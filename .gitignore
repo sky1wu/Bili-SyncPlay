@@ -4,3 +4,4 @@ build/
 coverage/
 *.log
 tmp-test-extension/
+release/

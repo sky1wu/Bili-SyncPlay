@@ -18,3 +18,10 @@ npm run dev:server
 
 Load `extension/dist` as an unpacked extension in Chrome.
 
+## Release package
+
+```bash
+npm run build:release
+```
+
+This generates a GitHub Release attachment at `release/bili-syncplay-extension-v<version>.zip`.
