@@ -1,0 +1,15 @@
+{
+  "name": "bili-syncplay",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "server",
+    "extension"
+  ],
+  "scripts": {
+    "build": "npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server && npm run build -w @bili-syncplay/extension",
+    "dev:server": "npm run dev -w @bili-syncplay/server",
+    "build:extension": "npm run build -w @bili-syncplay/extension"
+  }
+}
+
