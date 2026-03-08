@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bili SyncPlay",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Synchronize Bilibili playback across a room.",
   "permissions": [
     "storage",
