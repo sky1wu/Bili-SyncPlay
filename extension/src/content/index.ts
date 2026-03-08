@@ -6,6 +6,15 @@ let lastBroadcastAt = 0;
 let localMemberId: string | null = null;
 let activeSharedUrl: string | null = null;
 let activeRoomCode: string | null = null;
+let festivalBridgeReady = false;
+let festivalSnapshot:
+  | {
+      videoId: string;
+      url: string;
+      title: string;
+      updatedAt: number;
+    }
+  | null = null;
 let hydrationReady = false;
 let hasReceivedInitialRoomState = false;
 let pendingRoomStateHydration = true;
@@ -46,6 +55,7 @@ const PAUSE_HOLD_MS = 1200;
 const REMOTE_ECHO_SUPPRESSION_MS = 700;
 const REMOTE_PLAY_TRANSITION_GUARD_MS = 1800;
 const USER_GESTURE_GRACE_MS = 1200;
+const FESTIVAL_SNAPSHOT_TTL_MS = 1200;
 
 void init();
 
@@ -92,10 +102,12 @@ async function init(): Promise<void> {
     }
 
     if (message.type === "background:get-current-video") {
-      sendResponse({
-        ok: true,
-        payload: getCurrentSharePayload()
-      });
+      void (async () => {
+        sendResponse({
+          ok: true,
+          payload: await resolveCurrentSharePayload()
+        });
+      })();
       return true;
     }
 
@@ -382,13 +394,18 @@ function shouldSuppressRemotePlayTransition(
 }
 
 function getSharedVideo(): SharedVideo | null {
-  const url = normalizeUrl(window.location.href.split("?")[0]);
-  if (!url) {
-    return null;
+  if (window.location.pathname.startsWith("/festival/") && festivalSnapshot) {
+    return {
+      videoId: festivalSnapshot.videoId,
+      url: festivalSnapshot.url,
+      title: festivalSnapshot.title
+    };
   }
 
-  const match = url.match(/\/(?:video|bangumi\/play)\/([^/?]+)/);
-  if (!match) {
+  const pageUrl = window.location.href.split("#")[0];
+  const fallbackVideoRef = parseBilibiliVideoRef(pageUrl);
+
+  if (!fallbackVideoRef) {
     return null;
   }
 
@@ -396,8 +413,8 @@ function getSharedVideo(): SharedVideo | null {
   const title = heading || document.title.split("_")[0]?.trim() || document.title.trim();
 
   return {
-    videoId: match[1],
-    url,
+    videoId: fallbackVideoRef.videoId,
+    url: pageUrl,
     title
   };
 }
@@ -425,14 +442,169 @@ function createSharePayload(sharedVideo: SharedVideo): { video: SharedVideo; pla
 
 function getCurrentSharePayload(): { video: SharedVideo; playback: PlaybackState | null } | null {
   const currentVideo = getSharedVideo();
+  if (currentVideo && window.location.pathname.startsWith("/festival/")) {
+    debugLog(`Festival video detected id=${currentVideo.videoId} title=${currentVideo.title} url=${currentVideo.url}`);
+  }
   return currentVideo ? createSharePayload(currentVideo) : null;
 }
 
-function normalizeUrl(url: string | undefined | null): string | null {
+async function resolveCurrentSharePayload(): Promise<{ video: SharedVideo; playback: PlaybackState | null } | null> {
+  if (window.location.pathname.startsWith("/festival/")) {
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      const refreshed = await refreshFestivalSnapshot(attempt === 1 ? 0 : FESTIVAL_SNAPSHOT_TTL_MS);
+      if (refreshed) {
+        debugLog(`Festival payload stabilized after retry ${attempt}: ${refreshed.videoId}`);
+        return createSharePayload(refreshed);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
+    }
+
+    debugLog("Festival payload fell back to URL-based detection");
+  }
+
+  const initialPayload = getCurrentSharePayload();
+  return initialPayload;
+}
+
+async function refreshFestivalSnapshot(maxAgeMs = FESTIVAL_SNAPSHOT_TTL_MS): Promise<SharedVideo | null> {
+  if (!window.location.pathname.startsWith("/festival/")) {
+    festivalSnapshot = null;
+    return null;
+  }
+
+  if (festivalSnapshot && Date.now() - festivalSnapshot.updatedAt < maxAgeMs) {
+    return {
+      videoId: festivalSnapshot.videoId,
+      url: festivalSnapshot.url,
+      title: festivalSnapshot.title
+    };
+  }
+
+  const nextSnapshot = await readFestivalSnapshotFromPageContext();
+  if (!nextSnapshot) {
+    return festivalSnapshot
+      ? {
+          videoId: festivalSnapshot.videoId,
+          url: festivalSnapshot.url,
+          title: festivalSnapshot.title
+        }
+      : null;
+  }
+
+  festivalSnapshot = {
+    ...nextSnapshot,
+    updatedAt: Date.now()
+  };
+  debugLog(`Festival video detected id=${nextSnapshot.videoId} title=${nextSnapshot.title} url=${nextSnapshot.url}`);
+  return nextSnapshot;
+}
+
+function parseBilibiliVideoRef(url: string | undefined | null): { videoId: string; normalizedUrl: string } | null {
   if (!url) {
     return null;
   }
-  return url.split("?")[0].replace(/\/+$/, "");
+
+  try {
+    const parsed = new URL(url);
+    const bvid = parsed.searchParams.get("bvid");
+    if (bvid) {
+      const cid = parsed.searchParams.get("cid");
+      return {
+        videoId: cid ? `${bvid}:${cid}` : bvid,
+        normalizedUrl: cid ? `https://www.bilibili.com/video/${bvid}?cid=${cid}` : `https://www.bilibili.com/video/${bvid}`
+      };
+    }
+
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    const match = pathname.match(/^\/(?:video|bangumi\/play)\/([^/?]+)$/);
+    if (!match) {
+      return null;
+    }
+
+    return {
+      videoId: match[1],
+      normalizedUrl: `${parsed.origin}${pathname}`
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildFestivalShareUrl(pageUrl: string, bvid: string, cid: string): string {
+  const parsed = new URL(pageUrl);
+  parsed.searchParams.set("bvid", bvid);
+  parsed.searchParams.set("cid", cid);
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+async function readFestivalSnapshotFromPageContext(): Promise<SharedVideo | null> {
+  ensureFestivalBridge();
+  const requestId = `bili-syncplay-festival-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  return await new Promise<SharedVideo | null>((resolve) => {
+    const timeoutId = window.setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, 800);
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      window.removeEventListener("message", onSnapshot as EventListener);
+    };
+
+    const onSnapshot = (event: Event) => {
+      const messageEvent = event as MessageEvent<{
+        type?: string;
+        requestId?: string;
+        detail?: {
+          bvid?: string;
+          cid?: string | number;
+          title?: string;
+        };
+      }>;
+      if (messageEvent.source !== window) {
+        return;
+      }
+      if (messageEvent.data?.type !== "bili-syncplay:festival-video" || messageEvent.data.requestId !== requestId) {
+        return;
+      }
+      const detail = messageEvent.data.detail;
+      cleanup();
+
+      if (!detail?.bvid || detail.cid === undefined || !detail.title) {
+        resolve(null);
+        return;
+      }
+
+      const pageUrl = window.location.href.split("#")[0];
+      resolve({
+        videoId: `${detail.bvid}:${detail.cid}`,
+        url: buildFestivalShareUrl(pageUrl, detail.bvid, String(detail.cid)),
+        title: detail.title.trim()
+      });
+    };
+
+    window.addEventListener("message", onSnapshot as EventListener);
+    window.postMessage({ type: "bili-syncplay:get-festival-video", requestId }, "*");
+  });
+}
+
+function ensureFestivalBridge(): void {
+  if (festivalBridgeReady) {
+    return;
+  }
+
+  const script = document.createElement("script");
+  script.src = chrome.runtime.getURL("page-bridge.js");
+  script.async = false;
+  script.dataset.biliSyncplayBridge = "true";
+  (document.head || document.documentElement).appendChild(script);
+  festivalBridgeReady = true;
+}
+
+function normalizeUrl(url: string | undefined | null): string | null {
+  return parseBilibiliVideoRef(url)?.normalizedUrl ?? null;
 }
 
 function shouldApplySelfPlayback(video: HTMLVideoElement, playback: PlaybackState): boolean {

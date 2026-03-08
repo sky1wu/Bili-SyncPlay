@@ -13,7 +13,8 @@ const MAX_LOGS = 30;
 const CLOCK_SYNC_INTERVAL_MS = 15000;
 const BILIBILI_VIDEO_URL_PATTERNS = [
   "https://www.bilibili.com/video/*",
-  "https://www.bilibili.com/bangumi/play/*"
+  "https://www.bilibili.com/bangumi/play/*",
+  "https://www.bilibili.com/festival/*"
 ];
 
 let socket: WebSocket | null = null;
@@ -219,7 +220,7 @@ async function getActiveVideoPayload(): Promise<{
     return { ok: false, payload: null, tabId: null, error: "No active tab." };
   }
 
-  if (!activeTab.url || !/^https:\/\/www\.bilibili\.com\/(?:video|bangumi\/play)\//.test(activeTab.url)) {
+  if (!activeTab.url || !parseBilibiliVideoRef(activeTab.url)) {
     return { ok: false, payload: null, tabId: activeTab.id, error: "Please open a Bilibili video page first." };
   }
 
@@ -489,10 +490,38 @@ async function openSharedVideoFromPopup(): Promise<void> {
 }
 
 function normalizeUrl(url: string | undefined | null): string | null {
+  return parseBilibiliVideoRef(url)?.normalizedUrl ?? null;
+}
+
+function parseBilibiliVideoRef(url: string | undefined | null): { videoId: string; normalizedUrl: string } | null {
   if (!url) {
     return null;
   }
-  return url.split("?")[0].replace(/\/+$/, "");
+
+  try {
+    const parsed = new URL(url);
+    const bvid = parsed.searchParams.get("bvid");
+    if (bvid) {
+      const cid = parsed.searchParams.get("cid");
+      return {
+        videoId: cid ? `${bvid}:${cid}` : bvid,
+        normalizedUrl: cid ? `https://www.bilibili.com/video/${bvid}?cid=${cid}` : `https://www.bilibili.com/video/${bvid}`
+      };
+    }
+
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    const match = pathname.match(/^\/(?:video|bangumi\/play)\/([^/?]+)$/);
+    if (!match) {
+      return null;
+    }
+
+    return {
+      videoId: match[1],
+      normalizedUrl: `${parsed.origin}${pathname}`
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function notifyContentScripts(message: BackgroundToContentMessage): Promise<void> {

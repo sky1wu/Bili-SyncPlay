@@ -15,6 +15,7 @@ await Promise.all([
     entryPoints: {
       background: path.join(rootDir, "src/background/index.ts"),
       content: path.join(rootDir, "src/content/index.ts"),
+      "page-bridge": path.join(rootDir, "src/content/page-bridge.ts"),
       popup: path.join(rootDir, "src/popup/index.ts")
     },
     bundle: true,

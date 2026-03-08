@@ -28,11 +28,22 @@
     "48": "icon-48.png",
     "128": "icon-128.png"
   },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "page-bridge.js"
+      ],
+      "matches": [
+        "https://www.bilibili.com/*"
+      ]
+    }
+  ],
   "content_scripts": [
     {
       "matches": [
         "https://www.bilibili.com/video/*",
-        "https://www.bilibili.com/bangumi/play/*"
+        "https://www.bilibili.com/bangumi/play/*",
+        "https://www.bilibili.com/festival/*"
       ],
       "js": [
         "content.js"

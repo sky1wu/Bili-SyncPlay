@@ -322,7 +322,19 @@ function normalizeUrl(url: string | null | undefined): string | null {
   if (!url) {
     return null;
   }
-  return url.split("?")[0].replace(/\/+$/, "");
+
+  try {
+    const parsed = new URL(url);
+    const bvid = parsed.searchParams.get("bvid");
+    const cid = parsed.searchParams.get("cid");
+    if (bvid) {
+      return cid ? `https://www.bilibili.com/video/${bvid}?cid=${cid}` : `https://www.bilibili.com/video/${bvid}`;
+    }
+
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return url.split("?")[0].replace(/\/+$/, "");
+  }
 }
 
 function bindActions(nodes: PopupRefs): void {
