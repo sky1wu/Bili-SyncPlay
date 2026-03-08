@@ -1,6 +1,6 @@
 {
   "name": "@bili-syncplay/server",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
-    "@bili-syncplay/protocol": "0.3.0",
+    "@bili-syncplay/protocol": "0.3.1",
     "ws": "^8.18.3"
   },
   "devDependencies": {
