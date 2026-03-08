@@ -379,8 +379,8 @@ function shouldSuppressRemotePlayTransition(
   if (
     lastExplicitPlaybackAction &&
     Date.now() - lastExplicitPlaybackAction.at < USER_GESTURE_GRACE_MS &&
-    lastExplicitPlaybackAction.playState === "playing" &&
-    playState === "playing"
+    lastExplicitPlaybackAction.playState === "paused" &&
+    playState === "paused"
   ) {
     debugLog(`Allowed remote play transition echo by explicit action ${playState} ${currentVideo.url}`);
     return false;
