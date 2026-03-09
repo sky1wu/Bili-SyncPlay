@@ -861,6 +861,9 @@ function parseBilibiliVideoRef(url: string | undefined | null): { videoId: strin
     const pathname = parsed.pathname.replace(/\/+$/, "");
     const match = pathname.match(/^\/(?:video|bangumi\/play)\/([^/?]+)$/);
     if (!match) {
+      if (pathname === "/list/watchlater" || pathname === "/medialist/play/watchlater") {
+        return null;
+      }
       return null;
     }
 

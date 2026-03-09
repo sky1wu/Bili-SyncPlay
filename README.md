@@ -14,10 +14,24 @@ This repository is a monorepo with:
 - Share the current page video from the popup
 - Sync play, pause, seek, and playback rate
 - Automatically open the currently shared video for room members
+- Show in-page room toasts for:
+  - member join and leave
+  - shared video changes
+  - play and pause
+  - seek
+  - playback rate changes
+- Keep non-shared pages local-only while staying in a room
+  - non-shared pages do not broadcast playback back to the room
+  - manual playback on a non-shared page stays local
 - Support multiple Bilibili page types:
   - `https://www.bilibili.com/video/*`
   - `https://www.bilibili.com/bangumi/play/*`
   - `https://www.bilibili.com/festival/*`
+  - `https://www.bilibili.com/list/watchlater*`
+  - `https://www.bilibili.com/medialist/play/watchlater*`
+- Support per-part / per-episode variants:
+  - multi-part videos via `?p=`
+  - festival pages via `bvid + cid`
 
 ## Project Structure
 
@@ -77,6 +91,7 @@ ws://localhost:8787
 3. Open a supported Bilibili video page
 4. Click `Sync current page video` in the popup
 5. Other room members will open the same video and enter sync mode
+6. If a member browses to a different non-shared video while still in the room, that page stays local and does not affect the room unless they explicitly sync it
 
 ## Server Deployment
 
@@ -125,7 +140,8 @@ git push origin v0.4.1
 - Room state is currently stored in server memory only
 - Rooms are removed as soon as the last member leaves
 - Closing the browser does not restore the previous room automatically
-- Some Bilibili special pages may require extra compatibility handling as the site changes
+- Bilibili page structures change frequently, so special pages may require future compatibility updates
+- Festival pages and watch-later pages rely on URL or page-state extraction that may need maintenance if Bilibili changes those pages
 
 ## License
 

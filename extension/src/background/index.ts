@@ -15,7 +15,9 @@ const CLOCK_SYNC_INTERVAL_MS = 15000;
 const BILIBILI_VIDEO_URL_PATTERNS = [
   "https://www.bilibili.com/video/*",
   "https://www.bilibili.com/bangumi/play/*",
-  "https://www.bilibili.com/festival/*"
+  "https://www.bilibili.com/festival/*",
+  "https://www.bilibili.com/list/watchlater*",
+  "https://www.bilibili.com/medialist/play/watchlater*"
 ];
 
 let socket: WebSocket | null = null;
@@ -571,6 +573,9 @@ function parseBilibiliVideoRef(url: string | undefined | null): { videoId: strin
     const pathname = parsed.pathname.replace(/\/+$/, "");
     const match = pathname.match(/^\/(?:video|bangumi\/play)\/([^/?]+)$/);
     if (!match) {
+      if (pathname === "/list/watchlater" || pathname === "/medialist/play/watchlater") {
+        return null;
+      }
       return null;
     }
 
