@@ -1,13 +1,13 @@
 {
   "name": "@bili-syncplay/extension",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs"
   },
   "dependencies": {
-    "@bili-syncplay/protocol": "0.5.0"
+    "@bili-syncplay/protocol": "0.5.1"
   },
   "devDependencies": {
     "esbuild": "^0.25.10",

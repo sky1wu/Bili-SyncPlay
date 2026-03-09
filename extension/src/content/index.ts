@@ -167,6 +167,14 @@ function formatToastTime(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+function formatPlaybackRate(rate: number): string {
+  const rounded = Math.round(rate * 100) / 100;
+  if (Number.isInteger(rounded)) {
+    return `${rounded.toFixed(0)}x`;
+  }
+  return `${rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}x`;
+}
+
 function shouldShowSeekToast(previousPlayback: PlaybackState, nextPlayback: PlaybackState): boolean {
   const actualDelta = nextPlayback.currentTime - previousPlayback.currentTime;
   const elapsedSeconds = Math.max(0, nextPlayback.serverTime - previousPlayback.serverTime) / 1000;
@@ -212,14 +220,13 @@ function notifyRoomStateToasts(state: RoomState): void {
     return;
   }
 
-  const shouldShowSeek =
-    Boolean(
-      previousState.playback &&
-        state.playback &&
-        previousState.sharedVideo?.url === state.sharedVideo?.url &&
-        state.playback.actorId !== localMemberId &&
-        shouldShowSeekToast(previousState.playback, state.playback)
-    );
+  const shouldShowSeek = Boolean(
+    previousState.playback &&
+      state.playback &&
+      previousState.sharedVideo?.url === state.sharedVideo?.url &&
+      state.playback.actorId !== localMemberId &&
+      shouldShowSeekToast(previousState.playback, state.playback)
+  );
 
   if (
     previousState.playback?.playState !== state.playback?.playState &&
@@ -236,6 +243,19 @@ function notifyRoomStateToasts(state: RoomState): void {
     const actorName = getMemberName(state, state.playback.actorId);
     if (actorName) {
       showToast(state.playback.playState === "playing" ? `${actorName} 开始播放` : `${actorName} 暂停了视频`);
+    }
+  }
+
+  if (
+    previousState.playback &&
+    state.playback &&
+    previousState.sharedVideo?.url === state.sharedVideo?.url &&
+    state.playback.actorId !== localMemberId &&
+    Math.abs(previousState.playback.playbackRate - state.playback.playbackRate) > 0.01
+  ) {
+    const actorName = getMemberName(state, state.playback.actorId);
+    if (actorName) {
+      showToast(`${actorName} 切换到 ${formatPlaybackRate(state.playback.playbackRate)}`);
     }
   }
 
