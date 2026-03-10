@@ -210,6 +210,15 @@ function shouldShowSeekToast(previousPlayback: PlaybackState, nextPlayback: Play
   return Math.abs(actualDelta - expectedDelta) >= SEEK_TOAST_THRESHOLD_SECONDS;
 }
 
+function isCurrentPageShowingSharedVideo(state: RoomState): boolean {
+  const currentVideo = getSharedVideo();
+  if (!currentVideo || !state.sharedVideo) {
+    return false;
+  }
+
+  return normalizeUrl(currentVideo.url) === normalizeUrl(state.sharedVideo.url);
+}
+
 function notifyRoomStateToasts(state: RoomState): void {
   const previousState = lastToastRoomState;
   lastToastRoomState = state;
@@ -236,6 +245,10 @@ function notifyRoomStateToasts(state: RoomState): void {
   }
 
   if (sharedVideoChanged) {
+    return;
+  }
+
+  if (!isCurrentPageShowingSharedVideo(state)) {
     return;
   }
 
