@@ -64,6 +64,25 @@ Build everything:
 npm run build
 ```
 
+Run the automated test suites:
+
+```bash
+npm test
+```
+
+Current test coverage in this repository includes:
+- protocol client message validation
+- server WebSocket message validation and stability checks
+- background room-state race handling
+
+Workspace-level test commands are also available:
+
+```bash
+npm run test -w @bili-syncplay/protocol
+npm run test -w @bili-syncplay/server
+npm run test -w @bili-syncplay/extension
+```
+
 Start the local server:
 
 ```bash

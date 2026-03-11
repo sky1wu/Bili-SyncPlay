@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "test": "tsx --test test/**/*.test.ts"
   },
   "dependencies": {
     "@bili-syncplay/protocol": "0.5.4"

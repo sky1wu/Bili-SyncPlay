@@ -8,6 +8,7 @@ import type {
   PopupToBackgroundMessage,
   SharedVideoToastPayload
 } from "../shared/messages";
+import { decideIncomingRoomState, isSharedVideoChange } from "./room-state";
 
 const DEFAULT_SERVER_URL = "ws://localhost:8787";
 const MAX_LOGS = 30;
@@ -230,9 +231,14 @@ async function handleServerMessage(message: ServerMessage): Promise<void> {
 }
 
 async function handleRoomStateMessage(nextState: RoomState): Promise<void> {
-  const pendingShareUrl = normalizeUrl(pendingLocalShareUrl);
-  const nextSharedUrl = normalizeUrl(nextState.sharedVideo?.url);
-  if (pendingShareUrl && nextSharedUrl !== pendingShareUrl) {
+  const decision = decideIncomingRoomState({
+    currentRoomState: roomState,
+    nextState,
+    normalizedPendingLocalShareUrl: normalizeUrl(pendingLocalShareUrl),
+    normalizedIncomingSharedUrl: normalizeUrl(nextState.sharedVideo?.url)
+  });
+
+  if (decision.kind === "ignore-stale") {
     log(
       "background",
       `Ignored stale room state while waiting for ${pendingLocalShareUrl}; received ${nextState.sharedVideo?.url ?? "none"}`
@@ -240,8 +246,7 @@ async function handleRoomStateMessage(nextState: RoomState): Promise<void> {
     return;
   }
 
-  const previousSharedUrl = roomState?.sharedVideo?.url ?? null;
-  if (previousSharedUrl !== nextState.sharedVideo?.url) {
+  if (isSharedVideoChange(decision.previousSharedUrl, nextState)) {
     lastOpenedSharedUrl = null;
     log("background", `Shared video switched to ${nextState.sharedVideo?.url ?? "none"}`);
     pendingShareToast = createPendingShareToast(nextState);
@@ -251,7 +256,7 @@ async function handleRoomStateMessage(nextState: RoomState): Promise<void> {
   roomCode = nextState.roomCode;
   lastError = null;
 
-  if (pendingShareUrl && nextSharedUrl === pendingShareUrl) {
+  if (decision.confirmedPendingLocalShare) {
     log("background", `Confirmed shared video switch to ${pendingLocalShareUrl}`);
     pendingLocalShareUrl = null;
   }

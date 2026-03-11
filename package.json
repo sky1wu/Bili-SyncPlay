@@ -9,9 +9,13 @@
   ],
   "scripts": {
     "build": "npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server && npm run build -w @bili-syncplay/extension",
+    "test": "npm run test -w @bili-syncplay/protocol && npm run test -w @bili-syncplay/server && npm run test -w @bili-syncplay/extension",
     "dev:server": "npm run dev -w @bili-syncplay/server",
     "build:extension": "npm run build -w @bili-syncplay/extension",
     "build:release": "npm run build:extension && node scripts/package-release.mjs",
     "release:version": "node scripts/release-version.mjs"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
   }
 }

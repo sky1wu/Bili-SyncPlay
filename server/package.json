@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test": "tsx test/message-validation.ts"
   },
   "dependencies": {
     "@bili-syncplay/protocol": "0.5.4",
