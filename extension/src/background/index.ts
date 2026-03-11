@@ -13,7 +13,8 @@ import {
   decideIncomingRoomState,
   getActivePendingLocalShareUrl,
   isSharedVideoChange,
-  PENDING_LOCAL_SHARE_TIMEOUT_MS
+  PENDING_LOCAL_SHARE_TIMEOUT_MS,
+  shouldClearPendingLocalShareOnServerUrlChange
 } from "./room-state";
 
 const DEFAULT_SERVER_URL = "ws://localhost:8787";
@@ -827,13 +828,20 @@ async function updateServerUrl(nextServerUrl: string): Promise<void> {
     return;
   }
 
+  if (shouldClearPendingLocalShareOnServerUrlChange({
+    currentServerUrl: serverUrl,
+    nextServerUrl: normalized,
+    pendingLocalShareUrl
+  })) {
+    clearPendingLocalShare("server URL changed");
+  }
+
   serverUrl = normalized;
   lastError = null;
   await persistState();
   log("background", `Server URL updated to ${serverUrl}`);
 
   if (socket) {
-    clearPendingLocalShare("server URL changed");
     resetReconnectState();
     stopClockSyncTimer();
     const currentSocket = socket;

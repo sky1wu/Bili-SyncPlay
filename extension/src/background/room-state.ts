@@ -28,6 +28,15 @@ export function getActivePendingLocalShareUrl(args: {
   return pendingLocalShareExpiresAt > now ? pendingLocalShareUrl : null;
 }
 
+export function shouldClearPendingLocalShareOnServerUrlChange(args: {
+  currentServerUrl: string;
+  nextServerUrl: string;
+  pendingLocalShareUrl: string | null;
+}): boolean {
+  const { currentServerUrl, nextServerUrl, pendingLocalShareUrl } = args;
+  return pendingLocalShareUrl !== null && currentServerUrl !== nextServerUrl;
+}
+
 export function decideIncomingRoomState(args: {
   currentRoomState: RoomState | null;
   normalizedPendingLocalShareUrl: string | null;

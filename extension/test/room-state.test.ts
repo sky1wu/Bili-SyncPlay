@@ -5,7 +5,8 @@ import {
   createPendingLocalShareExpiry,
   decideIncomingRoomState,
   getActivePendingLocalShareUrl,
-  isSharedVideoChange
+  isSharedVideoChange,
+  shouldClearPendingLocalShareOnServerUrlChange
 } from "../src/background/room-state";
 
 function createRoomState(sharedUrl: string | null): RoomState {
@@ -81,4 +82,15 @@ test("expires pending local share when confirmation does not arrive in time", ()
 
   assert.equal(decision.kind, "apply");
   assert.equal(decision.confirmedPendingLocalShare, false);
+});
+
+test("clears pending local share when server URL changes without an active socket", () => {
+  assert.equal(
+    shouldClearPendingLocalShareOnServerUrlChange({
+      currentServerUrl: "ws://localhost:8787",
+      nextServerUrl: "ws://localhost:8788",
+      pendingLocalShareUrl: "https://www.bilibili.com/video/BV1B?p=1"
+    }),
+    true
+  );
 });
