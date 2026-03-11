@@ -8,7 +8,13 @@ import type {
   PopupToBackgroundMessage,
   SharedVideoToastPayload
 } from "../shared/messages";
-import { decideIncomingRoomState, isSharedVideoChange } from "./room-state";
+import {
+  createPendingLocalShareExpiry,
+  decideIncomingRoomState,
+  getActivePendingLocalShareUrl,
+  isSharedVideoChange,
+  PENDING_LOCAL_SHARE_TIMEOUT_MS
+} from "./room-state";
 
 const DEFAULT_SERVER_URL = "ws://localhost:8787";
 const MAX_LOGS = 30;
@@ -45,6 +51,8 @@ let pendingSharedVideo: SharedVideo | null = null;
 let pendingSharedPlayback: ClientMessage | null = null;
 let openingSharedUrl: string | null = null;
 let pendingLocalShareUrl: string | null = null;
+let pendingLocalShareExpiresAt: number | null = null;
+let pendingLocalShareTimer: number | null = null;
 let pendingShareToast: (SharedVideoToastPayload & { expiresAt: number; roomCode: string }) | null = null;
 let connectProbe: Promise<void> | null = null;
 let lastPopupStateLogKey: string | null = null;
@@ -144,6 +152,7 @@ async function openSocketWithProbe(): Promise<void> {
   socket.addEventListener("close", () => {
     connected = false;
     stopClockSyncTimer();
+    clearPendingLocalShare("socket closed before share confirmation");
     log("background", "Socket closed");
     scheduleReconnect();
     notifyAll();
@@ -153,6 +162,7 @@ async function openSocketWithProbe(): Promise<void> {
     lastError = "Cannot connect to sync server.";
     connected = false;
     stopClockSyncTimer();
+    clearPendingLocalShare("socket error before share confirmation");
     log("background", lastError);
     notifyAll();
   });
@@ -231,10 +241,16 @@ async function handleServerMessage(message: ServerMessage): Promise<void> {
 }
 
 async function handleRoomStateMessage(nextState: RoomState): Promise<void> {
+  expirePendingLocalShareIfNeeded();
   const decision = decideIncomingRoomState({
     currentRoomState: roomState,
-    nextState,
-    normalizedPendingLocalShareUrl: normalizeUrl(pendingLocalShareUrl),
+    normalizedPendingLocalShareUrl: normalizeUrl(
+      getActivePendingLocalShareUrl({
+        pendingLocalShareUrl,
+        pendingLocalShareExpiresAt,
+        now: Date.now()
+      })
+    ),
     normalizedIncomingSharedUrl: normalizeUrl(nextState.sharedVideo?.url)
   });
 
@@ -258,7 +274,7 @@ async function handleRoomStateMessage(nextState: RoomState): Promise<void> {
 
   if (decision.confirmedPendingLocalShare) {
     log("background", `Confirmed shared video switch to ${pendingLocalShareUrl}`);
-    pendingLocalShareUrl = null;
+    clearPendingLocalShare("share confirmation received");
   }
 
   await persistState();
@@ -362,7 +378,7 @@ async function queueOrSendSharedVideo(
   tabId: number | null
 ): Promise<void> {
   rememberSharedSourceTab(tabId ?? undefined, payload.video.url);
-  pendingLocalShareUrl = payload.video.url;
+  setPendingLocalShare(payload.video.url);
 
   if (connected && roomCode) {
     sendToServer({ type: "video:share", payload: payload.video });
@@ -510,9 +526,49 @@ function resetReconnectState(): void {
   reconnectAttempt = 0;
 }
 
+function clearPendingLocalShareTimer(): void {
+  if (pendingLocalShareTimer !== null) {
+    clearTimeout(pendingLocalShareTimer);
+    pendingLocalShareTimer = null;
+  }
+}
+
+function clearPendingLocalShare(reason: string): void {
+  if (!pendingLocalShareUrl && pendingLocalShareExpiresAt === null) {
+    return;
+  }
+  clearPendingLocalShareTimer();
+  log("background", `Cleared pending local share (${reason})`);
+  pendingLocalShareUrl = null;
+  pendingLocalShareExpiresAt = null;
+}
+
+function expirePendingLocalShareIfNeeded(): void {
+  const activePendingShare = getActivePendingLocalShareUrl({
+    pendingLocalShareUrl,
+    pendingLocalShareExpiresAt,
+    now: Date.now()
+  });
+  if (pendingLocalShareUrl && activePendingShare === null) {
+    clearPendingLocalShare(`share confirmation timed out after ${PENDING_LOCAL_SHARE_TIMEOUT_MS}ms`);
+  }
+}
+
+function setPendingLocalShare(url: string): void {
+  clearPendingLocalShareTimer();
+  pendingLocalShareUrl = url;
+  pendingLocalShareExpiresAt = createPendingLocalShareExpiry(Date.now());
+  log("background", `Waiting up to ${PENDING_LOCAL_SHARE_TIMEOUT_MS}ms for share confirmation ${url}`);
+  pendingLocalShareTimer = self.setTimeout(() => {
+    expirePendingLocalShareIfNeeded();
+    notifyAll();
+  }, PENDING_LOCAL_SHARE_TIMEOUT_MS);
+}
+
 function disconnectSocket(): void {
   resetReconnectState();
   stopClockSyncTimer();
+  clearPendingLocalShare("socket disconnected");
   if (!socket) {
     connected = false;
     return;
@@ -777,6 +833,7 @@ async function updateServerUrl(nextServerUrl: string): Promise<void> {
   log("background", `Server URL updated to ${serverUrl}`);
 
   if (socket) {
+    clearPendingLocalShare("server URL changed");
     resetReconnectState();
     stopClockSyncTimer();
     const currentSocket = socket;

@@ -1,5 +1,7 @@
 import type { RoomState } from "@bili-syncplay/protocol";
 
+export const PENDING_LOCAL_SHARE_TIMEOUT_MS = 10000;
+
 export type IncomingRoomStateDecision =
   | {
       kind: "ignore-stale";
@@ -10,15 +12,29 @@ export type IncomingRoomStateDecision =
       confirmedPendingLocalShare: boolean;
     };
 
+export function createPendingLocalShareExpiry(now: number, timeoutMs = PENDING_LOCAL_SHARE_TIMEOUT_MS): number {
+  return now + timeoutMs;
+}
+
+export function getActivePendingLocalShareUrl(args: {
+  pendingLocalShareUrl: string | null;
+  pendingLocalShareExpiresAt: number | null;
+  now: number;
+}): string | null {
+  const { pendingLocalShareUrl, pendingLocalShareExpiresAt, now } = args;
+  if (!pendingLocalShareUrl || pendingLocalShareExpiresAt === null) {
+    return null;
+  }
+  return pendingLocalShareExpiresAt > now ? pendingLocalShareUrl : null;
+}
+
 export function decideIncomingRoomState(args: {
   currentRoomState: RoomState | null;
-  nextState: RoomState;
   normalizedPendingLocalShareUrl: string | null;
   normalizedIncomingSharedUrl: string | null;
 }): IncomingRoomStateDecision {
   const {
     currentRoomState,
-    nextState,
     normalizedPendingLocalShareUrl,
     normalizedIncomingSharedUrl
   } = args;

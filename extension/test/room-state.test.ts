@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { RoomState } from "@bili-syncplay/protocol";
-import { decideIncomingRoomState, isSharedVideoChange } from "../src/background/room-state";
+import {
+  createPendingLocalShareExpiry,
+  decideIncomingRoomState,
+  getActivePendingLocalShareUrl,
+  isSharedVideoChange
+} from "../src/background/room-state";
 
 function createRoomState(sharedUrl: string | null): RoomState {
   return {
@@ -48,7 +53,6 @@ test("does not misclassify a legal new room state as stale when no local share i
   const nextState = createRoomState("https://www.bilibili.com/video/BV1C?p=1");
   const decision = decideIncomingRoomState({
     currentRoomState: createRoomState("https://www.bilibili.com/video/BV1A?p=1"),
-    nextState,
     normalizedPendingLocalShareUrl: null,
     normalizedIncomingSharedUrl: "https://www.bilibili.com/video/BV1C?p=1"
   });
@@ -56,4 +60,25 @@ test("does not misclassify a legal new room state as stale when no local share i
   assert.equal(decision.kind, "apply");
   assert.equal(decision.confirmedPendingLocalShare, false);
   assert.equal(isSharedVideoChange(decision.previousSharedUrl, nextState), true);
+});
+
+test("expires pending local share when confirmation does not arrive in time", () => {
+  const now = 1_000;
+  const pendingLocalShareExpiresAt = createPendingLocalShareExpiry(now, 5_000);
+  const activePendingLocalShareUrl = getActivePendingLocalShareUrl({
+    pendingLocalShareUrl: "https://www.bilibili.com/video/BV1B?p=1",
+    pendingLocalShareExpiresAt,
+    now: now + 5_001
+  });
+
+  assert.equal(activePendingLocalShareUrl, null);
+
+  const decision = decideIncomingRoomState({
+    currentRoomState: createRoomState("https://www.bilibili.com/video/BV1A?p=1"),
+    normalizedPendingLocalShareUrl: activePendingLocalShareUrl,
+    normalizedIncomingSharedUrl: "https://www.bilibili.com/video/BV1C?p=1"
+  });
+
+  assert.equal(decision.kind, "apply");
+  assert.equal(decision.confirmedPendingLocalShare, false);
 });
