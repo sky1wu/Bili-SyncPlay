@@ -1,5 +1,7 @@
 # Bili-SyncPlay
 
+[English](./README.md) | [简体中文](./README.zh-CN.md)
+
 Bili-SyncPlay is a Chrome extension for synchronized Bilibili watching. Users can create or join a room, share the current video, and keep playback, pause, seek, and playback rate in sync across participants.
 
 This repository is a monorepo with:
