@@ -30,6 +30,7 @@ import {
 import { compensateRoomStateForClock, CLOCK_SYNC_INTERVAL_MS, toHealthcheckUrl as buildHealthcheckUrl, updateClockSample } from "./clock-sync";
 import { notifyContentTabs } from "./content-bus";
 import { appendLog, formatContentLogSource } from "./logger";
+import { bootstrapBackground } from "./bootstrap";
 import { createPopupStateSnapshot } from "./popup-bus";
 import { createPendingShareToast as createRoomPendingShareToast, flushPendingShare as getPendingShareFlushPlan, getPendingShareToastFor as getRoomPendingShareToastFor } from "./room-manager";
 import {
@@ -39,6 +40,7 @@ import {
   MAX_RECONNECT_ATTEMPTS,
   SHARE_TOAST_TTL_MS
 } from "./runtime-state";
+import { validateServerUrl } from "./server-url";
 import { shouldReconnect, getReconnectDelayMs } from "./socket-manager";
 import { loadPersistedBackgroundSnapshot, persistBackgroundState } from "./storage-manager";
 import { decideSharedPlaybackTab, rememberSharedSource } from "./tab-coordinator";
@@ -81,23 +83,71 @@ const popupPorts = new Set<chrome.runtime.Port>();
 bootstrap().catch(console.error);
 
 async function bootstrap(): Promise<void> {
-  const persisted = await loadPersistedBackgroundSnapshot();
-  roomCode = persisted.roomCode;
-  joinToken = persisted.joinToken;
-  memberToken = persisted.memberToken;
-  memberId = persisted.memberId;
-  displayName = persisted.displayName;
-  roomState = persisted.roomState;
-  serverUrl = persisted.serverUrl?.trim() || DEFAULT_SERVER_URL;
-  if (roomCode) {
-    void connect();
-  }
-
-  chrome.tabs.onRemoved.addListener((tabId) => {
-    if (sharedTabId === tabId) {
-      sharedTabId = null;
-      log("background", `Cleared shared tab binding for closed tab ${tabId}`);
-      broadcastPopupState();
+  await bootstrapBackground({
+    state: {
+      get roomCode() {
+        return roomCode;
+      },
+      set roomCode(value) {
+        roomCode = value;
+      },
+      get joinToken() {
+        return joinToken;
+      },
+      set joinToken(value) {
+        joinToken = value;
+      },
+      get memberToken() {
+        return memberToken;
+      },
+      set memberToken(value) {
+        memberToken = value;
+      },
+      get memberId() {
+        return memberId;
+      },
+      set memberId(value) {
+        memberId = value;
+      },
+      get displayName() {
+        return displayName;
+      },
+      set displayName(value) {
+        displayName = value;
+      },
+      get roomState() {
+        return roomState;
+      },
+      set roomState(value) {
+        roomState = value;
+      },
+      get serverUrl() {
+        return serverUrl;
+      },
+      set serverUrl(value) {
+        serverUrl = value;
+      },
+      get lastError() {
+        return lastError;
+      },
+      set lastError(value) {
+        lastError = value;
+      },
+      get sharedTabId() {
+        return sharedTabId;
+      },
+      set sharedTabId(value) {
+        sharedTabId = value;
+      }
+    },
+    loadPersistedBackgroundSnapshot,
+    connect: () => {
+      void connect();
+    },
+    log,
+    broadcastPopupState,
+    addTabRemovedListener: (listener) => {
+      chrome.tabs.onRemoved.addListener(listener);
     }
   });
 }
@@ -110,9 +160,19 @@ async function connect(): Promise<void> {
     return connectProbe;
   }
 
+  const serverUrlResult = validateServerUrl(serverUrl);
+  if (!serverUrlResult.ok) {
+    lastError = serverUrlResult.message;
+    connected = false;
+    stopClockSyncTimer();
+    log("background", lastError);
+    notifyAll();
+    return;
+  }
+
   clearReconnectTimer();
-  log("background", `Connecting to ${serverUrl}`);
-  connectProbe = openSocketWithProbe();
+  log("background", `Connecting to ${serverUrlResult.normalizedUrl}`);
+  connectProbe = openSocketWithProbe(serverUrlResult.normalizedUrl);
   try {
     await connectProbe;
   } finally {
@@ -120,8 +180,18 @@ async function connect(): Promise<void> {
   }
 }
 
-async function openSocketWithProbe(): Promise<void> {
-  const healthUrl = buildHealthcheckUrl(serverUrl);
+async function openSocketWithProbe(targetServerUrl: string): Promise<void> {
+  const serverUrlResult = validateServerUrl(targetServerUrl);
+  if (!serverUrlResult.ok) {
+    lastError = serverUrlResult.message;
+    connected = false;
+    stopClockSyncTimer();
+    log("background", lastError);
+    notifyAll();
+    return;
+  }
+
+  const healthUrl = buildHealthcheckUrl(serverUrlResult.normalizedUrl);
   if (healthUrl) {
     try {
       await fetch(healthUrl, {
@@ -140,7 +210,7 @@ async function openSocketWithProbe(): Promise<void> {
     }
   }
 
-  socket = new WebSocket(serverUrl);
+  socket = new WebSocket(serverUrlResult.normalizedUrl);
 
   socket.addEventListener("open", () => {
     connected = true;
@@ -851,16 +921,16 @@ async function persistState(): Promise<void> {
   await persistBackgroundState(structuredState);
 }
 
-function normalizeServerUrl(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return DEFAULT_SERVER_URL;
-  }
-  return trimmed;
-}
-
 async function updateServerUrl(nextServerUrl: string): Promise<void> {
-  const normalized = normalizeServerUrl(nextServerUrl);
+  const serverUrlResult = validateServerUrl(nextServerUrl);
+  if (!serverUrlResult.ok) {
+    lastError = serverUrlResult.message;
+    log("background", lastError);
+    notifyAll();
+    return;
+  }
+
+  const normalized = serverUrlResult.normalizedUrl;
   if (normalized === serverUrl) {
     return;
   }

@@ -29,8 +29,8 @@ This repository is a monorepo with:
   - `https://www.bilibili.com/video/*`
   - `https://www.bilibili.com/bangumi/play/*`
   - `https://www.bilibili.com/festival/*`
-  - `https://www.bilibili.com/list/watchlater*`
-  - `https://www.bilibili.com/medialist/play/watchlater*`
+  - `https://www.bilibili.com/list/watchlater*` when the page URL carries `bvid`
+  - `https://www.bilibili.com/medialist/play/watchlater*` when the page URL carries `bvid`
 - Support per-part / per-episode variants:
   - multi-part videos via `?p=`
   - festival pages via `bvid + cid`
@@ -65,7 +65,19 @@ Bili-SyncPlay/
 
 ### Start the Local Server
 
+Before connecting the unpacked extension to a local server, allow the current extension origin in `ALLOWED_ORIGINS`.
+
+PowerShell:
+
+```powershell
+$env:ALLOWED_ORIGINS="chrome-extension://<extension-id>"
+npm run dev:server
+```
+
+Bash:
+
 ```bash
+ALLOWED_ORIGINS=chrome-extension://<extension-id> \
 npm run dev:server
 ```
 
@@ -137,6 +149,8 @@ Development notes:
 - the extension does not keep a permanent socket by default; it connects when a room already exists in session state or when the user creates / joins a room
 - reconnecting into an existing room now requires the stored `joinToken`; stale `memberToken` values are discarded on disconnect
 - if you change protocol types or message validation, rebuild both `packages/protocol` and `server`
+- the local server rejects extension connections unless `ALLOWED_ORIGINS` includes the current `chrome-extension://<extension-id>`
+- you can find the unpacked extension ID on `chrome://extensions`
 
 The extension version shown by Chrome comes from `extension/dist/manifest.json`.
 During build, that manifest version is generated automatically from the root `package.json`.
@@ -147,6 +161,7 @@ During build, that manifest version is generated automatically from the root `pa
 - if the room is already sharing a different video, the popup asks for confirmation before replacing it
 - the background service worker only forwards playback updates from the currently recognized shared tab
 - switching the server URL disconnects the current socket and reconnects using the new address if the extension still has an active room or pending room creation
+- invalid persisted server URLs remain visible in extension state and block automatic reconnect until corrected
 - supported playback pages depend on Bilibili DOM and URL patterns, so festival pages and watch-later pages may need future compatibility updates if Bilibili changes them
 
 ### State Persistence
@@ -160,6 +175,7 @@ Practical consequences:
 - the custom server URL survives browser restart
 - the popup can reconnect into the current room only while the browser session still holds both `roomCode` and `joinToken`
 - `memberToken` is intentionally cleared on disconnect and re-issued after a successful rejoin
+- if the persisted server URL becomes invalid, the extension keeps that value visible and stops auto reconnect until the URL is fixed
 - closing the browser does not restore the previous room automatically on the next launch
 
 ### Server Deployment
@@ -174,6 +190,10 @@ The extension supports changing the server URL from the popup, so you can switch
 ```text
 wss://sync.example.com
 ```
+
+Only `ws://` and `wss://` server URLs are accepted. Empty input falls back to `ws://localhost:8787`.
+
+For local unpacked-extension development, `ALLOWED_ORIGINS` must include the current `chrome-extension://<extension-id>` or the server will reject the WebSocket handshake with `origin_not_allowed`.
 
 The current server implementation:
 - listens on `PORT` only, defaulting to `8787`
@@ -441,6 +461,7 @@ npm run build -w @bili-syncplay/server
 
 Common developer-facing failure cases:
 - `Cannot connect to sync server.`: the extension could not reach the configured server URL, or the HTTP health probe derived from that URL failed.
+- repeated server logs with `origin_not_allowed`: `ALLOWED_ORIGINS` does not include the current `chrome-extension://<extension-id>`
 - `Room not found.`: the requested room code does not exist on the current server instance.
 - `Join token is invalid.`: the invite string is wrong, stale, or from another room.
 - `Member token is invalid.`: the current session lost its room binding and must rejoin.
@@ -469,6 +490,7 @@ npm run test -w @bili-syncplay/extension
 
 Chrome-side debugging tips:
 - check the extension service worker logs from `chrome://extensions`
+- copy the unpacked extension ID from `chrome://extensions` and use it in `ALLOWED_ORIGINS`
 - reload the unpacked extension after rebuilding `extension/dist`
 - reload open Bilibili tabs after the extension is reloaded so content scripts are injected again
 

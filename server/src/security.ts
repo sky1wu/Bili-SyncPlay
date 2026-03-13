@@ -59,18 +59,6 @@ export function createSecurityPolicy(config: SecurityConfig): {
     const origin = typeof originHeader === "string" ? originHeader : null;
     const remoteAddress = getRemoteAddress(request);
     const context = { remoteAddress, origin };
-    const originCheck = isOriginAllowed(origin);
-
-    if (!originCheck.ok) {
-      return {
-        ok: false,
-        statusCode: 403,
-        statusText: "Forbidden",
-        context,
-        reason: originCheck.reason
-      };
-    }
-
     const ipKey = remoteAddress ?? "unknown";
     const attemptWindow = ipAttemptWindows.get(ipKey) ?? createWindowCounter();
     ipAttemptWindows.set(ipKey, attemptWindow);
@@ -81,6 +69,17 @@ export function createSecurityPolicy(config: SecurityConfig): {
         statusText: "Too Many Requests",
         context,
         reason: "connection_attempt_rate_limited"
+      };
+    }
+
+    const originCheck = isOriginAllowed(origin);
+    if (!originCheck.ok) {
+      return {
+        ok: false,
+        statusCode: 403,
+        statusText: "Forbidden",
+        context,
+        reason: originCheck.reason
       };
     }
 

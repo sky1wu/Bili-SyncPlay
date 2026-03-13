@@ -65,3 +65,54 @@ test("security policy rejects upgrades when connection count exceeds the configu
   }
   assert.equal(secondDecision.reason, "connection_count_limited");
 });
+
+test("security policy rate limits repeated invalid origins before origin rejection", () => {
+  const config = getDefaultSecurityConfig();
+  config.allowedOrigins = ["chrome-extension://allowed-extension"];
+  config.connectionAttemptsPerMinute = 2;
+  const security = createSecurityPolicy(config);
+  const request = createRequest({ origin: "https://malicious.example" });
+
+  const firstDecision = security.evaluateUpgrade(request);
+  assert.equal(firstDecision.ok, false);
+  if (firstDecision.ok) {
+    throw new Error("Expected invalid origin to be rejected.");
+  }
+  assert.equal(firstDecision.reason, "origin_not_allowed");
+
+  const secondDecision = security.evaluateUpgrade(request);
+  assert.equal(secondDecision.ok, false);
+  if (secondDecision.ok) {
+    throw new Error("Expected invalid origin to be rejected.");
+  }
+  assert.equal(secondDecision.reason, "origin_not_allowed");
+
+  const thirdDecision = security.evaluateUpgrade(request);
+  assert.equal(thirdDecision.ok, false);
+  if (thirdDecision.ok) {
+    throw new Error("Expected invalid origin to be rate limited.");
+  }
+  assert.equal(thirdDecision.reason, "connection_attempt_rate_limited");
+});
+
+test("security policy counts missing origin requests toward the attempt window", () => {
+  const config = getDefaultSecurityConfig();
+  config.allowedOrigins = ["chrome-extension://allowed-extension"];
+  config.connectionAttemptsPerMinute = 1;
+  const security = createSecurityPolicy(config);
+  const request = createRequest({ origin: undefined });
+
+  const firstDecision = security.evaluateUpgrade(request);
+  assert.equal(firstDecision.ok, false);
+  if (firstDecision.ok) {
+    throw new Error("Expected missing origin to be rejected.");
+  }
+  assert.equal(firstDecision.reason, "origin_missing");
+
+  const secondDecision = security.evaluateUpgrade(request);
+  assert.equal(secondDecision.ok, false);
+  if (secondDecision.ok) {
+    throw new Error("Expected missing origin to be rate limited.");
+  }
+  assert.equal(secondDecision.reason, "connection_attempt_rate_limited");
+});

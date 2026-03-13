@@ -282,6 +282,31 @@ test("rejects missing Origin headers by default and only allows them in explicit
   }
 });
 
+test("rate limits repeated invalid origin handshakes from the same IP", async () => {
+  const server = await startTestServer({
+    connectionAttemptsPerMinute: 2
+  });
+  try {
+    await assert.rejects(connectClient(server.url, "https://malicious.example"), /Unexpected server response: 403/);
+    await assert.rejects(connectClient(server.url, "https://malicious.example"), /Unexpected server response: 403/);
+    await assert.rejects(connectClient(server.url, "https://malicious.example"), /Unexpected server response: 429/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("rate limits repeated missing origin handshakes by default", async () => {
+  const server = await startTestServer({
+    connectionAttemptsPerMinute: 1
+  });
+  try {
+    await assert.rejects(connectClient(server.url, ""), /Unexpected server response: 403/);
+    await assert.rejects(connectClient(server.url, ""), /Unexpected server response: 429/);
+  } finally {
+    await server.close();
+  }
+});
+
 test("creates a room with joinToken and memberToken", async () => {
   const server = await startTestServer();
   try {
