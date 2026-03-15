@@ -112,6 +112,15 @@ Build everything:
 npm run build
 ```
 
+Build the extension with a fixed Chrome extension ID:
+
+```powershell
+$env:BILI_SYNCPLAY_EXTENSION_KEY="<chrome-web-store-public-key>"
+npm run build -w @bili-syncplay/extension
+```
+
+If `BILI_SYNCPLAY_EXTENSION_KEY` is set, the build writes it to `extension/dist/manifest.json` as `manifest.key`. Use the same public key as the Chrome Web Store item so locally loaded builds keep the same extension ID as the published one.
+
 Run the automated test suites:
 
 ```bash

@@ -16,6 +16,13 @@ await mkdir(distDir, { recursive: true });
 const rootPackage = JSON.parse(await readFile(packageJsonPath, "utf8"));
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 manifest.version = rootPackage.version;
+const extensionKey = process.env.BILI_SYNCPLAY_EXTENSION_KEY?.trim();
+
+if (extensionKey) {
+  manifest.key = extensionKey;
+} else {
+  delete manifest.key;
+}
 
 await Promise.all([
   build({

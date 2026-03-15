@@ -112,6 +112,15 @@ npm install
 npm run build
 ```
 
+使用固定的 Chrome 扩展 ID 构建扩展：
+
+```powershell
+$env:BILI_SYNCPLAY_EXTENSION_KEY="<chrome-web-store-public-key>"
+npm run build -w @bili-syncplay/extension
+```
+
+如果设置了 `BILI_SYNCPLAY_EXTENSION_KEY`，构建会把它写入 `extension/dist/manifest.json` 的 `manifest.key`。这里应使用与你在 Chrome Web Store 发布项对应的同一个公钥，这样本地加载的扩展才能和已发布版本保持相同的扩展 ID。
+
 运行自动化测试：
 
 ```bash

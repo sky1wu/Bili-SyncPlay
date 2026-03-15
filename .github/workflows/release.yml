@@ -28,6 +28,8 @@ jobs:
 
       - name: Build release package
         run: npm run build:release
+        env:
+          BILI_SYNCPLAY_EXTENSION_KEY: ${{ secrets.BILI_SYNCPLAY_EXTENSION_KEY }}
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
