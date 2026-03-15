@@ -1,6 +1,12 @@
 import { normalizeBilibiliUrl, type RoomMember } from "@bili-syncplay/protocol";
 import type { BackgroundToPopupMessage } from "../shared/messages";
 import { escapeHtml, parseInviteValue } from "./helpers";
+import {
+  createServerUrlDraftState,
+  getRenderedServerUrlValue,
+  syncServerUrlDraft,
+  updateServerUrlDraft
+} from "./server-url-draft";
 import { applyIncomingPopupState, createPopupStateSyncState } from "./state-sync";
 
 const app = document.getElementById("app");
@@ -42,6 +48,7 @@ let lastKnownPendingJoinRoomCode: string | null = null;
 let lastKnownRoomCode: string | null = null;
 let lastRoomEnteredAt = 0;
 let roomCodeDraft = "";
+const serverUrlDraft = createServerUrlDraftState();
 let localStatusMessage: string | null = null;
 let popupPort: chrome.runtime.Port | null = null;
 const popupStateSync = createPopupStateSyncState();
@@ -337,9 +344,7 @@ function render(): void {
       refs.roomCodeInput.value = roomCodeDraft;
     }
   }
-  if (!serverUrlFocused) {
-    refs.serverUrlInput.value = state.serverUrl;
-  }
+  refs.serverUrlInput.value = getRenderedServerUrlValue(serverUrlDraft, state.serverUrl, serverUrlFocused);
 
   refs.copyRoomButton.disabled = !state.roomCode;
   refs.roomPanelJoined.hidden = !state.roomCode;
@@ -635,17 +640,26 @@ function bindActions(nodes: PopupRefs): void {
 
   const saveServerUrl = async () => {
     setLocalStatusMessage(null);
+    const requestedServerUrl = serverUrlDraft.value.trim();
     const response = (await chrome.runtime.sendMessage({
       type: "popup:set-server-url",
-      serverUrl: nodes.serverUrlInput.value.trim()
+      serverUrl: requestedServerUrl
     })) as BackgroundToPopupMessage;
     applyState(response.payload);
+    syncServerUrlDraft(serverUrlDraft, response.payload.serverUrl);
     nodes.serverUrlInput.value = response.payload.serverUrl;
     render();
   };
 
   nodes.saveServerUrlButton.addEventListener("click", () => {
     void saveServerUrl();
+  });
+
+  nodes.serverUrlInput.addEventListener("input", () => {
+    updateServerUrlDraft(serverUrlDraft, nodes.serverUrlInput.value, popupStateSync.popupState?.serverUrl ?? "");
+    if (localStatusMessage) {
+      setLocalStatusMessage(null);
+    }
   });
 
   nodes.serverUrlInput.addEventListener("keydown", async (event) => {
