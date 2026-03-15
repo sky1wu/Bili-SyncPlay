@@ -589,6 +589,17 @@ function getSharedVideo(): SharedVideo | null {
   });
 }
 
+async function getCurrentPlaybackVideo(): Promise<SharedVideo | null> {
+  if (window.location.pathname.startsWith("/festival/")) {
+    const refreshed = await refreshFestivalSnapshot(0);
+    if (refreshed) {
+      return refreshed;
+    }
+  }
+
+  return getSharedVideo();
+}
+
 function getCurrentPartTitle(): string | null {
   return (
     document.querySelector("li.bpx-state-multi-active-item")?.textContent?.trim() ||
@@ -688,7 +699,7 @@ async function broadcastPlayback(video: HTMLVideoElement): Promise<void> {
     }
   }
 
-  const currentVideo = getSharedVideo();
+  const currentVideo = await getCurrentPlaybackVideo();
   if (!currentVideo) {
     return;
   }
