@@ -191,8 +191,20 @@ function formatPlayback(playback) {
     return "未同步"
   }
 
-  const status = playback.paused ? "paused" : "playing"
+  const status = getPlaybackState(playback)
   return `${status} @ ${Number(playback.currentTime ?? 0).toFixed(1)}s x${Number(playback.playbackRate ?? 1).toFixed(2)}`
+}
+
+function getPlaybackState(playback) {
+  if (!playback) {
+    return "paused"
+  }
+
+  if (typeof playback.playState === "string" && playback.playState) {
+    return playback.playState
+  }
+
+  return playback.paused ? "paused" : "playing"
 }
 
 function formatJson(value) {
@@ -1029,14 +1041,14 @@ async function renderRoomDetailPage(roomCode) {
                 <div class="media-summary-title">${escapeHtml(detail.room.sharedVideo?.title || "未共享视频")}</div>
                 <div class="media-summary-meta">
                   ${detail.room.sharedVideo?.videoId ? `<span class="pill subtle">ID ${escapeHtml(detail.room.sharedVideo.videoId)}</span>` : renderEmptyValue("无视频 ID")}
-                  ${detail.room.playback ? renderResultBadge(detail.room.playback.paused ? "paused" : "playing") : renderEmptyValue("未同步")}
+                  ${detail.room.playback ? renderResultBadge(getPlaybackState(detail.room.playback)) : renderEmptyValue("未同步")}
                 </div>
               </div>
               <dl class="kv">
                 <dt>标题</dt><dd>${escapeHtml(detail.room.sharedVideo?.title || "未共享")}</dd>
                 <dt>视频 ID</dt><dd>${detail.room.sharedVideo?.videoId ? `<span class="code">${escapeHtml(detail.room.sharedVideo.videoId)}</span>` : renderEmptyValue()}</dd>
                 <dt>URL</dt><dd>${detail.room.sharedVideo?.url ? `<a href="${escapeHtml(detail.room.sharedVideo.url)}" target="_blank" rel="noreferrer">${escapeHtml(detail.room.sharedVideo.url)}</a>` : renderEmptyValue()}</dd>
-                <dt>播放状态</dt><dd>${detail.room.playback ? renderResultBadge(detail.room.playback.paused ? "paused" : "playing") : renderEmptyValue("未同步")}</dd>
+                <dt>播放状态</dt><dd>${detail.room.playback ? renderResultBadge(getPlaybackState(detail.room.playback)) : renderEmptyValue("未同步")}</dd>
                 <dt>当前时间</dt><dd>${detail.room.playback ? `${Number(detail.room.playback.currentTime || 0).toFixed(1)}s` : renderEmptyValue()}</dd>
                 <dt>播放速度</dt><dd>${detail.room.playback ? `x${Number(detail.room.playback.playbackRate || 1).toFixed(2)}` : renderEmptyValue()}</dd>
               </dl>
