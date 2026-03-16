@@ -9,6 +9,7 @@ const workspaceRootDir = path.resolve(rootDir, "..");
 const distDir = path.join(rootDir, "dist");
 const packageJsonPath = path.join(workspaceRootDir, "package.json");
 const manifestPath = path.join(rootDir, "public", "manifest.json");
+const defaultServerUrl = resolveDefaultServerUrl(process.env.BILI_SYNCPLAY_DEFAULT_SERVER_URL);
 
 await rm(distDir, { recursive: true, force: true });
 await mkdir(distDir, { recursive: true });
@@ -36,7 +37,10 @@ await Promise.all([
     format: "esm",
     target: "chrome120",
     outdir: distDir,
-    sourcemap: true
+    sourcemap: true,
+    define: {
+      __BILI_SYNCPLAY_DEFAULT_SERVER_URL__: JSON.stringify(defaultServerUrl)
+    }
   }),
   writeFile(path.join(distDir, "manifest.json"), JSON.stringify(manifest, null, 2)),
   cp(path.join(rootDir, "public", "popup.html"), path.join(distDir, "popup.html")),
@@ -64,4 +68,24 @@ function normalizeExtensionKey(rawValue) {
   }
 
   return normalized;
+}
+
+function resolveDefaultServerUrl(rawValue) {
+  const trimmed = rawValue?.trim();
+  if (!trimmed) {
+    return "ws://localhost:8787";
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(trimmed);
+  } catch {
+    throw new Error("BILI_SYNCPLAY_DEFAULT_SERVER_URL must be a valid ws:// or wss:// URL.");
+  }
+
+  if (parsedUrl.protocol !== "ws:" && parsedUrl.protocol !== "wss:") {
+    throw new Error("BILI_SYNCPLAY_DEFAULT_SERVER_URL must use ws:// or wss://.");
+  }
+
+  return parsedUrl.toString();
 }

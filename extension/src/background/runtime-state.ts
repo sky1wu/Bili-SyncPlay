@@ -1,7 +1,14 @@
 import type { PlaybackState, RoomState, SharedVideo } from "@bili-syncplay/protocol";
 import type { DebugLogEntry, SharedVideoToastPayload } from "../shared/messages";
 
-export const DEFAULT_SERVER_URL = "ws://localhost:8787";
+declare const __BILI_SYNCPLAY_DEFAULT_SERVER_URL__: string | undefined;
+
+const LOCALHOST_SERVER_URL = "ws://localhost:8787";
+
+export const DEFAULT_SERVER_URL =
+  typeof __BILI_SYNCPLAY_DEFAULT_SERVER_URL__ === "string"
+    ? __BILI_SYNCPLAY_DEFAULT_SERVER_URL__
+    : LOCALHOST_SERVER_URL;
 export const MAX_RECONNECT_ATTEMPTS = 5;
 export const SHARE_TOAST_TTL_MS = 8000;
 export const BILIBILI_VIDEO_URL_PATTERNS = [

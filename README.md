@@ -265,6 +265,15 @@ wss://sync.example.com
 
 Only `ws://` and `wss://` server URLs are accepted. Empty input falls back to `ws://localhost:8787`.
 
+If you want the Chrome Web Store build to ship with a public server URL while keeping the repository default at `ws://localhost:8787`, set `BILI_SYNCPLAY_DEFAULT_SERVER_URL` when building the extension. For example in PowerShell:
+
+```powershell
+$env:BILI_SYNCPLAY_DEFAULT_SERVER_URL="wss://sync.example.com"
+npm run build:release
+```
+
+When the environment variable is unset, the build output still uses `ws://localhost:8787`.
+
 For local unpacked-extension development, `ALLOWED_ORIGINS` must include the current `chrome-extension://<extension-id>` or the server will reject the WebSocket handshake with `origin_not_allowed`.
 
 The current server implementation:
