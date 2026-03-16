@@ -38,6 +38,24 @@ export function createRuntimeRegistry(now: () => number = Date.now): RuntimeRegi
     }
   }
 
+  function detachSessionFromRooms(sessionId: string, preferredRoomCode?: string | null): void {
+    const candidateRoomCodes = preferredRoomCode ? [preferredRoomCode, ...roomSessionIds.keys()] : roomSessionIds.keys();
+    const visited = new Set<string>();
+
+    for (const roomCode of candidateRoomCodes) {
+      if (visited.has(roomCode)) {
+        continue;
+      }
+      visited.add(roomCode);
+
+      const ids = roomSessionIds.get(roomCode);
+      ids?.delete(sessionId);
+      if (ids && ids.size === 0) {
+        roomSessionIds.delete(roomCode);
+      }
+    }
+  }
+
   return {
     registerSession(session) {
       sessionsById.set(session.id, session);
@@ -50,11 +68,10 @@ export function createRuntimeRegistry(now: () => number = Date.now): RuntimeRegi
     unregisterSession(sessionId) {
       const session = sessionsById.get(sessionId);
       if (!session) {
+        detachSessionFromRooms(sessionId);
         return;
       }
-      if (session.roomCode) {
-        this.markSessionLeftRoom(sessionId, session.roomCode);
-      }
+      detachSessionFromRooms(sessionId, session.roomCode);
       if (session.remoteAddress) {
         const ids = sessionIdsByRemoteAddress.get(session.remoteAddress);
         ids?.delete(sessionId);
@@ -69,9 +86,7 @@ export function createRuntimeRegistry(now: () => number = Date.now): RuntimeRegi
       if (!session) {
         return;
       }
-      if (session.roomCode && session.roomCode !== roomCode) {
-        this.markSessionLeftRoom(sessionId, session.roomCode);
-      }
+      detachSessionFromRooms(sessionId, session.roomCode);
       const ids = roomSessionIds.get(roomCode) ?? new Set<string>();
       ids.add(sessionId);
       roomSessionIds.set(roomCode, ids);
