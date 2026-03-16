@@ -114,6 +114,15 @@ $env:ADMIN_ROLE="admin"
 npm run dev:server
 ```
 
+To enable the built-in admin demo data in a non-production environment, opt in explicitly:
+
+```powershell
+$env:ADMIN_UI_DEMO_ENABLED="true"
+npm run dev:server
+```
+
+When this flag is not enabled, `?demo=1` is ignored by the admin UI.
+
 Generate a `sha256:<hex>` password hash locally:
 
 PowerShell:
@@ -292,6 +301,7 @@ The server accepts the following environment variables. Safe defaults are built 
 - `ADMIN_SESSION_SECRET`: secret used to bind bearer tokens to server-side sessions
 - `ADMIN_SESSION_TTL_MS`: admin session lifetime in milliseconds
 - `ADMIN_ROLE`: admin role, one of `viewer`, `operator`, `admin`
+- `ADMIN_UI_DEMO_ENABLED`: enables the built-in admin UI demo mode for local / non-production preview; defaults to `false`
 - `RATE_LIMIT_ROOM_CREATE_PER_MINUTE`
 - `RATE_LIMIT_ROOM_JOIN_PER_MINUTE`
 - `RATE_LIMIT_VIDEO_SHARE_PER_10_SECONDS`

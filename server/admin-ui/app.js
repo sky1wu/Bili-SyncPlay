@@ -1,7 +1,11 @@
 const STORAGE_KEY = "bili-syncplay-admin-token"
 const AUTO_REFRESH_MS = 15000
+const DEMO_QUERY_KEY = "demo"
+const DEMO_TOKEN = "demo-token"
+const ADMIN_UI_CONFIG = normalizeAdminUiConfig(window.__ADMIN_UI_CONFIG__)
 
 const state = {
+  demo: ADMIN_UI_CONFIG.demoEnabled && new URLSearchParams(location.search).get(DEMO_QUERY_KEY) === "1",
   token: localStorage.getItem(STORAGE_KEY) || "",
   me: null,
   currentRoute: "/overview",
@@ -14,6 +18,16 @@ const state = {
 }
 
 let dialogEventsBound = false
+
+function normalizeAdminUiConfig(value) {
+  if (!value || typeof value !== "object") {
+    return { demoEnabled: false }
+  }
+
+  return {
+    demoEnabled: value.demoEnabled === true
+  }
+}
 
 const routeMeta = {
   "/overview": { title: "概览", description: "服务、存储、运行态与近期事件的快速视图。" },
@@ -28,6 +42,13 @@ const appRoot = document.querySelector("#app")
 async function bootstrap() {
   bindDialogEvents()
   state.currentRoute = normalizePath(location.pathname)
+
+  if (state.demo) {
+    state.token = DEMO_TOKEN
+    state.me = demoAdminSession()
+    await render()
+    return
+  }
 
   if (state.token) {
     try {
@@ -69,6 +90,16 @@ function routeHref(path) {
   return `/admin${path}`
 }
 
+function withDemoQuery(url) {
+  if (!state.demo) {
+    return url
+  }
+
+  const resolved = new URL(url, location.origin)
+  resolved.searchParams.set(DEMO_QUERY_KEY, "1")
+  return `${resolved.pathname}${resolved.search}`
+}
+
 function canManage() {
   return state.me && (state.me.role === "operator" || state.me.role === "admin")
 }
@@ -103,7 +134,7 @@ function setToken(token) {
 function navigate(path, replace = false) {
   state.currentRoute = path
   const method = replace ? history.replaceState : history.pushState
-  method.call(history, null, "", routeHref(path))
+  method.call(history, null, "", withDemoQuery(routeHref(path)))
   render().catch(handleFatalRenderError)
 }
 
@@ -126,6 +157,19 @@ function formatDateTime(value) {
 
   const raw = typeof value === "number" ? String(value) : date.toISOString()
   return `<span title="${escapeHtml(raw)}">${escapeHtml(date.toLocaleString())}</span>`
+}
+
+function renderTimeBlock(value, hint = "") {
+  if (value === null || value === undefined || value === "") {
+    return renderEmptyValue()
+  }
+
+  const date = typeof value === "number" ? new Date(value) : new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return renderEmptyValue()
+  }
+
+  return renderDataPair(formatDateTime(value), hint || escapeHtml(date.toLocaleDateString()))
 }
 
 function formatDuration(ms) {
@@ -206,6 +250,15 @@ function renderCompactCode(value, copyLabel = "复制") {
   `
 }
 
+function renderDataPair(primary, secondary) {
+  return `
+    <div class="data-pair">
+      <div class="data-pair-primary">${primary}</div>
+      ${secondary ? `<div class="data-pair-secondary">${secondary}</div>` : ""}
+    </div>
+  `
+}
+
 function renderOriginValue(value) {
   if (!value) {
     return renderEmptyValue()
@@ -234,6 +287,9 @@ function escapeHtml(value) {
 
 function serializeQuery(query) {
   const params = new URLSearchParams()
+  if (state.demo) {
+    params.set(DEMO_QUERY_KEY, "1")
+  }
   for (const [key, value] of Object.entries(query)) {
     if (value === undefined || value === null || value === "") {
       continue
@@ -378,6 +434,7 @@ async function render() {
           ${renderNavLink("/config", "配置摘要")}
         </nav>
         <div class="sidebar-meta-card">
+          <div class="sidebar-meta-kicker">实例上下文</div>
           <div class="sidebar-meta">实例</div>
           <strong>${escapeHtml(instanceId)}</strong>
           <div class="sidebar-meta">统一管理当前服务实例的运行状态与治理动作。</div>
@@ -392,9 +449,15 @@ async function render() {
               <h2>${escapeHtml(meta.title)}</h2>
               <p>${escapeHtml(meta.description)}</p>
             </div>
-            <div class="userbar">
-              <span class="pill">${escapeHtml(state.me.username)}</span>
-              <span class="pill">${escapeHtml(state.me.role)}</span>
+            <div class="userbar-card">
+              <div class="userbar-meta">
+                <div class="userbar-label">当前登录</div>
+                <div class="userbar-name">${escapeHtml(state.me.username)}</div>
+              </div>
+              <div class="userbar">
+                <span class="pill">${escapeHtml(state.me.role)}</span>
+                <span class="pill">${escapeHtml(instanceId)}</span>
+              </div>
               <button class="button ghost" data-action="logout">退出登录</button>
             </div>
           </div>
@@ -419,7 +482,12 @@ async function render() {
 
 function renderNavLink(path, label) {
   const active = state.currentRoute === path
-  return `<a class="nav-link ${active ? "active" : ""}" href="${routeHref(path)}" data-nav="${escapeHtml(path)}">${escapeHtml(label)}</a>`
+  return `
+    <a class="nav-link ${active ? "active" : ""}" href="${withDemoQuery(routeHref(path))}" data-nav="${escapeHtml(path)}">
+      <span>${escapeHtml(label)}</span>
+      <span class="nav-link-mark" aria-hidden="true">${active ? "●" : "·"}</span>
+    </a>
+  `
 }
 
 async function ensureInstanceId() {
@@ -510,23 +578,27 @@ function bindCommonEvents(page) {
 function renderLogin() {
   appRoot.innerHTML = `
     <div class="login-shell">
-      <form class="login-card" id="login-form">
-        <span class="brand-eyebrow">Admin Login</span>
-        <h1>Bili-SyncPlay</h1>
-        <p>使用服务端配置的管理员账号进入管理控制面板。</p>
-        ${state.notice ? `<div class="notice ${escapeHtml(state.notice.type)}">${escapeHtml(state.notice.message)}</div>` : ""}
-        <div class="field">
-          <label for="username">用户名</label>
-          <input id="username" name="username" autocomplete="username" required />
-        </div>
-        <div class="field" style="margin-top: 14px;">
-          <label for="password">密码</label>
-          <input id="password" name="password" type="password" autocomplete="current-password" required />
-        </div>
-        <div class="actions" style="margin-top: 18px;">
-          <button class="button primary" type="submit">登录</button>
-        </div>
-      </form>
+      <div class="login-layout">
+        <form class="login-card" id="login-form">
+          <span class="brand-eyebrow">Admin Login</span>
+          <h2>登录后台</h2>
+          <p>使用服务端配置的管理员账号进入管理控制面板。</p>
+          ${state.notice ? `<div class="notice ${escapeHtml(state.notice.type)}">${escapeHtml(state.notice.message)}</div>` : ""}
+          <div class="login-fields">
+            <div class="field">
+              <label for="username">用户名</label>
+              <input id="username" name="username" autocomplete="username" required />
+            </div>
+            <div class="field">
+              <label for="password">密码</label>
+              <input id="password" name="password" type="password" autocomplete="current-password" required />
+            </div>
+          </div>
+          <div class="actions login-actions">
+            <button class="button primary" type="submit">登录</button>
+          </div>
+        </form>
+      </div>
     </div>
   `
 }
@@ -577,6 +649,12 @@ async function renderOverviewPage() {
   const [health, ready, overview] = await Promise.all([api.getHealth(), api.getReady(), api.getOverview()])
   state.lastOverviewData = overview.service
   const readyWarning = ready.status !== "ready"
+  const overviewHighlights = [
+    ["实例", overview.service.instanceId],
+    ["存储", overview.storage.provider],
+    ["Redis", overview.storage.redisConnected ? "已连接" : "未连接"],
+    ["房间", `${overview.runtime.activeRoomCount} 活跃 / ${overview.rooms.totalNonExpired} 非过期`]
+  ]
 
   return {
     autoRefresh: state.overviewAutoRefresh,
@@ -591,6 +669,14 @@ async function renderOverviewPage() {
           </div>
           <button class="button" data-refresh-overview>立即刷新</button>
         </div>
+        <section class="panel overview-strip">
+          ${overviewHighlights.map(([label, value]) => `
+            <div class="overview-strip-item">
+              <span class="overview-strip-label">${escapeHtml(label)}</span>
+              <strong>${escapeHtml(value)}</strong>
+            </div>
+          `).join("")}
+        </section>
         <div class="grid cards-4">
           ${metricCard("服务", escapeHtml(overview.service.name), `版本 ${escapeHtml(overview.service.version)}`)}
           ${metricCard("实例", escapeHtml(overview.service.instanceId), `启动于 ${new Date(overview.service.startedAt).toLocaleString()}`)}
@@ -656,25 +742,37 @@ function renderStatus(kind, text) {
 async function renderRoomsPage() {
   const query = roomsQueryFromLocation()
   const data = await api.listRooms(query)
+  const hasFilters = Boolean(query.keyword || query.status !== "all" || query.includeExpired || query.sortBy !== "lastActiveAt" || query.sortOrder !== "desc")
 
   return {
     instanceId: state.lastOverviewData?.instanceId,
     html: `
       <div class="section">
         <section class="panel panel-filter">
+          <div class="panel-intro">
+            <div class="panel-intro-kicker">房间筛选</div>
+            <div class="panel-intro-text">按房间状态、排序方式和过期范围快速收敛目标房间，再进入详情页执行治理动作。</div>
+          </div>
           <form id="rooms-filter" class="form-grid">
             ${textField("keyword", "房间号关键字", query.keyword)}
             ${selectField("status", "状态", query.status, [["all", "all"], ["active", "active"], ["idle", "idle"]])}
             ${selectField("sortBy", "排序字段", query.sortBy, [["lastActiveAt", "lastActiveAt"], ["createdAt", "createdAt"]])}
             ${selectField("sortOrder", "排序方向", query.sortOrder, [["desc", "desc"], ["asc", "asc"]])}
             ${textField("pageSize", "每页条数", String(query.pageSize), "number")}
-            <div class="field inline" style="align-self: end;">
+            <div class="field inline align-end">
               <input id="includeExpired" name="includeExpired" type="checkbox" ${query.includeExpired ? "checked" : ""} />
               <label for="includeExpired">包含已过期房间</label>
             </div>
-            <div class="actions" style="grid-column: 1 / -1;">
-              <button class="button primary" type="submit">查询</button>
-              <button class="button ghost" type="button" data-reset-rooms>重置</button>
+            <div class="filter-footer full-width">
+              <div class="filter-summary">
+                <span class="filter-summary-label">当前视图</span>
+                <strong>${hasFilters ? "已应用筛选" : "默认排序"}</strong>
+                <span>共 ${data.pagination.total} 个结果</span>
+              </div>
+              <div class="actions">
+                <button class="button primary" type="submit">查询</button>
+                <button class="button ghost" type="button" data-reset-rooms>重置</button>
+              </div>
             </div>
           </form>
         </section>
@@ -684,7 +782,10 @@ async function renderRoomsPage() {
               <div class="table-title">房间列表</div>
               <div class="muted">共 ${data.pagination.total} 个结果</div>
             </div>
-            <button class="button" data-refresh-rooms>刷新</button>
+            <div class="table-toolbar-actions">
+              <div class="pill subtle">每页 ${query.pageSize}</div>
+              <button class="button" data-refresh-rooms>刷新</button>
+            </div>
           </div>
           ${data.items.length === 0 ? `<div class="empty-state">当前筛选条件下没有房间。</div>` : `
             <div class="table-scroll">
@@ -706,15 +807,15 @@ async function renderRoomsPage() {
               <tbody>
                 ${data.items.map((item) => `
                   <tr>
-                    <td><a href="${routeHref(`/rooms/${item.roomCode}`)}" data-room-link="${escapeHtml(item.roomCode)}"><strong>${escapeHtml(item.roomCode)}</strong></a></td>
-                    <td>${escapeHtml(item.instanceId || "—")}</td>
+                    <td>${renderDataPair(`<a href="${withDemoQuery(routeHref(`/rooms/${item.roomCode}`))}" data-room-link="${escapeHtml(item.roomCode)}" class="primary-cell-link"><strong>${escapeHtml(item.roomCode)}</strong></a>`, item.sharedVideo?.videoId ? `<span class="primary-code">${escapeHtml(item.sharedVideo.videoId)}</span>` : "")}</td>
+                    <td><span class="primary-code">${escapeHtml(item.instanceId || "—")}</span></td>
                     <td>${renderStatus(item.isActive ? "success" : "neutral", item.isActive ? "active" : "idle")}</td>
-                    <td>${item.memberCount}</td>
-                    <td>${escapeHtml(item.sharedVideo?.title || item.sharedVideo?.videoId || "未共享")}</td>
-                    <td>${escapeHtml(formatPlayback(item.playback))}</td>
-                    <td>${formatDateTime(item.createdAt)}</td>
-                    <td>${formatDateTime(item.lastActiveAt)}</td>
-                    <td>${formatDateTime(item.expiresAt)}</td>
+                    <td><strong>${item.memberCount}</strong></td>
+                    <td>${renderDataPair(escapeHtml(item.sharedVideo?.title || item.sharedVideo?.videoId || "未共享"), item.sharedVideo?.url ? "已设置共享链接" : "")}</td>
+                    <td>${renderDataPair(escapeHtml(formatPlayback(item.playback)), item.playback ? `速度 x${Number(item.playback.playbackRate ?? 1).toFixed(2)}` : "")}</td>
+                    <td>${renderTimeBlock(item.createdAt, "创建")}</td>
+                    <td>${renderTimeBlock(item.lastActiveAt, "活跃")}</td>
+                    <td>${renderTimeBlock(item.expiresAt, "过期")}</td>
                     <td>${roomActionButtons(item.roomCode)}</td>
                   </tr>
                 `).join("")}
@@ -792,7 +893,7 @@ function bindRoomsListEvents(query) {
   })
 
   document.querySelector("[data-reset-rooms]")?.addEventListener("click", () => {
-    history.replaceState(null, "", routeHref("/rooms"))
+    history.replaceState(null, "", withDemoQuery(routeHref("/rooms")))
     render().catch(handleFatalRenderError)
   })
 
@@ -814,7 +915,10 @@ function bindPageButtons(basePath) {
     button.addEventListener("click", () => {
       const params = new URLSearchParams(location.search)
       params.set("page", button.getAttribute("data-page-target"))
-      history.replaceState(null, "", `${routeHref(basePath)}?${params.toString()}`)
+      if (state.demo) {
+        params.set(DEMO_QUERY_KEY, "1")
+      }
+      history.replaceState(null, "", `/admin${basePath}?${params.toString()}`)
       render().catch(handleFatalRenderError)
     })
   })
@@ -875,6 +979,24 @@ async function renderRoomDetailPage(roomCode) {
       instanceId: detail.instanceId,
       html: `
         <div class="section">
+          <section class="panel room-summary-strip">
+            <div class="room-summary-chip">
+              <span class="room-summary-label">房间号</span>
+              <strong>${escapeHtml(detail.room.roomCode)}</strong>
+            </div>
+            <div class="room-summary-chip">
+              <span class="room-summary-label">状态</span>
+              ${renderStatus(detail.room.isActive ? "success" : "neutral", detail.room.isActive ? "active" : "idle")}
+            </div>
+            <div class="room-summary-chip">
+              <span class="room-summary-label">在线成员</span>
+              <strong>${escapeHtml(detail.room.memberCount)}</strong>
+            </div>
+            <div class="room-summary-chip">
+              <span class="room-summary-label">实例</span>
+              <strong>${escapeHtml(detail.room.instanceId || "—")}</strong>
+            </div>
+          </section>
           <div class="toolbar">
             <div class="actions">
               <button class="button ghost" data-nav-back>返回房间列表</button>
@@ -945,10 +1067,10 @@ async function renderRoomDetailPage(roomCode) {
                 <tbody>
                   ${detail.members.map((member) => `
                     <tr>
-                      <td>${escapeHtml(member.displayName)}</td>
+                      <td>${renderDataPair(`<strong>${escapeHtml(member.displayName)}</strong>`, member.memberId ? `memberId ${escapeHtml(member.memberId)}` : "")}</td>
                       <td><div class="copy-stack"><span class="code">${escapeHtml(member.memberId)}</span><button class="button link" type="button" data-copy="${escapeHtml(member.memberId)}">复制</button></div></td>
                       <td><div class="copy-stack"><span class="code">${escapeHtml(member.sessionId)}</span><button class="button link" type="button" data-copy="${escapeHtml(member.sessionId)}">复制</button></div></td>
-                      <td>${formatDateTime(member.joinedAt)}</td>
+                      <td>${renderTimeBlock(member.joinedAt, "加入")}</td>
                       <td>${member.remoteAddress ? `<div class="copy-stack"><span class="code">${escapeHtml(member.remoteAddress)}</span><button class="button link" type="button" data-copy="${escapeHtml(member.remoteAddress)}">复制</button></div>` : renderEmptyValue()}</td>
                       <td>${renderOriginValue(member.origin)}</td>
                       <td>${memberActionButtons(roomCode, member)}</td>
@@ -982,8 +1104,8 @@ async function renderRoomDetailPage(roomCode) {
                 <tbody>
                   ${detail.recentEvents.map((event) => `
                     <tr>
-                      <td>${formatDateTime(event.timestamp)}</td>
-                      <td>${escapeHtml(event.event)}</td>
+                      <td>${renderTimeBlock(event.timestamp, "事件")}</td>
+                      <td>${renderDataPair(`<span class="event-name">${escapeHtml(event.event)}</span>`, event.roomCode ? `<span class="primary-code">${escapeHtml(event.roomCode)}</span>` : "")}</td>
                       <td>${event.sessionId ? `<span class="code">${escapeHtml(event.sessionId)}</span>` : renderEmptyValue()}</td>
                       <td>${event.result ? renderResultBadge(event.result) : renderEmptyValue()}</td>
                       <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(event.details))}'>查看 JSON</button></td>
@@ -1002,7 +1124,7 @@ async function renderRoomDetailPage(roomCode) {
         document.querySelector("[data-jump-events]")?.addEventListener("click", (event) => {
           const targetRoomCode = event.currentTarget.getAttribute("data-jump-events")
           navigateToUrl(
-            `${routeHref("/events")}?${new URLSearchParams({ roomCode: targetRoomCode }).toString()}`,
+            withDemoQuery(`/admin/events?${new URLSearchParams({ roomCode: targetRoomCode }).toString()}`),
             "/events",
             true
           )
@@ -1019,7 +1141,7 @@ async function renderRoomDetailPage(roomCode) {
           <div class="empty-state">
             <h3>房间不存在</h3>
             <p class="muted">房间 ${escapeHtml(roomCode)} 可能已被删除或已过期。</p>
-            <div class="actions" style="justify-content: center;">
+            <div class="actions centered">
               <button class="button" data-nav-back>返回房间列表</button>
             </div>
           </div>
@@ -1098,9 +1220,9 @@ async function renderEventsPage() {
       `,
       rows: data.items.map((item) => `
         <tr>
-          <td>${formatDateTime(item.timestamp)}</td>
-          <td>${escapeHtml(item.event)}</td>
-          <td>${item.roomCode ? escapeHtml(item.roomCode) : renderEmptyValue()}</td>
+          <td>${renderTimeBlock(item.timestamp, "事件")}</td>
+          <td><span class="event-name">${escapeHtml(item.event)}</span></td>
+          <td>${item.roomCode ? `<span class="primary-code">${escapeHtml(item.roomCode)}</span>` : renderEmptyValue()}</td>
           <td>${renderCompactCode(item.sessionId)}</td>
           <td>${renderCompactCode(item.remoteAddress)}</td>
           <td>${renderOriginValue(item.origin)}</td>
@@ -1145,15 +1267,15 @@ async function renderAuditLogsPage() {
       `,
       rows: data.items.map((item) => `
         <tr>
-          <td>${formatDateTime(item.timestamp)}</td>
-          <td>${escapeHtml(item.actor.username)}</td>
+          <td>${renderTimeBlock(item.timestamp, "审计")}</td>
+          <td><strong>${escapeHtml(item.actor.username)}</strong></td>
           <td>${renderResultBadge(item.actor.role)}</td>
-          <td>${escapeHtml(item.action)}</td>
+          <td><span class="event-name">${escapeHtml(item.action)}</span></td>
           <td>${escapeHtml(item.targetType)}</td>
-          <td>${item.targetId ? `<span class="code">${escapeHtml(item.targetId)}</span>` : renderEmptyValue()}</td>
+          <td>${item.targetId ? `<span class="primary-code">${escapeHtml(item.targetId)}</span>` : renderEmptyValue()}</td>
           <td>${renderResultBadge(item.result)}</td>
           <td>${item.reason ? escapeHtml(item.reason) : renderEmptyValue()}</td>
-          <td>${item.instanceId ? escapeHtml(item.instanceId) : renderEmptyValue()}</td>
+          <td>${item.instanceId ? `<span class="primary-code">${escapeHtml(item.instanceId)}</span>` : renderEmptyValue()}</td>
           <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(item.request))}'>查看请求</button></td>
         </tr>
       `).join(""),
@@ -1181,9 +1303,16 @@ function renderLogPage(options) {
         </div>
         <form id="${escapeHtml(options.formId)}" class="form-grid">
           ${options.filters}
-          <div class="actions" style="grid-column: 1 / -1;">
-            <button class="button primary" type="submit">查询</button>
-            <button class="button ghost" type="button" data-reset-list="${escapeHtml(options.basePath)}">重置</button>
+          <div class="filter-footer full-width">
+            <div class="filter-summary">
+              <span class="filter-summary-label">筛选结果</span>
+              <strong>共 ${escapeHtml(options.data.total)} 条</strong>
+              <span>默认按时间倒序展示</span>
+            </div>
+            <div class="actions">
+              <button class="button primary" type="submit">查询</button>
+              <button class="button ghost" type="button" data-reset-list="${escapeHtml(options.basePath)}">重置</button>
+            </div>
           </div>
         </form>
       </section>
@@ -1193,7 +1322,10 @@ function renderLogPage(options) {
             <div class="table-title">${escapeHtml(options.title)}</div>
             <div class="muted">${escapeHtml(options.muted)}</div>
           </div>
-          <div class="pill subtle">总数 ${escapeHtml(options.data.total)}</div>
+          <div class="table-toolbar-actions">
+            <div class="pill subtle">总数 ${escapeHtml(options.data.total)}</div>
+            <div class="pill">每页 ${escapeHtml(options.query.pageSize || 20)}</div>
+          </div>
         </div>
         ${options.data.items.length === 0 ? `<div class="empty-state">没有匹配结果。</div>` : `
           <div class="table-scroll">
@@ -1240,7 +1372,7 @@ function bindListFilter(basePath, formId) {
   })
 
   document.querySelector("[data-reset-list]")?.addEventListener("click", () => {
-    history.replaceState(null, "", routeHref(basePath))
+    history.replaceState(null, "", withDemoQuery(routeHref(basePath)))
     render().catch(handleFatalRenderError)
   })
 }
@@ -1337,8 +1469,328 @@ function selectField(name, label, value, options) {
   `
 }
 
+function demoAdminSession() {
+  return { id: "admin-demo", username: "demo-admin", role: "admin" }
+}
+
+function createDemoData() {
+  const now = Date.now()
+  const rooms = [
+    {
+      roomCode: "ROOM8A",
+      instanceId: "instance-1",
+      isActive: true,
+      memberCount: 4,
+      sharedVideo: {
+        title: "【番剧】第 12 话同步播放",
+        videoId: "BV1demo8A",
+        url: "https://www.bilibili.com/video/BV1demo8A"
+      },
+      playback: { paused: false, currentTime: 428.4, playbackRate: 1 },
+      createdAt: now - 1000 * 60 * 86,
+      lastActiveAt: now - 1000 * 18,
+      expiresAt: now + 1000 * 60 * 42
+    },
+    {
+      roomCode: "ROOM2B",
+      instanceId: "instance-1",
+      isActive: true,
+      memberCount: 2,
+      sharedVideo: {
+        title: "音乐现场回放",
+        videoId: "BV1demo2B",
+        url: "https://www.bilibili.com/video/BV1demo2B"
+      },
+      playback: { paused: true, currentTime: 95.2, playbackRate: 1.25 },
+      createdAt: now - 1000 * 60 * 210,
+      lastActiveAt: now - 1000 * 60 * 3,
+      expiresAt: now + 1000 * 60 * 18
+    },
+    {
+      roomCode: "ARCH9C",
+      instanceId: "instance-2",
+      isActive: false,
+      memberCount: 0,
+      sharedVideo: null,
+      playback: null,
+      createdAt: now - 1000 * 60 * 60 * 8,
+      lastActiveAt: now - 1000 * 60 * 52,
+      expiresAt: now - 1000 * 60 * 10
+    }
+  ]
+
+  const roomMembers = {
+    ROOM8A: [
+      {
+        displayName: "Alice",
+        memberId: "member-alice",
+        sessionId: "sess-alice-01",
+        joinedAt: now - 1000 * 60 * 28,
+        remoteAddress: "203.0.113.10",
+        origin: "chrome-extension://demo-extension"
+      },
+      {
+        displayName: "Bob",
+        memberId: "member-bob",
+        sessionId: "sess-bob-02",
+        joinedAt: now - 1000 * 60 * 18,
+        remoteAddress: "198.51.100.42",
+        origin: "https://www.bilibili.com"
+      },
+      {
+        displayName: "Carol",
+        memberId: "member-carol",
+        sessionId: "sess-carol-03",
+        joinedAt: now - 1000 * 60 * 11,
+        remoteAddress: "198.51.100.77",
+        origin: "http://localhost:5173"
+      },
+      {
+        displayName: "Dave",
+        memberId: "member-dave",
+        sessionId: "sess-dave-04",
+        joinedAt: now - 1000 * 60 * 4,
+        remoteAddress: null,
+        origin: ""
+      }
+    ],
+    ROOM2B: [
+      {
+        displayName: "Echo",
+        memberId: "member-echo",
+        sessionId: "sess-echo-01",
+        joinedAt: now - 1000 * 60 * 14,
+        remoteAddress: "192.0.2.15",
+        origin: "https://www.bilibili.com"
+      },
+      {
+        displayName: "Foxtrot",
+        memberId: "member-foxtrot",
+        sessionId: "sess-foxtrot-02",
+        joinedAt: now - 1000 * 60 * 6,
+        remoteAddress: "192.0.2.18",
+        origin: "chrome-extension://demo-extension"
+      }
+    ],
+    ARCH9C: []
+  }
+
+  const events = [
+    { timestamp: now - 1000 * 15, event: "playback_synced", roomCode: "ROOM8A", sessionId: "sess-alice-01", remoteAddress: "203.0.113.10", origin: "chrome-extension://demo-extension", result: "ok", details: { currentTime: 428.4, playbackRate: 1 } },
+    { timestamp: now - 1000 * 42, event: "room_joined", roomCode: "ROOM8A", sessionId: "sess-dave-04", remoteAddress: null, origin: "", result: "ok", details: { memberId: "member-dave" } },
+    { timestamp: now - 1000 * 60 * 3, event: "room_joined", roomCode: "ROOM2B", sessionId: "sess-foxtrot-02", remoteAddress: "192.0.2.18", origin: "chrome-extension://demo-extension", result: "ok", details: { memberId: "member-foxtrot" } },
+    { timestamp: now - 1000 * 60 * 7, event: "room_idle", roomCode: "ARCH9C", sessionId: "", remoteAddress: null, origin: "", result: "idle", details: { memberCount: 0 } },
+    { timestamp: now - 1000 * 60 * 12, event: "admin_room_video_cleared", roomCode: "ROOM2B", sessionId: "", remoteAddress: null, origin: "", result: "success", details: { actor: "demo-admin" } }
+  ]
+
+  const auditLogs = [
+    {
+      timestamp: now - 1000 * 60 * 5,
+      actor: { username: "demo-admin", role: "admin" },
+      action: "clear_video",
+      targetType: "room",
+      targetId: "ROOM2B",
+      result: "success",
+      reason: "同步下一首视频前清空当前状态",
+      instanceId: "instance-1",
+      request: { reason: "同步下一首视频前清空当前状态" }
+    },
+    {
+      timestamp: now - 1000 * 60 * 16,
+      actor: { username: "demo-admin", role: "admin" },
+      action: "kick_member",
+      targetType: "member",
+      targetId: "member-carol",
+      result: "success",
+      reason: "播放源异常，要求重连",
+      instanceId: "instance-1",
+      request: { roomCode: "ROOM8A", memberId: "member-carol" }
+    },
+    {
+      timestamp: now - 1000 * 60 * 34,
+      actor: { username: "demo-admin", role: "admin" },
+      action: "disconnect_session",
+      targetType: "session",
+      targetId: "sess-echo-01",
+      result: "success",
+      reason: "演示用断开",
+      instanceId: "instance-1",
+      request: { sessionId: "sess-echo-01" }
+    }
+  ]
+
+  return { now, rooms, roomMembers, events, auditLogs }
+}
+
+const demoData = createDemoData()
+
+function paginate(items, page, pageSize) {
+  const safePage = Math.max(1, Number(page) || 1)
+  const safePageSize = Math.max(1, Number(pageSize) || 20)
+  const start = (safePage - 1) * safePageSize
+  return {
+    items: items.slice(start, start + safePageSize),
+    total: items.length,
+    pagination: { total: items.length, page: safePage, pageSize: safePageSize }
+  }
+}
+
+function includesText(value, search) {
+  return String(value || "").toLowerCase().includes(String(search || "").toLowerCase())
+}
+
+async function mockApiRequest(path, options = {}) {
+  const url = new URL(path, location.origin)
+  const pathname = url.pathname
+  const params = url.searchParams
+
+  if (pathname === "/api/admin/auth/login") {
+    return { token: DEMO_TOKEN, expiresAt: demoData.now + 12 * 60 * 60 * 1000, admin: demoAdminSession() }
+  }
+  if (pathname === "/api/admin/auth/logout") {
+    return { ok: true }
+  }
+  if (pathname === "/api/admin/me") {
+    return demoAdminSession()
+  }
+  if (pathname === "/healthz") {
+    return { status: "healthy" }
+  }
+  if (pathname === "/readyz") {
+    return { status: "ready", checks: { roomStore: "ok", redis: "ok" } }
+  }
+  if (pathname === "/api/admin/overview") {
+    return {
+      service: {
+        name: "bili-syncplay-server",
+        version: "0.7.0-demo",
+        instanceId: "instance-1",
+        startedAt: demoData.now - 1000 * 60 * 60 * 4,
+        uptimeMs: 1000 * 60 * 60 * 4 + 1000 * 60 * 22
+      },
+      storage: { provider: "redis", redisConnected: true },
+      runtime: { connectionCount: 6, activeRoomCount: 2, activeMemberCount: 6 },
+      rooms: { totalNonExpired: 2, idle: 1 },
+      events: {
+        lastMinute: { room_created: 1, room_joined: 2, rate_limited: 0, ws_connection_rejected: 0, error: 0 },
+        totals: { room_created: 18, room_joined: 143, ws_connection_rejected: 4, rate_limited: 9 }
+      }
+    }
+  }
+  if (pathname === "/api/admin/rooms") {
+    let items = demoData.rooms.slice()
+    const keyword = params.get("keyword") || ""
+    const status = params.get("status") || "all"
+    const includeExpired = params.get("includeExpired") === "true"
+    const sortBy = params.get("sortBy") || "lastActiveAt"
+    const sortOrder = params.get("sortOrder") || "desc"
+    const page = params.get("page") || "1"
+    const pageSize = params.get("pageSize") || "20"
+
+    if (keyword) {
+      items = items.filter((item) => includesText(item.roomCode, keyword) || includesText(item.sharedVideo?.title, keyword))
+    }
+    if (status === "active") {
+      items = items.filter((item) => item.isActive)
+    } else if (status === "idle") {
+      items = items.filter((item) => !item.isActive)
+    }
+    if (!includeExpired) {
+      items = items.filter((item) => item.expiresAt > demoData.now)
+    }
+    items.sort((a, b) => {
+      const delta = Number(a[sortBy] || 0) - Number(b[sortBy] || 0)
+      return sortOrder === "asc" ? delta : -delta
+    })
+    const paged = paginate(items, page, pageSize)
+    return { items: paged.items, pagination: paged.pagination }
+  }
+  if (pathname.startsWith("/api/admin/rooms/") && !pathname.endsWith("/close") && !pathname.endsWith("/expire") && !pathname.endsWith("/clear-video")) {
+    const roomCode = decodeURIComponent(pathname.split("/")[4] || "")
+    const room = demoData.rooms.find((item) => item.roomCode === roomCode)
+    if (!room) {
+      throw { code: "room_not_found", message: "房间不存在。" }
+    }
+    return {
+      instanceId: room.instanceId,
+      room,
+      members: demoData.roomMembers[roomCode] || [],
+      recentEvents: demoData.events.filter((event) => event.roomCode === roomCode).slice(0, 20)
+    }
+  }
+  if (pathname === "/api/admin/events") {
+    let items = demoData.events.slice()
+    const filters = ["event", "roomCode", "sessionId", "remoteAddress", "origin", "result"]
+    for (const key of filters) {
+      const value = params.get(key)
+      if (value) {
+        items = items.filter((item) => includesText(item[key], value))
+      }
+    }
+    items.sort((a, b) => b.timestamp - a.timestamp)
+    const paged = paginate(items, params.get("page") || "1", params.get("pageSize") || "20")
+    return { items: paged.items, total: paged.total }
+  }
+  if (pathname === "/api/admin/audit-logs") {
+    let items = demoData.auditLogs.slice()
+    const actor = params.get("actor")
+    const action = params.get("action")
+    const targetType = params.get("targetType")
+    const targetId = params.get("targetId")
+    const result = params.get("result")
+    if (actor) items = items.filter((item) => includesText(item.actor.username, actor))
+    if (action) items = items.filter((item) => includesText(item.action, action))
+    if (targetType) items = items.filter((item) => includesText(item.targetType, targetType))
+    if (targetId) items = items.filter((item) => includesText(item.targetId, targetId))
+    if (result) items = items.filter((item) => includesText(item.result, result))
+    items.sort((a, b) => b.timestamp - a.timestamp)
+    const paged = paginate(items, params.get("page") || "1", params.get("pageSize") || "20")
+    return { items: paged.items, total: paged.total }
+  }
+  if (pathname === "/api/admin/config") {
+    return {
+      instanceId: "instance-1",
+      persistence: {
+        provider: "redis",
+        emptyRoomTtlMs: 1800000,
+        roomCleanupIntervalMs: 60000,
+        redisConfigured: true
+      },
+      admin: {
+        configured: true,
+        username: "demo-admin",
+        role: "admin",
+        sessionTtlMs: 43200000
+      },
+      security: {
+        allowedOrigins: ["https://www.bilibili.com", "chrome-extension://demo-extension"],
+        allowMissingOriginInDev: false,
+        trustProxyHeaders: true,
+        maxConnectionsPerIp: 24,
+        connectionAttemptsPerMinute: 120,
+        maxMembersPerRoom: 16,
+        maxMessageBytes: 8192,
+        invalidMessageCloseThreshold: 3,
+        rateLimits: {
+          perIp: { windowMs: 60000, max: 120 },
+          perRoom: { windowMs: 10000, max: 30 }
+        }
+      }
+    }
+  }
+  if (pathname.includes("/close") || pathname.includes("/expire") || pathname.includes("/clear-video") || pathname.includes("/kick") || pathname.includes("/disconnect")) {
+    return { ok: true }
+  }
+
+  throw { code: "request_failed", message: `未实现的 demo 接口：${pathname}` }
+}
+
 const api = {
   async request(path, options = {}) {
+    if (state.demo) {
+      return mockApiRequest(path, options)
+    }
+
     const response = await fetch(path, {
       method: options.method || "GET",
       headers: {

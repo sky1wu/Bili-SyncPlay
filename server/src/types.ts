@@ -74,6 +74,10 @@ export type AdminConfig = {
   role: AdminRole;
 } | null;
 
+export type AdminUiConfig = {
+  demoEnabled: boolean;
+};
+
 export type SecurityConfig = {
   allowedOrigins: string[];
   allowMissingOriginInDev: boolean;

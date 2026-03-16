@@ -114,6 +114,15 @@ $env:ADMIN_ROLE="admin"
 npm run dev:server
 ```
 
+如果你只是在本地或非生产环境下预览后台演示数据，需要显式开启：
+
+```powershell
+$env:ADMIN_UI_DEMO_ENABLED="true"
+npm run dev:server
+```
+
+未开启这个变量时，后台页面上的 `?demo=1` 会被忽略。
+
 本地生成 `sha256:<hex>` 密码哈希：
 
 PowerShell：
@@ -292,6 +301,7 @@ wss://sync.example.com
 - `ADMIN_SESSION_SECRET`：用于绑定后台 Bearer Token 与服务端会话的 secret
 - `ADMIN_SESSION_TTL_MS`：后台会话有效期，单位毫秒
 - `ADMIN_ROLE`：后台角色，可选 `viewer`、`operator`、`admin`
+- `ADMIN_UI_DEMO_ENABLED`：是否开启后台内置 demo 模式，适用于本地 / 非生产预览，默认 `false`
 - `RATE_LIMIT_ROOM_CREATE_PER_MINUTE`
 - `RATE_LIMIT_ROOM_JOIN_PER_MINUTE`
 - `RATE_LIMIT_VIDEO_SHARE_PER_10_SECONDS`

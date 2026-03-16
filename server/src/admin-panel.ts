@@ -2,8 +2,12 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
+import type { AdminUiConfig } from "./types.js";
 
 const adminUiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../admin-ui");
+const defaultAdminUiConfig: AdminUiConfig = {
+  demoEnabled: false
+};
 
 const assetTypes = new Map<string, string>([
   [".html", "text/html; charset=utf-8"],
@@ -11,7 +15,11 @@ const assetTypes = new Map<string, string>([
   [".css", "text/css; charset=utf-8"]
 ]);
 
-export async function tryHandleAdminPanel(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
+export async function tryHandleAdminPanel(
+  request: IncomingMessage,
+  response: ServerResponse,
+  adminUiConfig: AdminUiConfig = defaultAdminUiConfig
+): Promise<boolean> {
   if (request.method !== "GET" && request.method !== "HEAD") {
     return false;
   }
@@ -52,6 +60,19 @@ export async function tryHandleAdminPanel(request: IncomingMessage, response: Se
 
     if (request.method === "HEAD") {
       response.end();
+      return true;
+    }
+
+    if (shouldServeIndex) {
+      const html = body
+        .toString("utf8")
+        .replace(
+          '"__ADMIN_UI_CONFIG__"',
+          JSON.stringify({
+            demoEnabled: adminUiConfig.demoEnabled === true
+          })
+        );
+      response.end(html);
       return true;
     }
 

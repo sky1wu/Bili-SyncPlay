@@ -3,6 +3,7 @@ import {
   getDefaultPersistenceConfig,
   getDefaultSecurityConfig,
   type AdminConfig,
+  type AdminUiConfig,
   type PersistenceConfig,
   type SecurityConfig
 } from "./app.js";
@@ -11,9 +12,11 @@ const port = parseIntegerEnv("PORT", 8787);
 const securityConfig = loadSecurityConfig();
 const persistenceConfig = loadPersistenceConfig();
 const adminConfig = loadAdminConfig();
+const adminUiConfig = loadAdminUiConfig();
 
 const { httpServer } = await createSyncServer(securityConfig, persistenceConfig, {
-  adminConfig
+  adminConfig,
+  adminUiConfig
 });
 httpServer.listen(port, () => {
   console.log(`Bili-SyncPlay server listening on http://localhost:${port}`);
@@ -95,6 +98,12 @@ function loadAdminConfig(): AdminConfig {
     sessionSecret,
     sessionTtlMs: parsePositiveIntegerEnv("ADMIN_SESSION_TTL_MS", 12 * 60 * 60 * 1000),
     role: role === "viewer" || role === "operator" || role === "admin" ? role : "admin"
+  };
+}
+
+function loadAdminUiConfig(): AdminUiConfig {
+  return {
+    demoEnabled: parseBooleanEnv("ADMIN_UI_DEMO_ENABLED", false)
   };
 }
 

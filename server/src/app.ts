@@ -23,9 +23,9 @@ import { createRoomReaper } from "./room-reaper.js";
 import { createRoomService } from "./room-service.js";
 import { createRedisRoomStore } from "./redis-room-store.js";
 import { createSecurityPolicy } from "./security.js";
-import type { AdminConfig, LogEvent, PersistenceConfig, SecurityConfig, Session } from "./types.js";
+import type { AdminConfig, AdminUiConfig, LogEvent, PersistenceConfig, SecurityConfig, Session } from "./types.js";
 
-export type { AdminConfig, PersistenceConfig, SecurityConfig } from "./types.js";
+export type { AdminConfig, AdminUiConfig, PersistenceConfig, SecurityConfig } from "./types.js";
 
 export const INVALID_JSON_MESSAGE = "无效的 JSON 消息。";
 export const INVALID_CLIENT_MESSAGE_MESSAGE = "无效的客户端消息体。";
@@ -44,6 +44,7 @@ export type SyncServerDependencies = {
   generateToken?: () => string;
   now?: () => number;
   adminConfig?: AdminConfig;
+  adminUiConfig?: AdminUiConfig;
   serviceVersion?: string;
 };
 
@@ -215,7 +216,7 @@ export async function createSyncServer(
       if (handled) {
         return;
       }
-      void tryHandleAdminPanel(request, response).then((adminPanelHandled) => {
+      void tryHandleAdminPanel(request, response, dependencies.adminUiConfig).then((adminPanelHandled) => {
         if (adminPanelHandled) {
           return;
         }

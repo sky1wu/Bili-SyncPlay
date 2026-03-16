@@ -250,6 +250,32 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
   }
 });
 
+test("admin demo mode stays disabled by default and only enables when explicitly configured", async () => {
+  const defaultServer = await startAdminServer();
+
+  try {
+    const defaultHtml = await requestText(defaultServer.httpBaseUrl, "/admin/login?demo=1");
+    assert.equal(defaultHtml.status, 200);
+    assert.equal(defaultHtml.body.includes('"demoEnabled":false'), true);
+  } finally {
+    await defaultServer.close();
+  }
+
+  const enabledServer = await startAdminServer({
+    adminUiConfig: {
+      demoEnabled: true
+    }
+  });
+
+  try {
+    const enabledHtml = await requestText(enabledServer.httpBaseUrl, "/admin/login?demo=1");
+    assert.equal(enabledHtml.status, 200);
+    assert.equal(enabledHtml.body.includes('"demoEnabled":true'), true);
+  } finally {
+    await enabledServer.close();
+  }
+});
+
 test("admin login rejects invalid credentials", async () => {
   const server = await startAdminServer();
 
