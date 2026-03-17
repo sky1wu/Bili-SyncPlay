@@ -45,6 +45,7 @@ await Promise.all([
   writeFile(path.join(distDir, "manifest.json"), JSON.stringify(manifest, null, 2)),
   cp(path.join(rootDir, "public", "popup.html"), path.join(distDir, "popup.html")),
   cp(path.join(rootDir, "public", "popup.css"), path.join(distDir, "popup.css")),
+  cp(path.join(rootDir, "public", "_locales"), path.join(distDir, "_locales"), { recursive: true }),
   cp(path.join(rootDir, "public", "icon-16.png"), path.join(distDir, "icon-16.png")),
   cp(path.join(rootDir, "public", "icon-48.png"), path.join(distDir, "icon-48.png")),
   cp(path.join(rootDir, "public", "icon-128.png"), path.join(distDir, "icon-128.png"))
