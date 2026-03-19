@@ -45,11 +45,11 @@ import {
 } from "./room-manager";
 import {
   BILIBILI_VIDEO_URL_PATTERNS,
-  createBackgroundRuntimeState,
   DEFAULT_SERVER_URL,
   MAX_RECONNECT_ATTEMPTS,
   SHARE_TOAST_TTL_MS,
 } from "./runtime-state";
+import { createBackgroundStateStore } from "./state-store";
 import { validateServerUrl } from "./server-url";
 import { shouldReconnect, getReconnectDelayMs } from "./socket-manager";
 import {
@@ -62,7 +62,7 @@ import {
 } from "./tab-coordinator";
 import { localizeServerError, t } from "../shared/i18n";
 
-const structuredState = createBackgroundRuntimeState();
+const stateStore = createBackgroundStateStore();
 
 let socket: WebSocket | null = null;
 let serverUrl = DEFAULT_SERVER_URL;
@@ -1187,21 +1187,8 @@ async function notifyContentScripts(
 }
 
 function popupState(): BackgroundToPopupMessage {
-  structuredState.connection.connected = connected;
-  structuredState.connection.serverUrl = serverUrl;
-  structuredState.connection.lastError = lastError;
-  structuredState.connection.reconnectAttempt = reconnectAttempt;
-  structuredState.room.roomCode = roomCode;
-  structuredState.room.joinToken = joinToken;
-  structuredState.room.memberId = memberId;
-  structuredState.room.roomState = roomState;
-  structuredState.room.pendingCreateRoom = pendingCreateRoom;
-  structuredState.room.pendingJoinRoomCode = pendingJoinRoomCode;
-  structuredState.clock.clockOffsetMs = clockOffsetMs;
-  structuredState.clock.rttMs = rttMs;
-  structuredState.diagnostics.logs = logs;
   return createPopupStateSnapshot({
-    state: structuredState,
+    state: syncRuntimeStateStore(),
     retryInMs: getRetryInMs(),
     retryAttemptMax: MAX_RECONNECT_ATTEMPTS,
   });
@@ -1231,14 +1218,54 @@ function notifyAll(): void {
 }
 
 async function persistState(): Promise<void> {
-  structuredState.connection.serverUrl = serverUrl;
-  structuredState.room.roomCode = roomCode;
-  structuredState.room.joinToken = joinToken;
-  structuredState.room.memberToken = memberToken;
-  structuredState.room.memberId = memberId;
-  structuredState.room.displayName = displayName;
-  structuredState.room.roomState = roomState;
-  await persistBackgroundState(structuredState);
+  await persistBackgroundState(syncRuntimeStateStore());
+}
+
+function syncRuntimeStateStore() {
+  return stateStore.patch({
+    connection: {
+      socket,
+      serverUrl,
+      connected,
+      lastError,
+      connectProbe,
+      reconnectTimer,
+      reconnectAttempt,
+      reconnectDeadlineMs,
+    },
+    room: {
+      roomCode,
+      joinToken,
+      memberToken,
+      memberId,
+      displayName,
+      roomState,
+      pendingCreateRoom,
+      pendingJoinRoomCode,
+      pendingJoinToken,
+      pendingJoinRequestSent,
+      pendingSharedVideo,
+      pendingSharedPlayback,
+    },
+    share: {
+      sharedTabId,
+      lastOpenedSharedUrl,
+      openingSharedUrl,
+      pendingLocalShareUrl,
+      pendingLocalShareExpiresAt,
+      pendingLocalShareTimer,
+      pendingShareToast,
+    },
+    clock: {
+      clockOffsetMs,
+      rttMs,
+      clockSyncTimer,
+    },
+    diagnostics: {
+      logs,
+      lastPopupStateLogKey,
+    },
+  });
 }
 
 async function updateServerUrl(nextServerUrl: string): Promise<void> {

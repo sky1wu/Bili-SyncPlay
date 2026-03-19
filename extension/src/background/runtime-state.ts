@@ -47,6 +47,7 @@ export interface RoomSessionState {
   pendingCreateRoom: boolean;
   pendingJoinRoomCode: string | null;
   pendingJoinToken: string | null;
+  pendingJoinRequestSent: boolean;
   pendingSharedVideo: SharedVideo | null;
   pendingSharedPlayback: PlaybackState | null;
 }
@@ -104,6 +105,7 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       pendingCreateRoom: false,
       pendingJoinRoomCode: null,
       pendingJoinToken: null,
+      pendingJoinRequestSent: false,
       pendingSharedVideo: null,
       pendingSharedPlayback: null,
     },
