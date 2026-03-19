@@ -20,6 +20,7 @@ import { notifyContentTabs } from "./content-bus";
 import { bootstrapBackground } from "./bootstrap";
 import { createClockController } from "./clock-controller";
 import { createDiagnosticsController } from "./diagnostics-controller";
+import { createMessageController } from "./message-controller";
 import { flushPendingShare as getPendingShareFlushPlan } from "./room-manager";
 import { createPopupStateController } from "./popup-state-controller";
 import { createRoomSessionController } from "./room-session-controller";
@@ -32,6 +33,7 @@ import { createServerUrlController } from "./server-url-controller";
 import { createShareController } from "./share-controller";
 import { createSocketController } from "./socket-controller";
 import { createBackgroundStateStore } from "./state-store";
+import { createRuntimeSyncController } from "./runtime-sync-controller";
 import {
   loadPersistedBackgroundSnapshot,
   persistBackgroundState,
@@ -54,6 +56,15 @@ const diagnosticsController = createDiagnosticsController({
       popupStateController.broadcastPopupState();
     }
   },
+});
+const runtimeSyncController = createRuntimeSyncController({
+  stateStore,
+  connectionState,
+  roomSessionState,
+  shareState,
+  clockState,
+  diagnosticsState,
+  persistBackgroundState,
 });
 const tabController = createTabController({
   roomSessionState,
@@ -147,7 +158,7 @@ const serverUrlController = createServerUrlController({
   logInvalidServerUrl,
 });
 const popupStateController = createPopupStateController({
-  createState: syncRuntimeStateStore,
+  createState: () => runtimeSyncController.syncRuntimeStateStore(),
   getRetryInMs: () => socketController.getRetryInMs(),
   retryAttemptMax: MAX_RECONNECT_ATTEMPTS,
   notifyContentScripts,
@@ -156,6 +167,21 @@ const popupStateController = createPopupStateController({
     connected: connectionState.connected,
     memberId: roomSessionState.memberId,
   }),
+});
+const messageController = createMessageController({
+  connectionState,
+  roomSessionState,
+  diagnosticsController,
+  popupStateController,
+  roomSessionController,
+  shareController,
+  tabController,
+  clockController,
+  socketController,
+  sendToServer,
+  updateServerUrl,
+  persistState,
+  notifyAll,
 });
 
 bootstrap().catch(console.error);
@@ -409,54 +435,7 @@ function notifyAll(): void {
 }
 
 async function persistState(): Promise<void> {
-  await persistBackgroundState(syncRuntimeStateStore());
-}
-
-function syncRuntimeStateStore() {
-  return stateStore.patch({
-    connection: {
-      socket: connectionState.socket,
-      serverUrl: connectionState.serverUrl,
-      connected: connectionState.connected,
-      lastError: connectionState.lastError,
-      connectProbe: connectionState.connectProbe,
-      reconnectTimer: connectionState.reconnectTimer,
-      reconnectAttempt: connectionState.reconnectAttempt,
-      reconnectDeadlineMs: connectionState.reconnectDeadlineMs,
-    },
-    room: {
-      roomCode: roomSessionState.roomCode,
-      joinToken: roomSessionState.joinToken,
-      memberToken: roomSessionState.memberToken,
-      memberId: roomSessionState.memberId,
-      displayName: roomSessionState.displayName,
-      roomState: roomSessionState.roomState,
-      pendingCreateRoom: roomSessionState.pendingCreateRoom,
-      pendingJoinRoomCode: roomSessionState.pendingJoinRoomCode,
-      pendingJoinToken: roomSessionState.pendingJoinToken,
-      pendingJoinRequestSent: roomSessionState.pendingJoinRequestSent,
-      pendingSharedVideo: roomSessionState.pendingSharedVideo,
-      pendingSharedPlayback: roomSessionState.pendingSharedPlayback,
-    },
-    share: {
-      sharedTabId: shareState.sharedTabId,
-      lastOpenedSharedUrl: shareState.lastOpenedSharedUrl,
-      openingSharedUrl: shareState.openingSharedUrl,
-      pendingLocalShareUrl: shareState.pendingLocalShareUrl,
-      pendingLocalShareExpiresAt: shareState.pendingLocalShareExpiresAt,
-      pendingLocalShareTimer: shareState.pendingLocalShareTimer,
-      pendingShareToast: shareState.pendingShareToast,
-    },
-    clock: {
-      clockOffsetMs: clockState.clockOffsetMs,
-      rttMs: clockState.rttMs,
-      clockSyncTimer: clockState.clockSyncTimer,
-    },
-    diagnostics: {
-      logs: diagnosticsState.logs,
-      lastPopupStateLogKey: diagnosticsState.lastPopupStateLogKey,
-    },
-  });
+  await runtimeSyncController.persistState();
 }
 
 async function updateServerUrl(nextServerUrl: string): Promise<void> {
@@ -469,159 +448,7 @@ chrome.runtime.onMessage.addListener(
     sender,
     sendResponse,
   ) => {
-    void (async () => {
-      switch (message.type) {
-        case "popup:create-room":
-          await roomSessionController.requestCreateRoom();
-          sendResponse(popupStateController.popupState());
-          return;
-        case "popup:join-room":
-          await roomSessionController.requestJoinRoom(
-            message.roomCode,
-            message.joinToken,
-          );
-          if (!connectionState.connected) {
-            sendResponse(popupStateController.popupState());
-            return;
-          }
-          await roomSessionController.waitForJoinAttemptResult();
-          sendResponse(popupStateController.popupState());
-          return;
-        case "popup:leave-room":
-          await roomSessionController.requestLeaveRoom();
-          sendResponse(popupStateController.popupState());
-          return;
-        case "popup:debug-log":
-          diagnosticsController.log("popup", message.message);
-          sendResponse({ ok: true });
-          return;
-        case "popup:get-state":
-          diagnosticsController.maybeLogPopupStateRequest();
-          if (roomSessionState.roomCode && !connectionState.connected) {
-            void socketController.connect();
-          }
-          sendResponse(popupStateController.popupState());
-          return;
-        case "popup:get-active-video": {
-          const response = await shareController.getActiveVideoPayload();
-          if (!response.ok && response.error) {
-            connectionState.lastError = response.error;
-          } else {
-            connectionState.lastError = null;
-          }
-          notifyAll();
-          sendResponse(response);
-          return;
-        }
-        case "popup:share-current-video": {
-          const response = await shareController.getActiveVideoPayload();
-          if (!response.ok || !response.payload) {
-            connectionState.lastError =
-              response.error ?? t("popupErrorCannotReadCurrentVideo");
-            notifyAll();
-            sendResponse({ ok: false, error: connectionState.lastError });
-            return;
-          }
-          connectionState.lastError = null;
-          await shareController.queueOrSendSharedVideo(
-            response.payload,
-            response.tabId,
-          );
-          await persistState();
-          notifyAll();
-          sendResponse({ ok: true });
-          return;
-        }
-        case "popup:open-shared-video":
-          await tabController.openSharedVideoFromPopup();
-          sendResponse({ ok: true });
-          return;
-        case "popup:set-server-url":
-          await updateServerUrl(message.serverUrl);
-          sendResponse(popupStateController.popupState());
-          return;
-        case "content:report-user":
-          if (roomSessionState.displayName !== message.payload.displayName) {
-            roomSessionState.displayName = message.payload.displayName;
-            await persistState();
-            if (
-              connectionState.connected &&
-              roomSessionState.roomCode &&
-              roomSessionState.memberToken
-            ) {
-              sendToServer({
-                type: "profile:update",
-                payload: {
-                  memberToken: roomSessionState.memberToken,
-                  displayName: roomSessionState.displayName,
-                },
-              });
-            }
-          }
-          sendResponse({ ok: true });
-          return;
-        case "content:playback-update":
-          if (
-            connectionState.connected &&
-            roomSessionState.memberToken &&
-            tabController.isActiveSharedTab(sender.tab?.id, message.payload.url)
-          ) {
-            sendToServer({
-              type: "playback:update",
-              payload: {
-                memberToken: roomSessionState.memberToken,
-                playback: {
-                  ...message.payload,
-                  serverTime: 0,
-                  actorId: roomSessionState.memberId ?? message.payload.actorId,
-                },
-              },
-            });
-          }
-          sendResponse({ ok: true });
-          return;
-        case "content:get-room-state":
-          if (roomSessionState.roomCode && !connectionState.connected) {
-            void socketController.connect();
-          }
-          if (
-            connectionState.connected &&
-            roomSessionState.roomCode &&
-            roomSessionState.memberToken
-          ) {
-            sendToServer({
-              type: "sync:request",
-              payload: { memberToken: roomSessionState.memberToken },
-            });
-          }
-          sendResponse(
-            roomSessionState.roomState
-              ? {
-                  ok: true,
-                  roomState: clockController.compensateRoomState(
-                    roomSessionState.roomState,
-                  ),
-                  memberId: roomSessionState.memberId,
-                  roomCode: roomSessionState.roomCode,
-                }
-              : {
-                  ok: false,
-                  memberId: roomSessionState.memberId,
-                  roomCode: roomSessionState.roomCode,
-                },
-          );
-          return;
-        case "content:debug-log":
-          diagnosticsController.log(
-            "content",
-            `[${diagnosticsController.formatContentSource(sender)}] ${message.payload.message}`,
-          );
-          sendResponse({ ok: true });
-          return;
-        default:
-          sendResponse({ ok: false });
-      }
-    })();
+    void messageController.handleRuntimeMessage(message, sender, sendResponse);
 
     return true;
   },
