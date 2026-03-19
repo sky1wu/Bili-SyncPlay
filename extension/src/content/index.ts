@@ -24,13 +24,9 @@ import {
   shouldForcePauseWhileWaitingForInitialRoomState,
 } from "./sync-guards";
 import { createContentStateStore } from "./content-store";
+import { createRoomStateController } from "./room-state-controller";
 import { createSyncController } from "./sync-controller";
-import {
-  createToastCoordinatorState,
-  createToastPresenter,
-  getRoomStateToastMessages,
-  getSharedVideoToastMessage,
-} from "./toast";
+import { createToastCoordinatorState, createToastPresenter } from "./toast";
 
 let seq = 0;
 let lastBroadcastAt = 0;
@@ -60,6 +56,16 @@ let lastObservedPageUrl = window.location.href.split("#")[0];
 const festivalBridge = createFestivalBridgeController();
 const broadcastLogState = { key: null as string | null, at: 0 };
 const ignoredSelfPlaybackLogState = { key: null as string | null, at: 0 };
+const roomStateController = createRoomStateController({
+  runtimeState,
+  toastState,
+  toastPresenter,
+  getSharedVideo,
+  normalizeUrl,
+  debugLog,
+  resetPlaybackSyncState,
+  scheduleHydrationRetry,
+});
 const syncController = createSyncController({
   runtimeState,
   lastAppliedVersionByActor,
@@ -86,8 +92,10 @@ const syncController = createSyncController({
   getCurrentPlaybackVideo,
   getSharedVideo,
   normalizeUrl,
-  notifyRoomStateToasts,
-  maybeShowSharedVideoToast,
+  notifyRoomStateToasts: (state) =>
+    roomStateController.notifyRoomStateToasts(state),
+  maybeShowSharedVideoToast: (toast, state) =>
+    roomStateController.maybeShowSharedVideoToast(toast, state),
 });
 
 void init();
@@ -130,49 +138,6 @@ function resetPlaybackSyncState(reason: string): void {
   syncController.resetPlaybackSyncState(reason);
 }
 
-function isCurrentPageShowingSharedVideo(state: RoomState): boolean {
-  const currentVideo = getSharedVideo();
-  if (!currentVideo || !state.sharedVideo) {
-    return false;
-  }
-
-  return normalizeUrl(currentVideo.url) === normalizeUrl(state.sharedVideo.url);
-}
-
-function notifyRoomStateToasts(state: RoomState): void {
-  const plan = getRoomStateToastMessages({
-    previousState: toastState.lastRoomState,
-    nextState: state,
-    localMemberId: runtimeState.localMemberId,
-    pendingRoomStateHydration: runtimeState.pendingRoomStateHydration,
-    isCurrentPageShowingSharedVideo: isCurrentPageShowingSharedVideo(state),
-    now: Date.now(),
-    lastSeekToastByActor: toastState.lastSeekToastByActor,
-  });
-  toastState.lastRoomState = state;
-  toastState.lastSeekToastByActor = plan.nextSeekToastByActor;
-  for (const message of plan.messages) {
-    toastPresenter.show(message);
-  }
-}
-
-function maybeShowSharedVideoToast(
-  toast: SharedVideoToastPayload | null | undefined,
-  state: RoomState,
-): void {
-  const plan = getSharedVideoToastMessage({
-    toast,
-    state,
-    localMemberId: runtimeState.localMemberId,
-    lastSharedVideoToastKey: toastState.lastSharedVideoToastKey,
-    normalizedToastUrl: normalizeUrl(toast?.videoUrl),
-    normalizedSharedUrl: normalizeUrl(state.sharedVideo?.url),
-  });
-  toastState.lastSharedVideoToastKey = plan.nextSharedVideoToastKey;
-  if (plan.message) {
-    toastPresenter.show(plan.message);
-  }
-}
 async function init(): Promise<void> {
   startUserGestureTracking();
   startPlaybackBinding();
@@ -190,44 +155,7 @@ async function init(): Promise<void> {
       }
 
       if (message.type === "background:sync-status") {
-        const previousRoomCode = runtimeState.activeRoomCode;
-        runtimeState.activeRoomCode = message.payload.roomCode;
-        runtimeState.localMemberId = message.payload.memberId;
-        const roomChanged = Boolean(
-          previousRoomCode &&
-          message.payload.roomCode &&
-          previousRoomCode !== message.payload.roomCode,
-        );
-
-        if (roomChanged) {
-          resetPlaybackSyncState(
-            `room changed ${previousRoomCode} -> ${message.payload.roomCode}`,
-          );
-          toastState.lastRoomState = null;
-          runtimeState.hasReceivedInitialRoomState = false;
-          runtimeState.pendingRoomStateHydration = true;
-        }
-
-        if (
-          message.payload.roomCode &&
-          !runtimeState.hasReceivedInitialRoomState
-        ) {
-          runtimeState.pendingRoomStateHydration = true;
-          debugLog(
-            `Waiting for initial room state of ${message.payload.roomCode}`,
-          );
-          scheduleHydrationRetry(150);
-        }
-
-        if (!message.payload.roomCode) {
-          if (previousRoomCode) {
-            resetPlaybackSyncState(`room cleared from ${previousRoomCode}`);
-          }
-          runtimeState.activeSharedUrl = null;
-          toastState.lastRoomState = null;
-          runtimeState.pendingRoomStateHydration = false;
-          runtimeState.hasReceivedInitialRoomState = false;
-        }
+        roomStateController.handleSyncStatus(message.payload);
         return false;
       }
 
