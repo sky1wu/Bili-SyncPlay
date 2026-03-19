@@ -59,6 +59,7 @@
 - T12 已完成：共享 URL helper 已统一落地，扩展端不再各自包装 `normalizeBilibiliUrl()`，共享视频 URL 归一化与等值比较现已集中到 `extension/src/shared/url.ts`。
 - T13 已完成：`packages/protocol` 已完成按主题拆分，协议类型已迁入 `types/*`，守卫已迁入 `guards/*`，`index.ts` 现主要承担统一导出职责，现有 server / extension 导入路径保持兼容。
 - T14 已完成：服务端配置解析已从 `server/src/index.ts` 下沉到 `config/*`，安全配置、持久化配置、管理后台配置与通用 env helper 已收敛为单一来源，启动入口已退化为纯装配。
+- T15 已完成：服务端 bootstrap 与 admin router 已完成拆分，`app.ts` 的装配与 HTTP fallback 已下沉到 `bootstrap/*`，`admin/router.ts` 已切换为组合式路由分发，顺序分支复杂度显著下降。
 
 本轮实施备注：
 
@@ -88,6 +89,7 @@
 - T12 已落地：新增 `extension/src/shared/url.ts` 与对应测试，将共享视频 URL 归一化与等值比较统一为 `normalizeSharedVideoUrl` / `areSharedVideoUrlsEqual`，`background/index.ts`、`content/index.ts` 与 `popup` 动作层已不再各自维护本地包装实现
 - T13 已落地：新增 `packages/protocol/src/types/*` 与 `packages/protocol/src/guards/*`，将协议核心类型、client/server message 类型与基础守卫拆分为主题模块，并补充 `server-message` 守卫测试；`packages/protocol/src/index.ts` 已收敛为统一导出层
 - T14 已落地：新增 `server/src/config/env.ts`、`server/src/config/security-config.ts`、`server/src/config/persistence-config.ts`、`server/src/config/admin-config.ts`，将环境变量解析与默认值组装从 `server/src/index.ts` 下沉，并补充 `server/test/config-env.test.ts` 覆盖解析与报错语义
+- T15 已落地：新增 `server/src/bootstrap/admin-services.ts`、`server/src/bootstrap/http-handler.ts` 与 `server/src/admin/routes/*`，将 admin 服务装配、HTTP fallback / connection-check 处理和各类 admin route 分发拆到独立模块；`server/src/app.ts` 已显著瘦身，`server/src/admin/router.ts` 现主要承载鉴权辅助、错误边界与 route composition
 
 ## T01 建立统一 lint/format 工具链
 

@@ -6,19 +6,11 @@ import {
   type ErrorCode,
   type ServerMessage,
 } from "@bili-syncplay/protocol";
-import { createAdminActionService } from "./admin/action-service.js";
-import { createAuditLogService } from "./admin/audit-log.js";
-import { createInMemoryAuthStore } from "./admin/auth-store.js";
-import { createAdminAuthService } from "./admin/auth-service.js";
-import { tryHandleAdminPanel } from "./admin-panel.js";
-import { createAdminConfigService } from "./admin/config-service.js";
 import { createEventStore } from "./admin/event-store.js";
-import { createMetricsService } from "./admin/metrics.js";
-import { createAdminOverviewService } from "./admin/overview-service.js";
-import { createAdminRoomQueryService } from "./admin/room-query-service.js";
-import { createAdminRouter } from "./admin/router.js";
 import { createRuntimeRegistry } from "./admin/runtime-registry.js";
 import { createActiveRoomRegistry } from "./active-room-registry.js";
+import { createAdminServices } from "./bootstrap/admin-services.js";
+import { createHttpRequestHandler } from "./bootstrap/http-handler.js";
 import { createStructuredLogger } from "./logger.js";
 import { createMessageHandler } from "./message-handler.js";
 import { createSessionRateLimitState } from "./rate-limit.js";
@@ -123,14 +115,6 @@ export async function createSyncServer(
     createStructuredLogger(undefined, eventStore, runtimeRegistry);
   const activeRooms = createActiveRoomRegistry();
   const securityPolicy = createSecurityPolicy(securityConfig);
-  const authService = dependencies.adminConfig
-    ? createAdminAuthService(
-        dependencies.adminConfig,
-        createInMemoryAuthStore(),
-        now,
-      )
-    : undefined;
-  const auditLogService = createAuditLogService();
 
   const roomService = createRoomService({
     config: securityConfig,
@@ -163,153 +147,29 @@ export async function createSyncServer(
     logEvent,
     now,
   });
-
-  const overviewService = createAdminOverviewService({
-    instanceId: persistenceConfig.instanceId,
-    serviceName: "bili-syncplay-server",
-    serviceVersion:
-      dependencies.serviceVersion ?? process.env.npm_package_version ?? "0.0.0",
-    persistenceConfig,
-    roomStore,
-    runtimeRegistry,
-    eventStore,
-    now,
-  });
-  const roomQueryService = createAdminRoomQueryService({
-    instanceId: persistenceConfig.instanceId,
-    roomStore,
-    runtimeRegistry,
-    eventStore,
-  });
-  const metricsService = createMetricsService({
-    runtimeRegistry,
-    roomStore,
-  });
-  const configService = createAdminConfigService({
-    adminConfig: dependencies.adminConfig ?? null,
-    persistenceConfig,
+  const { adminRouter } = createAdminServices({
     securityConfig,
-  });
-  async function broadcastRoomState(roomCode: string): Promise<void> {
-    const state = await roomService.getRoomStateByCode(roomCode);
-    if (!state) {
-      return;
-    }
-    for (const session of runtimeRegistry.listSessionsByRoom(roomCode)) {
-      send(session.socket, {
-        type: "room:state",
-        payload: state,
-      });
-    }
-  }
-  function disconnectSessionSocket(session: Session, reason: string): void {
-    if (session.socket.readyState === session.socket.OPEN) {
-      session.socket.close(1000, reason);
-      return;
-    }
-    session.socket.terminate();
-  }
-  const actionService = createAdminActionService({
-    instanceId: persistenceConfig.instanceId,
+    persistenceConfig,
     roomStore,
     runtimeRegistry,
-    auditLogService,
-    getRoomStateByCode: (roomCode) => roomService.getRoomStateByCode(roomCode),
-    broadcastRoomState,
-    disconnectSessionSocket,
-    blockMemberToken: (roomCode, memberToken, expiresAt) =>
-      activeRooms.blockMemberToken(roomCode, memberToken, expiresAt),
+    eventStore,
+    activeRooms,
+    roomService,
+    send,
     logEvent,
     now,
-  });
-  const adminRouter = createAdminRouter({
-    getConfigSummary: () => configService.getSummary(),
-    getMetrics: () => metricsService.render(),
-    authService,
-    roomStoreReady: () => roomStore.isReady(),
-    getOverview: () => overviewService.getOverview(),
-    listRooms: (query) => roomQueryService.listRooms(query),
-    getRoomDetail: (roomCode) => roomQueryService.getRoomDetail(roomCode),
-    auditLogService,
-    listAuditLogs: (query) => auditLogService.query(query),
-    closeRoom: (actor, roomCode, reason) =>
-      actionService.closeRoom(actor, roomCode, reason),
-    expireRoom: (actor, roomCode, reason) =>
-      actionService.expireRoom(actor, roomCode, reason),
-    clearRoomVideo: (actor, roomCode, reason) =>
-      actionService.clearRoomVideo(actor, roomCode, reason),
-    kickMember: (actor, roomCode, memberId, reason) =>
-      actionService.kickMember(actor, roomCode, memberId, reason),
-    disconnectSession: (actor, sessionId, reason) =>
-      actionService.disconnectSession(actor, sessionId, reason),
-    eventStore,
-    serviceName: "bili-syncplay-server",
-    now,
+    adminConfig: dependencies.adminConfig,
+    serviceVersion:
+      dependencies.serviceVersion ?? process.env.npm_package_version ?? "0.0.0",
   });
 
-  const httpServer = createServer((request, response) => {
-    const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-    if (pathname === "/api/connection-check") {
-      const originHeader = request.headers.origin;
-      const origin = typeof originHeader === "string" ? originHeader : null;
-      const originCheck = securityPolicy.isOriginAllowed(origin);
-      const corsHeaders = {
-        "content-type": "application/json; charset=utf-8",
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, OPTIONS",
-        "access-control-allow-headers": "content-type",
-        "cache-control": "no-store",
-      };
-      if (request.method === "OPTIONS") {
-        response.writeHead(204, corsHeaders);
-        response.end();
-        return;
-      }
-      if (request.method !== "GET") {
-        response.writeHead(405, corsHeaders);
-        response.end(
-          JSON.stringify({
-            ok: false,
-            error: {
-              code: "method_not_allowed",
-              message: "Method not allowed.",
-            },
-          }),
-        );
-        return;
-      }
-      response.writeHead(200, corsHeaders);
-      response.end(
-        JSON.stringify({
-          ok: true,
-          data: {
-            websocketAllowed: originCheck.ok,
-            reason: originCheck.ok ? null : originCheck.reason,
-          },
-        }),
-      );
-      return;
-    }
-
-    void adminRouter.handle(request, response).then((handled) => {
-      if (handled) {
-        return;
-      }
-      void tryHandleAdminPanel(
-        request,
-        response,
-        dependencies.adminUiConfig,
-      ).then((adminPanelHandled) => {
-        if (adminPanelHandled) {
-          return;
-        }
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(
-          JSON.stringify({ ok: true, service: "bili-syncplay-server" }),
-        );
-      });
-    });
-  });
+  const httpServer = createServer(
+    createHttpRequestHandler({
+      adminRouter,
+      securityPolicy,
+      adminUiConfig: dependencies.adminUiConfig,
+    }),
+  );
 
   const wss = new WebSocketServer({
     noServer: true,
