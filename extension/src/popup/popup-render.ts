@@ -1,0 +1,183 @@
+import type { RoomMember } from "@bili-syncplay/protocol";
+import type { BackgroundToPopupMessage } from "../shared/messages";
+import { getUiLanguage, t } from "../shared/i18n";
+import { escapeHtml } from "./helpers";
+import {
+  getRenderedServerUrlValue,
+  type ServerUrlDraftState,
+} from "./server-url-draft";
+import type { PopupRefs } from "./popup-view";
+
+export function formatInviteDraft(
+  roomCode: string | null,
+  joinToken: string | null,
+): string {
+  if (!roomCode) {
+    return "";
+  }
+  return joinToken ? `${roomCode}:${joinToken}` : roomCode;
+}
+
+export function applyRoomActionControlState(args: {
+  refs: PopupRefs;
+  roomActionPending: boolean;
+  lastKnownPendingCreateRoom: boolean;
+  lastKnownPendingJoinRoomCode: string | null;
+  lastKnownRoomCode: string | null;
+}): void {
+  const isRoomTransitioning =
+    args.roomActionPending ||
+    args.lastKnownPendingCreateRoom ||
+    Boolean(args.lastKnownPendingJoinRoomCode);
+  args.refs.createRoomButton.disabled = isRoomTransitioning;
+  args.refs.joinRoomButton.disabled =
+    isRoomTransitioning || !args.refs.roomCodeInput.value.trim();
+  args.refs.leaveRoomButton.disabled = isRoomTransitioning;
+  args.refs.roomCodeInput.disabled =
+    isRoomTransitioning || Boolean(args.lastKnownRoomCode);
+}
+
+export function renderPopup(args: {
+  refs: PopupRefs;
+  state: BackgroundToPopupMessage["payload"];
+  serverUrlDraft: ServerUrlDraftState;
+  roomCodeDraft: string;
+  setRoomCodeDraft: (value: string) => void;
+  localStatusMessage: string | null;
+  roomActionPending: boolean;
+  lastKnownPendingCreateRoom: boolean;
+  lastKnownPendingJoinRoomCode: string | null;
+  lastKnownRoomCode: string | null;
+  sendPopupLog: (message: string) => Promise<void>;
+}): void {
+  const roomCodeFocused = document.activeElement === args.refs.roomCodeInput;
+  const serverUrlFocused = document.activeElement === args.refs.serverUrlInput;
+
+  args.refs.serverStatus.textContent = args.state.connected
+    ? t("statusConnected")
+    : t("statusDisconnected");
+  args.refs.roomStatus.textContent = args.state.roomCode ?? "-";
+  args.refs.membersStatus.textContent = t("membersOnline", {
+    count: args.state.roomState?.members.length ?? 0,
+  });
+  args.refs.debugMemberStatus.textContent =
+    args.state.displayName ?? args.state.memberId ?? "-";
+  args.refs.retryStatusValue.textContent =
+    args.state.retryInMs !== null
+      ? t("retrySeconds", { seconds: Math.ceil(args.state.retryInMs / 1000) })
+      : "-";
+  args.refs.retryStatusCount.textContent =
+    args.state.retryAttempt > 0
+      ? `(${args.state.retryAttempt}/${args.state.retryAttemptMax})`
+      : "";
+  args.refs.clockStatus.textContent = t("clockStatus", {
+    offset: args.state.clockOffsetMs ?? "-",
+    rtt: args.state.rttMs ?? "-",
+  });
+  const visibleMessage = args.localStatusMessage ?? args.state.error;
+  args.refs.message.textContent = visibleMessage ?? "";
+  args.refs.message.hidden = !visibleMessage;
+
+  if (!roomCodeFocused) {
+    if (args.state.roomCode) {
+      const nextRoomCodeDraft = formatInviteDraft(
+        args.state.roomCode,
+        args.state.joinToken,
+      );
+      args.setRoomCodeDraft(nextRoomCodeDraft);
+      args.refs.roomCodeInput.value = nextRoomCodeDraft;
+    } else {
+      args.refs.roomCodeInput.value = args.roomCodeDraft;
+    }
+  }
+  args.refs.serverUrlInput.value = getRenderedServerUrlValue(
+    args.serverUrlDraft,
+    args.state.serverUrl,
+    serverUrlFocused,
+  );
+
+  args.refs.copyRoomButton.disabled = !args.state.roomCode;
+  args.refs.roomPanelJoined.hidden = !args.state.roomCode;
+  args.refs.roomPanelIdle.hidden = Boolean(args.state.roomCode);
+  applyRoomActionControlState({
+    refs: args.refs,
+    roomActionPending: args.roomActionPending,
+    lastKnownPendingCreateRoom: args.lastKnownPendingCreateRoom,
+    lastKnownPendingJoinRoomCode: args.lastKnownPendingJoinRoomCode,
+    lastKnownRoomCode: args.lastKnownRoomCode,
+  });
+
+  args.refs.sharedVideoTitle.textContent =
+    args.state.roomState?.sharedVideo?.title ?? t("stateNoSharedVideo");
+  args.refs.sharedVideoMeta.textContent = formatVideoMeta(
+    args.state.roomState?.sharedVideo?.url ?? null,
+  );
+  const ownerText = formatVideoOwner(
+    args.state.roomState?.members ?? [],
+    args.state.roomState?.sharedVideo?.sharedByMemberId ?? null,
+  );
+  args.refs.sharedVideoOwner.textContent = ownerText;
+  args.refs.sharedVideoOwner.hidden =
+    !args.state.roomState?.sharedVideo?.url || !ownerText;
+  args.refs.sharedVideoCard.disabled = !args.state.roomState?.sharedVideo?.url;
+
+  renderMemberList(args.refs.memberList, args.state.roomState?.members ?? []);
+  renderLogs(args.refs.logs, args.state.logs);
+
+  if (args.state.pendingJoinRoomCode || args.roomActionPending) {
+    void args.sendPopupLog(
+      `Render room=${args.state.roomCode ?? "none"} connected=${args.state.connected} pendingJoin=${args.state.pendingJoinRoomCode ?? "none"} pendingAction=${args.roomActionPending}`,
+    );
+  }
+}
+
+function formatVideoMeta(url: string | null): string {
+  if (!url) {
+    return t("actionOpenSharedVideoHint");
+  }
+  const match = url.match(/\/video\/([^/?]+)/);
+  return match ? match[1] : t("actionOpenSharedVideo");
+}
+
+function formatVideoOwner(
+  members: RoomMember[],
+  actorId: string | null,
+): string {
+  if (!actorId) {
+    return "";
+  }
+  const owner = members.find((member) => member.id === actorId)?.name;
+  return owner ? t("ownerSharedBy", { owner }) : "";
+}
+
+function renderLogs(
+  container: HTMLElement,
+  logs: BackgroundToPopupMessage["payload"]["logs"],
+): void {
+  if (logs.length === 0) {
+    container.innerHTML = `<div class="muted">${escapeHtml(t("stateNoLogs"))}</div>`;
+    return;
+  }
+
+  container.innerHTML = logs
+    .map((entry) => {
+      const time = new Date(entry.at).toLocaleTimeString(getUiLanguage(), {
+        hour12: false,
+      });
+      return `<div class="log-line">[${time}] [${entry.scope}] ${escapeHtml(entry.message)}</div>`;
+    })
+    .join("");
+}
+
+function renderMemberList(container: HTMLElement, members: RoomMember[]): void {
+  if (members.length === 0) {
+    container.innerHTML = `<span class="member-chip">${escapeHtml(t("stateNoMembers"))}</span>`;
+    return;
+  }
+
+  container.innerHTML = members
+    .map(
+      (member) => `<span class="member-chip">${escapeHtml(member.name)}</span>`,
+    )
+    .join("");
+}

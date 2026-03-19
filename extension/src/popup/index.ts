@@ -1,11 +1,15 @@
-import { normalizeBilibiliUrl, type RoomMember } from "@bili-syncplay/protocol";
+import { normalizeBilibiliUrl } from "@bili-syncplay/protocol";
 import type { BackgroundToPopupMessage } from "../shared/messages";
-import { escapeHtml, parseInviteValue } from "./helpers";
+import { parseInviteValue } from "./helpers";
+import {
+  applyRoomActionControlState as applyRoomActionControlStateToRefs,
+  formatInviteDraft,
+  renderPopup,
+} from "./popup-render";
 import { renderPopupTemplate } from "./popup-template";
 import { collectPopupRefs, type PopupRefs } from "./popup-view";
 import {
   createServerUrlDraftState,
-  getRenderedServerUrlValue,
   syncServerUrlDraft,
   updateServerUrlDraft,
 } from "./server-url-draft";
@@ -13,7 +17,7 @@ import {
   applyIncomingPopupState,
   createPopupStateSyncState,
 } from "./state-sync";
-import { getDocumentLanguage, getUiLanguage, t } from "../shared/i18n";
+import { getDocumentLanguage, t } from "../shared/i18n";
 
 const app = document.getElementById("app");
 
@@ -90,16 +94,13 @@ async function sendPopupLog(message: string): Promise<void> {
 }
 
 function applyRoomActionControlState(nodes: PopupRefs): void {
-  const isRoomTransitioning =
-    roomActionPending ||
-    lastKnownPendingCreateRoom ||
-    Boolean(lastKnownPendingJoinRoomCode);
-  nodes.createRoomButton.disabled = isRoomTransitioning;
-  nodes.joinRoomButton.disabled =
-    isRoomTransitioning || !nodes.roomCodeInput.value.trim();
-  nodes.leaveRoomButton.disabled = isRoomTransitioning;
-  nodes.roomCodeInput.disabled =
-    isRoomTransitioning || Boolean(lastKnownRoomCode);
+  applyRoomActionControlStateToRefs({
+    refs: nodes,
+    roomActionPending,
+    lastKnownPendingCreateRoom,
+    lastKnownPendingJoinRoomCode,
+    lastKnownRoomCode,
+  });
 }
 
 function setRoomActionPending(nextPending: boolean): void {
@@ -114,16 +115,6 @@ function setLocalStatusMessage(message: string | null): void {
   if (popupStateSync.popupState) {
     render();
   }
-}
-
-function formatInviteDraft(
-  roomCode: string | null,
-  joinToken: string | null,
-): string {
-  if (!roomCode) {
-    return "";
-  }
-  return joinToken ? `${roomCode}:${joinToken}` : roomCode;
 }
 
 function applyState(
@@ -147,128 +138,21 @@ function render(): void {
   if (!refs || !popupStateSync.popupState) {
     return;
   }
-
-  const state = popupStateSync.popupState;
-  const roomCodeFocused = document.activeElement === refs.roomCodeInput;
-  const serverUrlFocused = document.activeElement === refs.serverUrlInput;
-
-  refs.serverStatus.textContent = state.connected
-    ? t("statusConnected")
-    : t("statusDisconnected");
-  refs.roomStatus.textContent = state.roomCode ?? "-";
-  refs.membersStatus.textContent = t("membersOnline", {
-    count: state.roomState?.members.length ?? 0,
-  });
-  refs.debugMemberStatus.textContent =
-    state.displayName ?? state.memberId ?? "-";
-  refs.retryStatusValue.textContent =
-    state.retryInMs !== null
-      ? t("retrySeconds", { seconds: Math.ceil(state.retryInMs / 1000) })
-      : "-";
-  refs.retryStatusCount.textContent =
-    state.retryAttempt > 0
-      ? `(${state.retryAttempt}/${state.retryAttemptMax})`
-      : "";
-  refs.clockStatus.textContent = t("clockStatus", {
-    offset: state.clockOffsetMs ?? "-",
-    rtt: state.rttMs ?? "-",
-  });
-  const visibleMessage = localStatusMessage ?? state.error;
-  refs.message.textContent = visibleMessage ?? "";
-  refs.message.hidden = !visibleMessage;
-
-  if (!roomCodeFocused) {
-    if (state.roomCode) {
-      roomCodeDraft = formatInviteDraft(state.roomCode, state.joinToken);
-      refs.roomCodeInput.value = roomCodeDraft;
-    } else {
-      refs.roomCodeInput.value = roomCodeDraft;
-    }
-  }
-  refs.serverUrlInput.value = getRenderedServerUrlValue(
+  renderPopup({
+    refs,
+    state: popupStateSync.popupState,
     serverUrlDraft,
-    state.serverUrl,
-    serverUrlFocused,
-  );
-
-  refs.copyRoomButton.disabled = !state.roomCode;
-  refs.roomPanelJoined.hidden = !state.roomCode;
-  refs.roomPanelIdle.hidden = Boolean(state.roomCode);
-  applyRoomActionControlState(refs);
-
-  refs.sharedVideoTitle.textContent =
-    state.roomState?.sharedVideo?.title ?? t("stateNoSharedVideo");
-  refs.sharedVideoMeta.textContent = formatVideoMeta(
-    state.roomState?.sharedVideo?.url ?? null,
-  );
-  const ownerText = formatVideoOwner(
-    state.roomState?.members ?? [],
-    state.roomState?.sharedVideo?.sharedByMemberId ?? null,
-  );
-  refs.sharedVideoOwner.textContent = ownerText;
-  refs.sharedVideoOwner.hidden =
-    !state.roomState?.sharedVideo?.url || !ownerText;
-  refs.sharedVideoCard.disabled = !state.roomState?.sharedVideo?.url;
-
-  renderMemberList(refs.memberList, state.roomState?.members ?? []);
-  renderLogs(refs.logs, state.logs);
-
-  if (state.pendingJoinRoomCode || roomActionPending) {
-    void sendPopupLog(
-      `Render room=${state.roomCode ?? "none"} connected=${state.connected} pendingJoin=${state.pendingJoinRoomCode ?? "none"} pendingAction=${roomActionPending}`,
-    );
-  }
-}
-
-function formatVideoMeta(url: string | null): string {
-  if (!url) {
-    return t("actionOpenSharedVideoHint");
-  }
-  const match = url.match(/\/video\/([^/?]+)/);
-  return match ? match[1] : t("actionOpenSharedVideo");
-}
-
-function formatVideoOwner(
-  members: RoomMember[],
-  actorId: string | null,
-): string {
-  if (!actorId) {
-    return "";
-  }
-  const owner = members.find((member) => member.id === actorId)?.name;
-  return owner ? t("ownerSharedBy", { owner }) : "";
-}
-
-function renderLogs(
-  container: HTMLElement,
-  logs: BackgroundToPopupMessage["payload"]["logs"],
-): void {
-  if (logs.length === 0) {
-    container.innerHTML = `<div class="muted">${escapeHtml(t("stateNoLogs"))}</div>`;
-    return;
-  }
-
-  container.innerHTML = logs
-    .map((entry) => {
-      const time = new Date(entry.at).toLocaleTimeString(getUiLanguage(), {
-        hour12: false,
-      });
-      return `<div class="log-line">[${time}] [${entry.scope}] ${escapeHtml(entry.message)}</div>`;
-    })
-    .join("");
-}
-
-function renderMemberList(container: HTMLElement, members: RoomMember[]): void {
-  if (members.length === 0) {
-    container.innerHTML = `<span class="member-chip">${escapeHtml(t("stateNoMembers"))}</span>`;
-    return;
-  }
-
-  container.innerHTML = members
-    .map(
-      (member) => `<span class="member-chip">${escapeHtml(member.name)}</span>`,
-    )
-    .join("");
+    roomCodeDraft,
+    setRoomCodeDraft: (value) => {
+      roomCodeDraft = value;
+    },
+    localStatusMessage,
+    roomActionPending,
+    lastKnownPendingCreateRoom,
+    lastKnownPendingJoinRoomCode,
+    lastKnownRoomCode,
+    sendPopupLog,
+  });
 }
 
 async function handleShareCurrentVideo(): Promise<void> {

@@ -77,6 +77,7 @@
 - T09 第二阶段已落地：新增 `extension/src/content/playback-binding-controller.ts`，将视频元素轮询绑定、本地播放事件广播触发、非共享页保护与初始 hydration 等待守卫从 `content/index.ts` 抽离，入口文件不再直接承载大段视频事件副作用
 - T09 第三阶段已落地：`content/index.ts` 已移除对同步主流程的中转包装函数，房间同步、播放广播、hydration 重试与导航/房间 controller 现已直接装配 `sync-controller` 与 `room-state-controller` 能力，主入口已基本退化为初始化与依赖装配层
 - T10 第一阶段已落地：新增 `extension/src/popup/popup-template.ts` 与 `extension/src/popup/popup-view.ts`，将 popup 首屏 HTML 模板与 DOM refs 收集从 `popup/index.ts` 抽离，主入口已不再直接承载大段模板字符串与节点查询逻辑
+- T10 第二阶段已落地：新增 `extension/src/popup/popup-render.ts`，将 popup 状态驱动渲染、成员列表渲染、日志列表渲染与房间动作按钮状态更新从 `popup/index.ts` 抽离，主入口开始退化为数据流装配与事件绑定层
 
 ## T01 建立统一 lint/format 工具链
 
