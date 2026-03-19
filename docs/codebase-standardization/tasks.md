@@ -54,6 +54,7 @@
 - T04 已完成：`background state store` 已落地，连接、房间会话、共享视频、时钟与诊断运行态均已收敛到统一 store，`index.ts` 不再依赖主要顶层状态变量作为核心状态来源。
 - T05 已完成：`background socket controller` 已落地，WebSocket 建连、探测、事件监听与重连调度已从 `background/index.ts` 抽离到独立 controller，入口文件不再直接承载大段 socket 生命周期逻辑。
 - T06 已完成：`background room/session controller` 已落地，create/join/leave 请求、房间服务端消息处理与房间上下文清理逻辑已从 `background/index.ts` 抽离到独立 controller，主入口只保留装配与分发。
+- T07 已完成：`background popup-state/diagnostics/tab controller` 已落地，popup port、状态广播、诊断日志与共享 tab 控制已从 `background/index.ts` 分离，主入口进一步收敛为事件注册与 controller 装配。
 
 本轮实施备注：
 
@@ -67,6 +68,7 @@
 - T04 第四阶段已落地：`room` 切片已直接挂接到 store，房间会话、待加入状态、待发送共享视频与 popup/content 消息读写均已改为经由 store 访问
 - T05 已落地：新增 `extension/src/background/socket-controller.ts`，将 socket 建连探测、`open/message/close/error` 监听、断线重连与重试倒计时统一收敛到 controller，`background/index.ts` 仅保留装配与业务调用入口
 - T06 已落地：新增 `extension/src/background/room-session-controller.ts`，将 `room:created`、`room:joined`、`room:state`、`error` 处理以及 popup `create/join/leave` 请求收敛到独立 controller，`background/index.ts` 进一步退化为薄装配层
+- T07 已落地：新增 `extension/src/background/popup-state-controller.ts`、`extension/src/background/diagnostics-controller.ts`、`extension/src/background/tab-controller.ts`，popup port 管理、状态广播、日志节流与共享页 tab 复用/打开逻辑已独立承载
 
 ## T01 建立统一 lint/format 工具链
 
