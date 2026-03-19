@@ -15,7 +15,7 @@
 - Do not rewrite published history unless explicitly requested by the repository maintainer.
 - Keep formatting-only changes separate from behavior changes whenever practical.
 - Do not mix unrelated refactors, docs updates, and feature or bug-fix changes in a single commit when they can be reviewed independently.
-- Before merging structural changes, run `npm run lint`, `npm run format:check`, `npm run build`, and `npm test`.
+- Before committing changes, run `npm run lint`, `npm run format:check`, `npm run build`, and `npm test`.
 - Prefer small, reviewable commits that preserve behavior at each step of a refactor.
 
 ## Commit Conventions
@@ -36,3 +36,7 @@
 - Keep changes scoped to the task. Avoid opportunistic edits in unrelated files.
 - When code changes affect developer workflow, architecture, or shared rules, update the relevant documentation files in the same change.
 - When reviewing code, report findings first, with concrete file references and impact, before giving summary commentary.
+
+## Language Rules
+
+- Agents must respond in Chinese throughout the entire interaction unless the user explicitly requests another language.
