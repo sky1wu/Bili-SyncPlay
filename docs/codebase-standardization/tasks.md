@@ -55,6 +55,7 @@
 - T05 已完成：`background socket controller` 已落地，WebSocket 建连、探测、事件监听与重连调度已从 `background/index.ts` 抽离到独立 controller，入口文件不再直接承载大段 socket 生命周期逻辑。
 - T06 已完成：`background room/session controller` 已落地，create/join/leave 请求、房间服务端消息处理与房间上下文清理逻辑已从 `background/index.ts` 抽离到独立 controller，主入口只保留装配与分发。
 - T07 已完成：`background popup-state/diagnostics/tab controller` 已落地，popup port、状态广播、诊断日志与共享 tab 控制已从 `background/index.ts` 分离，主入口进一步收敛为事件注册与 controller 装配。
+- T11 已完成：popup 列表渲染与局部状态已收敛，日志/成员列表继续集中在 render 层，本地草稿、复制成功态、pending 态与 popup port 引用已统一接入 popup store，`popup/index.ts` 不再维护主要局部 `let` 状态。
 
 本轮实施备注：
 
@@ -80,6 +81,7 @@
 - T10 第二阶段已落地：新增 `extension/src/popup/popup-render.ts`，将 popup 状态驱动渲染、成员列表渲染、日志列表渲染与房间动作按钮状态更新从 `popup/index.ts` 抽离，主入口开始退化为数据流装配与事件绑定层
 - T10 第三阶段已落地：新增 `extension/src/popup/popup-actions.ts`，将创建/加入/离开房间、复制房间号、复制日志、分享当前视频、打开共享页与 server URL 保存等动作绑定从 `popup/index.ts` 抽离，popup 主入口进一步收敛为初始化、状态同步与装配层
 - T10 第四阶段已落地：新增 `extension/src/popup/popup-port.ts`，将 popup 首次状态查询与 background port 同步连接从 `popup/index.ts` 抽离；至此 popup 主入口已基本只剩初始化、局部状态装配与状态收敛入口，T10 目标完成
+- T11 已落地：新增 `extension/src/popup/popup-store.ts` 与对应测试，将 room action pending、最近房间上下文、房间邀请码草稿、复制成功态、本地状态提示与 popup port 引用统一收敛到 store；`popup/index.ts` 已不再维护主要局部 `let` UI 状态，render/actions 全部改为经由 store 访问
 
 ## T01 建立统一 lint/format 工具链
 

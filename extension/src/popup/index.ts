@@ -8,6 +8,7 @@ import {
   applyRoomActionControlState as applyRoomActionControlStateToRefs,
   renderPopup,
 } from "./popup-render";
+import { createPopupUiStateStore } from "./popup-store";
 import { renderPopupTemplate } from "./popup-template";
 import { collectPopupRefs, type PopupRefs } from "./popup-view";
 import { createServerUrlDraftState } from "./server-url-draft";
@@ -20,15 +21,8 @@ import { getDocumentLanguage, t } from "../shared/i18n";
 const app = document.getElementById("app");
 
 let refs: PopupRefs | null = null;
-let roomActionPending = false;
-let lastKnownPendingCreateRoom = false;
-let lastKnownPendingJoinRoomCode: string | null = null;
-let lastKnownRoomCode: string | null = null;
-let lastRoomEnteredAt = 0;
-let roomCodeDraft = "";
 const serverUrlDraft = createServerUrlDraftState();
-let localStatusMessage: string | null = null;
-let popupPort: chrome.runtime.Port | null = null;
+const popupUiStateStore = createPopupUiStateStore();
 const popupStateSync = createPopupStateSyncState();
 
 const LEAVE_GUARD_MS = 1500;
@@ -48,21 +42,13 @@ async function init(): Promise<void> {
   bindPopupActions({
     refs,
     leaveGuardMs: LEAVE_GUARD_MS,
+    uiStateStore: popupUiStateStore,
     serverUrlDraft,
     queryState,
     applyActionState,
     render,
     sendPopupLog,
-    getRoomActionPending: () => roomActionPending,
-    setRoomActionPending,
     applyRoomActionControlState,
-    setRoomCodeDraft: (value) => {
-      roomCodeDraft = value;
-    },
-    getLocalStatusMessage: () => localStatusMessage,
-    setLocalStatusMessage,
-    getLastKnownRoomCode: () => lastKnownRoomCode,
-    getLastRoomEnteredAt: () => lastRoomEnteredAt,
     getPopupState: () => popupStateSync.popupState,
   });
   connectPort();
@@ -82,17 +68,18 @@ function applyActionState(state: BackgroundToPopupMessage["payload"]): void {
 }
 
 function connectPort(): void {
-  popupPort?.disconnect();
-  popupPort = createPopupStatePort({
+  popupUiStateStore.getState().popupPort?.disconnect();
+  const popupPort = createPopupStatePort({
     onState: (state) => {
       if (applyState(state, "port")) {
         render();
       }
     },
     onDisconnect: () => {
-      popupPort = null;
+      popupUiStateStore.patch({ popupPort: null });
     },
   });
+  popupUiStateStore.patch({ popupPort });
 }
 
 async function sendPopupLog(message: string): Promise<void> {
@@ -104,27 +91,14 @@ async function sendPopupLog(message: string): Promise<void> {
 }
 
 function applyRoomActionControlState(nodes: PopupRefs): void {
+  const uiState = popupUiStateStore.getState();
   applyRoomActionControlStateToRefs({
     refs: nodes,
-    roomActionPending,
-    lastKnownPendingCreateRoom,
-    lastKnownPendingJoinRoomCode,
-    lastKnownRoomCode,
+    roomActionPending: uiState.roomActionPending,
+    lastKnownPendingCreateRoom: uiState.lastKnownPendingCreateRoom,
+    lastKnownPendingJoinRoomCode: uiState.lastKnownPendingJoinRoomCode,
+    lastKnownRoomCode: uiState.lastKnownRoomCode,
   });
-}
-
-function setRoomActionPending(nextPending: boolean): void {
-  roomActionPending = nextPending;
-  if (refs) {
-    applyRoomActionControlState(refs);
-  }
-}
-
-function setLocalStatusMessage(message: string | null): void {
-  localStatusMessage = message;
-  if (popupStateSync.popupState) {
-    render();
-  }
 }
 
 function applyState(
@@ -134,12 +108,14 @@ function applyState(
   if (!applyIncomingPopupState(popupStateSync, state, source)) {
     return false;
   }
-  const previousRoomCode = lastKnownRoomCode;
-  lastKnownPendingCreateRoom = state.pendingCreateRoom;
-  lastKnownPendingJoinRoomCode = state.pendingJoinRoomCode;
-  lastKnownRoomCode = state.roomCode;
+  const previousRoomCode = popupUiStateStore.getState().lastKnownRoomCode;
+  popupUiStateStore.patch({
+    lastKnownPendingCreateRoom: state.pendingCreateRoom,
+    lastKnownPendingJoinRoomCode: state.pendingJoinRoomCode,
+    lastKnownRoomCode: state.roomCode,
+  });
   if (!previousRoomCode && state.roomCode) {
-    lastRoomEnteredAt = Date.now();
+    popupUiStateStore.patch({ lastRoomEnteredAt: Date.now() });
   }
   return true;
 }
@@ -148,19 +124,22 @@ function render(): void {
   if (!refs || !popupStateSync.popupState) {
     return;
   }
+  const uiState = popupUiStateStore.getState();
   renderPopup({
     refs,
     state: popupStateSync.popupState,
     serverUrlDraft,
-    roomCodeDraft,
+    roomCodeDraft: uiState.roomCodeDraft,
     setRoomCodeDraft: (value) => {
-      roomCodeDraft = value;
+      popupUiStateStore.patch({ roomCodeDraft: value });
     },
-    localStatusMessage,
-    roomActionPending,
-    lastKnownPendingCreateRoom,
-    lastKnownPendingJoinRoomCode,
-    lastKnownRoomCode,
+    localStatusMessage: uiState.localStatusMessage,
+    roomActionPending: uiState.roomActionPending,
+    lastKnownPendingCreateRoom: uiState.lastKnownPendingCreateRoom,
+    lastKnownPendingJoinRoomCode: uiState.lastKnownPendingJoinRoomCode,
+    lastKnownRoomCode: uiState.lastKnownRoomCode,
+    copyRoomSuccess: uiState.copyRoomSuccess,
+    copyLogsSuccess: uiState.copyLogsSuccess,
     sendPopupLog,
   });
 }

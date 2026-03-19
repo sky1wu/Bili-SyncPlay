@@ -48,6 +48,8 @@ export function renderPopup(args: {
   lastKnownPendingCreateRoom: boolean;
   lastKnownPendingJoinRoomCode: string | null;
   lastKnownRoomCode: string | null;
+  copyRoomSuccess: boolean;
+  copyLogsSuccess: boolean;
   sendPopupLog: (message: string) => Promise<void>;
 }): void {
   const roomCodeFocused = document.activeElement === args.refs.roomCodeInput;
@@ -97,6 +99,14 @@ export function renderPopup(args: {
   );
 
   args.refs.copyRoomButton.disabled = !args.state.roomCode;
+  args.refs.copyRoomButton.classList.toggle(
+    "success-button",
+    args.copyRoomSuccess,
+  );
+  args.refs.copyLogsButton.classList.toggle(
+    "success-button",
+    args.copyLogsSuccess,
+  );
   args.refs.roomPanelJoined.hidden = !args.state.roomCode;
   args.refs.roomPanelIdle.hidden = Boolean(args.state.roomCode);
   applyRoomActionControlState({

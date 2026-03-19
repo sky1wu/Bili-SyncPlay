@@ -3,6 +3,7 @@ import type { BackgroundToPopupMessage } from "../shared/messages";
 import { getUiLanguage, t } from "../shared/i18n";
 import { parseInviteValue } from "./helpers";
 import { formatInviteDraft } from "./popup-render";
+import type { PopupUiStateStore } from "./popup-store";
 import {
   syncServerUrlDraft,
   updateServerUrlDraft,
@@ -13,55 +14,50 @@ import type { PopupRefs } from "./popup-view";
 export function bindPopupActions(args: {
   refs: PopupRefs;
   leaveGuardMs: number;
+  uiStateStore: PopupUiStateStore;
   serverUrlDraft: ServerUrlDraftState;
   queryState: () => Promise<BackgroundToPopupMessage["payload"]>;
   applyActionState: (state: BackgroundToPopupMessage["payload"]) => void;
   render: () => void;
   sendPopupLog: (message: string) => Promise<void>;
-  getRoomActionPending: () => boolean;
-  setRoomActionPending: (pending: boolean) => void;
   applyRoomActionControlState: (refs: PopupRefs) => void;
-  setRoomCodeDraft: (value: string) => void;
-  getLocalStatusMessage: () => string | null;
-  setLocalStatusMessage: (message: string | null) => void;
-  getLastKnownRoomCode: () => string | null;
-  getLastRoomEnteredAt: () => number;
   getPopupState: () => BackgroundToPopupMessage["payload"] | null;
 }): void {
   const { refs } = args;
 
   refs.joinRoomButton.addEventListener("pointerdown", () => {
+    const uiState = args.uiStateStore.getState();
     void args.sendPopupLog(
-      `Join button pointerdown disabled=${refs.joinRoomButton.disabled} pending=${args.getRoomActionPending()} inputDisabled=${refs.roomCodeInput.disabled}`,
+      `Join button pointerdown disabled=${refs.joinRoomButton.disabled} pending=${uiState.roomActionPending} inputDisabled=${refs.roomCodeInput.disabled}`,
     );
   });
 
   refs.leaveRoomButton.addEventListener("pointerdown", () => {
+    const uiState = args.uiStateStore.getState();
     void args.sendPopupLog(
-      `Leave button pointerdown disabled=${refs.leaveRoomButton.disabled} pending=${args.getRoomActionPending()} room=${args.getLastKnownRoomCode() ?? "none"}`,
+      `Leave button pointerdown disabled=${refs.leaveRoomButton.disabled} pending=${uiState.roomActionPending} room=${uiState.lastKnownRoomCode ?? "none"}`,
     );
   });
 
   refs.createRoomButton.addEventListener("click", async () => {
-    if (args.getRoomActionPending()) {
+    if (args.uiStateStore.getState().roomActionPending) {
       void args.sendPopupLog(
         "Create room click ignored because room action is pending",
       );
       return;
     }
     void args.sendPopupLog("Create room button clicked");
-    args.setLocalStatusMessage(null);
-    args.setRoomActionPending(true);
+    patchUiState({ localStatusMessage: null, roomActionPending: true });
     try {
       const response = (await chrome.runtime.sendMessage({
         type: "popup:create-room",
       })) as BackgroundToPopupMessage;
       args.applyActionState(response.payload);
       void args.sendPopupLog("Create room message resolved");
-      args.setRoomActionPending(false);
+      patchUiState({ roomActionPending: false });
     } finally {
-      if (args.getRoomActionPending()) {
-        args.setRoomActionPending(false);
+      if (args.uiStateStore.getState().roomActionPending) {
+        patchUiState({ roomActionPending: false });
       }
     }
   });
@@ -77,37 +73,38 @@ export function bindPopupActions(args: {
   });
 
   refs.leaveRoomButton.addEventListener("click", async () => {
-    if (args.getRoomActionPending()) {
+    const uiState = args.uiStateStore.getState();
+    if (uiState.roomActionPending) {
       void args.sendPopupLog(
         "Leave click ignored because room action is pending",
       );
       return;
     }
-    if (Date.now() - args.getLastRoomEnteredAt() < args.leaveGuardMs) {
+    if (Date.now() - uiState.lastRoomEnteredAt < args.leaveGuardMs) {
       void args.sendPopupLog(
-        `Leave click ignored by recent-join guard ${Date.now() - args.getLastRoomEnteredAt()}ms`,
+        `Leave click ignored by recent-join guard ${Date.now() - uiState.lastRoomEnteredAt}ms`,
       );
       return;
     }
     void args.sendPopupLog("Leave room button clicked");
-    args.setLocalStatusMessage(null);
-    args.setRoomCodeDraft(
-      formatInviteDraft(
-        args.getLastKnownRoomCode(),
+    patchUiState({
+      localStatusMessage: null,
+      roomCodeDraft: formatInviteDraft(
+        uiState.lastKnownRoomCode,
         args.getPopupState()?.joinToken ?? null,
       ),
-    );
-    args.setRoomActionPending(true);
+      roomActionPending: true,
+    });
     try {
       const response = (await chrome.runtime.sendMessage({
         type: "popup:leave-room",
       })) as BackgroundToPopupMessage;
       args.applyActionState(response.payload);
       void args.sendPopupLog("Leave room message resolved");
-      args.setRoomActionPending(false);
+      patchUiState({ roomActionPending: false });
     } finally {
-      if (args.getRoomActionPending()) {
-        args.setRoomActionPending(false);
+      if (args.uiStateStore.getState().roomActionPending) {
+        patchUiState({ roomActionPending: false });
       }
     }
   });
@@ -120,7 +117,7 @@ export function bindPopupActions(args: {
     }
 
     await navigator.clipboard.writeText(`${roomCode}:${state.joinToken}`);
-    toggleCopySuccess(refs.copyRoomButton);
+    toggleCopySuccess("copyRoomSuccess");
   });
 
   refs.copyLogsButton.addEventListener("click", async () => {
@@ -137,7 +134,7 @@ export function bindPopupActions(args: {
       .join("\n");
 
     await navigator.clipboard.writeText(text || t("stateNoLogs"));
-    toggleCopySuccess(refs.copyLogsButton);
+    toggleCopySuccess("copyLogsSuccess");
   });
 
   refs.shareCurrentVideoButton.addEventListener("click", () => {
@@ -167,11 +164,13 @@ export function bindPopupActions(args: {
     args.applyRoomActionControlState(refs);
     const inviteText = refs.roomCodeInput.value.trim();
     const invite = parseInviteValue(inviteText);
-    args.setRoomCodeDraft(
-      invite ? `${invite.roomCode}:${invite.joinToken}` : inviteText,
-    );
-    if (args.getLocalStatusMessage()) {
-      args.setLocalStatusMessage(null);
+    patchUiState({
+      roomCodeDraft: invite
+        ? `${invite.roomCode}:${invite.joinToken}`
+        : inviteText,
+    });
+    if (args.uiStateStore.getState().localStatusMessage) {
+      patchUiState({ localStatusMessage: null });
     }
     if (invite) {
       void args.sendPopupLog(`Invite input changed room=${invite.roomCode}`);
@@ -179,7 +178,7 @@ export function bindPopupActions(args: {
   });
 
   const saveServerUrl = async () => {
-    args.setLocalStatusMessage(null);
+    patchUiState({ localStatusMessage: null });
     const requestedServerUrl = args.serverUrlDraft.value.trim();
     const response = (await chrome.runtime.sendMessage({
       type: "popup:set-server-url",
@@ -201,8 +200,8 @@ export function bindPopupActions(args: {
       refs.serverUrlInput.value,
       args.getPopupState()?.serverUrl ?? "",
     );
-    if (args.getLocalStatusMessage()) {
-      args.setLocalStatusMessage(null);
+    if (args.uiStateStore.getState().localStatusMessage) {
+      patchUiState({ localStatusMessage: null });
     }
   });
 
@@ -271,25 +270,27 @@ export function bindPopupActions(args: {
       if (args2.event.key !== "Enter") {
         return;
       }
-      if (args.getRoomActionPending()) {
+      if (args.uiStateStore.getState().roomActionPending) {
         void args.sendPopupLog(args2.pendingLabel);
         return;
       }
-    } else if (args.getRoomActionPending()) {
+    } else if (args.uiStateStore.getState().roomActionPending) {
       void args.sendPopupLog(args2.pendingLabel);
       return;
     }
 
     const invite = parseInviteValue(args2.inviteText);
     if (!invite) {
-      args.setLocalStatusMessage(t("errorInvalidInviteFormat"));
+      patchUiState({ localStatusMessage: t("errorInvalidInviteFormat") });
       void args.sendPopupLog(args2.invalidLabel);
       return;
     }
-    args.setLocalStatusMessage(null);
-    args.setRoomCodeDraft(`${invite.roomCode}:${invite.joinToken}`);
+    patchUiState({
+      localStatusMessage: null,
+      roomCodeDraft: `${invite.roomCode}:${invite.joinToken}`,
+    });
     void args.sendPopupLog(`${args2.reasonLabel} room=${invite.roomCode}`);
-    args.setRoomActionPending(true);
+    patchUiState({ roomActionPending: true });
     try {
       const response = (await chrome.runtime.sendMessage({
         type: "popup:join-room",
@@ -298,29 +299,41 @@ export function bindPopupActions(args: {
       })) as BackgroundToPopupMessage;
       args.applyActionState(response.payload);
       void args.sendPopupLog(`${args2.resolvedLabel} room=${invite.roomCode}`);
-      args.setRoomActionPending(false);
+      patchUiState({ roomActionPending: false });
     } finally {
-      if (args.getRoomActionPending()) {
-        args.setRoomActionPending(false);
+      if (args.uiStateStore.getState().roomActionPending) {
+        patchUiState({ roomActionPending: false });
       }
     }
   }
-}
 
-const copyResetTimers = new WeakMap<HTMLButtonElement, number>();
-
-function toggleCopySuccess(button: HTMLButtonElement): void {
-  button.classList.add("success-button");
-  const previousTimer = copyResetTimers.get(button);
-  if (previousTimer !== undefined) {
-    window.clearTimeout(previousTimer);
+  function patchUiState(
+    nextState: Partial<ReturnType<PopupUiStateStore["getState"]>>,
+  ): void {
+    args.uiStateStore.patch(nextState);
+    args.render();
   }
-  const timer = window.setTimeout(() => {
-    copyResetTimers.delete(button);
-    button.classList.remove("success-button");
-  }, 1400);
-  copyResetTimers.set(button, timer);
+
+  function toggleCopySuccess(
+    field: "copyRoomSuccess" | "copyLogsSuccess",
+  ): void {
+    const previousTimer = copyResetTimers.get(field);
+    if (previousTimer !== undefined) {
+      window.clearTimeout(previousTimer);
+    }
+    patchUiState({ [field]: true });
+    const timer = window.setTimeout(() => {
+      copyResetTimers.delete(field);
+      patchUiState({ [field]: false });
+    }, 1400);
+    copyResetTimers.set(field, timer);
+  }
 }
+
+const copyResetTimers = new Map<
+  "copyRoomSuccess" | "copyLogsSuccess",
+  number
+>();
 
 function normalizeUrl(url: string | null | undefined): string | null {
   return normalizeBilibiliUrl(url);
