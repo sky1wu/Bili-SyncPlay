@@ -13,13 +13,9 @@ import type {
   ContentToBackgroundMessage,
   DebugLogEntry,
   PopupToBackgroundMessage,
-  SharedVideoToastPayload,
 } from "../shared/messages";
 import {
   createPendingLocalShareExpiry,
-  decideIncomingRoomState,
-  getActivePendingLocalShareUrl,
-  isSharedVideoChange,
   PENDING_LOCAL_SHARE_TIMEOUT_MS,
   preparePendingLocalShareCleanup,
   preparePendingLocalShareCleanupForRoomLifecycle,
@@ -37,11 +33,8 @@ import { notifyContentTabs } from "./content-bus";
 import { appendLog, formatContentLogSource } from "./logger";
 import { bootstrapBackground } from "./bootstrap";
 import { createPopupStateSnapshot } from "./popup-bus";
-import {
-  createPendingShareToast as createRoomPendingShareToast,
-  flushPendingShare as getPendingShareFlushPlan,
-  getPendingShareToastFor as getRoomPendingShareToastFor,
-} from "./room-manager";
+import { flushPendingShare as getPendingShareFlushPlan } from "./room-manager";
+import { createRoomSessionController } from "./room-session-controller";
 import {
   BILIBILI_VIDEO_URL_PATTERNS,
   DEFAULT_SERVER_URL,
@@ -59,7 +52,7 @@ import {
   decideSharedPlaybackTab,
   rememberSharedSource,
 } from "./tab-coordinator";
-import { localizeServerError, t } from "../shared/i18n";
+import { t } from "../shared/i18n";
 
 const stateStore = createBackgroundStateStore();
 const connectionState = stateStore.getState().connection;
@@ -67,13 +60,32 @@ const roomSessionState = stateStore.getState().room;
 const shareState = stateStore.getState().share;
 const clockState = stateStore.getState().clock;
 const diagnosticsState = stateStore.getState().diagnostics;
-let pendingJoinAttemptResolvers: Array<
-  (result: "joined" | "failed" | "timeout") => void
-> = [];
 const HEARTBEAT_LOG_INTERVAL_MS = 10000;
 const outgoingMessageLogState = new Map<string, number>();
 const incomingMessageLogState = new Map<string, number>();
 const popupPorts = new Set<chrome.runtime.Port>();
+const roomSessionController = createRoomSessionController({
+  connectionState,
+  roomSessionState,
+  shareState,
+  log,
+  notifyAll,
+  persistState,
+  sendToServer,
+  connect: () => socketController.connect(),
+  disconnectSocket,
+  resetReconnectState: () => socketController.resetReconnectState(),
+  resetRoomLifecycleTransientState,
+  flushPendingShare,
+  ensureSharedVideoOpen,
+  notifyContentScripts,
+  compensateRoomState,
+  clearPendingLocalShare,
+  expirePendingLocalShareIfNeeded,
+  normalizeUrl,
+  logServerError,
+  shareToastTtlMs: SHARE_TOAST_TTL_MS,
+});
 const socketController = createSocketController({
   connectionState,
   roomSessionState,
@@ -86,14 +98,17 @@ const socketController = createSocketController({
   syncClock,
   startClockSyncTimer,
   clearPendingLocalShare,
-  sendJoinRequest,
+  sendJoinRequest: (...args) => roomSessionController.sendJoinRequest(...args),
   sendToServer,
   handleServerMessage,
   buildConnectionCheckUrl,
   buildHealthcheckUrl,
   onOpen: () => undefined,
   onAdminSessionReset: (errorMessage) => {
-    void clearCurrentRoomContext("socket closed by server", errorMessage);
+    void roomSessionController.clearCurrentRoomContext(
+      "socket closed by server",
+      errorMessage,
+    );
   },
   formatAdminSessionResetReason,
   reconnectFailedMessage: () =>
@@ -236,229 +251,20 @@ function sendToServer(message: ClientMessage): void {
   connectionState.socket.send(JSON.stringify(message));
 }
 
-function sendJoinRequest(
-  targetRoomCode: string,
-  targetJoinToken: string,
-): void {
-  roomSessionState.pendingJoinRequestSent = true;
-  sendToServer({
-    type: "room:join",
-    payload: {
-      roomCode: targetRoomCode,
-      joinToken: targetJoinToken,
-      ...(roomSessionState.memberToken
-        ? { memberToken: roomSessionState.memberToken }
-        : {}),
-      displayName: roomSessionState.displayName ?? undefined,
-    },
-  });
-}
-
-function settlePendingJoinAttempt(
-  result: "joined" | "failed" | "timeout",
-): void {
-  if (pendingJoinAttemptResolvers.length === 0) {
-    return;
-  }
-
-  const resolvers = pendingJoinAttemptResolvers;
-  pendingJoinAttemptResolvers = [];
-  for (const resolve of resolvers) {
-    resolve(result);
-  }
-}
-
-function waitForJoinAttemptResult(
-  timeoutMs = 3000,
-): Promise<"joined" | "failed" | "timeout"> {
-  return new Promise((resolve) => {
-    const timer = globalThis.setTimeout(() => {
-      pendingJoinAttemptResolvers = pendingJoinAttemptResolvers.filter(
-        (candidate) => candidate !== finalize,
-      );
-      resolve("timeout");
-    }, timeoutMs);
-
-    const finalize = (result: "joined" | "failed" | "timeout") => {
-      globalThis.clearTimeout(timer);
-      resolve(result);
-    };
-
-    pendingJoinAttemptResolvers.push(finalize);
-  });
-}
-
 async function handleServerMessage(message: ServerMessage): Promise<void> {
   if (shouldLogHeartbeatMessage(incomingMessageLogState, message.type)) {
     log("server", `<- ${message.type}`);
   }
-  switch (message.type) {
-    case "room:created":
-      roomSessionState.pendingJoinRoomCode = null;
-      roomSessionState.pendingJoinToken = null;
-      roomSessionState.roomCode = message.payload.roomCode;
-      roomSessionState.joinToken = message.payload.joinToken;
-      roomSessionState.memberToken = message.payload.memberToken;
-      roomSessionState.memberId = message.payload.memberId;
-      connectionState.lastError = null;
-      await persistState();
-      flushPendingShare();
-      notifyAll();
-      return;
-    case "room:joined":
-      roomSessionState.roomCode = message.payload.roomCode;
-      roomSessionState.joinToken =
-        roomSessionState.pendingJoinToken ?? roomSessionState.joinToken;
-      roomSessionState.memberToken = message.payload.memberToken;
-      roomSessionState.memberId = message.payload.memberId;
-      roomSessionState.pendingJoinRequestSent = false;
-      roomSessionState.pendingJoinRoomCode = null;
-      roomSessionState.pendingJoinToken = null;
-      connectionState.lastError = null;
-      settlePendingJoinAttempt("joined");
-      await persistState();
-      flushPendingShare();
-      notifyAll();
-      return;
-    case "room:state":
-      await handleRoomStateMessage(message.payload);
-      return;
-    case "error":
-      connectionState.lastError = localizeServerError(
-        message.payload.code,
-        message.payload.message,
-      );
-      if (
-        roomSessionState.pendingJoinRoomCode &&
-        (message.payload.code === "room_not_found" ||
-          message.payload.code === "join_token_invalid" ||
-          message.payload.code === "invalid_message")
-      ) {
-        log(
-          "background",
-          `Join failed for room ${roomSessionState.pendingJoinRoomCode}`,
-        );
-        settlePendingJoinAttempt("failed");
-        roomSessionState.pendingJoinRequestSent = false;
-        roomSessionState.pendingJoinRoomCode = null;
-        roomSessionState.pendingJoinToken = null;
-        roomSessionState.roomCode = null;
-        roomSessionState.joinToken = null;
-        roomSessionState.memberToken = null;
-        roomSessionState.memberId = null;
-        roomSessionState.roomState = null;
-        await persistState();
-      }
-      if (
-        roomSessionState.roomCode &&
-        !roomSessionState.pendingJoinRoomCode &&
-        (message.payload.code === "room_not_found" ||
-          message.payload.code === "join_token_invalid")
-      ) {
-        await clearCurrentRoomContext(
-          `server rejected stored room context: ${message.payload.code}`,
-          message.payload.message,
-        );
-        logServerError(message.payload.code, message.payload.message);
-        return;
-      }
-      if (message.payload.code === "member_token_invalid") {
-        roomSessionState.memberToken = null;
-        await persistState();
-      }
-      logServerError(message.payload.code, message.payload.message);
-      notifyAll();
-      return;
-    case "sync:pong":
-      updateClockOffset(
-        message.payload.clientSendTime,
-        message.payload.serverReceiveTime,
-        message.payload.serverSendTime,
-      );
-      notifyAll();
-      return;
-  }
-}
-
-async function handleRoomStateMessage(nextState: RoomState): Promise<void> {
-  expirePendingLocalShareIfNeeded();
-  const decision = decideIncomingRoomState({
-    currentRoomState: roomSessionState.roomState,
-    normalizedPendingLocalShareUrl: normalizeUrl(
-      getActivePendingLocalShareUrl({
-        pendingLocalShareUrl: shareState.pendingLocalShareUrl,
-        pendingLocalShareExpiresAt: shareState.pendingLocalShareExpiresAt,
-        now: Date.now(),
-      }),
-    ),
-    normalizedIncomingSharedUrl: normalizeUrl(nextState.sharedVideo?.url),
-  });
-
-  if (decision.kind === "ignore-stale") {
-    log(
-      "background",
-      `Ignored stale room state while waiting for ${shareState.pendingLocalShareUrl}; received ${nextState.sharedVideo?.url ?? "none"}`,
-    );
+  if (message.type !== "sync:pong") {
+    await roomSessionController.handleServerMessage(message);
     return;
   }
-
-  if (isSharedVideoChange(decision.previousSharedUrl, nextState)) {
-    shareState.lastOpenedSharedUrl = null;
-    log(
-      "background",
-      `Shared video switched to ${nextState.sharedVideo?.url ?? "none"}`,
-    );
-    shareState.pendingShareToast = createPendingShareToast(nextState);
-  }
-
-  roomSessionState.roomState = nextState;
-  roomSessionState.roomCode = nextState.roomCode;
-  connectionState.lastError = null;
-
-  if (decision.confirmedPendingLocalShare) {
-    log(
-      "background",
-      `Confirmed shared video switch to ${shareState.pendingLocalShareUrl}`,
-    );
-    clearPendingLocalShare("share confirmation received");
-  }
-
-  await persistState();
-  await ensureSharedVideoOpen(roomSessionState.roomState);
-  const compensatedRoomState = compensateRoomState(roomSessionState.roomState);
-  await notifyContentScripts({
-    type: "background:apply-room-state",
-    payload: compensatedRoomState,
-    shareToast: getPendingShareToastFor(nextState),
-  });
+  updateClockOffset(
+    message.payload.clientSendTime,
+    message.payload.serverReceiveTime,
+    message.payload.serverSendTime,
+  );
   notifyAll();
-}
-
-function createPendingShareToast(
-  state: RoomState,
-): (SharedVideoToastPayload & { expiresAt: number; roomCode: string }) | null {
-  return createRoomPendingShareToast({
-    state,
-    normalizedSharedUrl: normalizeUrl(state.sharedVideo?.url),
-    now: Date.now(),
-    ttlMs: SHARE_TOAST_TTL_MS,
-  });
-}
-
-function getPendingShareToastFor(
-  state: RoomState,
-): SharedVideoToastPayload | null {
-  const result = getRoomPendingShareToastFor({
-    pendingShareToast: shareState.pendingShareToast,
-    state,
-    normalizedPendingToastUrl: normalizeUrl(
-      shareState.pendingShareToast?.videoUrl,
-    ),
-    normalizedSharedUrl: normalizeUrl(state.sharedVideo?.url),
-    now: Date.now(),
-  });
-  shareState.pendingShareToast = result.pendingShareToast;
-  return result.shareToast;
 }
 
 function flushPendingShare(): void {
@@ -656,28 +462,6 @@ function updateClockOffset(
 
 function compensateRoomState(state: RoomState): RoomState {
   return compensateRoomStateForClock(state, clockState.clockOffsetMs);
-}
-
-async function clearCurrentRoomContext(
-  reason: string,
-  errorMessage: string | null = null,
-): Promise<void> {
-  log("background", `Clearing current room context (${reason})`);
-  roomSessionState.roomCode = null;
-  roomSessionState.joinToken = null;
-  roomSessionState.memberToken = null;
-  roomSessionState.memberId = null;
-  roomSessionState.roomState = null;
-  roomSessionState.pendingCreateRoom = false;
-  roomSessionState.pendingJoinRoomCode = null;
-  roomSessionState.pendingJoinToken = null;
-  roomSessionState.pendingJoinRequestSent = false;
-  shareState.lastOpenedSharedUrl = null;
-  connectionState.lastError = errorMessage;
-  socketController.resetReconnectState();
-  resetRoomLifecycleTransientState("leave-room", reason);
-  await persistState();
-  notifyAll();
 }
 
 function clearPendingLocalShareTimer(): void {
@@ -1094,104 +878,23 @@ chrome.runtime.onMessage.addListener(
     void (async () => {
       switch (message.type) {
         case "popup:create-room":
-          socketController.resetReconnectState();
-          roomSessionState.roomCode = null;
-          roomSessionState.joinToken = null;
-          roomSessionState.memberToken = null;
-          roomSessionState.memberId = null;
-          roomSessionState.roomState = null;
-          roomSessionState.pendingJoinRoomCode = null;
-          roomSessionState.pendingJoinToken = null;
-          resetRoomLifecycleTransientState(
-            "create-room",
-            "create room requested",
-          );
-          shareState.lastOpenedSharedUrl = null;
-          await persistState();
-          void socketController.connect();
-          if (connectionState.connected) {
-            roomSessionState.pendingCreateRoom = false;
-            sendToServer({
-              type: "room:create",
-              payload: {
-                displayName: roomSessionState.displayName ?? undefined,
-              },
-            });
-          } else {
-            roomSessionState.pendingCreateRoom = true;
-          }
+          await roomSessionController.requestCreateRoom();
           sendResponse(popupState());
           return;
         case "popup:join-room":
-          socketController.resetReconnectState();
-          roomSessionState.pendingCreateRoom = false;
-          roomSessionState.pendingJoinRoomCode = message.roomCode
-            .trim()
-            .toUpperCase();
-          roomSessionState.pendingJoinToken = message.joinToken.trim();
-          roomSessionState.pendingJoinRequestSent = false;
-          log(
-            "background",
-            `Popup requested join for ${roomSessionState.pendingJoinRoomCode}`,
+          await roomSessionController.requestJoinRoom(
+            message.roomCode,
+            message.joinToken,
           );
-          roomSessionState.roomCode = null;
-          roomSessionState.joinToken = null;
-          roomSessionState.memberToken = null;
-          roomSessionState.memberId = null;
-          roomSessionState.roomState = null;
-          resetRoomLifecycleTransientState("join-room", "join room requested");
-          shareState.lastOpenedSharedUrl = null;
-          connectionState.lastError = null;
-          await persistState();
-          await socketController.connect();
           if (!connectionState.connected) {
             sendResponse(popupState());
             return;
           }
-          if (
-            connectionState.connected &&
-            roomSessionState.pendingJoinRoomCode &&
-            roomSessionState.pendingJoinToken
-          ) {
-            const targetRoomCode = roomSessionState.pendingJoinRoomCode;
-            const targetJoinToken = roomSessionState.pendingJoinToken;
-            if (!roomSessionState.pendingJoinRequestSent) {
-              sendJoinRequest(targetRoomCode, targetJoinToken);
-            }
-          }
-          await waitForJoinAttemptResult();
+          await roomSessionController.waitForJoinAttemptResult();
           sendResponse(popupState());
           return;
         case "popup:leave-room":
-          log(
-            "background",
-            `Popup requested leave for ${roomSessionState.roomCode ?? "none"}`,
-          );
-          if (connectionState.connected) {
-            sendToServer({
-              type: "room:leave",
-              payload: roomSessionState.memberToken
-                ? { memberToken: roomSessionState.memberToken }
-                : undefined,
-            });
-          }
-          roomSessionState.roomCode = null;
-          roomSessionState.joinToken = null;
-          roomSessionState.memberToken = null;
-          roomSessionState.memberId = null;
-          roomSessionState.roomState = null;
-          roomSessionState.pendingJoinRoomCode = null;
-          roomSessionState.pendingJoinToken = null;
-          roomSessionState.pendingJoinRequestSent = false;
-          resetRoomLifecycleTransientState(
-            "leave-room",
-            "leave room requested",
-          );
-          shareState.lastOpenedSharedUrl = null;
-          roomSessionState.pendingCreateRoom = false;
-          disconnectSocket();
-          await persistState();
-          notifyAll();
+          await roomSessionController.requestLeaveRoom();
           sendResponse(popupState());
           return;
         case "popup:debug-log":
