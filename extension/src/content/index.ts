@@ -1,8 +1,5 @@
-import { normalizeBilibiliUrl, type RoomState } from "@bili-syncplay/protocol";
-import type {
-  BackgroundToContentMessage,
-  SharedVideoToastPayload,
-} from "../shared/messages";
+import { normalizeBilibiliUrl } from "@bili-syncplay/protocol";
+import type { BackgroundToContentMessage } from "../shared/messages";
 import { createFestivalBridgeController } from "./festival-bridge";
 import { getVideoElement, pauseVideo } from "./player-binding";
 import { createContentStateStore } from "./content-store";
@@ -53,8 +50,10 @@ const roomStateController = createRoomStateController({
   getSharedVideo: () => shareController.getSharedVideo(),
   normalizeUrl,
   debugLog,
-  resetPlaybackSyncState,
-  scheduleHydrationRetry,
+  resetPlaybackSyncState: (reason) =>
+    syncController.resetPlaybackSyncState(reason),
+  scheduleHydrationRetry: (delayMs) =>
+    syncController.scheduleHydrationRetry(delayMs),
 });
 const syncController = createSyncController({
   runtimeState,
@@ -97,7 +96,7 @@ const playbackBindingController = createPlaybackBindingController({
     syncController.hasRecentRemoteStopIntent(currentVideoUrl),
   normalizeUrl,
   getLastBroadcastAt: () => lastBroadcastAt,
-  broadcastPlayback,
+  broadcastPlayback: (video) => syncController.broadcastPlayback(video),
   applyPendingPlaybackApplication: (video) =>
     syncController.applyPendingPlaybackApplication(video),
   activatePauseHold,
@@ -117,7 +116,7 @@ const navigationController = createNavigationController({
     playbackBindingController.attachPlaybackListeners(),
   getVideoElement,
   pauseVideo,
-  hydrateRoomState,
+  hydrateRoomState: () => syncController.hydrateRoomState(),
   activatePauseHold,
   debugLog,
 });
@@ -158,10 +157,6 @@ async function runtimeSendMessage<T>(message: unknown): Promise<T | null> {
   }
 }
 
-function resetPlaybackSyncState(reason: string): void {
-  syncController.resetPlaybackSyncState(reason);
-}
-
 async function init(): Promise<void> {
   startUserGestureTracking();
   playbackBindingController.start();
@@ -174,7 +169,10 @@ async function init(): Promise<void> {
   chrome.runtime.onMessage.addListener(
     (message: BackgroundToContentMessage, _sender, sendResponse) => {
       if (message.type === "background:apply-room-state") {
-        void applyRoomState(message.payload, message.shareToast ?? null);
+        void syncController.applyRoomState(
+          message.payload,
+          message.shareToast ?? null,
+        );
         return false;
       }
 
@@ -197,7 +195,7 @@ async function init(): Promise<void> {
     },
   );
 
-  await hydrateRoomState();
+  await syncController.hydrateRoomState();
 }
 
 function startUserGestureTracking(): void {
@@ -213,27 +211,8 @@ function activatePauseHold(durationMs = PAUSE_HOLD_MS): void {
   runtimeState.pauseHoldUntil = Date.now() + durationMs;
 }
 
-function scheduleHydrationRetry(delayMs = 350): void {
-  syncController.scheduleHydrationRetry(delayMs);
-}
-
 function normalizeUrl(url: string | undefined | null): string | null {
   return normalizeBilibiliUrl(url);
-}
-
-async function broadcastPlayback(video: HTMLVideoElement): Promise<void> {
-  await syncController.broadcastPlayback(video);
-}
-
-async function applyRoomState(
-  state: RoomState,
-  shareToast: SharedVideoToastPayload | null = null,
-): Promise<void> {
-  await syncController.applyRoomState(state, shareToast);
-}
-
-async function hydrateRoomState(): Promise<void> {
-  await syncController.hydrateRoomState();
 }
 
 async function reportCurrentUser(): Promise<void> {
