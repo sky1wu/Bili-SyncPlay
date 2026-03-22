@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { PlaybackState, RoomState, SharedVideo } from "@bili-syncplay/protocol";
+import type {
+  PlaybackState,
+  RoomState,
+  SharedVideo,
+} from "@bili-syncplay/protocol";
 import { createContentRuntimeState } from "../src/content/runtime-state";
 import { createSyncController } from "../src/content/sync-controller";
 
@@ -51,6 +55,7 @@ function createControllerHarness() {
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
     remotePlayTransitionGuardMs: 500,
+    programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
@@ -130,7 +135,9 @@ function createRoomState(
   };
 }
 
-function createVideo(overrides: Partial<HTMLVideoElement> = {}): HTMLVideoElement {
+function createVideo(
+  overrides: Partial<HTMLVideoElement> = {},
+): HTMLVideoElement {
   return {
     paused: false,
     readyState: 4,
@@ -194,6 +201,7 @@ test("sync controller schedules hydration retry when room exists but initial roo
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
     remotePlayTransitionGuardMs: 500,
+    programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
@@ -261,13 +269,60 @@ test("sync controller suppresses follow-up local broadcast after applying a late
   );
 
   harness.setNow(20_050);
-  await harness.controller.broadcastPlayback(video);
+  await harness.controller.broadcastPlayback(video, "playing");
 
   assert.equal(harness.runtimeMessages.length, 0);
   assert.equal(
     harness.debugLogs.some((message) =>
-      message.includes("Allowed local echo") ||
-      message.includes("Suppressed local echo"),
+      message.includes("result=programmatic-playing"),
+    ),
+    true,
+  );
+});
+
+test("sync controller allows explicit user seek inside the silence window", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: true,
+    currentTime: 36.1,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+
+  await harness.controller.applyRoomState(
+    createRoomState({
+      actorId: "remote-member",
+      seq: 9,
+      serverTime: 19_950,
+      currentTime: 36,
+      playState: "paused",
+    }),
+  );
+
+  harness.runtimeState.lastExplicitUserAction = {
+    kind: "seek",
+    at: 20_020,
+  };
+  harness.runtimeState.suppressedRemotePlayback = null;
+  harness.runtimeState.recentRemotePlayingIntent = null;
+
+  harness.setNow(20_100);
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  assert.equal(harness.runtimeMessages.length, 1);
+  assert.equal(
+    harness.debugLogs.some((message) =>
+      message.includes("Allowed explicit user event"),
     ),
     true,
   );

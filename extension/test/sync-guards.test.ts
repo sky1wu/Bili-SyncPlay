@@ -8,6 +8,7 @@ import {
   shouldApplySelfPlayback,
   shouldForcePauseWhileWaitingForInitialRoomState,
   shouldSuppressLocalEcho,
+  shouldSuppressProgrammaticEvent,
   shouldSuppressRemotePlayTransition,
 } from "../src/content/sync-guards";
 
@@ -114,6 +115,93 @@ test("suppresses local echo for matching remote playback within the guard window
   assert.deepEqual(
     decision.nextSuppressedRemotePlayback,
     memory.suppressedRemotePlayback,
+  );
+});
+
+test("suppresses programmatic play, pause, and seek events inside the apply window", () => {
+  const playSignature = {
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "playing" as const,
+    currentTime: 25,
+    playbackRate: 1,
+  };
+  assert.equal(
+    shouldSuppressProgrammaticEvent({
+      programmaticApplyUntil: 10_500,
+      programmaticApplySignature: playSignature,
+      normalizedCurrentUrl: playSignature.url,
+      playState: "playing",
+      currentTime: 25.1,
+      playbackRate: 1,
+      eventSource: "play",
+      lastExplicitUserAction: null,
+      now: 10_100,
+      userGestureGraceMs: 1_200,
+    }).shouldSuppress,
+    true,
+  );
+
+  const pauseSignature = {
+    ...playSignature,
+    playState: "paused" as const,
+    currentTime: 30,
+  };
+  assert.equal(
+    shouldSuppressProgrammaticEvent({
+      programmaticApplyUntil: 10_500,
+      programmaticApplySignature: pauseSignature,
+      normalizedCurrentUrl: pauseSignature.url,
+      playState: "paused",
+      currentTime: 30.05,
+      playbackRate: 1,
+      eventSource: "pause",
+      lastExplicitUserAction: null,
+      now: 10_120,
+      userGestureGraceMs: 1_200,
+    }).shouldSuppress,
+    true,
+  );
+
+  assert.equal(
+    shouldSuppressProgrammaticEvent({
+      programmaticApplyUntil: 10_500,
+      programmaticApplySignature: pauseSignature,
+      normalizedCurrentUrl: pauseSignature.url,
+      playState: "paused",
+      currentTime: 30.4,
+      playbackRate: 1,
+      eventSource: "seeked",
+      lastExplicitUserAction: null,
+      now: 10_140,
+      userGestureGraceMs: 1_200,
+    }).shouldSuppress,
+    true,
+  );
+});
+
+test("allows explicit user actions to bypass programmatic suppression", () => {
+  assert.equal(
+    shouldSuppressProgrammaticEvent({
+      programmaticApplyUntil: 10_500,
+      programmaticApplySignature: {
+        url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+        playState: "paused",
+        currentTime: 36,
+        playbackRate: 1,
+      },
+      normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      playState: "paused",
+      currentTime: 36.1,
+      playbackRate: 1,
+      eventSource: "seeked",
+      lastExplicitUserAction: {
+        kind: "seek",
+        at: 10_000,
+      },
+      now: 10_100,
+      userGestureGraceMs: 1_200,
+    }).shouldSuppress,
+    false,
   );
 });
 
