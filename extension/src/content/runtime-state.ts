@@ -26,6 +26,38 @@ export interface RecentRemotePlayingIntent {
   currentTime: number;
 }
 
+export type LocalPlaybackEventSource =
+  | "play"
+  | "pause"
+  | "waiting"
+  | "stalled"
+  | "loadedmetadata"
+  | "canplay"
+  | "playing"
+  | "seeking"
+  | "seeked"
+  | "ratechange"
+  | "timeupdate"
+  | "manual";
+
+export type ExplicitUserActionKind =
+  | "play"
+  | "pause"
+  | "seek"
+  | "ratechange";
+
+export interface ExplicitUserAction {
+  kind: ExplicitUserActionKind;
+  at: number;
+}
+
+export interface ProgrammaticPlaybackSignature {
+  url: string;
+  playState: PlaybackState["playState"];
+  currentTime: number;
+  playbackRate: number;
+}
+
 export interface ContentRuntimeState {
   localMemberId: string | null;
   activeSharedUrl: string | null;
@@ -41,8 +73,11 @@ export interface ContentRuntimeState {
   explicitNonSharedPlaybackUrl: string | null;
   pauseHoldUntil: number;
   pendingPlaybackApplication: PlaybackState | null;
+  programmaticApplyUntil: number;
+  programmaticApplySignature: ProgrammaticPlaybackSignature | null;
   suppressedRemotePlayback: SuppressedRemotePlayback | null;
   recentRemotePlayingIntent: RecentRemotePlayingIntent | null;
+  lastExplicitUserAction: ExplicitUserAction | null;
   festivalSnapshot: FestivalVideoSnapshot | null;
 }
 
@@ -62,8 +97,11 @@ export function createContentRuntimeState(): ContentRuntimeState {
     explicitNonSharedPlaybackUrl: null,
     pauseHoldUntil: 0,
     pendingPlaybackApplication: null,
+    programmaticApplyUntil: 0,
+    programmaticApplySignature: null,
     suppressedRemotePlayback: null,
     recentRemotePlayingIntent: null,
+    lastExplicitUserAction: null,
     festivalSnapshot: null,
   };
 }
