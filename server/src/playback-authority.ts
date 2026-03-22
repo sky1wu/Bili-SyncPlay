@@ -26,14 +26,25 @@ export function decidePlaybackAcceptance(args: {
     return { decision: "accept", reason: "same-actor" };
   }
 
-  if (
-    args.authority &&
-    args.currentTime < args.authority.until &&
-    args.authority.actorId !== args.incomingPlayback.actorId &&
-    args.incomingPlayback.playState === "playing" &&
+  const currentIsStopLike =
+    args.currentPlayback.playState === "paused" ||
+    args.currentPlayback.playState === "buffering";
+  const incomingIsPlaying = args.incomingPlayback.playState === "playing";
+  const authority = args.authority;
+  const withinAuthorityWindow =
+    authority !== null && args.currentTime < authority.until;
+  const closeInTimeline =
     Math.abs(
       args.incomingPlayback.currentTime - args.currentPlayback.currentTime,
-    ) < 1.2
+    ) < 1.2;
+  const driftsBackBehindCurrent =
+    args.incomingPlayback.currentTime + 0.6 < args.currentPlayback.currentTime;
+
+  if (
+    withinAuthorityWindow &&
+    authority.actorId !== args.incomingPlayback.actorId &&
+    incomingIsPlaying &&
+    (currentIsStopLike || closeInTimeline)
   ) {
     return {
       decision: "ignore-as-follow",
@@ -41,10 +52,7 @@ export function decidePlaybackAcceptance(args: {
     };
   }
 
-  if (
-    args.incomingPlayback.playState === "playing" &&
-    args.incomingPlayback.currentTime + 0.6 < args.currentPlayback.currentTime
-  ) {
+  if (incomingIsPlaying && driftsBackBehindCurrent) {
     return {
       decision: "ignore-stale-like",
       reason: "timeline-regression",
