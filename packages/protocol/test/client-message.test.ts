@@ -195,6 +195,7 @@ test("accepts video:share with an initial playback state", () => {
           url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
           currentTime: 12,
           playState: "playing",
+          syncIntent: "explicit-seek",
           playbackRate: 1,
           updatedAt: 1,
           serverTime: 0,
@@ -281,6 +282,7 @@ test("accepts a valid playback:update message", () => {
           url: "https://www.bilibili.com/video/BV1xx411c7mD",
           currentTime: 12,
           playState: "playing",
+          syncIntent: "explicit-seek",
           playbackRate: 1,
           updatedAt: 1,
           serverTime: 1,
@@ -290,6 +292,29 @@ test("accepts a valid playback:update message", () => {
       },
     }),
     true,
+  );
+});
+
+test("rejects playback:update with an invalid sync intent", () => {
+  assert.equal(
+    isClientMessage({
+      type: "playback:update",
+      payload: {
+        memberToken: VALID_TOKEN,
+        playback: {
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          currentTime: 12,
+          playState: "playing",
+          syncIntent: "follow",
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 1,
+          actorId: "member-1",
+          seq: 1,
+        },
+      },
+    }),
+    false,
   );
 });
 

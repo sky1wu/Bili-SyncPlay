@@ -7,6 +7,7 @@ import type { SharedVideoToastPayload } from "../shared/messages";
 import { decidePlaybackApplication } from "./playback-apply";
 import {
   createPlaybackBroadcastPayload,
+  derivePlaybackSyncIntent,
   shouldPauseForNonSharedBroadcast,
   shouldSkipBroadcastWhileHydrating,
 } from "./playback-broadcast";
@@ -481,6 +482,12 @@ export function createSyncController(args: {
       currentVideo,
       currentTime: video.currentTime,
       playState,
+      syncIntent: derivePlaybackSyncIntent({
+        eventSource,
+        lastExplicitUserAction: args.runtimeState.lastExplicitUserAction,
+        now,
+        userGestureGraceMs: args.userGestureGraceMs,
+      }),
       playbackRate: video.playbackRate,
       actorId: args.runtimeState.localMemberId ?? "local",
       seq: args.nextSeq(),

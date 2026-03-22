@@ -531,6 +531,52 @@ test("room service ignores an older position after a seek authority takes over",
   assert.equal(finalState.playback?.actorId, owner.memberId);
 });
 
+test("room service treats explicit seek intent as seek authority even for a small delta", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM07B",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  await service.shareVideoForSession(
+    owner,
+    created.memberToken,
+    createSharedVideo(),
+    createPlayback(owner.memberId ?? owner.id, {
+      playState: "playing",
+      currentTime: 40,
+    }),
+  );
+
+  currentTime = 2_000;
+  const seeked = await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(owner.memberId ?? owner.id, {
+      playState: "playing",
+      currentTime: 41.2,
+      syncIntent: "explicit-seek",
+      seq: 3,
+    }),
+  );
+
+  assert.equal(seeked.ignored, false);
+  assert.equal(service.getPlaybackAuthority(created.room.code)?.kind, "seek");
+});
+
 test("room service keeps same-actor follow-up controls effective during an authority window", async () => {
   let currentTime = 1_000;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });

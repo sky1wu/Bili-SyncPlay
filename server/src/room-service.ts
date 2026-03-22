@@ -180,6 +180,12 @@ export function createRoomService(options: {
       return "ratechange";
     }
     if (
+      args.nextPlayback.syncIntent === "explicit-seek" &&
+      args.nextPlayback.playState === "playing"
+    ) {
+      return "seek";
+    }
+    if (
       Math.abs(
         args.nextPlayback.currentTime - args.currentPlayback.currentTime,
       ) >= 2.5

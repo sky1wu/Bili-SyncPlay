@@ -51,11 +51,35 @@ test("forces hard seek for explicit jumps while playing", () => {
 test("treats a three-second playing jump as an explicit seek", () => {
   assert.equal(
     shouldTreatAsExplicitSeek({
-      localCurrentTime: 12,
-      targetTime: 15,
+      syncIntent: "explicit-seek",
       playState: "playing",
     }),
     true,
+  );
+});
+
+test("does not infer explicit seek from a small playing delta without sender intent", () => {
+  assert.equal(
+    shouldTreatAsExplicitSeek({
+      playState: "playing",
+    }),
+    false,
+  );
+});
+
+test("forces hard seek for explicit seek intent even within a one-second delta", () => {
+  assert.deepEqual(
+    decidePlaybackReconcileMode({
+      localCurrentTime: 12,
+      targetTime: 13,
+      playState: "playing",
+      isExplicitSeek: true,
+    }),
+    {
+      mode: "hard-seek",
+      delta: 1,
+      reason: "explicit-seek",
+    },
   );
 });
 

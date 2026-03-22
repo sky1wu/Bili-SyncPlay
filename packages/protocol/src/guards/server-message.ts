@@ -31,6 +31,10 @@ function isOptionalBoundedString(
   return value === undefined || isBoundedString(value, maxLength);
 }
 
+function isPlaybackSyncIntent(value: unknown): boolean {
+  return value === "explicit-seek";
+}
+
 function isSharedVideo(value: unknown): boolean {
   return (
     isRecord(value) &&
@@ -47,6 +51,8 @@ function isPlaybackState(value: unknown): boolean {
     isBoundedString(value.url, URL_MAX_LENGTH) &&
     isFiniteNumber(value.currentTime) &&
     isPlaybackPlayState(value.playState) &&
+    (value.syncIntent === undefined ||
+      isPlaybackSyncIntent(value.syncIntent)) &&
     isFiniteNumber(value.playbackRate) &&
     isFiniteNumber(value.updatedAt) &&
     isFiniteNumber(value.serverTime) &&

@@ -45,6 +45,7 @@ export function syncPlaybackPosition(
   video: HTMLVideoElement,
   targetTime: number,
   playState: PlaybackState["playState"],
+  syncIntent: PlaybackState["syncIntent"] | undefined,
   playbackRate: number,
 ): void {
   const decision = decidePlaybackReconcileMode({
@@ -52,8 +53,7 @@ export function syncPlaybackPosition(
     targetTime,
     playState,
     isExplicitSeek: shouldTreatAsExplicitSeek({
-      localCurrentTime: video.currentTime,
-      targetTime,
+      syncIntent,
       playState,
     }),
   });
@@ -92,6 +92,7 @@ export function applyPendingPlaybackApplication(args: {
     args.video,
     playback.currentTime,
     playback.playState,
+    playback.syncIntent,
     playback.playbackRate,
   );
   if (playback.playState === "playing") {

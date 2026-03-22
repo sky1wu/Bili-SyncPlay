@@ -320,6 +320,20 @@ test("sync controller allows explicit user seek inside the silence window", asyn
   await harness.controller.broadcastPlayback(video, "seeked");
 
   assert.equal(harness.runtimeMessages.length, 1);
+  assert.deepEqual(harness.runtimeMessages[0], {
+    type: "content:playback-update",
+    payload: {
+      url: sharedVideo.url,
+      currentTime: 36.1,
+      playState: "paused",
+      syncIntent: "explicit-seek",
+      playbackRate: 1,
+      updatedAt: 20_100,
+      serverTime: 0,
+      actorId: "local-member",
+      seq: 1,
+    },
+  });
   assert.equal(
     harness.debugLogs.some((message) =>
       message.includes("Allowed explicit user event"),

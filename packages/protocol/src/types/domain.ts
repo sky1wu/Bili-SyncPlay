@@ -1,5 +1,7 @@
 import type { PlaybackPlayState, RoomCode } from "./common.js";
 
+export type PlaybackSyncIntent = "explicit-seek";
+
 export interface SharedVideo {
   videoId: string;
   url: string;
@@ -11,6 +13,7 @@ export interface PlaybackState {
   url: string;
   currentTime: number;
   playState: PlaybackPlayState;
+  syncIntent?: PlaybackSyncIntent;
   playbackRate: number;
   updatedAt: number;
   serverTime: number;
