@@ -1,4 +1,5 @@
 import type { PlaybackState } from "@bili-syncplay/protocol";
+import type { ProgrammaticPlaybackSignature } from "./runtime-state";
 
 export function getVideoElement(): HTMLVideoElement | null {
   return document.querySelector("video");
@@ -23,6 +24,17 @@ export function getPlayState(
 
 export function canApplyPlaybackImmediately(video: HTMLVideoElement): boolean {
   return Number.isFinite(video.duration) && video.readyState >= 1;
+}
+
+export function createProgrammaticPlaybackSignature(
+  playback: PlaybackState,
+): ProgrammaticPlaybackSignature {
+  return {
+    url: playback.url,
+    playState: playback.playState,
+    currentTime: playback.currentTime,
+    playbackRate: playback.playbackRate,
+  };
 }
 
 export function syncPlaybackPosition(
@@ -55,6 +67,10 @@ export function applyPendingPlaybackApplication(args: {
   video: HTMLVideoElement;
   pendingPlaybackApplication: PlaybackState | null;
   clearPendingPlaybackApplication: () => void;
+  markProgrammaticApply?: (
+    signature: ProgrammaticPlaybackSignature,
+    playback: PlaybackState,
+  ) => void;
   debugLog: (message: string) => void;
 }): boolean {
   if (
@@ -66,6 +82,8 @@ export function applyPendingPlaybackApplication(args: {
 
   const playback = args.pendingPlaybackApplication;
   args.clearPendingPlaybackApplication();
+  const signature = createProgrammaticPlaybackSignature(playback);
+  args.markProgrammaticApply?.(signature, playback);
 
   syncPlaybackPosition(
     args.video,

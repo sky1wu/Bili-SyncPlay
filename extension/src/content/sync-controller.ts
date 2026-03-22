@@ -13,6 +13,7 @@ import {
 import {
   applyPendingPlaybackApplication as applyPendingPlaybackApplicationWithBinding,
   canApplyPlaybackImmediately,
+  createProgrammaticPlaybackSignature,
   getPlayState,
   pauseVideo,
 } from "./player-binding";
@@ -48,6 +49,7 @@ export function createSyncController(args: {
   initialRoomStatePauseHoldMs: number;
   remoteEchoSuppressionMs: number;
   remotePlayTransitionGuardMs: number;
+  programmaticApplyWindowMs: number;
   userGestureGraceMs: number;
   nextSeq: () => number;
   markBroadcastAt: (at: number) => void;
@@ -102,6 +104,19 @@ export function createSyncController(args: {
     args.runtimeState.pauseHoldUntil = nowOf() + durationMs;
   }
 
+  function armProgrammaticApplyWindow(
+    playback: PlaybackState,
+    reason: "pending" | "apply",
+  ): void {
+    const signature = createProgrammaticPlaybackSignature(playback);
+    args.runtimeState.programmaticApplySignature = signature;
+    args.runtimeState.programmaticApplyUntil =
+      nowOf() + args.programmaticApplyWindowMs;
+    args.debugLog(
+      `Programmatic apply window armed actor=${playback.actorId} playState=${playback.playState} url=${playback.url} delta=n/a result=${reason} until=${args.runtimeState.programmaticApplyUntil}`,
+    );
+  }
+
   function resetPlaybackSyncState(reason: string): void {
     args.lastAppliedVersionByActor.clear();
     args.runtimeState.suppressedRemotePlayback = null;
@@ -127,6 +142,9 @@ export function createSyncController(args: {
       pendingPlaybackApplication: args.runtimeState.pendingPlaybackApplication,
       clearPendingPlaybackApplication: () => {
         args.runtimeState.pendingPlaybackApplication = null;
+      },
+      markProgrammaticApply: (_signature, playback) => {
+        armProgrammaticApplyWindow(playback, "apply");
       },
       debugLog: args.debugLog,
     });
@@ -605,6 +623,7 @@ export function createSyncController(args: {
     );
 
     args.runtimeState.pendingPlaybackApplication = { ...state.playback };
+    armProgrammaticApplyWindow(state.playback, "pending");
     if (canApplyPlaybackImmediately(video)) {
       applyPendingPlaybackApplication(video);
     } else {
