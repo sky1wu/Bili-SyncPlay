@@ -73,6 +73,31 @@ export function createSyncController(args: {
 }): SyncController {
   const nowOf = () => args.getNow?.() ?? Date.now();
 
+  function formatPlaybackDiagnostic(args: {
+    actor?: string | null;
+    playState: PlaybackState["playState"];
+    url: string;
+    localTime?: number | null;
+    targetTime: number;
+    result: string;
+    extra?: string;
+  }): string {
+    const localTime = args.localTime ?? null;
+    const delta =
+      localTime === null ? "n/a" : Math.abs(localTime - args.targetTime).toFixed(2);
+    const parts = [
+      `actor=${args.actor ?? "unknown"}`,
+      `playState=${args.playState}`,
+      `url=${args.url}`,
+      `delta=${delta}`,
+      `result=${args.result}`,
+    ];
+    if (args.extra) {
+      parts.push(args.extra);
+    }
+    return parts.join(" ");
+  }
+
   function activatePauseHold(durationMs = args.pauseHoldMs): void {
     args.runtimeState.pauseHoldUntil = nowOf() + durationMs;
   }
@@ -245,7 +270,13 @@ export function createSyncController(args: {
       : Infinity;
     if (decision.shouldSuppress) {
       args.debugLog(
-        `Suppressed remote play transition echo ${playState} ${currentVideo.url} delta=${delta.toFixed(2)}`,
+        `Suppressed remote play transition echo ${formatPlaybackDiagnostic({
+          playState,
+          url: currentVideo.url,
+          targetTime: currentTime,
+          result: "remote-play-transition",
+          extra: `intentDelta=${delta.toFixed(2)}`,
+        })}`,
       );
     }
     return decision.shouldSuppress;
@@ -333,7 +364,14 @@ export function createSyncController(args: {
       now - args.runtimeState.lastUserGestureAt >= args.userGestureGraceMs
     ) {
       args.debugLog(
-        `Skip playing broadcast during remote stop hold ${currentVideo.url}`,
+        `Skip broadcast ${formatPlaybackDiagnostic({
+          actor: args.runtimeState.localMemberId,
+          playState,
+          url: currentVideo.url,
+          localTime: video.currentTime,
+          targetTime: video.currentTime,
+          result: "remote-stop-hold",
+        })}`,
       );
       args.runtimeState.intendedPlayState = "paused";
       window.setTimeout(() => {
@@ -385,7 +423,15 @@ export function createSyncController(args: {
       )
     ) {
       args.debugLog(
-        `Broadcast playback ${playState} ${currentVideo.url} t=${payload.currentTime.toFixed(2)} seq=${payload.seq}`,
+        `Broadcast playback ${formatPlaybackDiagnostic({
+          actor: payload.actorId,
+          playState,
+          url: currentVideo.url,
+          localTime: video.currentTime,
+          targetTime: payload.currentTime,
+          result: "broadcast",
+          extra: `seq=${payload.seq}`,
+        })}`,
       );
     }
   }
@@ -474,14 +520,30 @@ export function createSyncController(args: {
 
     if (decision.kind === "ignore-local-guard") {
       args.debugLog(
-        `Ignored conflicting remote playback ${state.playback.playState} during local ${args.runtimeState.lastLocalIntentPlayState} guard actor=${state.playback.actorId} seq=${state.playback.seq}`,
+        `Ignored remote playback ${formatPlaybackDiagnostic({
+          actor: state.playback.actorId,
+          playState: state.playback.playState,
+          url: state.playback.url,
+          localTime: video.currentTime,
+          targetTime: state.playback.currentTime,
+          result: "local-intent-guard",
+          extra: `seq=${state.playback.seq} localIntent=${args.runtimeState.lastLocalIntentPlayState ?? "none"}`,
+        })}`,
       );
       return;
     }
 
     if (decision.kind === "ignore-stale-playback") {
       args.debugLog(
-        `Ignored stale playback actor=${state.playback.actorId} seq=${state.playback.seq}`,
+        `Ignored remote playback ${formatPlaybackDiagnostic({
+          actor: state.playback.actorId,
+          playState: state.playback.playState,
+          url: state.playback.url,
+          localTime: video.currentTime,
+          targetTime: state.playback.currentTime,
+          result: "stale-playback",
+          extra: `seq=${state.playback.seq}`,
+        })}`,
       );
       return;
     }
@@ -502,7 +564,15 @@ export function createSyncController(args: {
         )
       ) {
         args.debugLog(
-          `Ignored self playback actor=${state.playback.actorId} seq=${state.playback.seq} localPaused=${video.paused} localT=${video.currentTime.toFixed(2)} remoteT=${state.playback.currentTime.toFixed(2)}`,
+          `Ignored self playback ${formatPlaybackDiagnostic({
+            actor: state.playback.actorId,
+            playState: state.playback.playState,
+            url: state.playback.url,
+            localTime: video.currentTime,
+            targetTime: state.playback.currentTime,
+            result: "self-playback-noop",
+            extra: `seq=${state.playback.seq} localPaused=${video.paused}`,
+          })}`,
         );
       }
       return;
@@ -523,7 +593,15 @@ export function createSyncController(args: {
 
     args.runtimeState.intendedPlayState = state.playback.playState;
     args.debugLog(
-      `Apply playback ${state.playback.playState} ${state.sharedVideo.url} t=${state.playback.currentTime.toFixed(2)} seq=${state.playback.seq} actor=${state.playback.actorId}`,
+      `Apply playback ${formatPlaybackDiagnostic({
+        actor: state.playback.actorId,
+        playState: state.playback.playState,
+        url: state.sharedVideo.url,
+        localTime: video.currentTime,
+        targetTime: state.playback.currentTime,
+        result: "apply",
+        extra: `seq=${state.playback.seq}`,
+      })}`,
     );
 
     args.runtimeState.pendingPlaybackApplication = { ...state.playback };
