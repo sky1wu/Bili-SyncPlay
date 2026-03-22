@@ -237,8 +237,7 @@ test("allows explicit user actions to bypass programmatic suppression", () => {
 test("suppresses follow-up broadcasts while the remote playing window is active", () => {
   const decision = shouldSuppressRemoteFollowupBroadcast({
     remoteFollowPlayingUntil: 13_000,
-    remoteFollowPlayingUrl:
-      "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     playState: "playing",
     eventSource: "timeupdate",
@@ -257,8 +256,7 @@ test("suppresses follow-up broadcasts while the remote playing window is active"
 test("allows explicit user seek to bypass the remote playing window", () => {
   const decision = shouldSuppressRemoteFollowupBroadcast({
     remoteFollowPlayingUntil: 13_000,
-    remoteFollowPlayingUrl:
-      "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     playState: "playing",
     eventSource: "seeked",
@@ -276,8 +274,7 @@ test("allows explicit user seek to bypass the remote playing window", () => {
 test("clears the remote playing window on pause or url mismatch but keeps it through buffering", () => {
   const pausedDecision = shouldSuppressRemoteFollowupBroadcast({
     remoteFollowPlayingUntil: 13_000,
-    remoteFollowPlayingUrl:
-      "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     playState: "paused",
     eventSource: "pause",
@@ -292,8 +289,7 @@ test("clears the remote playing window on pause or url mismatch but keeps it thr
 
   const bufferingDecision = shouldSuppressRemoteFollowupBroadcast({
     remoteFollowPlayingUntil: 13_000,
-    remoteFollowPlayingUrl:
-      "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     playState: "buffering",
     eventSource: "waiting",
@@ -311,8 +307,7 @@ test("clears the remote playing window on pause or url mismatch but keeps it thr
 
   const mismatchDecision = shouldSuppressRemoteFollowupBroadcast({
     remoteFollowPlayingUntil: 13_000,
-    remoteFollowPlayingUrl:
-      "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     normalizedCurrentUrl: "https://www.bilibili.com/video/BV1other?p=1",
     playState: "playing",
     eventSource: "playing",

@@ -178,8 +178,7 @@ export function createSyncController(args: {
 
     args.runtimeState.remoteFollowPlayingUntil =
       nowOf() + args.remoteFollowPlayingWindowMs;
-    args.runtimeState.remoteFollowPlayingUrl =
-      args.normalizeUrl(playback.url);
+    args.runtimeState.remoteFollowPlayingUrl = args.normalizeUrl(playback.url);
   }
 
   function hasRecentRemoteStopIntent(currentVideoUrl: string): boolean {
