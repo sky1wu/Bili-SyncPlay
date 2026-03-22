@@ -1,5 +1,8 @@
 import { createServer, type Server as HttpServer } from "node:http";
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import {
   isClientMessage,
@@ -46,6 +49,12 @@ export {
 } from "./messages.js";
 
 const CLOSE_CODE_POLICY_VIOLATION = 1008;
+const PACKAGE_JSON_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../package.json",
+);
+
+let cachedServiceVersion: string | null = null;
 
 export type SyncServer = {
   httpServer: HttpServer;
@@ -61,6 +70,33 @@ export type SyncServerDependencies = {
   adminUiConfig?: AdminUiConfig;
   serviceVersion?: string;
 };
+
+async function resolveServiceVersion(): Promise<string> {
+  if (process.env.npm_package_version) {
+    return process.env.npm_package_version;
+  }
+
+  if (cachedServiceVersion) {
+    return cachedServiceVersion;
+  }
+
+  try {
+    const packageJson = JSON.parse(
+      await readFile(PACKAGE_JSON_PATH, "utf8"),
+    ) as { version?: unknown };
+    if (
+      typeof packageJson.version === "string" &&
+      packageJson.version.length > 0
+    ) {
+      cachedServiceVersion = packageJson.version;
+      return packageJson.version;
+    }
+  } catch {
+    // Keep the legacy fallback when package metadata is unavailable.
+  }
+
+  return "0.0.0";
+}
 
 export function getDefaultSecurityConfig(): SecurityConfig {
   return {
@@ -100,6 +136,8 @@ export async function createSyncServer(
   persistenceConfig: PersistenceConfig = getDefaultPersistenceConfig(),
   dependencies: SyncServerDependencies = {},
 ): Promise<SyncServer> {
+  const serviceVersion =
+    dependencies.serviceVersion ?? (await resolveServiceVersion());
   const now = dependencies.now ?? Date.now;
   const generateToken =
     dependencies.generateToken ?? (() => randomBytes(24).toString("base64url"));
@@ -159,8 +197,7 @@ export async function createSyncServer(
     logEvent,
     now,
     adminConfig: dependencies.adminConfig,
-    serviceVersion:
-      dependencies.serviceVersion ?? process.env.npm_package_version ?? "0.0.0",
+    serviceVersion,
   });
 
   const httpServer = createServer(

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { WebSocket, type RawData } from "ws";
 import {
@@ -18,23 +19,27 @@ function sha256Hex(value: string): string {
 }
 
 async function startAdminServer(dependencies: SyncServerDependencies = {}) {
+  const resolvedDependencies: SyncServerDependencies = {
+    ...dependencies,
+    adminConfig: dependencies.adminConfig ?? {
+      username: "admin",
+      passwordHash: `sha256:${sha256Hex("secret-123")}`,
+      sessionSecret: "session-secret-123",
+      sessionTtlMs: 60_000,
+      role: "admin",
+    },
+  };
+  if (resolvedDependencies.serviceVersion === undefined) {
+    resolvedDependencies.serviceVersion = "0.7.0-test";
+  }
+
   const server = await createSyncServer(
     {
       ...getDefaultSecurityConfig(),
       allowedOrigins: [ALLOWED_ORIGIN],
     },
     getDefaultPersistenceConfig(),
-    {
-      ...dependencies,
-      adminConfig: dependencies.adminConfig ?? {
-        username: "admin",
-        passwordHash: `sha256:${sha256Hex("secret-123")}`,
-        sessionSecret: "session-secret-123",
-        sessionTtlMs: 60_000,
-        role: "admin",
-      },
-      serviceVersion: "0.7.0-test",
-    },
+    resolvedDependencies,
   );
 
   await new Promise<void>((resolve, reject) => {
@@ -339,6 +344,56 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
       { token },
     );
     assert.equal(meAfterLogout.status, 401);
+  } finally {
+    await server.close();
+  }
+});
+
+test("admin overview falls back to server package version", async () => {
+  const packageJson = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8"),
+  ) as { version: string };
+
+  const server = await createSyncServer(
+    {
+      ...getDefaultSecurityConfig(),
+      allowedOrigins: [ALLOWED_ORIGIN],
+    },
+    getDefaultPersistenceConfig(),
+    {
+      adminConfig: {
+        username: "admin",
+        passwordHash: `sha256:${sha256Hex("secret-123")}`,
+        sessionSecret: "session-secret-123",
+        sessionTtlMs: 60_000,
+        role: "admin",
+      },
+    },
+  );
+
+  await new Promise<void>((resolve, reject) => {
+    server.httpServer.listen(0, "127.0.0.1", () => resolve());
+    server.httpServer.once("error", reject);
+  });
+
+  const address = server.httpServer.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to determine test server address.");
+  }
+
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const token = await login(baseUrl);
+    const overview = await requestJson(baseUrl, "/api/admin/overview", {
+      token,
+    });
+
+    assert.equal(overview.status, 200);
+    assert.equal(
+      (overview.body.data as { service: { version: string } }).service.version,
+      packageJson.version,
+    );
   } finally {
     await server.close();
   }
