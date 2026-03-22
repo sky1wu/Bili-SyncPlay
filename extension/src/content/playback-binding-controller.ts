@@ -8,7 +8,10 @@ import {
   evaluateNonSharedPageGuard,
   shouldForcePauseWhileWaitingForInitialRoomState,
 } from "./sync-guards";
-import type { ContentRuntimeState } from "./runtime-state";
+import type {
+  ContentRuntimeState,
+  LocalPlaybackEventSource,
+} from "./runtime-state";
 
 export interface PlaybackBindingController {
   start(): void;
@@ -24,7 +27,10 @@ export function createPlaybackBindingController(args: {
   hasRecentRemoteStopIntent: (currentVideoUrl: string) => boolean;
   normalizeUrl: (url: string | undefined | null) => string | null;
   getLastBroadcastAt: () => number;
-  broadcastPlayback: (video: HTMLVideoElement) => Promise<void>;
+  broadcastPlayback: (
+    video: HTMLVideoElement,
+    eventSource?: LocalPlaybackEventSource,
+  ) => Promise<void>;
   applyPendingPlaybackApplication: (video: HTMLVideoElement) => void;
   activatePauseHold: (durationMs?: number) => void;
   debugLog: (message: string) => void;
@@ -33,11 +39,15 @@ export function createPlaybackBindingController(args: {
   let videoBindingTimer: number | null = null;
   const nowOf = () => args.getNow?.() ?? Date.now();
 
-  function scheduleBroadcast(video: HTMLVideoElement, followUpMs?: number) {
-    void args.broadcastPlayback(video);
+  function scheduleBroadcast(
+    video: HTMLVideoElement,
+    eventSource: LocalPlaybackEventSource,
+    followUpMs?: number,
+  ) {
+    void args.broadcastPlayback(video, eventSource);
     if (followUpMs) {
       window.setTimeout(() => {
-        void args.broadcastPlayback(video);
+        void args.broadcastPlayback(video, eventSource);
       }, followUpMs);
     }
   }
@@ -199,7 +209,7 @@ export function createPlaybackBindingController(args: {
       onPlay: () => {
         rememberExplicitPlaybackAction("playing");
         if (!guardUnexpectedResume()) {
-          scheduleBroadcast(video, 180);
+          scheduleBroadcast(video, "play", 180);
         }
       },
       onPause: () => {
@@ -212,10 +222,10 @@ export function createPlaybackBindingController(args: {
         ) {
           args.runtimeState.explicitNonSharedPlaybackUrl = null;
         }
-        scheduleBroadcast(video, 120);
+        scheduleBroadcast(video, "pause", 120);
       },
-      onWaiting: () => scheduleBroadcast(video),
-      onStalled: () => scheduleBroadcast(video),
+      onWaiting: () => scheduleBroadcast(video, "waiting"),
+      onStalled: () => scheduleBroadcast(video, "stalled"),
       onLoadedMetadata: () => {
         if (!forcePauseWhileWaitingForInitialRoomState(video)) {
           args.applyPendingPlaybackApplication(video);
@@ -225,20 +235,20 @@ export function createPlaybackBindingController(args: {
         if (!forcePauseWhileWaitingForInitialRoomState(video)) {
           args.applyPendingPlaybackApplication(video);
         }
-        scheduleBroadcast(video, 120);
+        scheduleBroadcast(video, "canplay", 120);
       },
       onPlaying: () => {
         rememberExplicitPlaybackAction("playing");
         if (!guardUnexpectedResume()) {
-          scheduleBroadcast(video, 180);
+          scheduleBroadcast(video, "playing", 180);
         }
       },
-      onSeeking: () => scheduleBroadcast(video),
-      onSeeked: () => scheduleBroadcast(video, 120),
-      onRateChange: () => scheduleBroadcast(video, 120),
+      onSeeking: () => scheduleBroadcast(video, "seeking"),
+      onSeeked: () => scheduleBroadcast(video, "seeked", 120),
+      onRateChange: () => scheduleBroadcast(video, "ratechange", 120),
       onTimeUpdate: () => {
         if (nowOf() - args.getLastBroadcastAt() > 2000 && !video.paused) {
-          void args.broadcastPlayback(video);
+          void args.broadcastPlayback(video, "timeupdate");
         }
       },
     });

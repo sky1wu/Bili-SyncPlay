@@ -22,15 +22,22 @@ import {
   rememberRemotePlaybackForSuppression as rememberRemotePlaybackForSuppressionGuard,
   shouldApplySelfPlayback as shouldApplySelfPlaybackGuard,
   shouldSuppressLocalEcho as shouldSuppressLocalEchoGuard,
+  shouldSuppressProgrammaticEvent as shouldSuppressProgrammaticEventGuard,
   shouldSuppressRemotePlayTransition as shouldSuppressRemotePlayTransitionGuard,
 } from "./sync-guards";
-import type { ContentRuntimeState } from "./runtime-state";
+import type {
+  ContentRuntimeState,
+  LocalPlaybackEventSource,
+} from "./runtime-state";
 
 export interface SyncController {
   resetPlaybackSyncState(reason: string): void;
   hasRecentRemoteStopIntent(currentVideoUrl: string): boolean;
   applyPendingPlaybackApplication(video: HTMLVideoElement): void;
-  broadcastPlayback(video: HTMLVideoElement): Promise<void>;
+  broadcastPlayback(
+    video: HTMLVideoElement,
+    eventSource?: LocalPlaybackEventSource,
+  ): Promise<void>;
   applyRoomState(
     state: RoomState,
     shareToast?: SharedVideoToastPayload | null,
@@ -122,6 +129,8 @@ export function createSyncController(args: {
     args.runtimeState.suppressedRemotePlayback = null;
     args.runtimeState.recentRemotePlayingIntent = null;
     args.runtimeState.pendingPlaybackApplication = null;
+    args.runtimeState.programmaticApplyUntil = 0;
+    args.runtimeState.programmaticApplySignature = null;
     args.debugLog(`Reset playback sync state: ${reason}`);
   }
 
@@ -312,7 +321,10 @@ export function createSyncController(args: {
     });
   }
 
-  async function broadcastPlayback(video: HTMLVideoElement): Promise<void> {
+  async function broadcastPlayback(
+    video: HTMLVideoElement,
+    eventSource: LocalPlaybackEventSource = "manual",
+  ): Promise<void> {
     if (!args.runtimeState.hydrationReady) {
       args.debugLog("Skip broadcast before hydration ready");
       return;
@@ -376,6 +388,36 @@ export function createSyncController(args: {
 
     args.markBroadcastAt(now);
     const playState = getPlayState(video, args.runtimeState.intendedPlayState);
+    const programmaticDecision = shouldSuppressProgrammaticEventGuard({
+      programmaticApplyUntil: args.runtimeState.programmaticApplyUntil,
+      programmaticApplySignature: args.runtimeState.programmaticApplySignature,
+      normalizedCurrentUrl: normalizedCurrentVideoUrl,
+      playState,
+      currentTime: video.currentTime,
+      playbackRate: video.playbackRate,
+      eventSource,
+      now,
+    });
+    args.runtimeState.programmaticApplyUntil =
+      programmaticDecision.nextProgrammaticApplyUntil;
+    args.runtimeState.programmaticApplySignature =
+      programmaticDecision.nextProgrammaticApplySignature;
+    if (programmaticDecision.shouldSuppress) {
+      args.debugLog(
+        `Skip broadcast ${formatPlaybackDiagnostic({
+          actor: args.runtimeState.localMemberId,
+          playState,
+          url: currentVideo.url,
+          localTime: video.currentTime,
+          targetTime:
+            programmaticDecision.nextProgrammaticApplySignature?.currentTime ??
+            video.currentTime,
+          result: `programmatic-${eventSource}`,
+        })}`,
+      );
+      return;
+    }
+
     if (
       playState === "playing" &&
       hasRecentRemoteStopIntent(currentVideo.url) &&

@@ -1,6 +1,8 @@
 import type { PlaybackState } from "@bili-syncplay/protocol";
 import type {
   ExplicitPlaybackAction,
+  LocalPlaybackEventSource,
+  ProgrammaticPlaybackSignature,
   RecentRemotePlayingIntent,
   SuppressedRemotePlayback,
 } from "./runtime-state";
@@ -59,6 +61,36 @@ export interface RemotePlayTransitionGuardInput {
   lastExplicitPlaybackAction: ExplicitPlaybackAction | null;
   now: number;
   userGestureGraceMs: number;
+}
+
+export interface ProgrammaticEventSuppressionInput {
+  programmaticApplyUntil: number;
+  programmaticApplySignature: ProgrammaticPlaybackSignature | null;
+  normalizedCurrentUrl: string | null;
+  playState: PlaybackState["playState"];
+  currentTime: number;
+  playbackRate: number;
+  eventSource: LocalPlaybackEventSource;
+  now: number;
+}
+
+function getProgrammaticEventThreshold(
+  eventSource: LocalPlaybackEventSource,
+  playState: PlaybackState["playState"],
+): number {
+  if (eventSource === "seeking" || eventSource === "seeked") {
+    return 0.6;
+  }
+  if (eventSource === "loadedmetadata" || eventSource === "canplay") {
+    return 0.6;
+  }
+  if (eventSource === "timeupdate") {
+    return 1;
+  }
+  if (eventSource === "ratechange") {
+    return 1.2;
+  }
+  return playState === "playing" ? 0.9 : 0.25;
 }
 
 export function shouldForcePauseWhileWaitingForInitialRoomState(
@@ -196,6 +228,64 @@ export function shouldSuppressLocalEcho(input: LocalEchoGuardInput): {
   return {
     shouldSuppress: delta <= threshold,
     nextSuppressedRemotePlayback: input.suppressedRemotePlayback,
+  };
+}
+
+export function shouldSuppressProgrammaticEvent(
+  input: ProgrammaticEventSuppressionInput,
+): {
+  shouldSuppress: boolean;
+  nextProgrammaticApplyUntil: number;
+  nextProgrammaticApplySignature: ProgrammaticPlaybackSignature | null;
+} {
+  if (!input.programmaticApplySignature) {
+    return {
+      shouldSuppress: false,
+      nextProgrammaticApplyUntil: 0,
+      nextProgrammaticApplySignature: null,
+    };
+  }
+
+  if (input.now >= input.programmaticApplyUntil) {
+    return {
+      shouldSuppress: false,
+      nextProgrammaticApplyUntil: 0,
+      nextProgrammaticApplySignature: null,
+    };
+  }
+
+  if (
+    !input.normalizedCurrentUrl ||
+    input.normalizedCurrentUrl !== input.programmaticApplySignature.url
+  ) {
+    return {
+      shouldSuppress: false,
+      nextProgrammaticApplyUntil: input.programmaticApplyUntil,
+      nextProgrammaticApplySignature: input.programmaticApplySignature,
+    };
+  }
+
+  if (
+    input.playState !== input.programmaticApplySignature.playState ||
+    Math.abs(
+      input.playbackRate - input.programmaticApplySignature.playbackRate,
+    ) > 0.01
+  ) {
+    return {
+      shouldSuppress: false,
+      nextProgrammaticApplyUntil: input.programmaticApplyUntil,
+      nextProgrammaticApplySignature: input.programmaticApplySignature,
+    };
+  }
+
+  const delta = Math.abs(
+    input.currentTime - input.programmaticApplySignature.currentTime,
+  );
+  return {
+    shouldSuppress:
+      delta <= getProgrammaticEventThreshold(input.eventSource, input.playState),
+    nextProgrammaticApplyUntil: input.programmaticApplyUntil,
+    nextProgrammaticApplySignature: input.programmaticApplySignature,
   };
 }
 
