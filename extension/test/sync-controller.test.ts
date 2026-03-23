@@ -842,8 +842,9 @@ test("sync controller does not arm cooldown when soft apply times out", async ()
       false,
     );
     assert.equal(
-      harness.debugLogs.filter((message) => message.includes("Started soft apply"))
-        .length,
+      harness.debugLogs.filter((message) =>
+        message.includes("Started soft apply"),
+      ).length,
       2,
     );
   } finally {
