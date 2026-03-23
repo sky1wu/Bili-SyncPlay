@@ -531,6 +531,78 @@ test("room service ignores an older position after a seek authority takes over",
   assert.equal(finalState.playback?.actorId, owner.memberId);
 });
 
+test("room service ignores a far-ahead playing update while seek authority is active", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM07C",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const guest = createSession("guest");
+  const joined = await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  await service.shareVideoForSession(
+    owner,
+    created.memberToken,
+    createSharedVideo(),
+    createPlayback(owner.memberId ?? owner.id, {
+      playState: "playing",
+      currentTime: 200,
+    }),
+  );
+
+  currentTime = 2_000;
+  const seeked = await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(owner.memberId ?? owner.id, {
+      playState: "playing",
+      currentTime: 70,
+      syncIntent: "explicit-seek",
+      seq: 3,
+    }),
+  );
+  assert.equal(seeked.ignored, false);
+  assert.equal(service.getPlaybackAuthority(created.room.code)?.kind, "seek");
+
+  currentTime = 2_100;
+  const farAheadFollow = await service.updatePlaybackForSession(
+    guest,
+    joined.memberToken,
+    createPlayback(guest.memberId ?? guest.id, {
+      playState: "playing",
+      currentTime: 205,
+      seq: 1,
+    }),
+  );
+
+  assert.equal(farAheadFollow.ignored, true);
+  const finalState = await service.getRoomStateForSession(
+    owner,
+    created.memberToken,
+    "sync:request",
+  );
+  assert.equal(finalState.playback?.currentTime, 70);
+  assert.equal(finalState.playback?.actorId, owner.memberId);
+});
+
 test("room service treats explicit seek intent as seek authority even for a small delta", async () => {
   let currentTime = 1_000;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });

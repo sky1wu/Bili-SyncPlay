@@ -41,6 +41,10 @@ export function decidePlaybackAcceptance(args: {
     authority?.kind === "seek" ||
     authority?.kind === "ratechange" ||
     authority?.kind === "share";
+  const authorityOwnsCurrentPlayback =
+    authority !== null &&
+    args.currentPlayback.actorId === authority.actorId &&
+    args.currentPlayback.playState === "playing";
   const closeInTimeline =
     Math.abs(
       args.incomingPlayback.currentTime - args.currentPlayback.currentTime,
@@ -55,7 +59,9 @@ export function decidePlaybackAcceptance(args: {
     withinAuthorityWindow &&
     authority.actorId !== args.incomingPlayback.actorId &&
     incomingIsPlaying &&
-    (currentIsStopLike || closeInTimeline)
+    (currentIsStopLike ||
+      closeInTimeline ||
+      (authorityPrefersPlaybackContinuity && authorityOwnsCurrentPlayback))
   ) {
     return {
       decision: "ignore-as-follow",
