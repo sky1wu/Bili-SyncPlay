@@ -41,7 +41,7 @@ export function resolvePageSharedVideo(
 
   return {
     videoId: fallbackVideoRef.videoId,
-    url: source.pageUrl,
+    url: fallbackVideoRef.normalizedUrl,
     title: resolveSharedVideoTitle(source),
   };
 }

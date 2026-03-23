@@ -7,6 +7,7 @@ import {
   rememberRemotePlaybackForSuppression,
   shouldApplySelfPlayback,
   shouldForcePauseWhileWaitingForInitialRoomState,
+  shouldSuppressRemoteFollowupBroadcast,
   shouldSuppressLocalEcho,
   shouldSuppressProgrammaticEvent,
   shouldSuppressRemotePlayTransition,
@@ -118,6 +119,34 @@ test("suppresses local echo for matching remote playback within the guard window
   );
 });
 
+test("treats buffering after remote playing as the same local echo chain", () => {
+  const memory = rememberRemotePlaybackForSuppression({
+    playback: createPlayback({
+      playState: "playing",
+      currentTime: 25,
+    }),
+    normalizedUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    now: 10_000,
+    remoteEchoSuppressionMs: 700,
+    remotePlayTransitionGuardMs: 1_800,
+  });
+
+  const decision = shouldSuppressLocalEcho({
+    suppressedRemotePlayback: memory.suppressedRemotePlayback,
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "buffering",
+    currentTime: 25.05,
+    playbackRate: 1,
+    now: 10_100,
+  });
+
+  assert.equal(decision.shouldSuppress, true);
+  assert.deepEqual(
+    decision.nextSuppressedRemotePlayback,
+    memory.suppressedRemotePlayback,
+  );
+});
+
 test("suppresses programmatic play, pause, and seek events inside the apply window", () => {
   const playSignature = {
     url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -203,6 +232,93 @@ test("allows explicit user actions to bypass programmatic suppression", () => {
     }).shouldSuppress,
     false,
   );
+});
+
+test("suppresses follow-up broadcasts while the remote playing window is active", () => {
+  const decision = shouldSuppressRemoteFollowupBroadcast({
+    remoteFollowPlayingUntil: 13_000,
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "playing",
+    eventSource: "timeupdate",
+    lastExplicitUserAction: null,
+    now: 12_200,
+    userGestureGraceMs: 1_200,
+  });
+
+  assert.equal(decision.shouldSuppress, true);
+  assert.equal(
+    decision.nextRemoteFollowPlayingUrl,
+    "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+  );
+});
+
+test("allows explicit user seek to bypass the remote playing window", () => {
+  const decision = shouldSuppressRemoteFollowupBroadcast({
+    remoteFollowPlayingUntil: 13_000,
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "playing",
+    eventSource: "seeked",
+    lastExplicitUserAction: {
+      kind: "seek",
+      at: 12_250,
+    },
+    now: 12_300,
+    userGestureGraceMs: 1_200,
+  });
+
+  assert.equal(decision.shouldSuppress, false);
+});
+
+test("clears the remote playing window on pause or url mismatch but keeps it through buffering", () => {
+  const pausedDecision = shouldSuppressRemoteFollowupBroadcast({
+    remoteFollowPlayingUntil: 13_000,
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "paused",
+    eventSource: "pause",
+    lastExplicitUserAction: null,
+    now: 12_200,
+    userGestureGraceMs: 1_200,
+  });
+
+  assert.equal(pausedDecision.shouldSuppress, false);
+  assert.equal(pausedDecision.nextRemoteFollowPlayingUntil, 0);
+  assert.equal(pausedDecision.nextRemoteFollowPlayingUrl, null);
+
+  const bufferingDecision = shouldSuppressRemoteFollowupBroadcast({
+    remoteFollowPlayingUntil: 13_000,
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "buffering",
+    eventSource: "waiting",
+    lastExplicitUserAction: null,
+    now: 12_200,
+    userGestureGraceMs: 1_200,
+  });
+
+  assert.equal(bufferingDecision.shouldSuppress, false);
+  assert.equal(bufferingDecision.nextRemoteFollowPlayingUntil, 13_000);
+  assert.equal(
+    bufferingDecision.nextRemoteFollowPlayingUrl,
+    "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+  );
+
+  const mismatchDecision = shouldSuppressRemoteFollowupBroadcast({
+    remoteFollowPlayingUntil: 13_000,
+    remoteFollowPlayingUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1other?p=1",
+    playState: "playing",
+    eventSource: "playing",
+    lastExplicitUserAction: null,
+    now: 12_200,
+    userGestureGraceMs: 1_200,
+  });
+
+  assert.equal(mismatchDecision.shouldSuppress, false);
+  assert.equal(mismatchDecision.nextRemoteFollowPlayingUntil, 0);
+  assert.equal(mismatchDecision.nextRemoteFollowPlayingUrl, null);
 });
 
 test("reapplies remote stop intent when an unexpected resume happens shortly after a remote pause", () => {

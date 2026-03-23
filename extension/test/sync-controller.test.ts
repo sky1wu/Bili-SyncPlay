@@ -55,6 +55,7 @@ function createControllerHarness() {
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
     remotePlayTransitionGuardMs: 500,
+    remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
     nextSeq: () => 1,
@@ -201,6 +202,7 @@ test("sync controller schedules hydration retry when room exists but initial roo
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
     remotePlayTransitionGuardMs: 500,
+    remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
     nextSeq: () => 1,
@@ -268,13 +270,59 @@ test("sync controller suppresses follow-up local broadcast after applying a late
     }),
   );
 
-  harness.setNow(20_050);
-  await harness.controller.broadcastPlayback(video, "playing");
+  harness.setNow(22_050);
+  await harness.controller.broadcastPlayback(video, "timeupdate");
 
   assert.equal(harness.runtimeMessages.length, 0);
   assert.equal(
     harness.debugLogs.some((message) =>
-      message.includes("result=programmatic-playing"),
+      message.includes("result=remote-follow-timeupdate"),
+    ),
+    true,
+  );
+});
+
+test("sync controller keeps the remote follow window through buffering and suppresses the later playing event", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: false,
+    readyState: 2,
+    currentTime: 24.05,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+
+  await harness.controller.applyRoomState(
+    createRoomState({
+      actorId: "remote-member",
+      seq: 8,
+      serverTime: 19_900,
+      currentTime: 24,
+      playState: "playing",
+    }),
+  );
+
+  harness.setNow(20_100);
+  await harness.controller.broadcastPlayback(video, "waiting");
+
+  video.readyState = 4;
+  harness.setNow(20_900);
+  await harness.controller.broadcastPlayback(video, "playing");
+
+  assert.equal(harness.runtimeMessages.length, 0);
+  assert.equal(harness.runtimeState.remoteFollowPlayingUntil > 20_900, true);
+  assert.equal(
+    harness.debugLogs.some((message) =>
+      message.includes("result=remote-follow-playing"),
     ),
     true,
   );
@@ -288,7 +336,7 @@ test("sync controller allows explicit user seek inside the silence window", asyn
     title: "Video",
   };
   const video = createVideo({
-    paused: true,
+    paused: false,
     currentTime: 36.1,
   });
 
@@ -305,18 +353,16 @@ test("sync controller allows explicit user seek inside the silence window", asyn
       seq: 9,
       serverTime: 19_950,
       currentTime: 36,
-      playState: "paused",
+      playState: "playing",
     }),
   );
 
   harness.runtimeState.lastExplicitUserAction = {
     kind: "seek",
-    at: 20_020,
+    at: 21_950,
   };
-  harness.runtimeState.suppressedRemotePlayback = null;
-  harness.runtimeState.recentRemotePlayingIntent = null;
 
-  harness.setNow(20_100);
+  harness.setNow(22_000);
   await harness.controller.broadcastPlayback(video, "seeked");
 
   assert.equal(harness.runtimeMessages.length, 1);
@@ -325,10 +371,10 @@ test("sync controller allows explicit user seek inside the silence window", asyn
     payload: {
       url: sharedVideo.url,
       currentTime: 36.1,
-      playState: "paused",
+      playState: "playing",
       syncIntent: "explicit-seek",
       playbackRate: 1,
-      updatedAt: 20_100,
+      updatedAt: 22_000,
       serverTime: 0,
       actorId: "local-member",
       seq: 1,

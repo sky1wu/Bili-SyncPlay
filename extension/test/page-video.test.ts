@@ -24,6 +24,24 @@ test("resolves standard page video and prefers current part title", () => {
   });
 });
 
+test("normalizes standard video share url and strips tracking query params", () => {
+  const video = resolvePageSharedVideo({
+    pageUrl:
+      "https://www.bilibili.com/video/BV199W9zEEcH/?trackid=web_pegasus_0.router-web-pegasus-2479516-sm4rx.1774190259001.845&track_id=pbaes.nJHUokmlMgNKY6ahLsFY_Vlskz4FyoCSdXkr1otdqbbbIgWSL0pTE5Fudk-JApG58k_xZt0ILnIgHz5-XLvNGUg8EYTpU_o4MoinI6Er15VuK5i5FxQPuBeggPcboJq5Nm7NXhcCICPKoTd226kNeKrJZjkcGSGJbCz_4Pbl5QjVxworUhivCszJ-6MGRlUD&caid=__CAID__&resource_id=__RESOURCEID__&source_id=5614&request_id=1774190259003q172a24a62a50q693&from_spmid=__FROMSPMID__&creative_id=1228378938&linked_creative_id=1239263497&vd_source=90fe97386ffebd7ca4de9b85a001ebfb",
+    pathname: "/video/BV199W9zEEcH/",
+    documentTitle: "Doc Title_哔哩哔哩",
+    headingTitle: "Heading Title",
+    currentPartTitle: null,
+    festivalSnapshot: null,
+  });
+
+  assert.deepEqual(video, {
+    videoId: "BV199W9zEEcH",
+    url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    title: "Heading Title",
+  });
+});
+
 test("resolves festival snapshot ahead of URL fallback", () => {
   const video = resolvePageSharedVideo({
     pageUrl: "https://www.bilibili.com/festival/demo",

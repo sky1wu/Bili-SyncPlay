@@ -28,6 +28,7 @@ const PAUSE_HOLD_MS = 1200;
 const INITIAL_ROOM_STATE_PAUSE_HOLD_MS = 3000;
 const REMOTE_ECHO_SUPPRESSION_MS = 700;
 const REMOTE_PLAY_TRANSITION_GUARD_MS = 1800;
+const REMOTE_FOLLOW_PLAYING_WINDOW_MS = 3000;
 const PROGRAMMATIC_APPLY_WINDOW_MS = 700;
 const USER_GESTURE_GRACE_MS = 1200;
 const FESTIVAL_SNAPSHOT_TTL_MS = 1200;
@@ -67,6 +68,7 @@ const syncController = createSyncController({
   initialRoomStatePauseHoldMs: INITIAL_ROOM_STATE_PAUSE_HOLD_MS,
   remoteEchoSuppressionMs: REMOTE_ECHO_SUPPRESSION_MS,
   remotePlayTransitionGuardMs: REMOTE_PLAY_TRANSITION_GUARD_MS,
+  remoteFollowPlayingWindowMs: REMOTE_FOLLOW_PLAYING_WINDOW_MS,
   programmaticApplyWindowMs: PROGRAMMATIC_APPLY_WINDOW_MS,
   userGestureGraceMs: USER_GESTURE_GRACE_MS,
   nextSeq: () => seq++,
@@ -99,7 +101,8 @@ const playbackBindingController = createPlaybackBindingController({
     syncController.hasRecentRemoteStopIntent(currentVideoUrl),
   normalizeUrl,
   getLastBroadcastAt: () => lastBroadcastAt,
-  broadcastPlayback: (video) => syncController.broadcastPlayback(video),
+  broadcastPlayback: (video, eventSource) =>
+    syncController.broadcastPlayback(video, eventSource),
   applyPendingPlaybackApplication: (video) =>
     syncController.applyPendingPlaybackApplication(video),
   activatePauseHold,

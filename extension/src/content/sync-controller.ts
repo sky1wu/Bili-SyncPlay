@@ -23,6 +23,7 @@ import {
   rememberRemotePlaybackForSuppression as rememberRemotePlaybackForSuppressionGuard,
   shouldApplySelfPlayback as shouldApplySelfPlaybackGuard,
   shouldSuppressLocalEcho as shouldSuppressLocalEchoGuard,
+  shouldSuppressRemoteFollowupBroadcast as shouldSuppressRemoteFollowupBroadcastGuard,
   shouldSuppressProgrammaticEvent as shouldSuppressProgrammaticEventGuard,
   shouldSuppressRemotePlayTransition as shouldSuppressRemotePlayTransitionGuard,
 } from "./sync-guards";
@@ -57,6 +58,7 @@ export function createSyncController(args: {
   initialRoomStatePauseHoldMs: number;
   remoteEchoSuppressionMs: number;
   remotePlayTransitionGuardMs: number;
+  remoteFollowPlayingWindowMs: number;
   programmaticApplyWindowMs: number;
   userGestureGraceMs: number;
   nextSeq: () => number;
@@ -129,6 +131,7 @@ export function createSyncController(args: {
 
   function resetPlaybackSyncState(reason: string): void {
     args.lastAppliedVersionByActor.clear();
+    clearRemoteFollowPlayingWindow();
     args.runtimeState.suppressedRemotePlayback = null;
     args.runtimeState.recentRemotePlayingIntent = null;
     args.runtimeState.pendingPlaybackApplication = null;
@@ -160,6 +163,22 @@ export function createSyncController(args: {
       },
       debugLog: args.debugLog,
     });
+  }
+
+  function clearRemoteFollowPlayingWindow(): void {
+    args.runtimeState.remoteFollowPlayingUntil = 0;
+    args.runtimeState.remoteFollowPlayingUrl = null;
+  }
+
+  function rememberRemoteFollowPlayingWindow(playback: PlaybackState): void {
+    if (playback.playState !== "playing") {
+      clearRemoteFollowPlayingWindow();
+      return;
+    }
+
+    args.runtimeState.remoteFollowPlayingUntil =
+      nowOf() + args.remoteFollowPlayingWindowMs;
+    args.runtimeState.remoteFollowPlayingUrl = args.normalizeUrl(playback.url);
   }
 
   function hasRecentRemoteStopIntent(currentVideoUrl: string): boolean {
@@ -389,7 +408,6 @@ export function createSyncController(args: {
       return;
     }
 
-    args.markBroadcastAt(now);
     const playState = getPlayState(video, args.runtimeState.intendedPlayState);
     const programmaticDecision = shouldSuppressProgrammaticEventGuard({
       programmaticApplyUntil: args.runtimeState.programmaticApplyUntil,
@@ -418,6 +436,33 @@ export function createSyncController(args: {
             programmaticDecision.nextProgrammaticApplySignature?.currentTime ??
             video.currentTime,
           result: `programmatic-${eventSource}`,
+        })}`,
+      );
+      return;
+    }
+    const followupDecision = shouldSuppressRemoteFollowupBroadcastGuard({
+      remoteFollowPlayingUntil: args.runtimeState.remoteFollowPlayingUntil,
+      remoteFollowPlayingUrl: args.runtimeState.remoteFollowPlayingUrl,
+      normalizedCurrentUrl: normalizedCurrentVideoUrl,
+      playState,
+      eventSource,
+      lastExplicitUserAction: args.runtimeState.lastExplicitUserAction,
+      now,
+      userGestureGraceMs: args.userGestureGraceMs,
+    });
+    args.runtimeState.remoteFollowPlayingUntil =
+      followupDecision.nextRemoteFollowPlayingUntil;
+    args.runtimeState.remoteFollowPlayingUrl =
+      followupDecision.nextRemoteFollowPlayingUrl;
+    if (followupDecision.shouldSuppress) {
+      args.debugLog(
+        `Skip broadcast ${formatPlaybackDiagnostic({
+          actor: args.runtimeState.localMemberId,
+          playState,
+          url: currentVideo.url,
+          localTime: video.currentTime,
+          targetTime: video.currentTime,
+          result: `remote-follow-${eventSource}`,
         })}`,
       );
       return;
@@ -474,6 +519,7 @@ export function createSyncController(args: {
       return;
     }
 
+    args.markBroadcastAt(now);
     args.runtimeState.intendedPlayState = playState;
     args.runtimeState.lastLocalIntentAt = now;
     args.runtimeState.lastLocalIntentPlayState = playState;
@@ -555,6 +601,7 @@ export function createSyncController(args: {
 
     if (decision.kind === "empty-room") {
       args.runtimeState.activeSharedUrl = null;
+      clearRemoteFollowPlayingWindow();
       if (decision.acceptedHydration) {
         args.debugLog(`Accepted empty room state for ${state.roomCode}`);
         args.runtimeState.pendingRoomStateHydration = false;
@@ -669,12 +716,15 @@ export function createSyncController(args: {
       state.playback.playState === "paused" ||
       state.playback.playState === "buffering"
     ) {
+      clearRemoteFollowPlayingWindow();
       activatePauseHold(
         args.runtimeState.pendingRoomStateHydration ||
           !args.runtimeState.hasReceivedInitialRoomState
           ? args.initialRoomStatePauseHoldMs
           : args.pauseHoldMs,
       );
+    } else if (!decision.isSelfPlayback) {
+      rememberRemoteFollowPlayingWindow(state.playback);
     }
 
     args.runtimeState.intendedPlayState = state.playback.playState;

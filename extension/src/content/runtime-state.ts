@@ -71,6 +71,8 @@ export interface ContentRuntimeState {
   pendingPlaybackApplication: PlaybackState | null;
   programmaticApplyUntil: number;
   programmaticApplySignature: ProgrammaticPlaybackSignature | null;
+  remoteFollowPlayingUntil: number;
+  remoteFollowPlayingUrl: string | null;
   suppressedRemotePlayback: SuppressedRemotePlayback | null;
   recentRemotePlayingIntent: RecentRemotePlayingIntent | null;
   lastExplicitUserAction: ExplicitUserAction | null;
@@ -95,6 +97,8 @@ export function createContentRuntimeState(): ContentRuntimeState {
     pendingPlaybackApplication: null,
     programmaticApplyUntil: 0,
     programmaticApplySignature: null,
+    remoteFollowPlayingUntil: 0,
+    remoteFollowPlayingUrl: null,
     suppressedRemotePlayback: null,
     recentRemotePlayingIntent: null,
     lastExplicitUserAction: null,
