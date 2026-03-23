@@ -479,3 +479,82 @@ test("sync controller ignores remote explicit seek while local explicit seek is 
     false,
   );
 });
+
+test("sync controller reproduces repeated soft apply after heartbeat-driven convergence", async () => {
+  const windowHarness = installWindowStub();
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: false,
+    currentTime: 24,
+    playbackRate: 1,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  try {
+    harness.setNow(20_000);
+    await harness.controller.applyRoomState(
+      createRoomState({
+        actorId: "remote-member",
+        seq: 10,
+        serverTime: 19_900,
+        currentTime: 24.8,
+        playState: "playing",
+        playbackRate: 1,
+      }),
+    );
+
+    assert.ok(Math.abs(video.currentTime - 24.48) < 0.001);
+    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+
+    video.currentTime = 24.66;
+    harness.controller.maintainActiveSoftApply(video);
+    assert.ok(Math.abs(video.playbackRate - 1) < 0.001);
+
+    harness.setNow(22_000);
+    video.currentTime = 26;
+    await harness.controller.applyRoomState(
+      createRoomState({
+        actorId: "remote-member",
+        seq: 11,
+        serverTime: 21_900,
+        currentTime: 26.7,
+        playState: "playing",
+        playbackRate: 1,
+      }),
+    );
+
+    assert.ok(Math.abs(video.currentTime - 26.42) < 0.001);
+    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+
+    const startedSoftApplyLogs = harness.debugLogs.filter((message) =>
+      message.includes("Started soft apply"),
+    );
+    assert.equal(startedSoftApplyLogs.length, 2);
+    assert.equal(
+      harness.debugLogs.some(
+        (message) =>
+          message.includes("Cancelled soft apply") &&
+          message.includes("result=converged"),
+      ),
+      true,
+    );
+    assert.equal(
+      harness.debugLogs.some((message) =>
+        message.includes("Programmatic apply window armed"),
+      ),
+      true,
+    );
+  } finally {
+    windowHarness.restore();
+  }
+});
