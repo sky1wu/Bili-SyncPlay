@@ -349,6 +349,57 @@ test("sync controller logs reconcile decisions for soft apply and ignore paths",
   }
 });
 
+test("sync controller suppresses the waiting event chain triggered by soft apply", async () => {
+  const windowHarness = installWindowStub();
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: false,
+    readyState: 2,
+    currentTime: 24,
+    playbackRate: 1,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  try {
+    harness.setNow(20_000);
+    await harness.controller.applyRoomState(
+      createRoomState({
+        actorId: "remote-member",
+        seq: 10,
+        serverTime: 19_900,
+        currentTime: 24.8,
+        playState: "playing",
+        playbackRate: 1,
+      }),
+    );
+
+    harness.setNow(20_050);
+    await harness.controller.broadcastPlayback(video, "waiting");
+
+    assert.equal(harness.runtimeMessages.length, 0);
+    assert.equal(
+      harness.debugLogs.some(
+        (message) =>
+          message.includes("Skip broadcast") &&
+          message.includes("result=programmatic-waiting"),
+      ),
+      true,
+    );
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("sync controller keeps the remote follow window through buffering and suppresses the later playing event", async () => {
   const harness = createControllerHarness();
   const sharedVideo = {

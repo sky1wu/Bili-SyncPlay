@@ -36,6 +36,10 @@ test("soft apply nudges current time and playback rate toward the remote target"
   assert.equal(applied.restorePlaybackRate, 1);
   assert.equal(applied.currentTime, 12.48);
   assert.equal(applied.playbackRate, 1.12);
+  assert.equal(applied.reason, "playing-drift");
+  assert.ok(Math.abs(applied.delta - 0.8) < 0.001);
+  assert.equal(applied.didWriteCurrentTime, true);
+  assert.equal(applied.didWritePlaybackRate, true);
 });
 
 test("soft apply slows down when local playback is ahead of the room timeline", () => {
@@ -53,6 +57,10 @@ test("soft apply slows down when local playback is ahead of the room timeline", 
   assert.equal(applied.restorePlaybackRate, 1);
   assert.equal(applied.currentTime, 12.32);
   assert.equal(applied.playbackRate, 0.88);
+  assert.equal(applied.reason, "playing-drift");
+  assert.ok(Math.abs(applied.delta - 0.8) < 0.001);
+  assert.equal(applied.didWriteCurrentTime, true);
+  assert.equal(applied.didWritePlaybackRate, true);
 });
 
 test("programmatic apply signature tracks the soft-applied position instead of the raw remote target", () => {
@@ -123,7 +131,41 @@ test("ignore-window playback update does not arm programmatic apply when nothing
   assert.equal(applied.applied, true);
   assert.equal(applied.didChange, false);
   assert.equal(applied.adjustment?.mode, "ignore");
+  assert.equal(applied.adjustment?.reason, "within-threshold");
+  assert.equal(applied.adjustment?.didWriteCurrentTime, false);
+  assert.equal(applied.adjustment?.didWritePlaybackRate, false);
   assert.equal(signatures.length, 0);
+});
+
+test("ignore-window playback update still restores playbackRate when only the rate drifted", () => {
+  const video = createVideo({
+    paused: false,
+    currentTime: 12,
+    playbackRate: 1.1,
+  });
+
+  const applied = applyPendingPlaybackApplication({
+    video,
+    pendingPlaybackApplication: {
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 12.15,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 1,
+      serverTime: 1,
+      actorId: "remote-member",
+      seq: 6,
+    },
+    clearPendingPlaybackApplication: () => {},
+    debugLog: () => {},
+  });
+
+  assert.equal(applied.applied, true);
+  assert.equal(applied.didChange, true);
+  assert.equal(applied.adjustment?.mode, "ignore");
+  assert.equal(applied.adjustment?.didWriteCurrentTime, false);
+  assert.equal(applied.adjustment?.didWritePlaybackRate, true);
+  assert.ok(Math.abs(video.playbackRate - 1) < 0.001);
 });
 
 test("buffering playback update does not force-pause an already playing video", () => {
