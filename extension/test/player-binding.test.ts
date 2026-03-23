@@ -134,6 +134,19 @@ test("explicit seek still uses hard seek for immediate alignment", () => {
   assert.equal(applied.didWriteCurrentTime, true);
 });
 
+test("large playing drift still escalates to hard seek", () => {
+  const video = createVideo({
+    currentTime: 12,
+    playbackRate: 1,
+  });
+
+  const applied = syncPlaybackPosition(video, 13.6, "playing", undefined, 1);
+
+  assert.equal(applied.mode, "hard-seek");
+  assert.ok(Math.abs(video.currentTime - 13.6) < 0.001);
+  assert.equal(applied.didWriteCurrentTime, true);
+});
+
 test("ignore-window playback update does not arm programmatic apply when nothing actually changed", () => {
   const video = createVideo({
     paused: false,
