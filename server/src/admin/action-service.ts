@@ -27,7 +27,7 @@ export class AdminActionError extends Error {
 export function createAdminActionService(options: {
   instanceId: string;
   roomStore: RoomStore;
-  runtimeStore: Pick<RuntimeStore, "listSessionsByRoom" | "getSession">;
+  runtimeStore: Pick<RuntimeStore, "listSessionsByRoom" | "getSession" | "deleteRoom">;
   listClusterSessions: () => Promise<Awaited<ReturnType<RuntimeStore["listClusterSessions"]>>>;
   listClusterSessionsByRoom: (
     roomCode: string,
@@ -36,10 +36,7 @@ export function createAdminActionService(options: {
   auditLogService: GlobalAuditStore;
   getRoomStateByCode: (roomCode: string) => Promise<unknown | null>;
   publishRoomStateUpdate: (roomCode: string) => Promise<void>;
-  disconnectSessionSocket: (
-    session: Awaited<ReturnType<RuntimeStore["listClusterSessions"]>>[number],
-    reason: string,
-  ) => void;
+  publishRoomDeleted: (roomCode: string) => Promise<void>;
   logEvent: LogEvent;
   now?: () => number;
 }) {
@@ -130,22 +127,44 @@ export function createAdminActionService(options: {
   return {
     async closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
       await getRoomOrThrow(roomCode);
-      const sessions = options.runtimeStore.listSessionsByRoom(roomCode);
+      const sessions = await options.listClusterSessionsByRoom(roomCode);
+      const disconnectResults = await Promise.all(
+        sessions.map(async (session) => {
+          const targetInstanceId = session.instanceId ?? options.instanceId;
+          const result = await options.requestAdminCommand({
+            kind: "disconnect_session",
+            requestId: `close-room:${roomCode}:${session.id}:${now()}`,
+            targetInstanceId,
+            sessionId: session.id,
+            reason,
+            requestedAt: now(),
+          });
+          return { session, targetInstanceId, result };
+        }),
+      );
 
-      for (const session of sessions) {
-        options.disconnectSessionSocket(session, "Admin closed room");
-      }
       await options.roomStore.deleteRoom(roomCode);
+      options.runtimeStore.deleteRoom(roomCode);
+      await options.publishRoomDeleted(roomCode);
+      const disconnectedSessionCount = disconnectResults.filter(
+        ({ result }) => result.status === "ok",
+      ).length;
+      const commandFailureCount = disconnectResults.filter(
+        ({ result }) => result.status !== "ok",
+      ).length;
+
       options.logEvent("admin_room_closed", {
         roomCode,
         sessionCount: sessions.length,
+        disconnectedSessionCount,
+        commandFailureCount,
         result: "ok",
         actor: actor.username,
       });
       writeAudit(actor, "close_room", "room", roomCode, { reason }, "ok");
       return {
         roomCode,
-        disconnectedSessionCount: sessions.length,
+        disconnectedSessionCount,
       };
     },
 

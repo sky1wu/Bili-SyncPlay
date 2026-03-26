@@ -42,6 +42,9 @@ export function createAdminServices(args: {
   now: () => number;
   adminConfig?: AdminConfig;
   serviceVersion: string;
+  serviceName?: string;
+  createOverviewService?: typeof createAdminOverviewService;
+  createRoomQueryService?: typeof createAdminRoomQueryService;
 }): Promise<{
   adminRouter: ReturnType<typeof createAdminRouter>;
   close: () => Promise<void>;
@@ -72,13 +75,17 @@ export function createAdminServices(args: {
       }
     }
 
+    const createOverviewService =
+      args.createOverviewService ?? createAdminOverviewService;
+    const createRoomQueryService =
+      args.createRoomQueryService ?? createAdminRoomQueryService;
     const authService =
       args.adminConfig && adminSessionStore
         ? createAdminAuthService(args.adminConfig, adminSessionStore, args.now)
         : undefined;
-    const overviewService = createAdminOverviewService({
+    const overviewService = createOverviewService({
       instanceId: args.persistenceConfig.instanceId,
-      serviceName: "bili-syncplay-server",
+      serviceName: args.serviceName ?? "bili-syncplay-server",
       serviceVersion: args.serviceVersion,
       persistenceConfig: args.persistenceConfig,
       roomStore: args.roomStore,
@@ -86,7 +93,7 @@ export function createAdminServices(args: {
       eventStore: args.eventStore,
       now: args.now,
     });
-    const roomQueryService = createAdminRoomQueryService({
+    const roomQueryService = createRoomQueryService({
       instanceId: args.persistenceConfig.instanceId,
       roomStore: args.roomStore,
       runtimeStore: args.runtimeStore,
@@ -111,14 +118,6 @@ export function createAdminServices(args: {
       });
     }
 
-    function disconnectSessionSocket(session: Session, reason: string): void {
-      if (session.socket.readyState === session.socket.OPEN) {
-        session.socket.close(1000, reason);
-        return;
-      }
-      session.socket.terminate();
-    }
-
     const actionService = createAdminActionService({
       instanceId: args.persistenceConfig.instanceId,
       roomStore: args.roomStore,
@@ -131,7 +130,14 @@ export function createAdminServices(args: {
       getRoomStateByCode: (roomCode) =>
         args.roomService.getRoomStateByCode(roomCode),
       publishRoomStateUpdate,
-      disconnectSessionSocket,
+      publishRoomDeleted: async (roomCode) => {
+        await args.publishRoomEvent({
+          type: "room_deleted",
+          roomCode,
+          sourceInstanceId: args.persistenceConfig.instanceId,
+          emittedAt: args.now(),
+        });
+      },
       logEvent: args.logEvent,
       now: args.now,
     });
@@ -169,7 +175,7 @@ export function createAdminServices(args: {
         reason?: string,
       ) => actionService.disconnectSession(actor, sessionId, reason),
       eventStore: args.eventStore,
-      serviceName: "bili-syncplay-server",
+      serviceName: args.serviceName ?? "bili-syncplay-server",
       now: args.now,
     });
 

@@ -1,6 +1,8 @@
 import { createServer, type Server as HttpServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { createEventStore } from "./admin/event-store.js";
+import { createGlobalAdminOverviewService } from "./admin/global-overview-service.js";
+import { createGlobalAdminRoomQueryService } from "./admin/global-room-query-service.js";
 import { createRedisEventStore } from "./admin/redis-event-store.js";
 import { createAdminServices } from "./bootstrap/admin-services.js";
 import { createHttpRequestHandler } from "./bootstrap/http-handler.js";
@@ -111,6 +113,9 @@ export async function createGlobalAdminServer(
     logEvent,
     now,
     adminConfig: dependencies.adminConfig,
+    serviceName: "bili-syncplay-global-admin",
+    createOverviewService: createGlobalAdminOverviewService,
+    createRoomQueryService: createGlobalAdminRoomQueryService,
     serviceVersion:
       dependencies.serviceVersion ?? "0.0.0-global-admin",
   });
