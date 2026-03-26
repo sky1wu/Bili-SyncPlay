@@ -202,7 +202,6 @@ test("global admin server queries and closes rooms through shared cluster state"
     throw new Error("Failed to determine test server address.");
   }
 
-  const roomNodeBaseUrl = `http://127.0.0.1:${roomNodeAddress.port}`;
   const roomNodeWsUrl = `ws://127.0.0.1:${roomNodeAddress.port}`;
   const globalAdminBaseUrl = `http://127.0.0.1:${globalAdminAddress.port}`;
 
@@ -236,9 +235,9 @@ test("global admin server queries and closes rooms through shared cluster state"
       );
       assert.equal(rooms.status, 200);
       assert.equal(
-        (
-          rooms.body.data as { items: Array<{ roomCode: string }> }
-        ).items.some((item) => item.roomCode === roomCode),
+        (rooms.body.data as { items: Array<{ roomCode: string }> }).items.some(
+          (item) => item.roomCode === roomCode,
+        ),
         true,
       );
 

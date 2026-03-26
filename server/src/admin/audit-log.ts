@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AdminSession, AuditLogQuery, AuditLogRecord } from "./types.js";
+import type { AuditLogRecord } from "./types.js";
 import type { GlobalAuditStore } from "./global-audit-store.js";
 
 export type AuditLogService = GlobalAuditStore;

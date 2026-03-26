@@ -87,8 +87,7 @@ function parseResult(payload: string): AdminCommandResult | null {
         targetInstanceId: parsed.targetInstanceId,
         executorInstanceId: parsed.executorInstanceId,
         status: "ok",
-        roomCode:
-          typeof parsed.roomCode === "string" ? parsed.roomCode : null,
+        roomCode: typeof parsed.roomCode === "string" ? parsed.roomCode : null,
         memberId:
           typeof parsed.memberId === "string" ? parsed.memberId : undefined,
         sessionId:
@@ -205,7 +204,10 @@ export async function createRedisAdminCommandBus(
         };
       }
 
-      const replyChannel = resultChannel(resultChannelPrefix, command.requestId);
+      const replyChannel = resultChannel(
+        resultChannelPrefix,
+        command.requestId,
+      );
       await subscribeClient.subscribe(replyChannel);
 
       try {

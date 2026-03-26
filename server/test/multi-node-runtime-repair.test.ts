@@ -102,7 +102,9 @@ test("offline node sessions are reaped from the global room view after heartbeat
     assert.equal(detailBeforeRepair.status, 200);
     assert.equal(
       (
-        detailBeforeRepair.body.data as { members: Array<{ displayName: string }> }
+        detailBeforeRepair.body.data as {
+          members: Array<{ displayName: string }>;
+        }
       ).members.some((member) => member.displayName === "Ghost"),
       true,
     );
@@ -114,7 +116,8 @@ test("offline node sessions are reaped from the global room view after heartbeat
     );
     assert.equal(overviewBeforeRepair.status, 200);
     assert.equal(
-      (overviewBeforeRepair.body.data as { nodes: { offline: number } }).nodes.offline >= 1,
+      (overviewBeforeRepair.body.data as { nodes: { offline: number } }).nodes
+        .offline >= 1,
       true,
     );
 
@@ -135,7 +138,9 @@ test("offline node sessions are reaped from the global room view after heartbeat
     assert.equal(detailAfterRepair.status, 200);
     assert.deepEqual(
       (
-        detailAfterRepair.body.data as { members: Array<{ displayName: string }> }
+        detailAfterRepair.body.data as {
+          members: Array<{ displayName: string }>;
+        }
       ).members.map((member) => member.displayName),
       ["Alice"],
     );

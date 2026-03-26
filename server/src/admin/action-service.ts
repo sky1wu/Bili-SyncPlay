@@ -1,4 +1,7 @@
-import type { AdminCommandBus, AdminCommandResult } from "../admin-command-bus.js";
+import type {
+  AdminCommandBus,
+  AdminCommandResult,
+} from "../admin-command-bus.js";
 import type { GlobalAuditStore } from "./global-audit-store.js";
 import type { AdminSession } from "./types.js";
 import {
@@ -11,8 +14,6 @@ import {
 import type { LogEvent, PersistedRoom } from "../types.js";
 import type { RoomStore, RoomUpdateResult } from "../room-store.js";
 import type { RuntimeStore } from "../runtime-store.js";
-
-const KICK_REJOIN_BLOCK_MS = 60_000;
 
 export class AdminActionError extends Error {
   constructor(
@@ -27,8 +28,13 @@ export class AdminActionError extends Error {
 export function createAdminActionService(options: {
   instanceId: string;
   roomStore: RoomStore;
-  runtimeStore: Pick<RuntimeStore, "listSessionsByRoom" | "getSession" | "deleteRoom">;
-  listClusterSessions: () => Promise<Awaited<ReturnType<RuntimeStore["listClusterSessions"]>>>;
+  runtimeStore: Pick<
+    RuntimeStore,
+    "listSessionsByRoom" | "getSession" | "deleteRoom"
+  >;
+  listClusterSessions: () => Promise<
+    Awaited<ReturnType<RuntimeStore["listClusterSessions"]>>
+  >;
   listClusterSessionsByRoom: (
     roomCode: string,
   ) => Promise<Awaited<ReturnType<RuntimeStore["listClusterSessionsByRoom"]>>>;
@@ -225,8 +231,9 @@ export function createAdminActionService(options: {
       reason?: string,
     ) {
       await getRoomOrThrow(roomCode);
-      const session = (await options.listClusterSessionsByRoom(roomCode))
-        .find((entry) => entry.memberId === memberId);
+      const session = (await options.listClusterSessionsByRoom(roomCode)).find(
+        (entry) => entry.memberId === memberId,
+      );
       if (!session) {
         throw new AdminActionError(
           404,
@@ -279,8 +286,9 @@ export function createAdminActionService(options: {
       reason?: string,
     ) {
       const session =
-        (await options.listClusterSessions()).find((entry) => entry.id === sessionId) ??
-        options.runtimeStore.getSession(sessionId);
+        (await options.listClusterSessions()).find(
+          (entry) => entry.id === sessionId,
+        ) ?? options.runtimeStore.getSession(sessionId);
       if (!session) {
         throw new AdminActionError(
           404,

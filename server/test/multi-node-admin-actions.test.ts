@@ -101,7 +101,8 @@ test("global admin executes cross-node kick_member and disconnect_session action
           payload: {
             roomCode,
             joinToken: (created.payload as { joinToken: string }).joinToken,
-            memberToken: (joined.payload as { memberToken: string }).memberToken,
+            memberToken: (joined.payload as { memberToken: string })
+              .memberToken,
             displayName: "Bob",
           },
         }),

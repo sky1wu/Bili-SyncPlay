@@ -29,7 +29,6 @@ import type {
   LogEvent,
   PersistenceConfig,
   SecurityConfig,
-  Session,
 } from "../types.js";
 
 export function createAdminServices(args: {

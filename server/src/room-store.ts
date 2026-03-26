@@ -191,7 +191,10 @@ export function roomStateOf(
   room: PersistedRoom,
   activeRoom: ActiveRoom | null,
 ): RoomStoreRoomState {
-  return roomStateFromSessions(room, Array.from(activeRoom?.members.values() ?? []));
+  return roomStateFromSessions(
+    room,
+    Array.from(activeRoom?.members.values() ?? []),
+  );
 }
 
 export function roomStateFromSessions(

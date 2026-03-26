@@ -5,7 +5,10 @@ import {
   getDefaultPersistenceConfig,
   getDefaultSecurityConfig,
 } from "../src/app.js";
-import { createPersistedRoom, createInMemoryRoomStore } from "../src/room-store.js";
+import {
+  createPersistedRoom,
+  createInMemoryRoomStore,
+} from "../src/room-store.js";
 import { createRoomService } from "../src/room-service.js";
 import type { RuntimeStore } from "../src/runtime-store.js";
 import type { LogEvent, Session } from "../src/types.js";
@@ -55,14 +58,19 @@ test("room state query uses cluster sessions instead of only local active member
       return {
         code: "ROOM01",
         members: new Map([[localOwner.memberId ?? localOwner.id, localOwner]]),
-        memberTokens: new Map([[localOwner.memberId ?? localOwner.id, "token-owner"]]),
+        memberTokens: new Map([
+          [localOwner.memberId ?? localOwner.id, "token-owner"],
+        ]),
       };
     },
     async listClusterSessionsByRoom() {
       return [localOwner, remoteJoiner];
     },
     deleteRoom() {},
-  } as Pick<RuntimeStore, "getRoom" | "listClusterSessionsByRoom" | "deleteRoom">;
+  } as Pick<
+    RuntimeStore,
+    "getRoom" | "listClusterSessionsByRoom" | "deleteRoom"
+  >;
 
   const service = createRoomService({
     config: getDefaultSecurityConfig(),

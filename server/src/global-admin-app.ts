@@ -12,7 +12,10 @@ import {
   createNoopAdminCommandBus,
   type AdminCommandBus,
 } from "./admin-command-bus.js";
-import { getDefaultPersistenceConfig, getDefaultSecurityConfig } from "./app.js";
+import {
+  getDefaultPersistenceConfig,
+  getDefaultSecurityConfig,
+} from "./app.js";
 import { createRedisAdminCommandBus } from "./redis-admin-command-bus.js";
 import { createRedisRoomEventBus } from "./redis-room-event-bus.js";
 import { createInMemoryRoomStore, type RoomStore } from "./room-store.js";
@@ -79,9 +82,7 @@ export async function createGlobalAdminServer(
     persistenceConfig.runtimeStoreProvider === "redis"
       ? await createRedisRuntimeStore(persistenceConfig.redisUrl, {
           now,
-          keyPrefix: getRedisRuntimeKeyPrefix(
-            persistenceConfig.redisNamespace,
-          ),
+          keyPrefix: getRedisRuntimeKeyPrefix(persistenceConfig.redisNamespace),
         })
       : createInMemoryRuntimeStore(now);
   const adminCommandBus =
@@ -132,7 +133,8 @@ export async function createGlobalAdminServer(
     eventStore,
     roomService,
     send() {},
-    publishRoomEvent: (message: RoomEventBusMessage) => roomEventBus.publish(message),
+    publishRoomEvent: (message: RoomEventBusMessage) =>
+      roomEventBus.publish(message),
     requestAdminCommand: (command, timeoutMs) =>
       adminCommandBus.request(command, timeoutMs),
     logEvent,
@@ -141,8 +143,7 @@ export async function createGlobalAdminServer(
     serviceName: "bili-syncplay-global-admin",
     createOverviewService: createGlobalAdminOverviewService,
     createRoomQueryService: createGlobalAdminRoomQueryService,
-    serviceVersion:
-      dependencies.serviceVersion ?? "0.0.0-global-admin",
+    serviceVersion: dependencies.serviceVersion ?? "0.0.0-global-admin",
   });
 
   const httpServer = createServer(
@@ -184,9 +185,10 @@ export async function createGlobalAdminServer(
       if (typeof maybeClosableEventStore.close === "function") {
         await maybeClosableEventStore.close();
       }
-      const maybeClosableAdminCommandBus = adminCommandBus as AdminCommandBus & {
-        close?: () => Promise<void>;
-      };
+      const maybeClosableAdminCommandBus =
+        adminCommandBus as AdminCommandBus & {
+          close?: () => Promise<void>;
+        };
       if (typeof maybeClosableAdminCommandBus.close === "function") {
         await maybeClosableAdminCommandBus.close();
       }

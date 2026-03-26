@@ -108,22 +108,14 @@ export function createRoomService(options: {
     memberToken: string,
     messageType: ClientMessage["type"],
   ) => Promise<ReturnType<typeof roomStateOf>>;
-  getActiveRoom: (
-    roomCode: string,
-  ) => ReturnType<RuntimeStore["getRoom"]>;
+  getActiveRoom: (roomCode: string) => ReturnType<RuntimeStore["getRoom"]>;
   getPlaybackAuthority: (roomCode: string) => PlaybackAuthority | null;
   getRoomStateByCode: (
     roomCode: string,
   ) => Promise<ReturnType<typeof roomStateOf> | null>;
   deleteExpiredRooms: (currentTime?: number) => Promise<number>;
 } {
-  const {
-    config,
-    persistence,
-    roomStore,
-    generateToken,
-    logEvent,
-  } = options;
+  const { config, persistence, roomStore, generateToken, logEvent } = options;
   const runtimeStoreOption = options.runtimeStore ?? options.activeRooms;
   const now = options.now ?? Date.now;
   const nextRoomCode = options.createRoomCode ?? createRoomCode;

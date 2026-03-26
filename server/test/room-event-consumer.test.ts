@@ -38,10 +38,16 @@ test("room event consumer sends room state only to local room sessions", async (
   const bus = createInMemoryRoomEventBus();
   const localRoomSession = createSession("member-a", "ROOM01");
   const otherRoomSession = createSession("member-b", "ROOM02");
-  const sent: Array<{ sessionId: string; roomCode: string; memberCount: number }> =
-    [];
-  const logs: Array<{ event: string; roomCode: string | null; result: string }> =
-    [];
+  const sent: Array<{
+    sessionId: string;
+    roomCode: string;
+    memberCount: number;
+  }> = [];
+  const logs: Array<{
+    event: string;
+    roomCode: string | null;
+    result: string;
+  }> = [];
 
   const consumer = await createRoomEventConsumer({
     roomEventBus: bus,
@@ -58,7 +64,9 @@ test("room event consumer sends room state only to local room sessions", async (
     },
     send(socket, message) {
       const session =
-        socket === localRoomSession.socket ? localRoomSession : otherRoomSession;
+        socket === localRoomSession.socket
+          ? localRoomSession
+          : otherRoomSession;
       sent.push({
         sessionId: session.id,
         roomCode: message.payload.roomCode,
@@ -69,8 +77,7 @@ test("room event consumer sends room state only to local room sessions", async (
     logEvent(event, data) {
       logs.push({
         event,
-        roomCode:
-          typeof data.roomCode === "string" ? data.roomCode : null,
+        roomCode: typeof data.roomCode === "string" ? data.roomCode : null,
         result: String(data.result),
       });
     },
@@ -140,8 +147,11 @@ test("room event consumer emits an empty state for deleted rooms", async () => {
 
 test("room event consumer logs failures without throwing to the bus", async () => {
   const bus = createInMemoryRoomEventBus();
-  const logs: Array<{ event: string; result: string; roomCode: string | null }> =
-    [];
+  const logs: Array<{
+    event: string;
+    result: string;
+    roomCode: string | null;
+  }> = [];
 
   const consumer = await createRoomEventConsumer({
     roomEventBus: bus,
@@ -157,8 +167,7 @@ test("room event consumer logs failures without throwing to the bus", async () =
       logs.push({
         event,
         result: String(data.result),
-        roomCode:
-          typeof data.roomCode === "string" ? data.roomCode : null,
+        roomCode: typeof data.roomCode === "string" ? data.roomCode : null,
       });
     },
   });

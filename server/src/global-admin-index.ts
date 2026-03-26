@@ -26,5 +26,7 @@ const { httpServer } = await createGlobalAdminServer(
   },
 );
 httpServer.listen(port, () => {
-  console.log(`Bili-SyncPlay global admin listening on http://localhost:${port}`);
+  console.log(
+    `Bili-SyncPlay global admin listening on http://localhost:${port}`,
+  );
 });

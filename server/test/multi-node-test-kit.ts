@@ -25,7 +25,9 @@ function sha256Hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function listen(server: SyncServer): Promise<{ httpBaseUrl: string; wsUrl: string }> {
+async function listen(
+  server: SyncServer,
+): Promise<{ httpBaseUrl: string; wsUrl: string }> {
   await new Promise<void>((resolve, reject) => {
     server.httpServer.listen(0, "127.0.0.1", () => resolve());
     server.httpServer.once("error", reject);

@@ -18,7 +18,8 @@ export function createRuntimeIndexReaper(options: {
     }
 
     const currentTime = now();
-    const nodeStatuses = await options.runtimeStore.listNodeStatuses(currentTime);
+    const nodeStatuses =
+      await options.runtimeStore.listNodeStatuses(currentTime);
     const offlineInstanceIds = new Set(
       nodeStatuses
         .filter((status) => status.health === "offline")

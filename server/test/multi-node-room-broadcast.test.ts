@@ -82,13 +82,13 @@ test("cross-node room broadcasts sync join, shared video, playback updates, and 
     const ownerSharedState = await ownerCollector.next("room:state");
     const joinerSharedState = await joinerCollector.next("room:state");
     assert.equal(
-      (ownerSharedState.payload as { sharedVideo?: { title?: string } }).sharedVideo
-        ?.title,
+      (ownerSharedState.payload as { sharedVideo?: { title?: string } })
+        .sharedVideo?.title,
       "Episode 2",
     );
     assert.equal(
-      (joinerSharedState.payload as { sharedVideo?: { title?: string } }).sharedVideo
-        ?.title,
+      (joinerSharedState.payload as { sharedVideo?: { title?: string } })
+        .sharedVideo?.title,
       "Episode 2",
     );
     assert.equal(
@@ -132,7 +132,11 @@ test("cross-node room broadcasts sync join, shared video, playback updates, and 
     assert.equal(
       (
         joinerPlaybackState.payload as {
-          playback?: { currentTime?: number; playState?: string; playbackRate?: number };
+          playback?: {
+            currentTime?: number;
+            playState?: string;
+            playbackRate?: number;
+          };
         }
       ).playback?.playState,
       "paused",

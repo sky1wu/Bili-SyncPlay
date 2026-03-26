@@ -74,6 +74,12 @@ test("admin auth service authenticates through injected admin session store", as
   const authenticated = await service.authenticate(login.token);
   assert.ok(authenticated);
   assert.equal(authenticated.lastSeenAt, 100);
-  assert.equal(calls.some((entry) => entry.startsWith("save:")), true);
-  assert.equal(calls.some((entry) => entry.startsWith("get:")), true);
+  assert.equal(
+    calls.some((entry) => entry.startsWith("save:")),
+    true,
+  );
+  assert.equal(
+    calls.some((entry) => entry.startsWith("get:")),
+    true,
+  );
 });

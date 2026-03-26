@@ -4,7 +4,11 @@ import { createInMemoryAdminCommandBus } from "../src/admin-command-bus.js";
 import { createAdminCommandConsumer } from "../src/admin-command-consumer.js";
 import type { Session } from "../src/types.js";
 
-function createSession(id: string, roomCode: string, memberId: string): Session {
+function createSession(
+  id: string,
+  roomCode: string,
+  memberId: string,
+): Session {
   return {
     id,
     socket: {

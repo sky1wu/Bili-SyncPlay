@@ -675,7 +675,10 @@ test("redis-backed admin events and audit logs are queryable across server insta
           items: Array<{ event: string; roomCode: string }>;
         }
       ).items;
-      assert.equal(eventItems.some((item) => item.event === "room_created"), true);
+      assert.equal(
+        eventItems.some((item) => item.event === "room_created"),
+        true,
+      );
 
       const auditOnB = await requestJson(
         serverB.httpBaseUrl,
@@ -685,7 +688,11 @@ test("redis-backed admin events and audit logs are queryable across server insta
       assert.equal(auditOnB.status, 200);
       const auditItems = (
         auditOnB.body.data as {
-          items: Array<{ action: string; targetId: string; instanceId: string }>;
+          items: Array<{
+            action: string;
+            targetId: string;
+            instanceId: string;
+          }>;
         }
       ).items;
       assert.equal(

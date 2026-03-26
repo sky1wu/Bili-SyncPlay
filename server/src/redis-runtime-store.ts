@@ -203,7 +203,8 @@ export async function createRedisRuntimeStore(
       );
     },
     markSessionJoinedRoom(sessionId: string, roomCode: string) {
-      const previousRoomCode = localRuntimeStore.getSession(sessionId)?.roomCode;
+      const previousRoomCode =
+        localRuntimeStore.getSession(sessionId)?.roomCode;
       localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
       trackOperation(
         (async () => {
@@ -214,7 +215,11 @@ export async function createRedisRuntimeStore(
               sessionId,
             );
           }
-          transaction.hset(sessionKey(keyPrefix, sessionId), "roomCode", roomCode);
+          transaction.hset(
+            sessionKey(keyPrefix, sessionId),
+            "roomCode",
+            roomCode,
+          );
           transaction.sadd(roomSessionsKey(keyPrefix, roomCode), sessionId);
           transaction.sadd(`${keyPrefix}rooms`, roomCode);
           await transaction.exec();
@@ -273,8 +278,12 @@ export async function createRedisRuntimeStore(
       return localRuntimeStore.getActiveRoomCodes();
     },
     async getRoom(code: string) {
-      const memberTokens = await redis.hgetall(roomMemberTokensKey(keyPrefix, code));
-      const memberSessionIds = await redis.hgetall(roomMembersKey(keyPrefix, code));
+      const memberTokens = await redis.hgetall(
+        roomMemberTokensKey(keyPrefix, code),
+      );
+      const memberSessionIds = await redis.hgetall(
+        roomMembersKey(keyPrefix, code),
+      );
       if (
         Object.keys(memberTokens).length === 0 &&
         Object.keys(memberSessionIds).length === 0
@@ -307,7 +316,12 @@ export async function createRedisRuntimeStore(
       session: Session,
       memberToken: string,
     ) {
-      const room = localRuntimeStore.addMember(code, memberId, session, memberToken);
+      const room = localRuntimeStore.addMember(
+        code,
+        memberId,
+        session,
+        memberToken,
+      );
       trackOperation(
         redis
           .multi()
@@ -318,7 +332,9 @@ export async function createRedisRuntimeStore(
       return room;
     },
     async findMemberIdByToken(code: string, memberToken: string) {
-      const memberTokens = await redis.hgetall(roomMemberTokensKey(keyPrefix, code));
+      const memberTokens = await redis.hgetall(
+        roomMemberTokensKey(keyPrefix, code),
+      );
       for (const [memberId, token] of Object.entries(memberTokens)) {
         if (token === memberToken) {
           return memberId;
@@ -346,15 +362,25 @@ export async function createRedisRuntimeStore(
         0,
         currentTime,
       );
-      const score = await redis.zscore(blockedTokensKey(keyPrefix, code), memberToken);
+      const score = await redis.zscore(
+        blockedTokensKey(keyPrefix, code),
+        memberToken,
+      );
       if (score !== null) {
         return true;
       }
-      return localRuntimeStore.isMemberTokenBlocked(code, memberToken, currentTime);
+      return localRuntimeStore.isMemberTokenBlocked(
+        code,
+        memberToken,
+        currentTime,
+      );
     },
     async removeMember(code: string, memberId: string, session?: Session) {
       const removal = localRuntimeStore.removeMember(code, memberId, session);
-      const currentSessionId = await redis.hget(roomMembersKey(keyPrefix, code), memberId);
+      const currentSessionId = await redis.hget(
+        roomMembersKey(keyPrefix, code),
+        memberId,
+      );
       if (!session || !currentSessionId || currentSessionId === session.id) {
         await redis
           .multi()
@@ -407,7 +433,9 @@ export async function createRedisRuntimeStore(
       const instanceIds = await redis.smembers(nodesKey(keyPrefix));
       const statuses = await Promise.all(
         instanceIds.map(async (instanceId) => {
-          const fields = await redis.hgetall(nodeStatusKey(keyPrefix, instanceId));
+          const fields = await redis.hgetall(
+            nodeStatusKey(keyPrefix, instanceId),
+          );
           if (Object.keys(fields).length === 0) {
             await redis.srem(nodesKey(keyPrefix), instanceId);
             return null;
@@ -444,7 +472,9 @@ export async function createRedisRuntimeStore(
       return redis.scard(`${keyPrefix}rooms`);
     },
     async listClusterSessionsByRoom(roomCode: string) {
-      const sessionIds = await redis.smembers(roomSessionsKey(keyPrefix, roomCode));
+      const sessionIds = await redis.smembers(
+        roomSessionsKey(keyPrefix, roomCode),
+      );
       const sessions = await Promise.all(
         sessionIds.map((sessionId) => loadSession(redis, keyPrefix, sessionId)),
       );

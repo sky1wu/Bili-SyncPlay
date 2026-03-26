@@ -22,7 +22,8 @@ export function createAdminOverviewService(options: {
         keyword: undefined,
         includeExpired: false,
       });
-      const nodeStatuses = await options.runtimeStore.listNodeStatuses(currentTime);
+      const nodeStatuses =
+        await options.runtimeStore.listNodeStatuses(currentTime);
       const clusterActiveRoomCount =
         await options.runtimeStore.countClusterActiveRooms();
       const activeNodeStatuses =
@@ -71,7 +72,8 @@ export function createAdminOverviewService(options: {
         },
         nodes: {
           total: nodeStatuses.length,
-          online: nodeStatuses.filter((status) => status.health === "ok").length,
+          online: nodeStatuses.filter((status) => status.health === "ok")
+            .length,
           stale: nodeStatuses.filter((status) => status.health === "stale")
             .length,
           offline: nodeStatuses.filter((status) => status.health === "offline")

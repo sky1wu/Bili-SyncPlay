@@ -87,9 +87,8 @@ export function createAdminRoomQueryService(options: {
 
       const roomItems = await Promise.all(
         selected.map(async (room) => {
-          const activeSessions = await options.runtimeStore.listClusterSessionsByRoom(
-            room.code,
-          );
+          const activeSessions =
+            await options.runtimeStore.listClusterSessionsByRoom(room.code);
           return {
             ...toSummary(room, activeSessions),
             instanceId:
@@ -113,12 +112,13 @@ export function createAdminRoomQueryService(options: {
         return null;
       }
 
-      const sessions = await options.runtimeStore.listClusterSessionsByRoom(
-        roomCode,
-      );
+      const sessions =
+        await options.runtimeStore.listClusterSessionsByRoom(roomCode);
       return {
         instanceId:
-          sessions.length === 1 ? (sessions[0]?.instanceId ?? options.instanceId) : undefined,
+          sessions.length === 1
+            ? (sessions[0]?.instanceId ?? options.instanceId)
+            : undefined,
         room: {
           ...toSummary(room, sessions),
         },
@@ -133,9 +133,9 @@ export function createAdminRoomQueryService(options: {
         })),
         recentEvents: (
           await options.eventStore.query({
-          roomCode,
-          page: 1,
-          pageSize: 20,
+            roomCode,
+            page: 1,
+            pageSize: 20,
           })
         ).items,
       };

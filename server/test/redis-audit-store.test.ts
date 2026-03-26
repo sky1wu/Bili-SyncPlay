@@ -85,7 +85,10 @@ test("redis audit store appends, trims, and queries records across store instanc
       pageSize: 10,
     });
     assert.equal(trimmed.total, 2);
-    assert.equal(trimmed.items.some((item) => item.action === "close_room"), false);
+    assert.equal(
+      trimmed.items.some((item) => item.action === "close_room"),
+      false,
+    );
   } finally {
     await storeA.close();
     await storeB.close();

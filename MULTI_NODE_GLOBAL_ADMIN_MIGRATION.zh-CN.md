@@ -153,14 +153,14 @@ Global Admin：
 
 ## 快速回退矩阵
 
-| 现象 | 第一回退动作 | 说明 |
-| --- | --- | --- |
-| 跨节点登录异常 | `ADMIN_SESSION_STORE_PROVIDER=memory` | 管理会话回到节点本地 |
-| 全局事件或审计查询异常 | `ADMIN_EVENT_STORE_PROVIDER=memory`、`ADMIN_AUDIT_STORE_PROVIDER=memory` | stdout 结构化日志不受影响 |
-| 全局房间/成员统计异常 | `RUNTIME_STORE_PROVIDER=memory`、`NODE_HEARTBEAT_ENABLED=false` | 管理读视图退回节点本地 |
-| 跨节点房间同步异常 | `ROOM_EVENT_BUS_PROVIDER=none` | 调查期间恢复 sticky |
-| 跨节点踢人/断连异常 | `ADMIN_COMMAND_BUS_PROVIDER=none` | 保留只读全局管理面也可 |
-| Global Admin 切换异常 | 管理流量回切节点 `/admin` | Room Node 可临时重新打开 `GLOBAL_ADMIN_ENABLED=true` |
+| 现象                   | 第一回退动作                                                             | 说明                                                 |
+| ---------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------- |
+| 跨节点登录异常         | `ADMIN_SESSION_STORE_PROVIDER=memory`                                    | 管理会话回到节点本地                                 |
+| 全局事件或审计查询异常 | `ADMIN_EVENT_STORE_PROVIDER=memory`、`ADMIN_AUDIT_STORE_PROVIDER=memory` | stdout 结构化日志不受影响                            |
+| 全局房间/成员统计异常  | `RUNTIME_STORE_PROVIDER=memory`、`NODE_HEARTBEAT_ENABLED=false`          | 管理读视图退回节点本地                               |
+| 跨节点房间同步异常     | `ROOM_EVENT_BUS_PROVIDER=none`                                           | 调查期间恢复 sticky                                  |
+| 跨节点踢人/断连异常    | `ADMIN_COMMAND_BUS_PROVIDER=none`                                        | 保留只读全局管理面也可                               |
+| Global Admin 切换异常  | 管理流量回切节点 `/admin`                                                | Room Node 可临时重新打开 `GLOBAL_ADMIN_ENABLED=true` |
 
 ## 运维检查清单
 

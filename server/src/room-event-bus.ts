@@ -42,7 +42,9 @@ export function createInMemoryRoomEventBus(): RoomEventBus {
   return {
     async publish(message) {
       await Promise.allSettled(
-        Array.from(subscribers, (subscriber) => Promise.resolve(subscriber(message))),
+        Array.from(subscribers, (subscriber) =>
+          Promise.resolve(subscriber(message)),
+        ),
       );
     },
     async subscribe(handler) {

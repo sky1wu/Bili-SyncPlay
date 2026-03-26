@@ -163,7 +163,9 @@ export async function createRedisEventStore(
           timestamp,
           "roomCode",
           encodeNullable(
-            typeof input.data.roomCode === "string" ? input.data.roomCode : null,
+            typeof input.data.roomCode === "string"
+              ? input.data.roomCode
+              : null,
           ),
           "sessionId",
           encodeNullable(
@@ -189,7 +191,9 @@ export async function createRedisEventStore(
           details,
         );
         if (!streamId) {
-          throw new Error("Redis did not return a stream id for appended event.");
+          throw new Error(
+            "Redis did not return a stream id for appended event.",
+          );
         }
         await redis.xtrim(streamKey, "MAXLEN", "=", maxLen);
 

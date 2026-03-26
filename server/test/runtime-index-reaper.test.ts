@@ -67,7 +67,12 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
     session.memberId = "member-offline";
     session.memberToken = "token-offline";
     runtimeStore.registerSession(session);
-    runtimeStore.addMember("ROOM01", "member-offline", session, "token-offline");
+    runtimeStore.addMember(
+      "ROOM01",
+      "member-offline",
+      session,
+      "token-offline",
+    );
     await runtimeStore.heartbeatNode({
       instanceId: "offline-node",
       version: "test-version",

@@ -150,14 +150,14 @@ Rollback:
 
 ## Fast Rollback Matrix
 
-| Symptom | First rollback action | Notes |
-| --- | --- | --- |
-| Cross-node login issues | `ADMIN_SESSION_STORE_PROVIDER=memory` | Admin sessions fall back to node-local only |
-| Global events or audit query instability | `ADMIN_EVENT_STORE_PROVIDER=memory`, `ADMIN_AUDIT_STORE_PROVIDER=memory` | stdout logging is unchanged |
-| Global room/member counts wrong | `RUNTIME_STORE_PROVIDER=memory`, `NODE_HEARTBEAT_ENABLED=false` | Restores node-local admin read model |
-| Cross-node room-state sync issues | `ROOM_EVENT_BUS_PROVIDER=none` | Re-enable sticky routing while investigating |
-| Cross-node kick/disconnect issues | `ADMIN_COMMAND_BUS_PROVIDER=none` | Keep read-only global admin if needed |
-| Global admin rollout issues | move operators back to node `/admin` | Room nodes can temporarily keep `GLOBAL_ADMIN_ENABLED=true` |
+| Symptom                                  | First rollback action                                                    | Notes                                                       |
+| ---------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| Cross-node login issues                  | `ADMIN_SESSION_STORE_PROVIDER=memory`                                    | Admin sessions fall back to node-local only                 |
+| Global events or audit query instability | `ADMIN_EVENT_STORE_PROVIDER=memory`, `ADMIN_AUDIT_STORE_PROVIDER=memory` | stdout logging is unchanged                                 |
+| Global room/member counts wrong          | `RUNTIME_STORE_PROVIDER=memory`, `NODE_HEARTBEAT_ENABLED=false`          | Restores node-local admin read model                        |
+| Cross-node room-state sync issues        | `ROOM_EVENT_BUS_PROVIDER=none`                                           | Re-enable sticky routing while investigating                |
+| Cross-node kick/disconnect issues        | `ADMIN_COMMAND_BUS_PROVIDER=none`                                        | Keep read-only global admin if needed                       |
+| Global admin rollout issues              | move operators back to node `/admin`                                     | Room nodes can temporarily keep `GLOBAL_ADMIN_ENABLED=true` |
 
 ## Operational Checklist
 

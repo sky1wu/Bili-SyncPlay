@@ -32,15 +32,23 @@ test("admin bearer sessions are shared across room nodes and revoked globally on
     assert.equal(meOnB.status, 200);
     assert.equal((meOnB.body.data as { username: string }).username, "admin");
 
-    const logoutOnB = await requestJson(nodeB.httpBaseUrl, "/api/admin/auth/logout", {
-      method: "POST",
-      token,
-    });
+    const logoutOnB = await requestJson(
+      nodeB.httpBaseUrl,
+      "/api/admin/auth/logout",
+      {
+        method: "POST",
+        token,
+      },
+    );
     assert.equal(logoutOnB.status, 200);
 
-    const meOnAAfterLogout = await requestJson(nodeA.httpBaseUrl, "/api/admin/me", {
-      token,
-    });
+    const meOnAAfterLogout = await requestJson(
+      nodeA.httpBaseUrl,
+      "/api/admin/me",
+      {
+        token,
+      },
+    );
     assert.equal(meOnAAfterLogout.status, 401);
   } finally {
     await kit.closeAll();

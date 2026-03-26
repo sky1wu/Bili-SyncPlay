@@ -111,9 +111,9 @@ export async function createRedisRoomStore(
     >,
   ) {
     const ascending = query.sortOrder === "asc";
-      const codes =
-        query.sortBy === "lastActiveAt"
-          ? ascending
+    const codes =
+      query.sortBy === "lastActiveAt"
+        ? ascending
           ? await redis.zrange(roomIndexKey, 0, -1)
           : await redis.zrevrange(roomIndexKey, 0, -1)
         : await redis.keys(`${roomKeyPrefix}*`);

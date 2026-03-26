@@ -17,9 +17,7 @@ function parseAdminSessionStoreProvider(
   if (value === "memory" || value === "redis") {
     return value;
   }
-  throw new Error(
-    `Environment variable ${name} must be "memory" or "redis".`,
-  );
+  throw new Error(`Environment variable ${name} must be "memory" or "redis".`);
 }
 
 function parseAdminRole(value: string | undefined): AdminRole {

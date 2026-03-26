@@ -11,16 +11,14 @@ if (!process.env.REDIS_URL) {
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const serverDir = resolve(scriptDir, "..");
+const workspaceDir = resolve(serverDir, "..");
+const tsxCli = resolve(workspaceDir, "node_modules", "tsx", "dist", "cli.mjs");
 
-const child = spawn(
-  process.platform === "win32" ? "npx.cmd" : "npx",
-  ["tsx", "--test", "test/redis-room-store.test.ts"],
-  {
-    cwd: serverDir,
-    stdio: "inherit",
-    env: process.env,
-  },
-);
+const child = spawn(process.execPath, [tsxCli, "--test", "test/**/*.ts"], {
+  cwd: serverDir,
+  stdio: "inherit",
+  env: process.env,
+});
 
 child.on("exit", (code, signal) => {
   if (signal) {

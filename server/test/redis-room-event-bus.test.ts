@@ -19,35 +19,42 @@ test("redis room event bus delivers published events across instances", async (t
   const subscriber = await createRedisRoomEventBus(REDIS_URL, { channel });
 
   try {
-    const received = await new Promise<
-      | {
-          type: string;
-          roomCode: string;
-          sourceInstanceId: string;
-        }
-      | null
-    >(async (resolve, reject) => {
+    const receivedPromise = new Promise<{
+      type: string;
+      roomCode: string;
+      sourceInstanceId: string;
+    } | null>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error("Timed out waiting for room event."));
       }, 2_000);
 
-      const unsubscribe = await subscriber.subscribe((message) => {
-        clearTimeout(timer);
-        void unsubscribe();
-        resolve({
-          type: message.type,
-          roomCode: message.roomCode,
-          sourceInstanceId: message.sourceInstanceId,
+      void subscriber
+        .subscribe((message) => {
+          clearTimeout(timer);
+          void unsubscribePromise.then((unsubscribe) => unsubscribe());
+          resolve({
+            type: message.type,
+            roomCode: message.roomCode,
+            sourceInstanceId: message.sourceInstanceId,
+          });
+        })
+        .then((unsubscribe) => {
+          unsubscribePromise = Promise.resolve(unsubscribe);
+          return publisher.publish({
+            type: "room_state_updated",
+            roomCode: "ROOM01",
+            sourceInstanceId: "instance-a",
+            emittedAt: Date.now(),
+          });
+        })
+        .catch((error) => {
+          clearTimeout(timer);
+          reject(error);
         });
-      });
 
-      await publisher.publish({
-        type: "room_state_updated",
-        roomCode: "ROOM01",
-        sourceInstanceId: "instance-a",
-        emittedAt: Date.now(),
-      });
+      let unsubscribePromise = Promise.resolve(async () => {});
     });
+    const received = await receivedPromise;
 
     assert.deepEqual(received, {
       type: "room_state_updated",

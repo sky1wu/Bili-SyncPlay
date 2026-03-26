@@ -20,9 +20,13 @@ test("multi-node test kit starts two room nodes and one global admin on the same
     assert.ok(kit.namespace.startsWith("bsp:test:"));
 
     const token = await kit.login(globalAdmin.httpBaseUrl);
-    const overview = await requestJson(globalAdmin.httpBaseUrl, "/api/admin/overview", {
-      token,
-    });
+    const overview = await requestJson(
+      globalAdmin.httpBaseUrl,
+      "/api/admin/overview",
+      {
+        token,
+      },
+    );
     assert.equal(overview.status, 200);
     assert.equal(
       (overview.body.data as { service: { name: string } }).service.name,

@@ -54,8 +54,9 @@ function parseAuditRecord(
     targetInstanceId: normalizeNullable(fields.targetInstanceId),
     executorInstanceId: normalizeNullable(fields.executorInstanceId),
     commandRequestId: normalizeNullable(fields.commandRequestId),
-    commandStatus:
-      normalizeNullable(fields.commandStatus) as AuditLogRecord["commandStatus"],
+    commandStatus: normalizeNullable(
+      fields.commandStatus,
+    ) as AuditLogRecord["commandStatus"],
     commandCode: normalizeNullable(fields.commandCode),
   };
 }
@@ -155,7 +156,9 @@ export async function createRedisAuditStore(
           encodeNullable(input.commandCode),
         );
         if (!streamId) {
-          throw new Error("Redis did not return a stream id for appended audit log.");
+          throw new Error(
+            "Redis did not return a stream id for appended audit log.",
+          );
         }
         await redis.xtrim(streamKey, "MAXLEN", "=", maxLen);
 

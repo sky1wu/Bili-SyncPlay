@@ -159,7 +159,12 @@ function createMirroredRuntimeStore(
       return localRuntimeStore.getOrCreateRoom(code);
     },
     addMember(code, memberId, session, memberToken) {
-      const room = localRuntimeStore.addMember(code, memberId, session, memberToken);
+      const room = localRuntimeStore.addMember(
+        code,
+        memberId,
+        session,
+        memberToken,
+      );
       sharedRuntimeStore.addMember(code, memberId, session, memberToken);
       return room;
     },
@@ -171,7 +176,11 @@ function createMirroredRuntimeStore(
       sharedRuntimeStore.blockMemberToken(code, memberToken, expiresAt);
     },
     isMemberTokenBlocked(code, memberToken, currentTime) {
-      return localRuntimeStore.isMemberTokenBlocked(code, memberToken, currentTime);
+      return localRuntimeStore.isMemberTokenBlocked(
+        code,
+        memberToken,
+        currentTime,
+      );
     },
     removeMember(code, memberId, session) {
       const removal = localRuntimeStore.removeMember(code, memberId, session);
@@ -289,9 +298,7 @@ export async function createSyncServer(
     persistenceConfig.runtimeStoreProvider === "redis"
       ? await createRedisRuntimeStore(persistenceConfig.redisUrl, {
           now,
-          keyPrefix: getRedisRuntimeKeyPrefix(
-            persistenceConfig.redisNamespace,
-          ),
+          keyPrefix: getRedisRuntimeKeyPrefix(persistenceConfig.redisNamespace),
         })
       : localRuntimeStore;
   const runtimeStore =
@@ -383,7 +390,8 @@ export async function createSyncServer(
   const roomEventConsumer = await createRoomEventConsumer({
     roomEventBus,
     getRoomStateByCode: (roomCode) => roomService.getRoomStateByCode(roomCode),
-    listLocalSessionsByRoom: (roomCode) => runtimeStore.listSessionsByRoom(roomCode),
+    listLocalSessionsByRoom: (roomCode) =>
+      runtimeStore.listSessionsByRoom(roomCode),
     send,
     instanceId: persistenceConfig.instanceId,
     logEvent,
@@ -392,7 +400,8 @@ export async function createSyncServer(
     instanceId: persistenceConfig.instanceId,
     adminCommandBus,
     getLocalSession: (sessionId) => localRuntimeStore.getSession(sessionId),
-    listLocalSessionsByRoom: (roomCode) => localRuntimeStore.listSessionsByRoom(roomCode),
+    listLocalSessionsByRoom: (roomCode) =>
+      localRuntimeStore.listSessionsByRoom(roomCode),
     blockMemberToken: (roomCode, memberToken, expiresAt) =>
       runtimeStore.blockMemberToken(roomCode, memberToken, expiresAt),
     disconnectSessionSocket: (session, reason) => {
@@ -698,17 +707,19 @@ export async function createSyncServer(
         await maybeClosableEventStore.close();
       }
       if (sharedRuntimeStore !== localRuntimeStore) {
-        const maybeClosableRuntimeStore = sharedRuntimeStore as typeof sharedRuntimeStore & {
-          close?: () => Promise<void>;
-        };
+        const maybeClosableRuntimeStore =
+          sharedRuntimeStore as typeof sharedRuntimeStore & {
+            close?: () => Promise<void>;
+          };
         if (typeof maybeClosableRuntimeStore.close === "function") {
           await maybeClosableRuntimeStore.close();
         }
       }
       await adminCommandConsumer.close();
-      const maybeClosableAdminCommandBus = adminCommandBus as AdminCommandBus & {
-        close?: () => Promise<void>;
-      };
+      const maybeClosableAdminCommandBus =
+        adminCommandBus as AdminCommandBus & {
+          close?: () => Promise<void>;
+        };
       if (typeof maybeClosableAdminCommandBus.close === "function") {
         await maybeClosableAdminCommandBus.close();
       }

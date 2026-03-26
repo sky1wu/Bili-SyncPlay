@@ -65,7 +65,9 @@ function createRoom(code = "ROOM01"): PersistedRoom {
 function createService(options: {
   session?: Session | null;
   sessionsByRoom?: Session[];
-  requestAdminCommand: Parameters<typeof createAdminActionService>[0]["requestAdminCommand"];
+  requestAdminCommand: Parameters<
+    typeof createAdminActionService
+  >[0]["requestAdminCommand"];
 }) {
   return createAdminActionService({
     instanceId: "instance-1",
@@ -86,8 +88,7 @@ function createService(options: {
       listSessionsByRoom: () => options.sessionsByRoom ?? [],
       getSession: () => options.session ?? null,
     },
-    listClusterSessions: async () =>
-      options.session ? [options.session] : [],
+    listClusterSessions: async () => (options.session ? [options.session] : []),
     listClusterSessionsByRoom: async () => options.sessionsByRoom ?? [],
     requestAdminCommand: options.requestAdminCommand,
     auditLogService: createAuditLogService(),

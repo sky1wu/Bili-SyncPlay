@@ -76,7 +76,10 @@ test("redis event store appends, trims, and queries events across store instance
       pageSize: 10,
     });
     assert.equal(trimmed.total, 2);
-    assert.equal(trimmed.items.some((item) => item.event === "room_created"), false);
+    assert.equal(
+      trimmed.items.some((item) => item.event === "room_created"),
+      false,
+    );
   } finally {
     await storeA.close();
     await storeB.close();
