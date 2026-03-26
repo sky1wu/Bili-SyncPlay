@@ -26,9 +26,10 @@ This repository is a monorepo:
 
 ## Quick Start
 
-If you want to use the published extension directly, install it from the Chrome Web Store:
+If you want to use the published extension directly, install it from one of the published stores:
 
 - [Bili-SyncPlay on Chrome Web Store](https://chromewebstore.google.com/detail/bili-syncplay/lbmckljnginagfabglpfdepofoglfdkj)
+- [Bili-SyncPlay on Microsoft Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/bili-syncplay/cpgcalajpoihfgfeidmnijcdimnjniam)
 
 ### 1. Install and build
 
