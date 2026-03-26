@@ -1,6 +1,6 @@
 import type { GlobalEventStore } from "./global-event-store.js";
-import type { RuntimeRegistry } from "./runtime-registry.js";
 import type { RoomStore } from "../room-store.js";
+import type { RuntimeStore } from "../runtime-store.js";
 import type { PersistenceConfig } from "../types.js";
 
 export function createAdminOverviewService(options: {
@@ -9,7 +9,7 @@ export function createAdminOverviewService(options: {
   serviceVersion: string;
   persistenceConfig: PersistenceConfig;
   roomStore: RoomStore;
-  runtimeRegistry: RuntimeRegistry;
+  runtimeStore: RuntimeStore;
   eventStore: GlobalEventStore;
   now?: () => number;
 }) {
@@ -22,16 +22,16 @@ export function createAdminOverviewService(options: {
         keyword: undefined,
         includeExpired: false,
       });
-      const activeRoomCount = options.runtimeRegistry.getActiveRoomCount();
-      const activeMemberCount = options.runtimeRegistry.getActiveMemberCount();
+      const activeRoomCount = options.runtimeStore.getActiveRoomCount();
+      const activeMemberCount = options.runtimeStore.getActiveMemberCount();
 
       return {
         service: {
           instanceId: options.instanceId,
           name: options.serviceName,
           version: options.serviceVersion,
-          startedAt: options.runtimeRegistry.getStartedAt(),
-          uptimeMs: currentTime - options.runtimeRegistry.getStartedAt(),
+          startedAt: options.runtimeStore.getStartedAt(),
+          uptimeMs: currentTime - options.runtimeStore.getStartedAt(),
         },
         storage: {
           provider: options.persistenceConfig.provider,
@@ -41,7 +41,7 @@ export function createAdminOverviewService(options: {
               : true,
         },
         runtime: {
-          connectionCount: options.runtimeRegistry.getConnectionCount(),
+          connectionCount: options.runtimeStore.getConnectionCount(),
           activeRoomCount,
           activeMemberCount,
         },
@@ -57,14 +57,14 @@ export function createAdminOverviewService(options: {
             rate_limited: 0,
             ws_connection_rejected: 0,
             error: 0,
-            ...options.runtimeRegistry.getRecentEventCounts(currentTime),
+            ...options.runtimeStore.getRecentEventCounts(currentTime),
           },
           totals: {
             room_created: 0,
             room_joined: 0,
             ws_connection_rejected: 0,
             rate_limited: 0,
-            ...options.runtimeRegistry.getLifetimeEventCounts(),
+            ...options.runtimeStore.getLifetimeEventCounts(),
           },
         },
       };

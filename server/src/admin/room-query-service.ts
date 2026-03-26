@@ -1,8 +1,8 @@
 import type { GlobalEventStore } from "./global-event-store.js";
-import type { RuntimeRegistry } from "./runtime-registry.js";
 import type { RoomDetail, RoomListQuery, RoomSummary } from "./types.js";
 import type { PersistedRoom, Session } from "../types.js";
 import type { RoomStore } from "../room-store.js";
+import type { RuntimeStore } from "../runtime-store.js";
 
 function toSummary(
   room: PersistedRoom,
@@ -23,7 +23,7 @@ function toSummary(
 export function createAdminRoomQueryService(options: {
   instanceId: string;
   roomStore: RoomStore;
-  runtimeRegistry: RuntimeRegistry;
+  runtimeStore: RuntimeStore;
   eventStore: GlobalEventStore;
 }) {
   function filterByStatus(
@@ -35,7 +35,7 @@ export function createAdminRoomQueryService(options: {
     }
     return items.filter((room) => {
       const isActive =
-        options.runtimeRegistry.listSessionsByRoom(room.code).length > 0;
+        options.runtimeStore.listSessionsByRoom(room.code).length > 0;
       return status === "active" ? isActive : !isActive;
     });
   }
@@ -69,7 +69,7 @@ export function createAdminRoomQueryService(options: {
         items: selected.map((room) => ({
           ...toSummary(
             room,
-            options.runtimeRegistry.listSessionsByRoom(room.code),
+            options.runtimeStore.listSessionsByRoom(room.code),
           ),
           instanceId: options.instanceId,
         })),
@@ -86,7 +86,7 @@ export function createAdminRoomQueryService(options: {
         return null;
       }
 
-      const sessions = options.runtimeRegistry.listSessionsByRoom(roomCode);
+      const sessions = options.runtimeStore.listSessionsByRoom(roomCode);
       return {
         instanceId: options.instanceId,
         room: {

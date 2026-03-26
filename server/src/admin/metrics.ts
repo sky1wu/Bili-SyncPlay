@@ -1,13 +1,13 @@
-import type { RuntimeRegistry } from "./runtime-registry.js";
+import type { RuntimeStore } from "../runtime-store.js";
 import type { RoomStore } from "../room-store.js";
 
 export function createMetricsService(options: {
-  runtimeRegistry: RuntimeRegistry;
+  runtimeStore: RuntimeStore;
   roomStore: RoomStore;
 }) {
   return {
     async render(): Promise<string> {
-      const totals = options.runtimeRegistry.getLifetimeEventCounts();
+      const totals = options.runtimeStore.getLifetimeEventCounts();
       const totalNonExpired = await options.roomStore.countRooms({
         keyword: undefined,
         includeExpired: false,
@@ -16,10 +16,10 @@ export function createMetricsService(options: {
       const lines = [
         "# HELP bili_syncplay_connections Current websocket connection count",
         "# TYPE bili_syncplay_connections gauge",
-        `bili_syncplay_connections ${options.runtimeRegistry.getConnectionCount()}`,
+        `bili_syncplay_connections ${options.runtimeStore.getConnectionCount()}`,
         "# HELP bili_syncplay_active_rooms Current active room count",
         "# TYPE bili_syncplay_active_rooms gauge",
-        `bili_syncplay_active_rooms ${options.runtimeRegistry.getActiveRoomCount()}`,
+        `bili_syncplay_active_rooms ${options.runtimeStore.getActiveRoomCount()}`,
         "# HELP bili_syncplay_rooms_non_expired Current non-expired room count",
         "# TYPE bili_syncplay_rooms_non_expired gauge",
         `bili_syncplay_rooms_non_expired ${totalNonExpired}`,

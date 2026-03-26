@@ -5,7 +5,6 @@ import {
   type PlaybackState,
   type SharedVideo,
 } from "@bili-syncplay/protocol";
-import type { ActiveRoomRegistry } from "./active-room-registry.js";
 import {
   INTERNAL_SERVER_ERROR_MESSAGE,
   JOIN_TOKEN_INVALID_MESSAGE,
@@ -19,6 +18,7 @@ import {
 } from "./messages.js";
 import { decidePlaybackAcceptance } from "./playback-authority.js";
 import { createRoomCode, roomStateOf, type RoomStore } from "./room-store.js";
+import type { RuntimeStore } from "./runtime-store.js";
 import type {
   LogEvent,
   PlaybackAuthority,
@@ -54,14 +54,15 @@ export class RoomServiceError extends Error {
 type JoinedRoomAccess = {
   session: Session;
   persistedRoom: PersistedRoom;
-  activeRoom: ReturnType<ActiveRoomRegistry["getOrCreateRoom"]>;
+  activeRoom: ReturnType<RuntimeStore["getOrCreateRoom"]>;
 };
 
 export function createRoomService(options: {
   config: SecurityConfig;
   persistence: PersistenceConfig;
   roomStore: RoomStore;
-  activeRooms: ActiveRoomRegistry;
+  runtimeStore?: RuntimeStore;
+  activeRooms?: RuntimeStore;
   createRoomCode?: () => string;
   generateToken: () => string;
   logEvent: LogEvent;
@@ -104,7 +105,7 @@ export function createRoomService(options: {
   ) => Promise<ReturnType<typeof roomStateOf>>;
   getActiveRoom: (
     roomCode: string,
-  ) => ReturnType<ActiveRoomRegistry["getRoom"]>;
+  ) => ReturnType<RuntimeStore["getRoom"]>;
   getPlaybackAuthority: (roomCode: string) => PlaybackAuthority | null;
   getRoomStateByCode: (
     roomCode: string,
@@ -115,13 +116,18 @@ export function createRoomService(options: {
     config,
     persistence,
     roomStore,
-    activeRooms,
     generateToken,
     logEvent,
   } = options;
+  const runtimeStoreOption = options.runtimeStore ?? options.activeRooms;
   const now = options.now ?? Date.now;
   const nextRoomCode = options.createRoomCode ?? createRoomCode;
   const playbackAuthorityByRoom = new Map<string, PlaybackAuthority>();
+
+  if (!runtimeStoreOption) {
+    throw new Error("RuntimeStore is required");
+  }
+  const runtimeStore: RuntimeStore = runtimeStoreOption;
 
   function setSessionDisplayName(session: Session, displayName?: string): void {
     session.displayName = displayName?.trim() || session.displayName;
@@ -141,7 +147,7 @@ export function createRoomService(options: {
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
       await roomStore.deleteRoom(code);
-      activeRooms.deleteRoom(code);
+      runtimeStore.deleteRoom(code);
       return null;
     }
     return room;
@@ -216,7 +222,7 @@ export function createRoomService(options: {
   }
 
   function requireMemberToken(
-    activeRoom: ReturnType<ActiveRoomRegistry["getOrCreateRoom"]>,
+    activeRoom: ReturnType<RuntimeStore["getOrCreateRoom"]>,
     session: Session,
     memberToken: string,
     messageType: ClientMessage["type"],
@@ -286,7 +292,7 @@ export function createRoomService(options: {
       );
     }
 
-    const activeRoom = activeRooms.getRoom(persistedRoom.code);
+    const activeRoom = runtimeStore.getRoom(persistedRoom.code);
     if (
       !activeRoom ||
       !session.memberId ||
@@ -345,8 +351,8 @@ export function createRoomService(options: {
 
     const roomCode = session.roomCode;
     const removal = session.memberId
-      ? activeRooms.removeMember(roomCode, session.memberId, session)
-      : { room: activeRooms.getRoom(roomCode), roomEmpty: false };
+      ? runtimeStore.removeMember(roomCode, session.memberId, session)
+      : { room: runtimeStore.getRoom(roomCode), roomEmpty: false };
     clearSessionRoom(session);
 
     const persistedRoom = await resolveRoom(roomCode);
@@ -432,7 +438,7 @@ export function createRoomService(options: {
 
       const memberToken = generateToken();
       session.memberId = session.id;
-      activeRooms.addMember(room.code, session.memberId, session, memberToken);
+      runtimeStore.addMember(room.code, session.memberId, session, memberToken);
       session.roomCode = room.code;
       session.memberToken = memberToken;
       session.joinedAt = createdAt;
@@ -478,7 +484,11 @@ export function createRoomService(options: {
 
         if (
           previousMemberToken &&
-          activeRooms.isMemberTokenBlocked(roomCode, previousMemberToken, now())
+          runtimeStore.isMemberTokenBlocked(
+            roomCode,
+            previousMemberToken,
+            now(),
+          )
         ) {
           logEvent("auth_failed", {
             sessionId: session.id,
@@ -496,10 +506,10 @@ export function createRoomService(options: {
           );
         }
 
-        const activeRoom = activeRooms.getRoom(roomCode);
+        const activeRoom = runtimeStore.getRoom(roomCode);
         const reconnectMemberId =
           previousMemberToken && activeRoom
-            ? activeRooms.findMemberIdByToken(roomCode, previousMemberToken)
+            ? runtimeStore.findMemberIdByToken(roomCode, previousMemberToken)
             : null;
         const activeMemberCount = activeRoom?.members.size ?? 0;
         if (
@@ -532,7 +542,7 @@ export function createRoomService(options: {
       }
 
       const reconnectMemberId = previousMemberToken
-        ? activeRooms.findMemberIdByToken(joinedRoom.code, previousMemberToken)
+        ? runtimeStore.findMemberIdByToken(joinedRoom.code, previousMemberToken)
         : null;
       const memberId = reconnectMemberId ?? session.id;
       const memberToken =
@@ -541,12 +551,12 @@ export function createRoomService(options: {
           : generateToken();
       const previousSession =
         reconnectMemberId !== null
-          ? (activeRooms
+          ? (runtimeStore
               .getRoom(joinedRoom.code)
               ?.members.get(reconnectMemberId) ?? null)
           : null;
       session.memberId = memberId;
-      activeRooms.addMember(joinedRoom.code, memberId, session, memberToken);
+      runtimeStore.addMember(joinedRoom.code, memberId, session, memberToken);
       session.roomCode = joinedRoom.code;
       session.memberToken = memberToken;
       session.joinedAt = now();
@@ -790,12 +800,12 @@ export function createRoomService(options: {
       }
       return roomStateOf(
         persistedRoom,
-        activeRooms.getRoom(persistedRoom.code),
+        runtimeStore.getRoom(persistedRoom.code),
       );
     },
 
     getActiveRoom(roomCode) {
-      return activeRooms.getRoom(roomCode);
+      return runtimeStore.getRoom(roomCode);
     },
 
     getPlaybackAuthority(roomCode) {
@@ -807,7 +817,7 @@ export function createRoomService(options: {
       if (!room) {
         return null;
       }
-      return roomStateOf(room, activeRooms.getRoom(roomCode));
+      return roomStateOf(room, runtimeStore.getRoom(roomCode));
     },
 
     async deleteExpiredRooms(currentTime = now()) {

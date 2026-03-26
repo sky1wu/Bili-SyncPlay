@@ -17,6 +17,7 @@ import type { AdminSessionStore } from "../admin-session-store.js";
 import { createRedisAdminSessionStore } from "../redis-admin-session-store.js";
 import { createRoomService } from "../room-service.js";
 import type { RoomStore } from "../room-store.js";
+import type { RuntimeStore } from "../runtime-store.js";
 import type {
   AdminConfig,
   LogEvent,
@@ -29,13 +30,8 @@ export function createAdminServices(args: {
   securityConfig: SecurityConfig;
   persistenceConfig: PersistenceConfig;
   roomStore: RoomStore;
-  runtimeRegistry: ReturnType<
-    typeof import("../admin/runtime-registry.js").createRuntimeRegistry
-  >;
+  runtimeStore: RuntimeStore;
   eventStore: GlobalEventStore;
-  activeRooms: ReturnType<
-    typeof import("../active-room-registry.js").createActiveRoomRegistry
-  >;
   roomService: ReturnType<typeof createRoomService>;
   send: (socket: WebSocket, message: ServerMessage) => void;
   logEvent: LogEvent;
@@ -82,18 +78,18 @@ export function createAdminServices(args: {
       serviceVersion: args.serviceVersion,
       persistenceConfig: args.persistenceConfig,
       roomStore: args.roomStore,
-      runtimeRegistry: args.runtimeRegistry,
+      runtimeStore: args.runtimeStore,
       eventStore: args.eventStore,
       now: args.now,
     });
     const roomQueryService = createAdminRoomQueryService({
       instanceId: args.persistenceConfig.instanceId,
       roomStore: args.roomStore,
-      runtimeRegistry: args.runtimeRegistry,
+      runtimeStore: args.runtimeStore,
       eventStore: args.eventStore,
     });
     const metricsService = createMetricsService({
-      runtimeRegistry: args.runtimeRegistry,
+      runtimeStore: args.runtimeStore,
       roomStore: args.roomStore,
     });
     const configService = createAdminConfigService({
@@ -107,7 +103,7 @@ export function createAdminServices(args: {
       if (!state) {
         return;
       }
-      for (const session of args.runtimeRegistry.listSessionsByRoom(roomCode)) {
+      for (const session of args.runtimeStore.listSessionsByRoom(roomCode)) {
         args.send(session.socket, {
           type: "room:state",
           payload: state,
@@ -126,14 +122,14 @@ export function createAdminServices(args: {
     const actionService = createAdminActionService({
       instanceId: args.persistenceConfig.instanceId,
       roomStore: args.roomStore,
-      runtimeRegistry: args.runtimeRegistry,
+      runtimeStore: args.runtimeStore,
       auditLogService,
       getRoomStateByCode: (roomCode) =>
         args.roomService.getRoomStateByCode(roomCode),
       broadcastRoomState,
       disconnectSessionSocket,
       blockMemberToken: (roomCode, memberToken, expiresAt) =>
-        args.activeRooms.blockMemberToken(roomCode, memberToken, expiresAt),
+        args.runtimeStore.blockMemberToken(roomCode, memberToken, expiresAt),
       logEvent: args.logEvent,
       now: args.now,
     });

@@ -11,8 +11,6 @@ import {
 } from "@bili-syncplay/protocol";
 import { createEventStore } from "./admin/event-store.js";
 import { createRedisEventStore } from "./admin/redis-event-store.js";
-import { createRuntimeRegistry } from "./admin/runtime-registry.js";
-import { createActiveRoomRegistry } from "./active-room-registry.js";
 import { createAdminServices } from "./bootstrap/admin-services.js";
 import { createHttpRequestHandler } from "./bootstrap/http-handler.js";
 import { createStructuredLogger } from "./logger.js";
@@ -22,6 +20,7 @@ import { createInMemoryRoomStore, type RoomStore } from "./room-store.js";
 import { createRoomReaper } from "./room-reaper.js";
 import { createRoomService } from "./room-service.js";
 import { createRedisRoomStore } from "./redis-room-store.js";
+import { createInMemoryRuntimeStore } from "./runtime-store.js";
 import { createSecurityPolicy } from "./security.js";
 import type { GlobalEventStore } from "./admin/global-event-store.js";
 import type {
@@ -148,22 +147,21 @@ export async function createSyncServer(
     (persistenceConfig.provider === "redis"
       ? await createRedisRoomStore(persistenceConfig.redisUrl)
       : createInMemoryRoomStore({ now }));
-  const runtimeRegistry = createRuntimeRegistry(now);
+  const runtimeStore = createInMemoryRuntimeStore(now);
   const eventStore =
     dependencies.adminConfig?.eventStoreProvider === "redis"
       ? await createRedisEventStore(persistenceConfig.redisUrl)
       : createEventStore();
   const logEvent =
     dependencies.logEvent ??
-    createStructuredLogger(undefined, eventStore, runtimeRegistry);
-  const activeRooms = createActiveRoomRegistry();
+    createStructuredLogger(undefined, eventStore, runtimeStore);
   const securityPolicy = createSecurityPolicy(securityConfig);
 
   const roomService = createRoomService({
     config: securityConfig,
     persistence: persistenceConfig,
     roomStore,
-    activeRooms,
+    runtimeStore,
     generateToken,
     logEvent,
     now,
@@ -176,10 +174,10 @@ export async function createSyncServer(
     send,
     sendError,
     onRoomJoined: (session, roomCode) => {
-      runtimeRegistry.markSessionJoinedRoom(session.id, roomCode);
+      runtimeStore.markSessionJoinedRoom(session.id, roomCode);
     },
     onRoomLeft: (session, roomCode) => {
-      runtimeRegistry.markSessionLeftRoom(session.id, roomCode);
+      runtimeStore.markSessionLeftRoom(session.id, roomCode);
     },
     now,
   });
@@ -194,9 +192,8 @@ export async function createSyncServer(
     securityConfig,
     persistenceConfig,
     roomStore,
-    runtimeRegistry,
+    runtimeStore,
     eventStore,
-    activeRooms,
     roomService,
     send,
     logEvent,
@@ -320,7 +317,7 @@ export async function createSyncServer(
     };
 
     securityPolicy.incrementConnectionCount(session.remoteAddress);
-    runtimeRegistry.registerSession(session);
+    runtimeStore.registerSession(session);
     logEvent("ws_connection_accepted", {
       sessionId: session.id,
       remoteAddress: session.remoteAddress,
@@ -376,7 +373,7 @@ export async function createSyncServer(
       void (async () => {
         securityPolicy.decrementConnectionCount(session.remoteAddress);
         await messageHandler.leaveRoom(session);
-        runtimeRegistry.unregisterSession(session.id);
+        runtimeStore.unregisterSession(session.id);
         logEvent("ws_connection_closed", {
           sessionId: session.id,
           remoteAddress: session.remoteAddress,

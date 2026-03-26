@@ -1,6 +1,5 @@
 import type { GlobalAuditStore } from "./global-audit-store.js";
 import type { AdminSession } from "./types.js";
-import type { RuntimeRegistry } from "./runtime-registry.js";
 import {
   MEMBER_NOT_FOUND_MESSAGE,
   ROOM_ACTIVE_MESSAGE,
@@ -10,6 +9,7 @@ import {
 } from "../messages.js";
 import type { LogEvent, PersistedRoom, Session } from "../types.js";
 import type { RoomStore, RoomUpdateResult } from "../room-store.js";
+import type { RuntimeStore } from "../runtime-store.js";
 
 const KICK_REJOIN_BLOCK_MS = 60_000;
 
@@ -26,7 +26,7 @@ export class AdminActionError extends Error {
 export function createAdminActionService(options: {
   instanceId: string;
   roomStore: RoomStore;
-  runtimeRegistry: RuntimeRegistry;
+  runtimeStore: RuntimeStore;
   auditLogService: GlobalAuditStore;
   getRoomStateByCode: (roomCode: string) => Promise<unknown | null>;
   broadcastRoomState: (roomCode: string) => Promise<void>;
@@ -102,7 +102,7 @@ export function createAdminActionService(options: {
   return {
     async closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
       await getRoomOrThrow(roomCode);
-      const sessions = options.runtimeRegistry.listSessionsByRoom(roomCode);
+      const sessions = options.runtimeStore.listSessionsByRoom(roomCode);
 
       for (const session of sessions) {
         options.disconnectSessionSocket(session, "Admin closed room");
@@ -122,7 +122,7 @@ export function createAdminActionService(options: {
     },
 
     async expireRoom(actor: AdminSession, roomCode: string, reason?: string) {
-      const sessions = options.runtimeRegistry.listSessionsByRoom(roomCode);
+      const sessions = options.runtimeStore.listSessionsByRoom(roomCode);
       if (sessions.length > 0) {
         throw new AdminActionError(409, "room_active", ROOM_ACTIVE_MESSAGE);
       }
@@ -178,7 +178,7 @@ export function createAdminActionService(options: {
       reason?: string,
     ) {
       await getRoomOrThrow(roomCode);
-      const session = options.runtimeRegistry
+      const session = options.runtimeStore
         .listSessionsByRoom(roomCode)
         .find((entry) => entry.memberId === memberId);
       if (!session) {
@@ -223,7 +223,7 @@ export function createAdminActionService(options: {
       sessionId: string,
       reason?: string,
     ) {
-      const session = options.runtimeRegistry.getSession(sessionId);
+      const session = options.runtimeStore.getSession(sessionId);
       if (!session) {
         throw new AdminActionError(
           404,
