@@ -149,7 +149,7 @@ export const handleReadRoutes: AdminRouteHandler = async ({
       ),
     };
     sendOk(response, {
-      ...options.listAuditLogs(query),
+      ...(await options.listAuditLogs(query)),
       pagination: {
         page: query.page,
         pageSize: query.pageSize,

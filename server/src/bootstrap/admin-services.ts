@@ -5,6 +5,7 @@ import { createAuditLogService } from "../admin/audit-log.js";
 import { createInMemoryAdminSessionStore } from "../admin/auth-store.js";
 import { createAdminAuthService } from "../admin/auth-service.js";
 import { createAdminConfigService } from "../admin/config-service.js";
+import type { GlobalAuditStore } from "../admin/global-audit-store.js";
 import type { GlobalEventStore } from "../admin/global-event-store.js";
 import { createMetricsService } from "../admin/metrics.js";
 import { createAdminOverviewService } from "../admin/overview-service.js";
@@ -45,6 +46,7 @@ export function createAdminServices(args: {
   close: () => Promise<void>;
 }> {
   return (async () => {
+    let auditLogService: GlobalAuditStore = createAuditLogService();
     let adminSessionStore: AdminSessionStore | undefined;
     let closeAdminSessionStore: (() => Promise<void>) | undefined;
 
@@ -64,7 +66,6 @@ export function createAdminServices(args: {
       args.adminConfig && adminSessionStore
         ? createAdminAuthService(args.adminConfig, adminSessionStore, args.now)
         : undefined;
-    const auditLogService = createAuditLogService();
     const overviewService = createAdminOverviewService({
       instanceId: args.persistenceConfig.instanceId,
       serviceName: "bili-syncplay-server",
@@ -138,7 +139,7 @@ export function createAdminServices(args: {
       getRoomDetail: (roomCode: string) =>
         roomQueryService.getRoomDetail(roomCode),
       listAuditLogs: (query: import("../admin/types.js").AuditLogQuery) =>
-        auditLogService.query(query),
+        Promise.resolve(auditLogService.query(query)),
       closeRoom: (actor: AdminSession, roomCode: string, reason?: string) =>
         actionService.closeRoom(actor, roomCode, reason),
       expireRoom: (actor: AdminSession, roomCode: string, reason?: string) =>

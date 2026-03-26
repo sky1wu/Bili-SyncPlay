@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AdminAuthService } from "./auth-service.js";
+import type { GlobalAuditQueryResult } from "./global-audit-store.js";
 import type { GlobalEventStore } from "./global-event-store.js";
 import type {
   AdminRole,
@@ -16,7 +17,7 @@ export type AdminRouterOptions = {
   getOverview: () => Promise<unknown>;
   listRooms: (query: RoomListQuery) => Promise<unknown>;
   getRoomDetail: (roomCode: string) => Promise<unknown | null>;
-  listAuditLogs: (query: AuditLogQuery) => { items: unknown[]; total: number };
+  listAuditLogs: (query: AuditLogQuery) => Promise<GlobalAuditQueryResult>;
   closeRoom: (
     actor: AdminSession,
     roomCode: string,

@@ -1,19 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { AdminSession, AuditLogQuery, AuditLogRecord } from "./types.js";
+import type { GlobalAuditStore } from "./global-audit-store.js";
 
-export type AuditLogService = {
-  append: (input: {
-    actor: AdminSession;
-    action: string;
-    targetType: AuditLogRecord["targetType"];
-    targetId: string;
-    request?: Record<string, unknown>;
-    result: AuditLogRecord["result"];
-    reason?: string;
-    instanceId?: string;
-  }) => AuditLogRecord;
-  query: (query: AuditLogQuery) => { items: AuditLogRecord[]; total: number };
-};
+export type AuditLogService = GlobalAuditStore;
 
 export function createAuditLogService(capacity = 1_000): AuditLogService {
   const records: AuditLogRecord[] = [];
@@ -23,7 +12,7 @@ export function createAuditLogService(capacity = 1_000): AuditLogService {
   }
 
   return {
-    append(input) {
+    async append(input) {
       const record: AuditLogRecord = {
         id: randomUUID(),
         timestamp: new Date().toISOString(),
@@ -47,7 +36,7 @@ export function createAuditLogService(capacity = 1_000): AuditLogService {
       }
       return record;
     },
-    query(query) {
+    async query(query) {
       const filtered = records.filter((record) => {
         const timestamp = recordTime(record);
         if (

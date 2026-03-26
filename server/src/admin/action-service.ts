@@ -1,4 +1,4 @@
-import type { AuditLogService } from "./audit-log.js";
+import type { GlobalAuditStore } from "./global-audit-store.js";
 import type { AdminSession } from "./types.js";
 import type { RuntimeRegistry } from "./runtime-registry.js";
 import {
@@ -27,7 +27,7 @@ export function createAdminActionService(options: {
   instanceId: string;
   roomStore: RoomStore;
   runtimeRegistry: RuntimeRegistry;
-  auditLogService: AuditLogService;
+  auditLogService: GlobalAuditStore;
   getRoomStateByCode: (roomCode: string) => Promise<unknown | null>;
   broadcastRoomState: (roomCode: string) => Promise<void>;
   disconnectSessionSocket: (session: Session, reason: string) => void;
@@ -83,15 +83,19 @@ export function createAdminActionService(options: {
     result: "ok" | "rejected" | "error",
     reason?: string,
   ): void {
-    options.auditLogService.append({
-      actor,
-      action,
-      targetType,
-      targetId,
-      request,
-      result,
-      reason,
-      instanceId: options.instanceId,
+    void Promise.resolve(
+      options.auditLogService.append({
+        actor,
+        action,
+        targetType,
+        targetId,
+        request,
+        result,
+        reason,
+        instanceId: options.instanceId,
+      }),
+    ).catch((error: unknown) => {
+      console.error("Failed to append audit log", error);
     });
   }
 
