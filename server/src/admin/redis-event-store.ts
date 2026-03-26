@@ -1,4 +1,5 @@
 import { Redis } from "ioredis";
+import { randomUUID } from "node:crypto";
 import type {
   GlobalEventStore,
   GlobalEventStoreAppendInput,
@@ -91,6 +92,7 @@ export async function createRedisEventStore(
   });
   const streamKey = options.streamKey ?? DEFAULT_EVENT_STREAM_KEY;
   const maxLen = options.maxLen ?? DEFAULT_EVENT_STREAM_MAX_LEN;
+  let closing = false;
   let pendingAppend = Promise.resolve();
 
   await redis.connect();
@@ -126,6 +128,30 @@ export async function createRedisEventStore(
     append(input: GlobalEventStoreAppendInput) {
       const timestamp = input.timestamp ?? new Date().toISOString();
       const details = JSON.stringify(input.data);
+      const runtimeEvent: RuntimeEvent = {
+        id: randomUUID(),
+        timestamp,
+        event: input.event,
+        roomCode:
+          typeof input.data.roomCode === "string" ? input.data.roomCode : null,
+        sessionId:
+          typeof input.data.sessionId === "string"
+            ? input.data.sessionId
+            : null,
+        remoteAddress:
+          typeof input.data.remoteAddress === "string"
+            ? input.data.remoteAddress
+            : null,
+        origin:
+          typeof input.data.origin === "string" ? input.data.origin : null,
+        result:
+          typeof input.data.result === "string" ? input.data.result : null,
+        details: { ...input.data },
+      };
+
+      if (closing) {
+        return Promise.resolve(runtimeEvent);
+      }
 
       const appendPromise = pendingAppend.then(async () => {
         const streamId = await redis.xadd(
@@ -168,24 +194,8 @@ export async function createRedisEventStore(
         await redis.xtrim(streamKey, "MAXLEN", "=", maxLen);
 
         return {
+          ...runtimeEvent,
           id: streamId,
-          timestamp,
-          event: input.event,
-          roomCode:
-            typeof input.data.roomCode === "string" ? input.data.roomCode : null,
-          sessionId:
-            typeof input.data.sessionId === "string"
-              ? input.data.sessionId
-              : null,
-          remoteAddress:
-            typeof input.data.remoteAddress === "string"
-              ? input.data.remoteAddress
-              : null,
-          origin:
-            typeof input.data.origin === "string" ? input.data.origin : null,
-          result:
-            typeof input.data.result === "string" ? input.data.result : null,
-          details: { ...input.data },
         } satisfies RuntimeEvent;
       });
 
@@ -200,6 +210,7 @@ export async function createRedisEventStore(
       return await queryEvents(query);
     },
     async close() {
+      closing = true;
       await pendingAppend;
       await redis.quit();
     },

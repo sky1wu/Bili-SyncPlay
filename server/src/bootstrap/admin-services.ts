@@ -10,6 +10,7 @@ import type { GlobalEventStore } from "../admin/global-event-store.js";
 import { createMetricsService } from "../admin/metrics.js";
 import { createAdminOverviewService } from "../admin/overview-service.js";
 import { createAdminRoomQueryService } from "../admin/room-query-service.js";
+import { createRedisAuditStore } from "../admin/redis-audit-store.js";
 import { createAdminRouter } from "../admin/router.js";
 import type { AdminSession } from "../admin/types.js";
 import type { AdminSessionStore } from "../admin-session-store.js";
@@ -49,6 +50,7 @@ export function createAdminServices(args: {
     let auditLogService: GlobalAuditStore = createAuditLogService();
     let adminSessionStore: AdminSessionStore | undefined;
     let closeAdminSessionStore: (() => Promise<void>) | undefined;
+    let closeAuditLogService: (() => Promise<void>) | undefined;
 
     if (args.adminConfig) {
       if (args.adminConfig.sessionStoreProvider === "redis") {
@@ -59,6 +61,14 @@ export function createAdminServices(args: {
         closeAdminSessionStore = redisAdminSessionStore.close;
       } else {
         adminSessionStore = createInMemoryAdminSessionStore();
+      }
+
+      if (args.adminConfig.auditStoreProvider === "redis") {
+        const redisAuditStore = await createRedisAuditStore(
+          args.persistenceConfig.redisUrl,
+        );
+        auditLogService = redisAuditStore;
+        closeAuditLogService = redisAuditStore.close;
       }
     }
 
@@ -169,6 +179,7 @@ export function createAdminServices(args: {
       adminRouter,
       async close() {
         await closeAdminSessionStore?.();
+        await closeAuditLogService?.();
       },
     };
   })();

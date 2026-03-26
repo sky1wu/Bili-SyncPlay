@@ -28,6 +28,8 @@ async function startAdminServer(dependencies: SyncServerDependencies = {}) {
       sessionTtlMs: 60_000,
       role: "admin",
       sessionStoreProvider: "memory",
+      eventStoreProvider: "memory",
+      auditStoreProvider: "memory",
     },
   };
   if (resolvedDependencies.serviceVersion === undefined) {
@@ -73,6 +75,8 @@ async function startAdminServerWithPersistence(
       sessionTtlMs: 60_000,
       role: "admin",
       sessionStoreProvider: "memory",
+      eventStoreProvider: "memory",
+      auditStoreProvider: "memory",
     },
   };
   if (resolvedDependencies.serviceVersion === undefined) {
@@ -205,6 +209,8 @@ function adminDependencies(role: AdminRole = "admin"): SyncServerDependencies {
       sessionTtlMs: 60_000,
       role,
       sessionStoreProvider: "memory",
+      eventStoreProvider: "memory",
+      auditStoreProvider: "memory",
     },
     serviceVersion: "0.7.0-test",
   };
@@ -415,6 +421,8 @@ test("admin overview falls back to server package version", async () => {
         sessionTtlMs: 60_000,
         role: "admin",
         sessionStoreProvider: "memory",
+        eventStoreProvider: "memory",
+        auditStoreProvider: "memory",
       },
     },
   );
@@ -516,6 +524,8 @@ test("redis-backed admin sessions authenticate across server instances and logou
     sessionTtlMs: 60_000,
     role: "admin" as const,
     sessionStoreProvider: "redis" as const,
+    eventStoreProvider: "memory" as const,
+    auditStoreProvider: "memory" as const,
   };
   const serverA = await startAdminServerWithPersistence(persistenceConfig, {
     adminConfig: sharedAdminConfig,
@@ -572,6 +582,122 @@ test("viewer cannot call admin action endpoints", async () => {
     assert.equal(response.body.ok, false);
   } finally {
     await server.close();
+  }
+});
+
+test("redis-backed admin events and audit logs are queryable across server instances", async (t) => {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const persistenceConfig = {
+    ...getDefaultPersistenceConfig(),
+    redisUrl,
+  };
+  const sharedAdminConfig = {
+    username: "admin",
+    passwordHash: `sha256:${sha256Hex("secret-123")}`,
+    sessionSecret: "session-secret-123",
+    sessionTtlMs: 60_000,
+    role: "operator" as const,
+    sessionStoreProvider: "redis" as const,
+    eventStoreProvider: "redis" as const,
+    auditStoreProvider: "redis" as const,
+  };
+  const serverA = await startAdminServerWithPersistence(persistenceConfig, {
+    adminConfig: sharedAdminConfig,
+  });
+  const serverB = await startAdminServerWithPersistence(persistenceConfig, {
+    adminConfig: sharedAdminConfig,
+  });
+
+  try {
+    const tokenA = await login(serverA.httpBaseUrl);
+    const tokenB = await login(serverB.httpBaseUrl);
+
+    const socket = await connectClient(serverA.wsUrl);
+    const collector = createMessageCollector(socket);
+    try {
+      socket.send(
+        JSON.stringify({
+          type: "room:create",
+          payload: { displayName: "Alice" },
+        }),
+      );
+      const created = await collector.next("room:created");
+      await collector.next("room:state");
+      const roomCode = (created.payload as { roomCode: string }).roomCode;
+      const memberToken = (created.payload as { memberToken: string })
+        .memberToken;
+
+      socket.send(
+        JSON.stringify({
+          type: "video:share",
+          payload: {
+            memberToken,
+            video: {
+              videoId: "BV1xx411c7mD",
+              url: "https://www.bilibili.com/video/BV1xx411c7mD",
+              title: "Video",
+            },
+          },
+        }),
+      );
+      await collector.next("room:state");
+
+      const clearVideo = await requestJson(
+        serverA.httpBaseUrl,
+        `/api/admin/rooms/${roomCode}/clear-video`,
+        {
+          method: "POST",
+          token: tokenA,
+          body: { reason: "shared audit verification" },
+        },
+      );
+      assert.equal(clearVideo.status, 200);
+      await collector.next("room:state");
+
+      const eventsOnB = await requestJson(
+        serverB.httpBaseUrl,
+        `/api/admin/events?event=room_created&roomCode=${roomCode}`,
+        { token: tokenB },
+      );
+      assert.equal(eventsOnB.status, 200);
+      const eventItems = (
+        eventsOnB.body.data as {
+          items: Array<{ event: string; roomCode: string }>;
+        }
+      ).items;
+      assert.equal(eventItems.some((item) => item.event === "room_created"), true);
+
+      const auditOnB = await requestJson(
+        serverB.httpBaseUrl,
+        "/api/admin/audit-logs?action=clear_room_video&page=1&pageSize=10",
+        { token: tokenB },
+      );
+      assert.equal(auditOnB.status, 200);
+      const auditItems = (
+        auditOnB.body.data as {
+          items: Array<{ action: string; targetId: string; instanceId: string }>;
+        }
+      ).items;
+      assert.equal(
+        auditItems.some(
+          (item) =>
+            item.action === "clear_room_video" &&
+            item.targetId === roomCode &&
+            item.instanceId === "instance-1",
+        ),
+        true,
+      );
+    } finally {
+      await closeClient(socket);
+    }
+  } finally {
+    await serverA.close();
+    await serverB.close();
   }
 });
 

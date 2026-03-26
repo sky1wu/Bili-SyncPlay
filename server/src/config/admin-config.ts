@@ -8,6 +8,7 @@ import {
 } from "./env.js";
 
 function parseAdminSessionStoreProvider(
+  name: string,
   value: string | undefined,
 ): "memory" | "redis" {
   if (value === undefined || value === "") {
@@ -17,7 +18,7 @@ function parseAdminSessionStoreProvider(
     return value;
   }
   throw new Error(
-    'Environment variable ADMIN_SESSION_STORE_PROVIDER must be "memory" or "redis".',
+    `Environment variable ${name} must be "memory" or "redis".`,
   );
 }
 
@@ -47,7 +48,16 @@ export function loadAdminConfig(env: EnvSource = process.env): AdminConfig {
     ),
     role: parseAdminRole(readTrimmedEnv(env, "ADMIN_ROLE")),
     sessionStoreProvider: parseAdminSessionStoreProvider(
+      "ADMIN_SESSION_STORE_PROVIDER",
       readTrimmedEnv(env, "ADMIN_SESSION_STORE_PROVIDER"),
+    ),
+    eventStoreProvider: parseAdminSessionStoreProvider(
+      "ADMIN_EVENT_STORE_PROVIDER",
+      readTrimmedEnv(env, "ADMIN_EVENT_STORE_PROVIDER"),
+    ),
+    auditStoreProvider: parseAdminSessionStoreProvider(
+      "ADMIN_AUDIT_STORE_PROVIDER",
+      readTrimmedEnv(env, "ADMIN_AUDIT_STORE_PROVIDER"),
     ),
   };
 }

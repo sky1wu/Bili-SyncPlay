@@ -10,6 +10,7 @@ import {
   type ServerMessage,
 } from "@bili-syncplay/protocol";
 import { createEventStore } from "./admin/event-store.js";
+import { createRedisEventStore } from "./admin/redis-event-store.js";
 import { createRuntimeRegistry } from "./admin/runtime-registry.js";
 import { createActiveRoomRegistry } from "./active-room-registry.js";
 import { createAdminServices } from "./bootstrap/admin-services.js";
@@ -22,6 +23,7 @@ import { createRoomReaper } from "./room-reaper.js";
 import { createRoomService } from "./room-service.js";
 import { createRedisRoomStore } from "./redis-room-store.js";
 import { createSecurityPolicy } from "./security.js";
+import type { GlobalEventStore } from "./admin/global-event-store.js";
 import type {
   AdminConfig,
   AdminUiConfig,
@@ -147,7 +149,10 @@ export async function createSyncServer(
       ? await createRedisRoomStore(persistenceConfig.redisUrl)
       : createInMemoryRoomStore({ now }));
   const runtimeRegistry = createRuntimeRegistry(now);
-  const eventStore = createEventStore();
+  const eventStore =
+    dependencies.adminConfig?.eventStoreProvider === "redis"
+      ? await createRedisEventStore(persistenceConfig.redisUrl)
+      : createEventStore();
   const logEvent =
     dependencies.logEvent ??
     createStructuredLogger(undefined, eventStore, runtimeRegistry);
@@ -412,6 +417,12 @@ export async function createSyncServer(
       };
       if (typeof maybeClosableStore.close === "function") {
         await maybeClosableStore.close();
+      }
+      const maybeClosableEventStore = eventStore as GlobalEventStore & {
+        close?: () => Promise<void>;
+      };
+      if (typeof maybeClosableEventStore.close === "function") {
+        await maybeClosableEventStore.close();
       }
       await closeAdminServices();
     },
