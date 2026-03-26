@@ -19,6 +19,7 @@ function createSession(id: string): Session {
       close() {},
       terminate() {},
     } as Session["socket"],
+    instanceId: `${id}-node`,
     remoteAddress: "127.0.0.1",
     origin: "chrome-extension://allowed-extension",
     roomCode: null,

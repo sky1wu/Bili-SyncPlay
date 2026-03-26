@@ -13,6 +13,7 @@ function createSession(id: string): Session {
       close() {},
       terminate() {},
     } as Session["socket"],
+    instanceId: "test-node",
     remoteAddress: null,
     origin: null,
     roomCode: null,

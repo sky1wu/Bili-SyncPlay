@@ -8,7 +8,16 @@ function toSummary(
   room: PersistedRoom,
   activeSessions: Session[],
 ): RoomSummary {
+  const instanceIds = Array.from(
+    new Set(
+      activeSessions
+        .map((session) => session.instanceId ?? null)
+        .filter((instanceId): instanceId is string => Boolean(instanceId)),
+    ),
+  ).sort();
+
   return {
+    instanceId: instanceIds.length === 1 ? instanceIds[0] : undefined,
     roomCode: room.code,
     createdAt: room.createdAt,
     lastActiveAt: room.lastActiveAt,
@@ -17,6 +26,9 @@ function toSummary(
     playback: room.playback,
     memberCount: activeSessions.length,
     isActive: activeSessions.length > 0,
+    instanceIds: instanceIds.filter(
+      (instanceId): instanceId is string => typeof instanceId === "string",
+    ),
   };
 }
 
@@ -26,18 +38,26 @@ export function createAdminRoomQueryService(options: {
   runtimeStore: RuntimeStore;
   eventStore: GlobalEventStore;
 }) {
-  function filterByStatus(
+  async function filterByStatus(
     items: PersistedRoom[],
     status: RoomListQuery["status"],
-  ): PersistedRoom[] {
+  ): Promise<PersistedRoom[]> {
     if (status === "all") {
       return items;
     }
-    return items.filter((room) => {
-      const isActive =
-        options.runtimeStore.listSessionsByRoom(room.code).length > 0;
-      return status === "active" ? isActive : !isActive;
-    });
+
+    const roomsWithState = await Promise.all(
+      items.map(async (room) => ({
+        room,
+        isActive:
+          (await options.runtimeStore.listClusterSessionsByRoom(room.code))
+            .length > 0,
+      })),
+    );
+
+    return roomsWithState
+      .filter(({ isActive }) => (status === "active" ? isActive : !isActive))
+      .map(({ room }) => room);
   }
 
   return {
@@ -45,7 +65,7 @@ export function createAdminRoomQueryService(options: {
       const baseRooms =
         query.status === "all"
           ? await options.roomStore.listRooms(query)
-          : filterByStatus(
+          : await filterByStatus(
               await options.roomStore.listRooms({
                 ...query,
                 page: 1,
@@ -65,14 +85,21 @@ export function createAdminRoomQueryService(options: {
           ? baseRooms
           : baseRooms.slice(start, start + query.pageSize);
 
+      const roomItems = await Promise.all(
+        selected.map(async (room) => {
+          const activeSessions = await options.runtimeStore.listClusterSessionsByRoom(
+            room.code,
+          );
+          return {
+            ...toSummary(room, activeSessions),
+            instanceId:
+              activeSessions.length === 0 ? options.instanceId : undefined,
+          };
+        }),
+      );
+
       return {
-        items: selected.map((room) => ({
-          ...toSummary(
-            room,
-            options.runtimeStore.listSessionsByRoom(room.code),
-          ),
-          instanceId: options.instanceId,
-        })),
+        items: roomItems,
         pagination: {
           page: query.page,
           pageSize: query.pageSize,
@@ -86,16 +113,19 @@ export function createAdminRoomQueryService(options: {
         return null;
       }
 
-      const sessions = options.runtimeStore.listSessionsByRoom(roomCode);
+      const sessions = await options.runtimeStore.listClusterSessionsByRoom(
+        roomCode,
+      );
       return {
-        instanceId: options.instanceId,
+        instanceId:
+          sessions.length === 1 ? (sessions[0]?.instanceId ?? options.instanceId) : undefined,
         room: {
           ...toSummary(room, sessions),
-          instanceId: options.instanceId,
         },
         members: sessions.map((session) => ({
           sessionId: session.id,
           memberId: session.memberId ?? session.id,
+          instanceId: session.instanceId ?? undefined,
           displayName: session.displayName,
           joinedAt: session.joinedAt,
           remoteAddress: session.remoteAddress,

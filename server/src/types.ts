@@ -31,6 +31,7 @@ export type SessionRateLimitState = {
 export type Session = {
   id: string;
   socket: WebSocket;
+  instanceId?: string | null;
   remoteAddress: string | null;
   origin: string | null;
   roomCode: string | null;

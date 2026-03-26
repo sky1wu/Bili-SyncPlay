@@ -168,6 +168,9 @@ function createMirroredRuntimeStore(
     countClusterActiveRooms() {
       return sharedRuntimeStore.countClusterActiveRooms();
     },
+    listClusterSessionsByRoom(roomCode) {
+      return sharedRuntimeStore.listClusterSessionsByRoom(roomCode);
+    },
   };
 }
 
@@ -430,6 +433,7 @@ export async function createSyncServer(
     const session: Session = {
       id: randomUUID(),
       socket,
+      instanceId: persistenceConfig.instanceId,
       remoteAddress: context.remoteAddress,
       origin: context.origin,
       roomCode: null,

@@ -14,6 +14,7 @@ const ALLOWED_ORIGIN = "chrome-extension://allowed-extension";
 const REDIS_URL = process.env.REDIS_URL;
 
 async function startRedisServer() {
+  const instanceId = `runtime-lifecycle-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 6)}`;
   const server = await createSyncServer(
     {
       ...getDefaultSecurityConfig(),
@@ -23,6 +24,7 @@ async function startRedisServer() {
       ...getDefaultPersistenceConfig(),
       provider: "redis",
       runtimeStoreProvider: "redis",
+      instanceId,
       redisUrl: REDIS_URL ?? getDefaultPersistenceConfig().redisUrl,
     },
   );
@@ -39,6 +41,7 @@ async function startRedisServer() {
 
   return {
     close: server.close,
+    instanceId,
     wsUrl: `ws://127.0.0.1:${address.port}`,
   };
 }
@@ -149,6 +152,12 @@ test("websocket lifecycle mirrors sessions into the shared redis runtime store",
           .map((session) => session.displayName)
           .sort(),
         ["Alice", "Bob"],
+      );
+      assert.deepEqual(
+        Array.from(sharedRoom.members.values())
+          .map((session) => session.instanceId)
+          .sort(),
+        [serverA.instanceId, serverB.instanceId].sort(),
       );
     } finally {
       await closeClient(owner);

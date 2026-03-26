@@ -95,6 +95,7 @@ export type AuditLogQuery = {
 
 export type RoomSummary = {
   instanceId?: string;
+  instanceIds?: string[];
   roomCode: string;
   createdAt: number;
   lastActiveAt: number;
@@ -108,6 +109,7 @@ export type RoomSummary = {
 export type RoomDetailMember = {
   sessionId: string;
   memberId: string;
+  instanceId?: string;
   displayName: string;
   joinedAt: number | null;
   remoteAddress: string | null;

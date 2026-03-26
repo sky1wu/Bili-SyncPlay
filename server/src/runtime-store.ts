@@ -55,6 +55,7 @@ export type RuntimeStore = {
   heartbeatNode: (status: ClusterNodeStatus) => Promise<void>;
   listNodeStatuses: (currentTime?: number) => Promise<ClusterNodeStatus[]>;
   countClusterActiveRooms: () => Promise<number>;
+  listClusterSessionsByRoom: (roomCode: string) => Promise<Session[]>;
 };
 
 export function createInMemoryRuntimeStore(
@@ -316,6 +317,11 @@ export function createInMemoryRuntimeStore(
     },
     async countClusterActiveRooms() {
       return roomSessionIds.size;
+    },
+    async listClusterSessionsByRoom(roomCode) {
+      return Array.from(roomSessionIds.get(roomCode) ?? [])
+        .map((sessionId) => sessionsById.get(sessionId) ?? null)
+        .filter((session): session is Session => session !== null);
     },
   };
 }

@@ -7,6 +7,7 @@ import {
 
 type RedisRuntimeSession = {
   id: string;
+  instanceId: string | null;
   remoteAddress: string | null;
   origin: string | null;
   roomCode: string | null;
@@ -69,6 +70,7 @@ const DETACHED_SOCKET = {
 function serializeSession(session: Session): RedisRuntimeSession {
   return {
     id: session.id,
+    instanceId: session.instanceId ?? null,
     remoteAddress: session.remoteAddress,
     origin: session.origin,
     roomCode: session.roomCode,
@@ -88,6 +90,7 @@ function deserializeSession(fields: Record<string, string>): Session | null {
   return {
     id: fields.id,
     socket: DETACHED_SOCKET,
+    instanceId: normalizeNullable(fields.instanceId),
     remoteAddress: normalizeNullable(fields.remoteAddress),
     origin: normalizeNullable(fields.origin),
     roomCode: normalizeNullable(fields.roomCode),
@@ -164,6 +167,7 @@ export async function createRedisRuntimeStore(
           .sadd(`${keyPrefix}sessions`, session.id)
           .hset(sessionKey(keyPrefix, session.id), {
             id: serialized.id,
+            instanceId: encodeNullable(serialized.instanceId),
             remoteAddress: encodeNullable(serialized.remoteAddress),
             origin: encodeNullable(serialized.origin),
             roomCode: encodeNullable(serialized.roomCode),
@@ -438,6 +442,13 @@ export async function createRedisRuntimeStore(
     },
     async countClusterActiveRooms() {
       return redis.scard(`${keyPrefix}rooms`);
+    },
+    async listClusterSessionsByRoom(roomCode: string) {
+      const sessionIds = await redis.smembers(roomSessionsKey(keyPrefix, roomCode));
+      const sessions = await Promise.all(
+        sessionIds.map((sessionId) => loadSession(redis, keyPrefix, sessionId)),
+      );
+      return sessions.filter((session): session is Session => session !== null);
     },
   };
 
