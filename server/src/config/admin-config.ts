@@ -7,6 +7,20 @@ import {
   readTrimmedEnv,
 } from "./env.js";
 
+function parseAdminSessionStoreProvider(
+  value: string | undefined,
+): "memory" | "redis" {
+  if (value === undefined || value === "") {
+    return "memory";
+  }
+  if (value === "memory" || value === "redis") {
+    return value;
+  }
+  throw new Error(
+    'Environment variable ADMIN_SESSION_STORE_PROVIDER must be "memory" or "redis".',
+  );
+}
+
 function parseAdminRole(value: string | undefined): AdminRole {
   return value === "viewer" || value === "operator" || value === "admin"
     ? value
@@ -32,6 +46,9 @@ export function loadAdminConfig(env: EnvSource = process.env): AdminConfig {
       12 * 60 * 60 * 1000,
     ),
     role: parseAdminRole(readTrimmedEnv(env, "ADMIN_ROLE")),
+    sessionStoreProvider: parseAdminSessionStoreProvider(
+      readTrimmedEnv(env, "ADMIN_SESSION_STORE_PROVIDER"),
+    ),
   };
 }
 

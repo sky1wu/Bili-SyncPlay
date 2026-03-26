@@ -27,6 +27,7 @@ async function startAdminServer(dependencies: SyncServerDependencies = {}) {
       sessionSecret: "session-secret-123",
       sessionTtlMs: 60_000,
       role: "admin",
+      sessionStoreProvider: "memory",
     },
   };
   if (resolvedDependencies.serviceVersion === undefined) {
@@ -39,6 +40,51 @@ async function startAdminServer(dependencies: SyncServerDependencies = {}) {
       allowedOrigins: [ALLOWED_ORIGIN],
     },
     getDefaultPersistenceConfig(),
+    resolvedDependencies,
+  );
+
+  await new Promise<void>((resolve, reject) => {
+    server.httpServer.listen(0, "127.0.0.1", () => resolve());
+    server.httpServer.once("error", reject);
+  });
+
+  const address = server.httpServer.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to determine test server address.");
+  }
+
+  return {
+    close: server.close,
+    httpBaseUrl: `http://127.0.0.1:${address.port}`,
+    wsUrl: `ws://127.0.0.1:${address.port}`,
+  };
+}
+
+async function startAdminServerWithPersistence(
+  persistenceConfig: ReturnType<typeof getDefaultPersistenceConfig>,
+  dependencies: SyncServerDependencies = {},
+) {
+  const resolvedDependencies: SyncServerDependencies = {
+    ...dependencies,
+    adminConfig: dependencies.adminConfig ?? {
+      username: "admin",
+      passwordHash: `sha256:${sha256Hex("secret-123")}`,
+      sessionSecret: "session-secret-123",
+      sessionTtlMs: 60_000,
+      role: "admin",
+      sessionStoreProvider: "memory",
+    },
+  };
+  if (resolvedDependencies.serviceVersion === undefined) {
+    resolvedDependencies.serviceVersion = "0.7.0-test";
+  }
+
+  const server = await createSyncServer(
+    {
+      ...getDefaultSecurityConfig(),
+      allowedOrigins: [ALLOWED_ORIGIN],
+    },
+    persistenceConfig,
     resolvedDependencies,
   );
 
@@ -158,6 +204,7 @@ function adminDependencies(role: AdminRole = "admin"): SyncServerDependencies {
       sessionSecret: "session-secret-123",
       sessionTtlMs: 60_000,
       role,
+      sessionStoreProvider: "memory",
     },
     serviceVersion: "0.7.0-test",
   };
@@ -367,6 +414,7 @@ test("admin overview falls back to server package version", async () => {
         sessionSecret: "session-secret-123",
         sessionTtlMs: 60_000,
         role: "admin",
+        sessionStoreProvider: "memory",
       },
     },
   );
@@ -447,6 +495,62 @@ test("admin login rejects invalid credentials", async () => {
     assert.equal(login.body.ok, false);
   } finally {
     await server.close();
+  }
+});
+
+test("redis-backed admin sessions authenticate across server instances and logout globally", async (t) => {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const persistenceConfig = {
+    ...getDefaultPersistenceConfig(),
+    redisUrl,
+  };
+  const sharedAdminConfig = {
+    username: "admin",
+    passwordHash: `sha256:${sha256Hex("secret-123")}`,
+    sessionSecret: "session-secret-123",
+    sessionTtlMs: 60_000,
+    role: "admin" as const,
+    sessionStoreProvider: "redis" as const,
+  };
+  const serverA = await startAdminServerWithPersistence(persistenceConfig, {
+    adminConfig: sharedAdminConfig,
+  });
+  const serverB = await startAdminServerWithPersistence(persistenceConfig, {
+    adminConfig: sharedAdminConfig,
+  });
+
+  try {
+    const token = await login(serverA.httpBaseUrl);
+    const meOnB = await requestJson(serverB.httpBaseUrl, "/api/admin/me", {
+      token,
+    });
+    assert.equal(meOnB.status, 200);
+    assert.equal((meOnB.body.data as { username: string }).username, "admin");
+
+    const logoutOnB = await requestJson(
+      serverB.httpBaseUrl,
+      "/api/admin/auth/logout",
+      {
+        method: "POST",
+        token,
+      },
+    );
+    assert.equal(logoutOnB.status, 200);
+
+    const meOnAAfterLogout = await requestJson(
+      serverA.httpBaseUrl,
+      "/api/admin/me",
+      { token },
+    );
+    assert.equal(meOnAAfterLogout.status, 401);
+  } finally {
+    await serverA.close();
+    await serverB.close();
   }
 });
 

@@ -85,6 +85,7 @@ export type AdminConfig = {
   sessionSecret: string;
   sessionTtlMs: number;
   role: AdminRole;
+  sessionStoreProvider: "memory" | "redis";
 } | null;
 
 export type AdminUiConfig = {

@@ -185,7 +185,7 @@ export async function createSyncServer(
     logEvent,
     now,
   });
-  const { adminRouter } = createAdminServices({
+  const { adminRouter, close: closeAdminServices } = await createAdminServices({
     securityConfig,
     persistenceConfig,
     roomStore,
@@ -413,6 +413,7 @@ export async function createSyncServer(
       if (typeof maybeClosableStore.close === "function") {
         await maybeClosableStore.close();
       }
+      await closeAdminServices();
     },
   };
 }

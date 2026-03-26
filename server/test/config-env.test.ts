@@ -51,6 +51,7 @@ test("admin config parses role and session ttl", () => {
     ADMIN_USERNAME: "admin",
     ADMIN_PASSWORD_HASH: "hash",
     ADMIN_SESSION_SECRET: "secret",
+    ADMIN_SESSION_STORE_PROVIDER: "redis",
     ADMIN_ROLE: "operator",
     ADMIN_SESSION_TTL_MS: "3600000",
   });
@@ -61,6 +62,7 @@ test("admin config parses role and session ttl", () => {
     sessionSecret: "secret",
     role: "operator",
     sessionTtlMs: 3600000,
+    sessionStoreProvider: "redis",
   });
 });
 
