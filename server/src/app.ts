@@ -165,6 +165,9 @@ function createMirroredRuntimeStore(
     listNodeStatuses(currentTime) {
       return sharedRuntimeStore.listNodeStatuses(currentTime);
     },
+    countClusterActiveRooms() {
+      return sharedRuntimeStore.countClusterActiveRooms();
+    },
   };
 }
 
@@ -335,6 +338,7 @@ export async function createSyncServer(
     noServer: true,
     maxPayload: securityConfig.maxMessageBytes,
   });
+  const pendingSessionCleanup = new Set<Promise<void>>();
 
   function send(socket: WebSocket, message: ServerMessage): void {
     if (socket.readyState === socket.OPEN) {
@@ -491,7 +495,7 @@ export async function createSyncServer(
     });
 
     socket.on("close", (code, reason) => {
-      void (async () => {
+      const cleanup = (async () => {
         securityPolicy.decrementConnectionCount(session.remoteAddress);
         await messageHandler.leaveRoom(session);
         runtimeStore.unregisterSession(session.id);
@@ -505,6 +509,10 @@ export async function createSyncServer(
           reason: decodeCloseReason(reason),
         });
       })();
+      pendingSessionCleanup.add(cleanup);
+      void cleanup.finally(() => {
+        pendingSessionCleanup.delete(cleanup);
+      });
     });
   });
 
@@ -512,7 +520,7 @@ export async function createSyncServer(
     httpServer,
     close: async () => {
       roomReaper.stop();
-      nodeHeartbeat.stop();
+      await nodeHeartbeat.stop();
       for (const client of wss.clients) {
         client.terminate();
       }
@@ -531,6 +539,7 @@ export async function createSyncServer(
           });
         });
       });
+      await Promise.allSettled(Array.from(pendingSessionCleanup));
       const maybeClosableStore = roomStore as RoomStore & {
         close?: () => Promise<void>;
       };

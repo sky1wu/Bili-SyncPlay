@@ -70,6 +70,7 @@ test("redis runtime store shares room sessions and member token state across ins
     const room = await storeA.getRoom("ROOM01");
     assert.ok(room);
     assert.deepEqual(Array.from(room.members.keys()).sort(), ["member-a", "member-b"]);
+    assert.equal(await storeA.countClusterActiveRooms(), 1);
     assert.equal(await storeB.findMemberIdByToken("ROOM01", "token-b"), "member-b");
 
     storeA.blockMemberToken("ROOM01", "token-a", currentTime + 500);

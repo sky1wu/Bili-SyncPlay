@@ -54,6 +54,7 @@ export type RuntimeStore = {
   deleteRoom: (code: string) => void;
   heartbeatNode: (status: ClusterNodeStatus) => Promise<void>;
   listNodeStatuses: (currentTime?: number) => Promise<ClusterNodeStatus[]>;
+  countClusterActiveRooms: () => Promise<number>;
 };
 
 export function createInMemoryRuntimeStore(
@@ -312,6 +313,9 @@ export function createInMemoryRuntimeStore(
           };
         })
         .sort((left, right) => left.instanceId.localeCompare(right.instanceId));
+    },
+    async countClusterActiveRooms() {
+      return roomSessionIds.size;
     },
   };
 }

@@ -32,7 +32,7 @@ function createSession(id: string): Session {
   };
 }
 
-test("runtime store tracks room membership and kicked member tokens", () => {
+test("runtime store tracks room membership and kicked member tokens", async () => {
   let currentTime = 1_000;
   const store = createInMemoryRuntimeStore(() => currentTime);
   const session = createSession("session-1");
@@ -46,6 +46,7 @@ test("runtime store tracks room membership and kicked member tokens", () => {
     store.listSessionsByRoom("ROOM01").map((entry) => entry.id),
     ["session-1"],
   );
+  assert.equal(await store.countClusterActiveRooms(), 1);
   assert.equal(store.getActiveRoomCount(), 1);
   assert.equal(store.getActiveMemberCount(), 1);
   assert.equal(store.findMemberIdByToken("ROOM01", "token-1"), "member-1");

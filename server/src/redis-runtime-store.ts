@@ -436,6 +436,9 @@ export async function createRedisRuntimeStore(
         .filter((status): status is ClusterNodeStatus => status !== null)
         .sort((left, right) => left.instanceId.localeCompare(right.instanceId));
     },
+    async countClusterActiveRooms() {
+      return redis.scard(`${keyPrefix}rooms`);
+    },
   };
 
   return store as unknown as RuntimeStore & { close: () => Promise<void> };

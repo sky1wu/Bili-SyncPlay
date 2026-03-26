@@ -22,8 +22,27 @@ export function createAdminOverviewService(options: {
         keyword: undefined,
         includeExpired: false,
       });
-      const activeRoomCount = options.runtimeStore.getActiveRoomCount();
-      const activeMemberCount = options.runtimeStore.getActiveMemberCount();
+      const nodeStatuses = await options.runtimeStore.listNodeStatuses(currentTime);
+      const clusterActiveRoomCount =
+        await options.runtimeStore.countClusterActiveRooms();
+      const activeNodeStatuses =
+        nodeStatuses.length === 0
+          ? null
+          : nodeStatuses.filter((status) => status.health !== "offline");
+      const connectionCount =
+        activeNodeStatuses?.reduce(
+          (total, status) => total + status.connectionCount,
+          0,
+        ) ?? options.runtimeStore.getConnectionCount();
+      const activeRoomCount =
+        activeNodeStatuses !== null
+          ? clusterActiveRoomCount
+          : options.runtimeStore.getActiveRoomCount();
+      const activeMemberCount =
+        activeNodeStatuses?.reduce(
+          (total, status) => total + status.activeMemberCount,
+          0,
+        ) ?? options.runtimeStore.getActiveMemberCount();
 
       return {
         service: {
@@ -41,7 +60,7 @@ export function createAdminOverviewService(options: {
               : true,
         },
         runtime: {
-          connectionCount: options.runtimeStore.getConnectionCount(),
+          connectionCount,
           activeRoomCount,
           activeMemberCount,
         },
@@ -49,6 +68,15 @@ export function createAdminOverviewService(options: {
           totalNonExpired,
           active: activeRoomCount,
           idle: Math.max(0, totalNonExpired - activeRoomCount),
+        },
+        nodes: {
+          total: nodeStatuses.length,
+          online: nodeStatuses.filter((status) => status.health === "ok").length,
+          stale: nodeStatuses.filter((status) => status.health === "stale")
+            .length,
+          offline: nodeStatuses.filter((status) => status.health === "offline")
+            .length,
+          items: nodeStatuses,
         },
         events: {
           lastMinute: {
