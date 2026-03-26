@@ -209,6 +209,7 @@ export async function createMultiNodeTestKit(redisUrl: string) {
       {
         ...dependencies,
         adminConfig: dependencies.adminConfig ?? adminConfig,
+        logEvent: dependencies.logEvent ?? (() => {}),
         serviceVersion: dependencies.serviceVersion ?? `0.9.0-${name}-test`,
         adminUiConfig: dependencies.adminUiConfig ?? {
           enabled: false,
@@ -235,6 +236,7 @@ export async function createMultiNodeTestKit(redisUrl: string) {
       },
       {
         adminConfig,
+        logEvent: () => {},
         serviceVersion: `0.9.0-${name}-test`,
       },
     );
