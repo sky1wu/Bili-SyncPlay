@@ -405,6 +405,76 @@ The current server implementation:
 - keeps empty rooms until `EMPTY_ROOM_TTL_MS` expires instead of deleting them immediately
 - supports origin allowlists, connection throttling, message throttling, and structured security logs
 
+### Multi-Node Deployment and Global Admin
+
+The server now supports a full multi-node topology with shared admin sessions, shared event and audit streams, shared runtime indexes, cross-node room-state fanout, cross-node admin commands, and a dedicated global admin entrypoint.
+
+Recommended production topology:
+
+- `room-node-a`: WebSocket room traffic plus health probes
+- `room-node-b`: WebSocket room traffic plus health probes
+- `global-admin`: `/admin` and `/api/admin/*`
+- `redis`: shared persistence, runtime index, event bus, and command bus backend
+
+Recommended provider settings for a full multi-node rollout:
+
+- `ROOM_STORE_PROVIDER=redis`
+- `ADMIN_SESSION_STORE_PROVIDER=redis`
+- `ADMIN_EVENT_STORE_PROVIDER=redis`
+- `ADMIN_AUDIT_STORE_PROVIDER=redis`
+- `RUNTIME_STORE_PROVIDER=redis`
+- `ROOM_EVENT_BUS_PROVIDER=redis`
+- `ADMIN_COMMAND_BUS_PROVIDER=redis`
+- `NODE_HEARTBEAT_ENABLED=true`
+
+Room node example:
+
+```bash
+PORT=8787 \
+INSTANCE_ID=room-node-a \
+ROOM_STORE_PROVIDER=redis \
+ADMIN_SESSION_STORE_PROVIDER=redis \
+ADMIN_EVENT_STORE_PROVIDER=redis \
+ADMIN_AUDIT_STORE_PROVIDER=redis \
+RUNTIME_STORE_PROVIDER=redis \
+ROOM_EVENT_BUS_PROVIDER=redis \
+ADMIN_COMMAND_BUS_PROVIDER=redis \
+NODE_HEARTBEAT_ENABLED=true \
+GLOBAL_ADMIN_ENABLED=false \
+REDIS_URL=redis://127.0.0.1:6379 \
+node server/dist/index.js
+```
+
+Dedicated global admin example:
+
+```bash
+GLOBAL_ADMIN_PORT=8788 \
+INSTANCE_ID=global-admin \
+ROOM_STORE_PROVIDER=redis \
+ADMIN_SESSION_STORE_PROVIDER=redis \
+ADMIN_EVENT_STORE_PROVIDER=redis \
+ADMIN_AUDIT_STORE_PROVIDER=redis \
+RUNTIME_STORE_PROVIDER=redis \
+ROOM_EVENT_BUS_PROVIDER=redis \
+ADMIN_COMMAND_BUS_PROVIDER=redis \
+NODE_HEARTBEAT_ENABLED=true \
+GLOBAL_ADMIN_ENABLED=true \
+REDIS_URL=redis://127.0.0.1:6379 \
+node server/dist/global-admin-index.js
+```
+
+If the admin UI should talk to a separate API origin, set `GLOBAL_ADMIN_API_BASE_URL=https://admin.example.com`.
+
+Redis key families used by the multi-node control plane:
+
+- `bsp:room:*`, `bsp:room-index`, `bsp:room-expiry`: persisted room base state
+- `bsp:runtime:*`: shared sessions, room members, blocked member tokens, and node heartbeats
+- `bsp:admin:session:*`: shared admin bearer sessions
+- `bsp:events`: runtime event stream
+- `bsp:audit-logs`: admin audit stream
+- `bsp:room-events`: room event bus channel
+- `bsp:admin-command:*`, `bsp:admin-command-result:*`: admin command channels
+
 ### Security Environment Variables
 
 The server accepts the following environment variables. Safe defaults are built in, but production should set them explicitly:
@@ -428,6 +498,18 @@ The server accepts the following environment variables. Safe defaults are built 
 - `ADMIN_SESSION_TTL_MS`: admin session lifetime in milliseconds
 - `ADMIN_ROLE`: admin role, one of `viewer`, `operator`, `admin`
 - `ADMIN_UI_DEMO_ENABLED`: enables the built-in admin UI demo mode for local / non-production preview; defaults to `false`
+- `ADMIN_SESSION_STORE_PROVIDER`: `memory` or `redis`
+- `ADMIN_EVENT_STORE_PROVIDER`: `memory` or `redis`
+- `ADMIN_AUDIT_STORE_PROVIDER`: `memory` or `redis`
+- `RUNTIME_STORE_PROVIDER`: `memory` or `redis`
+- `ROOM_EVENT_BUS_PROVIDER`: `none`, `memory`, or `redis`
+- `ADMIN_COMMAND_BUS_PROVIDER`: `none`, `memory`, or `redis`
+- `GLOBAL_ADMIN_ENABLED`: when `false`, a room node keeps `/`, `/healthz`, `/readyz`, but disables `/admin` and `/api/admin/*`
+- `GLOBAL_ADMIN_API_BASE_URL`: optional admin UI API base URL override
+- `GLOBAL_ADMIN_PORT`: HTTP port for `server/dist/global-admin-index.js`
+- `NODE_HEARTBEAT_ENABLED`: enables node heartbeat reporting
+- `NODE_HEARTBEAT_INTERVAL_MS`: heartbeat interval in milliseconds
+- `NODE_HEARTBEAT_TTL_MS`: heartbeat TTL in milliseconds
 - `RATE_LIMIT_ROOM_CREATE_PER_MINUTE`
 - `RATE_LIMIT_ROOM_JOIN_PER_MINUTE`
 - `RATE_LIMIT_VIDEO_SHARE_PER_10_SECONDS`
@@ -593,7 +675,7 @@ Expected response:
 { "ok": true, "service": "bili-syncplay-server" }
 ```
 
-### 3. Create a systemd service
+### 3. Create systemd services
 
 Create a dedicated user:
 
@@ -602,11 +684,11 @@ sudo useradd --system --home /opt/bili-syncplay --shell /usr/sbin/nologin bili-s
 sudo chown -R bili-syncplay:bili-syncplay /opt/bili-syncplay
 ```
 
-Create `/etc/systemd/system/bili-syncplay.service`:
+Create `/etc/systemd/system/bili-syncplay-room-node-a.service`:
 
 ```ini
 [Unit]
-Description=Bili-SyncPlay WebSocket server
+Description=Bili-SyncPlay room node A
 After=network.target
 
 [Service]
@@ -615,8 +697,17 @@ User=bili-syncplay
 Group=bili-syncplay
 WorkingDirectory=/opt/bili-syncplay
 Environment=PORT=8787
+Environment=INSTANCE_ID=room-node-a
 Environment=ALLOWED_ORIGINS=chrome-extension://<extension-id>,https://sync.example.com
 Environment=ROOM_STORE_PROVIDER=redis
+Environment=ADMIN_SESSION_STORE_PROVIDER=redis
+Environment=ADMIN_EVENT_STORE_PROVIDER=redis
+Environment=ADMIN_AUDIT_STORE_PROVIDER=redis
+Environment=RUNTIME_STORE_PROVIDER=redis
+Environment=ROOM_EVENT_BUS_PROVIDER=redis
+Environment=ADMIN_COMMAND_BUS_PROVIDER=redis
+Environment=NODE_HEARTBEAT_ENABLED=true
+Environment=GLOBAL_ADMIN_ENABLED=false
 Environment=REDIS_URL=redis://127.0.0.1:6379
 Environment=EMPTY_ROOM_TTL_MS=900000
 Environment=ROOM_CLEANUP_INTERVAL_MS=60000
@@ -628,18 +719,53 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-Enable and start it:
+Create `/etc/systemd/system/bili-syncplay-global-admin.service`:
+
+```ini
+[Unit]
+Description=Bili-SyncPlay global admin
+After=network.target
+
+[Service]
+Type=simple
+User=bili-syncplay
+Group=bili-syncplay
+WorkingDirectory=/opt/bili-syncplay
+Environment=GLOBAL_ADMIN_PORT=8788
+Environment=INSTANCE_ID=global-admin
+Environment=ROOM_STORE_PROVIDER=redis
+Environment=ADMIN_SESSION_STORE_PROVIDER=redis
+Environment=ADMIN_EVENT_STORE_PROVIDER=redis
+Environment=ADMIN_AUDIT_STORE_PROVIDER=redis
+Environment=RUNTIME_STORE_PROVIDER=redis
+Environment=ROOM_EVENT_BUS_PROVIDER=redis
+Environment=ADMIN_COMMAND_BUS_PROVIDER=redis
+Environment=NODE_HEARTBEAT_ENABLED=true
+Environment=GLOBAL_ADMIN_ENABLED=true
+Environment=REDIS_URL=redis://127.0.0.1:6379
+ExecStart=/usr/bin/node /opt/bili-syncplay/server/dist/global-admin-index.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start them:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now bili-syncplay
-sudo systemctl status bili-syncplay
+sudo systemctl enable --now bili-syncplay-room-node-a
+sudo systemctl enable --now bili-syncplay-global-admin
+sudo systemctl status bili-syncplay-room-node-a
+sudo systemctl status bili-syncplay-global-admin
 ```
 
 View logs:
 
 ```bash
-sudo journalctl -u bili-syncplay -f
+sudo journalctl -u bili-syncplay-room-node-a -f
+sudo journalctl -u bili-syncplay-global-admin -f
 ```
 
 ### 4. Put Nginx in front of the WebSocket server
@@ -661,7 +787,7 @@ server {
     server_name sync.example.com;
 
     location ^~ /admin {
-        proxy_pass http://127.0.0.1:8787;
+        proxy_pass http://127.0.0.1:8788;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -670,7 +796,7 @@ server {
 
     location ^~ /api/admin/ {
         limit_req zone=admin_req_per_ip burst=20 nodelay;
-        proxy_pass http://127.0.0.1:8787;
+        proxy_pass http://127.0.0.1:8788;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -769,9 +895,10 @@ npm run build -w @bili-syncplay/server
 - Health checks are available on both `GET /` and `GET /healthz`; readiness is `GET /readyz`.
 - If you use a cloud firewall, allow inbound `80` and `443`, but keep `8787` private to localhost.
 - If you do not want Nginx, you can expose Node directly, but browsers and extensions should still connect over `wss://` with a valid TLS certificate.
-- With `ROOM_STORE_PROVIDER=redis`, persisted room base state is shared across server instances.
-- Online members, `memberToken` values, and real-time room-state fanout remain process-local session state.
-- Multi-instance deployment still needs routing affinity or an added cross-instance broadcast mechanism to avoid incomplete member views and missed live updates.
+- With the Redis-backed providers enabled, persisted room base state, admin sessions, runtime indexes, room-state fanout, and admin command routing are shared across server instances.
+- A dedicated global admin process is the recommended production entrypoint for `/admin` and `/api/admin/*`.
+- Room nodes can keep `GLOBAL_ADMIN_ENABLED=false` so they expose only WebSocket traffic plus `/`, `/healthz`, and `/readyz`.
+- When all Redis-backed providers are enabled, multi-instance deployment no longer depends on sticky routing for room-state correctness.
 
 ### Troubleshooting
 
@@ -801,6 +928,9 @@ npm run test -w @bili-syncplay/server
 
 # Redis integration regression
 REDIS_URL=redis://127.0.0.1:6379 npm run test:redis -w @bili-syncplay/server
+
+# Full multi-node regression
+REDIS_URL=redis://127.0.0.1:6379 npx tsx --test server/test/multi-node-*.test.ts
 
 # Protocol tests
 npm run test -w @bili-syncplay/protocol

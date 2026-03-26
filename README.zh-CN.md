@@ -405,6 +405,76 @@ npm run build:release
 - 最后一名成员离开后，房间不会立即删除，而是保留到 `EMPTY_ROOM_TTL_MS` 到期
 - 支持 Origin 白名单、连接限流、消息限流和结构化安全日志
 
+### 多节点部署与全局管理面
+
+现在服务端已经支持完整多节点拓扑，包括共享管理员会话、共享事件与审计流、共享运行时索引、跨节点房间状态广播、跨节点管理命令，以及独立的全局管理入口。
+
+推荐生产拓扑：
+
+- `room-node-a`：承载 WebSocket 房间流量和探活
+- `room-node-b`：承载 WebSocket 房间流量和探活
+- `global-admin`：承载 `/admin` 与 `/api/admin/*`
+- `redis`：共享持久化、运行时索引、事件总线和命令总线
+
+完整多节点上线建议统一开启以下 provider：
+
+- `ROOM_STORE_PROVIDER=redis`
+- `ADMIN_SESSION_STORE_PROVIDER=redis`
+- `ADMIN_EVENT_STORE_PROVIDER=redis`
+- `ADMIN_AUDIT_STORE_PROVIDER=redis`
+- `RUNTIME_STORE_PROVIDER=redis`
+- `ROOM_EVENT_BUS_PROVIDER=redis`
+- `ADMIN_COMMAND_BUS_PROVIDER=redis`
+- `NODE_HEARTBEAT_ENABLED=true`
+
+Room Node 示例：
+
+```bash
+PORT=8787 \
+INSTANCE_ID=room-node-a \
+ROOM_STORE_PROVIDER=redis \
+ADMIN_SESSION_STORE_PROVIDER=redis \
+ADMIN_EVENT_STORE_PROVIDER=redis \
+ADMIN_AUDIT_STORE_PROVIDER=redis \
+RUNTIME_STORE_PROVIDER=redis \
+ROOM_EVENT_BUS_PROVIDER=redis \
+ADMIN_COMMAND_BUS_PROVIDER=redis \
+NODE_HEARTBEAT_ENABLED=true \
+GLOBAL_ADMIN_ENABLED=false \
+REDIS_URL=redis://127.0.0.1:6379 \
+node server/dist/index.js
+```
+
+独立 Global Admin 示例：
+
+```bash
+GLOBAL_ADMIN_PORT=8788 \
+INSTANCE_ID=global-admin \
+ROOM_STORE_PROVIDER=redis \
+ADMIN_SESSION_STORE_PROVIDER=redis \
+ADMIN_EVENT_STORE_PROVIDER=redis \
+ADMIN_AUDIT_STORE_PROVIDER=redis \
+RUNTIME_STORE_PROVIDER=redis \
+ROOM_EVENT_BUS_PROVIDER=redis \
+ADMIN_COMMAND_BUS_PROVIDER=redis \
+NODE_HEARTBEAT_ENABLED=true \
+GLOBAL_ADMIN_ENABLED=true \
+REDIS_URL=redis://127.0.0.1:6379 \
+node server/dist/global-admin-index.js
+```
+
+如果管理 UI 需要请求一个独立 API 域名，可设置 `GLOBAL_ADMIN_API_BASE_URL=https://admin.example.com`。
+
+多节点控制面当前使用的 Redis 键族：
+
+- `bsp:room:*`、`bsp:room-index`、`bsp:room-expiry`：房间基础持久化
+- `bsp:runtime:*`：共享 session、房间成员、被踢 token 与节点心跳
+- `bsp:admin:session:*`：共享管理员 Bearer 会话
+- `bsp:events`：运行事件流
+- `bsp:audit-logs`：管理审计流
+- `bsp:room-events`：房间事件总线频道
+- `bsp:admin-command:*`、`bsp:admin-command-result:*`：管理命令频道
+
 ### 安全相关环境变量
 
 服务器支持以下环境变量。虽然内置了安全默认值，但生产环境应显式设置：
@@ -428,6 +498,18 @@ npm run build:release
 - `ADMIN_SESSION_TTL_MS`：后台会话有效期，单位毫秒
 - `ADMIN_ROLE`：后台角色，可选 `viewer`、`operator`、`admin`
 - `ADMIN_UI_DEMO_ENABLED`：是否开启后台内置 demo 模式，适用于本地 / 非生产预览，默认 `false`
+- `ADMIN_SESSION_STORE_PROVIDER`：`memory` 或 `redis`
+- `ADMIN_EVENT_STORE_PROVIDER`：`memory` 或 `redis`
+- `ADMIN_AUDIT_STORE_PROVIDER`：`memory` 或 `redis`
+- `RUNTIME_STORE_PROVIDER`：`memory` 或 `redis`
+- `ROOM_EVENT_BUS_PROVIDER`：`none`、`memory` 或 `redis`
+- `ADMIN_COMMAND_BUS_PROVIDER`：`none`、`memory` 或 `redis`
+- `GLOBAL_ADMIN_ENABLED`：设为 `false` 时，Room Node 保留 `/`、`/healthz`、`/readyz`，但关闭 `/admin` 与 `/api/admin/*`
+- `GLOBAL_ADMIN_API_BASE_URL`：可选的管理 UI API 基址覆盖项
+- `GLOBAL_ADMIN_PORT`：`server/dist/global-admin-index.js` 使用的 HTTP 端口
+- `NODE_HEARTBEAT_ENABLED`：是否开启节点心跳
+- `NODE_HEARTBEAT_INTERVAL_MS`：节点心跳间隔，单位毫秒
+- `NODE_HEARTBEAT_TTL_MS`：节点心跳 TTL，单位毫秒
 - `RATE_LIMIT_ROOM_CREATE_PER_MINUTE`
 - `RATE_LIMIT_ROOM_JOIN_PER_MINUTE`
 - `RATE_LIMIT_VIDEO_SHARE_PER_10_SECONDS`
@@ -602,11 +684,11 @@ sudo useradd --system --home /opt/bili-syncplay --shell /usr/sbin/nologin bili-s
 sudo chown -R bili-syncplay:bili-syncplay /opt/bili-syncplay
 ```
 
-创建 `/etc/systemd/system/bili-syncplay.service`：
+创建 `/etc/systemd/system/bili-syncplay-room-node-a.service`：
 
 ```ini
 [Unit]
-Description=Bili-SyncPlay WebSocket server
+Description=Bili-SyncPlay room node A
 After=network.target
 
 [Service]
@@ -615,8 +697,17 @@ User=bili-syncplay
 Group=bili-syncplay
 WorkingDirectory=/opt/bili-syncplay
 Environment=PORT=8787
+Environment=INSTANCE_ID=room-node-a
 Environment=ALLOWED_ORIGINS=chrome-extension://<extension-id>,https://sync.example.com
 Environment=ROOM_STORE_PROVIDER=redis
+Environment=ADMIN_SESSION_STORE_PROVIDER=redis
+Environment=ADMIN_EVENT_STORE_PROVIDER=redis
+Environment=ADMIN_AUDIT_STORE_PROVIDER=redis
+Environment=RUNTIME_STORE_PROVIDER=redis
+Environment=ROOM_EVENT_BUS_PROVIDER=redis
+Environment=ADMIN_COMMAND_BUS_PROVIDER=redis
+Environment=NODE_HEARTBEAT_ENABLED=true
+Environment=GLOBAL_ADMIN_ENABLED=false
 Environment=REDIS_URL=redis://127.0.0.1:6379
 Environment=EMPTY_ROOM_TTL_MS=900000
 Environment=ROOM_CLEANUP_INTERVAL_MS=60000
@@ -628,18 +719,53 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-启用并启动：
+创建 `/etc/systemd/system/bili-syncplay-global-admin.service`：
+
+```ini
+[Unit]
+Description=Bili-SyncPlay global admin
+After=network.target
+
+[Service]
+Type=simple
+User=bili-syncplay
+Group=bili-syncplay
+WorkingDirectory=/opt/bili-syncplay
+Environment=GLOBAL_ADMIN_PORT=8788
+Environment=INSTANCE_ID=global-admin
+Environment=ROOM_STORE_PROVIDER=redis
+Environment=ADMIN_SESSION_STORE_PROVIDER=redis
+Environment=ADMIN_EVENT_STORE_PROVIDER=redis
+Environment=ADMIN_AUDIT_STORE_PROVIDER=redis
+Environment=RUNTIME_STORE_PROVIDER=redis
+Environment=ROOM_EVENT_BUS_PROVIDER=redis
+Environment=ADMIN_COMMAND_BUS_PROVIDER=redis
+Environment=NODE_HEARTBEAT_ENABLED=true
+Environment=GLOBAL_ADMIN_ENABLED=true
+Environment=REDIS_URL=redis://127.0.0.1:6379
+ExecStart=/usr/bin/node /opt/bili-syncplay/server/dist/global-admin-index.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用并启动它们：
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now bili-syncplay
-sudo systemctl status bili-syncplay
+sudo systemctl enable --now bili-syncplay-room-node-a
+sudo systemctl enable --now bili-syncplay-global-admin
+sudo systemctl status bili-syncplay-room-node-a
+sudo systemctl status bili-syncplay-global-admin
 ```
 
 查看日志：
 
 ```bash
-sudo journalctl -u bili-syncplay -f
+sudo journalctl -u bili-syncplay-room-node-a -f
+sudo journalctl -u bili-syncplay-global-admin -f
 ```
 
 ### 4. 在 WebSocket 服务器前配置 Nginx
@@ -661,7 +787,7 @@ server {
     server_name sync.example.com;
 
     location ^~ /admin {
-        proxy_pass http://127.0.0.1:8787;
+        proxy_pass http://127.0.0.1:8788;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -670,7 +796,7 @@ server {
 
     location ^~ /api/admin/ {
         limit_req zone=admin_req_per_ip burst=20 nodelay;
-        proxy_pass http://127.0.0.1:8787;
+        proxy_pass http://127.0.0.1:8788;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -769,9 +895,10 @@ npm run build -w @bili-syncplay/server
 - 健康检查同时提供 `GET /` 与 `GET /healthz`；就绪检查为 `GET /readyz`。
 - 如果你使用云防火墙，请放行入站 `80` 和 `443`，并将 `8787` 仅暴露给 localhost。
 - 如果你不想使用 Nginx，也可以直接暴露 Node 服务，但浏览器和扩展仍应通过带有效 TLS 证书的 `wss://` 连接。
-- 当 `ROOM_STORE_PROVIDER=redis` 时，房间基础状态可在多个服务实例之间共享。
-- 在线成员关系、`memberToken` 以及实时房间状态广播仍然是进程内会话态。
-- 多实例部署时，仍需要路由亲和性，或额外补充跨实例广播机制，否则成员视图和实时更新可能不完整。
+- 当 Redis 相关 provider 全部开启后，房间基础状态、管理员会话、运行时索引、房间状态广播与管理命令路由都可在多个服务实例之间共享。
+- 生产环境推荐把 `/admin` 与 `/api/admin/*` 收敛到独立 Global Admin 进程。
+- Room Node 可以设置 `GLOBAL_ADMIN_ENABLED=false`，只保留 WebSocket 流量与 `/`、`/healthz`、`/readyz`。
+- 当所有 Redis 共享能力都已开启时，多实例部署不再依赖 sticky 路由来保证房间状态正确性。
 
 ### 故障排查
 
@@ -801,6 +928,9 @@ npm run test -w @bili-syncplay/server
 
 # Redis 集成回归
 REDIS_URL=redis://127.0.0.1:6379 npm run test:redis -w @bili-syncplay/server
+
+# 完整多节点回归
+REDIS_URL=redis://127.0.0.1:6379 npx tsx --test server/test/multi-node-*.test.ts
 
 # 协议测试
 npm run test -w @bili-syncplay/protocol
