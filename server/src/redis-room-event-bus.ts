@@ -40,6 +40,11 @@ export async function createRedisRoomEventBus(
   redisUrl: string,
   options: {
     channel?: string;
+    onConnectionError?: (
+      role: "publisher" | "subscriber",
+      error: unknown,
+    ) => void;
+    onInvalidMessage?: (payload: string) => void;
   } = {},
 ): Promise<RoomEventBus & { close: () => Promise<void> }> {
   const publishClient = new Redis(redisUrl, {
@@ -57,6 +62,13 @@ export async function createRedisRoomEventBus(
   >();
   let subscribed = false;
   let closing = false;
+
+  publishClient.on("error", (error) => {
+    options.onConnectionError?.("publisher", error);
+  });
+  subscribeClient.on("error", (error) => {
+    options.onConnectionError?.("subscriber", error);
+  });
 
   await Promise.all([publishClient.connect(), subscribeClient.connect()]);
 
@@ -96,10 +108,13 @@ export async function createRedisRoomEventBus(
 
         const message = parseMessage(payload);
         if (!message) {
+          options.onInvalidMessage?.(payload);
           return;
         }
 
-        void Promise.resolve(handler(message));
+        void Promise.resolve(handler(message)).catch(() => {
+          // Handler-side observability is managed by the subscriber implementation.
+        });
       };
 
       subscribers.set(handler, listener);

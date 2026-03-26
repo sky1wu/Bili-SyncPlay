@@ -40,6 +40,8 @@ test("room event consumer sends room state only to local room sessions", async (
   const otherRoomSession = createSession("member-b", "ROOM02");
   const sent: Array<{ sessionId: string; roomCode: string; memberCount: number }> =
     [];
+  const logs: Array<{ event: string; roomCode: string | null; result: string }> =
+    [];
 
   const consumer = await createRoomEventConsumer({
     roomEventBus: bus,
@@ -63,6 +65,15 @@ test("room event consumer sends room state only to local room sessions", async (
         memberCount: message.payload.members.length,
       });
     },
+    instanceId: "instance-a",
+    logEvent(event, data) {
+      logs.push({
+        event,
+        roomCode:
+          typeof data.roomCode === "string" ? data.roomCode : null,
+        result: String(data.result),
+      });
+    },
   });
 
   try {
@@ -81,6 +92,13 @@ test("room event consumer sends room state only to local room sessions", async (
       sessionId: "member-a",
       roomCode: "ROOM01",
       memberCount: 1,
+    },
+  ]);
+  assert.deepEqual(logs, [
+    {
+      event: "room_event_consumed",
+      roomCode: "ROOM01",
+      result: "ok",
     },
   ]);
 });
@@ -118,4 +136,49 @@ test("room event consumer emits an empty state for deleted rooms", async () => {
   }
 
   assert.deepEqual(sent, [{ roomCode: "ROOM01", members: 0 }]);
+});
+
+test("room event consumer logs failures without throwing to the bus", async () => {
+  const bus = createInMemoryRoomEventBus();
+  const logs: Array<{ event: string; result: string; roomCode: string | null }> =
+    [];
+
+  const consumer = await createRoomEventConsumer({
+    roomEventBus: bus,
+    async getRoomStateByCode() {
+      throw new Error("boom");
+    },
+    listLocalSessionsByRoom() {
+      return [];
+    },
+    send() {},
+    instanceId: "instance-a",
+    logEvent(event, data) {
+      logs.push({
+        event,
+        result: String(data.result),
+        roomCode:
+          typeof data.roomCode === "string" ? data.roomCode : null,
+      });
+    },
+  });
+
+  try {
+    await bus.publish({
+      type: "room_state_updated",
+      roomCode: "ROOM99",
+      sourceInstanceId: "instance-b",
+      emittedAt: 2_000,
+    });
+  } finally {
+    await consumer.close();
+  }
+
+  assert.deepEqual(logs, [
+    {
+      event: "room_event_consume_failed",
+      result: "error",
+      roomCode: "ROOM99",
+    },
+  ]);
 });

@@ -277,7 +277,25 @@ export async function createSyncServer(
       : createMirroredRuntimeStore(localRuntimeStore, sharedRuntimeStore);
   const roomEventBus =
     persistenceConfig.roomEventBusProvider === "redis"
-      ? await createRedisRoomEventBus(persistenceConfig.redisUrl)
+      ? await createRedisRoomEventBus(persistenceConfig.redisUrl, {
+          onConnectionError: (role, error) => {
+            logEvent("room_event_bus_error", {
+              busRole: role,
+              instanceId: persistenceConfig.instanceId,
+              provider: persistenceConfig.roomEventBusProvider,
+              result: "error",
+              error: error instanceof Error ? error.message : String(error),
+            });
+          },
+          onInvalidMessage: (payload) => {
+            logEvent("room_event_bus_invalid_message", {
+              instanceId: persistenceConfig.instanceId,
+              provider: persistenceConfig.roomEventBusProvider,
+              result: "rejected",
+              payloadSize: payload.length,
+            });
+          },
+        })
       : persistenceConfig.roomEventBusProvider === "none"
         ? createNoopRoomEventBus()
         : createInMemoryRoomEventBus();
@@ -301,7 +319,26 @@ export async function createSyncServer(
   });
 
   async function publishRoomEvent(message: RoomEventBusMessage): Promise<void> {
-    await roomEventBus.publish(message);
+    try {
+      await roomEventBus.publish(message);
+      logEvent("room_event_published", {
+        roomCode: message.roomCode,
+        eventType: message.type,
+        sourceInstanceId: message.sourceInstanceId,
+        provider: persistenceConfig.roomEventBusProvider,
+        result: "ok",
+      });
+    } catch (error) {
+      logEvent("room_event_publish_failed", {
+        roomCode: message.roomCode,
+        eventType: message.type,
+        sourceInstanceId: message.sourceInstanceId,
+        provider: persistenceConfig.roomEventBusProvider,
+        result: "error",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   const roomEventConsumer = await createRoomEventConsumer({
@@ -309,6 +346,8 @@ export async function createSyncServer(
     getRoomStateByCode: (roomCode) => roomService.getRoomStateByCode(roomCode),
     listLocalSessionsByRoom: (roomCode) => runtimeStore.listSessionsByRoom(roomCode),
     send,
+    instanceId: persistenceConfig.instanceId,
+    logEvent,
   });
 
   const messageHandler = createMessageHandler({
