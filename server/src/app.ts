@@ -109,6 +109,9 @@ function createMirroredRuntimeStore(
       localRuntimeStore.registerSession(session);
       sharedRuntimeStore.registerSession(session);
     },
+    flush() {
+      return sharedRuntimeStore.flush?.() ?? Promise.resolve();
+    },
     unregisterSession(sessionId) {
       localRuntimeStore.unregisterSession(sessionId);
       sharedRuntimeStore.unregisterSession(sessionId);

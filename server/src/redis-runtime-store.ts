@@ -181,6 +181,9 @@ export async function createRedisRuntimeStore(
           .exec(),
       );
     },
+    async flush() {
+      await Promise.allSettled(Array.from(pendingOperations));
+    },
     unregisterSession(sessionId: string) {
       const session = localRuntimeStore.getSession(sessionId);
       localRuntimeStore.unregisterSession(sessionId);

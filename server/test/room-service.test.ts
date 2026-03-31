@@ -10,6 +10,7 @@ import {
 import { createSessionRateLimitState } from "../src/rate-limit.js";
 import { createInMemoryRoomStore } from "../src/room-store.js";
 import { createRoomService } from "../src/room-service.js";
+import type { RuntimeStore } from "../src/runtime-store.js";
 import type { LogEvent, Session } from "../src/types.js";
 
 function createSession(id: string): Session {
@@ -224,6 +225,133 @@ test("room service updates member display name after join", async () => {
 
   const owner = createSession("owner");
   const created = await service.createRoomForSession(owner, "Guest-123");
+
+  await service.updateProfileForSession(owner, created.memberToken, "Alice");
+
+  const state = await service.getRoomStateForSession(
+    owner,
+    created.memberToken,
+    "sync:request",
+  );
+  assert.deepEqual(state.members, [{ id: owner.memberId, name: "Alice" }]);
+});
+
+test("room service flushes pending runtime store writes before exposing updated display names", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const clusterSessionsByRoom = new Map<string, Session[]>();
+  const stagedSessionsById = new Map<string, Session>();
+  const activeRooms = createActiveRoomRegistry();
+  const runtimeStore: RuntimeStore = {
+    registerSession(session) {
+      stagedSessionsById.set(session.id, { ...session });
+    },
+    async flush() {
+      for (const session of stagedSessionsById.values()) {
+        if (!session.roomCode) {
+          continue;
+        }
+        const roomSessions = clusterSessionsByRoom.get(session.roomCode) ?? [];
+        const nextSessions = roomSessions.filter(
+          (entry) => entry.id !== session.id,
+        );
+        nextSessions.push({ ...session });
+        clusterSessionsByRoom.set(session.roomCode, nextSessions);
+      }
+      stagedSessionsById.clear();
+    },
+    unregisterSession() {},
+    markSessionJoinedRoom(sessionId, roomCode) {
+      const staged = stagedSessionsById.get(sessionId);
+      if (staged) {
+        staged.roomCode = roomCode;
+      }
+    },
+    markSessionLeftRoom() {},
+    recordEvent() {},
+    getSession() {
+      return null;
+    },
+    listSessionsByRoom(roomCode) {
+      return clusterSessionsByRoom.get(roomCode) ?? [];
+    },
+    getConnectionCount() {
+      return 0;
+    },
+    getActiveRoomCount() {
+      return 0;
+    },
+    getActiveMemberCount() {
+      return 0;
+    },
+    getStartedAt() {
+      return 0;
+    },
+    getRecentEventCounts() {
+      return {};
+    },
+    getLifetimeEventCounts() {
+      return {};
+    },
+    getActiveRoomCodes() {
+      return new Set<string>();
+    },
+    getRoom(code) {
+      return activeRooms.getRoom(code);
+    },
+    getOrCreateRoom(code) {
+      return activeRooms.getOrCreateRoom(code);
+    },
+    addMember(code, memberId, session, memberToken) {
+      return activeRooms.addMember(code, memberId, session, memberToken);
+    },
+    findMemberIdByToken(code, memberToken) {
+      return activeRooms.findMemberIdByToken(code, memberToken);
+    },
+    blockMemberToken(code, memberToken, expiresAt) {
+      activeRooms.blockMemberToken(code, memberToken, expiresAt);
+    },
+    isMemberTokenBlocked(code, memberToken, currentTime) {
+      return activeRooms.isMemberTokenBlocked(code, memberToken, currentTime);
+    },
+    removeMember(code, memberId, session) {
+      return activeRooms.removeMember(code, memberId, session);
+    },
+    deleteRoom(code) {
+      activeRooms.deleteRoom(code);
+      clusterSessionsByRoom.delete(code);
+    },
+    async heartbeatNode() {},
+    async listNodeStatuses() {
+      return [];
+    },
+    async purgeNodeStatus() {},
+    async countClusterActiveRooms() {
+      return 0;
+    },
+    async listClusterSessionsByRoom(roomCode) {
+      return clusterSessionsByRoom.get(roomCode) ?? [];
+    },
+    async listClusterSessions() {
+      return Array.from(clusterSessionsByRoom.values()).flat();
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    runtimeStore,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOM04B",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Guest-123");
+  await runtimeStore.flush?.();
 
   await service.updateProfileForSession(owner, created.memberToken, "Alice");
 

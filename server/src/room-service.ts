@@ -808,6 +808,7 @@ export function createRoomService(options: {
         "profile:update",
       );
       setSessionDisplayName(session, displayName);
+      await runtimeStore.flush?.();
       return { room: access.persistedRoom };
     },
 
