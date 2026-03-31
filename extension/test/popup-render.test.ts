@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   applyRoomActionControlState,
   renderPopup,
+  resetPopupRenderDebugStateForTests,
 } from "../src/popup/popup-render";
 import type { PopupRefs } from "../src/popup/popup-view";
 import { setLocaleForTests } from "../src/shared/i18n";
@@ -69,6 +70,7 @@ function createPopupRefs(): PopupRefs {
 }
 
 test("applyRoomActionControlState disables room actions during room transitions", () => {
+  resetPopupRenderDebugStateForTests();
   const refs = createPopupRefs();
   refs.roomCodeInput.value = "ROOM01:token-1";
 
@@ -87,6 +89,7 @@ test("applyRoomActionControlState disables room actions during room transitions"
 });
 
 test("renderPopup updates popup metrics, owner hint, logs, and draft values", async () => {
+  resetPopupRenderDebugStateForTests();
   setLocaleForTests("en-US");
   const originalDocument = globalThis.document;
   const refs = createPopupRefs();
@@ -181,6 +184,125 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
     assert.equal(refs.sharedVideoOwner.hidden, false);
     assert.equal(refs.logs.innerHTML.includes("Connected"), true);
     assert.equal(refs.memberList.innerHTML.includes("Bob"), true);
+  } finally {
+    setLocaleForTests(null);
+    Object.assign(globalThis, { document: originalDocument });
+  }
+});
+
+test("renderPopup debug log distinguishes background pending state from local UI pending state", async () => {
+  resetPopupRenderDebugStateForTests();
+  setLocaleForTests("en-US");
+  const originalDocument = globalThis.document;
+  const refs = createPopupRefs();
+  const popupLogs: string[] = [];
+
+  Object.assign(globalThis, {
+    document: {
+      activeElement: null,
+    },
+  });
+
+  try {
+    renderPopup({
+      refs,
+      state: {
+        connected: false,
+        serverUrl: "ws://localhost:8787",
+        error: null,
+        roomCode: null,
+        joinToken: null,
+        memberId: null,
+        displayName: null,
+        roomState: null,
+        pendingCreateRoom: false,
+        pendingJoinRoomCode: null,
+        retryInMs: null,
+        retryAttempt: 0,
+        retryAttemptMax: 5,
+        clockOffsetMs: null,
+        rttMs: null,
+        logs: [],
+      },
+      serverUrlDraft: { value: "", dirty: false },
+      roomCodeDraft: "ROOM01:join-token-1",
+      setRoomCodeDraft: () => {},
+      localStatusMessage: null,
+      roomActionPending: true,
+      lastKnownPendingCreateRoom: false,
+      lastKnownPendingJoinRoomCode: "ROOM01",
+      lastKnownRoomCode: null,
+      copyRoomSuccess: false,
+      copyLogsSuccess: false,
+      sendPopupLog: async (message) => {
+        popupLogs.push(message);
+      },
+    });
+
+    assert.deepEqual(popupLogs, [
+      "Render room=none connected=false backgroundPendingJoin=none uiPendingAction=true lastKnownPendingJoin=ROOM01 lastKnownRoom=none",
+    ]);
+  } finally {
+    setLocaleForTests(null);
+    Object.assign(globalThis, { document: originalDocument });
+  }
+});
+
+test("renderPopup only logs once for repeated identical pending renders", async () => {
+  resetPopupRenderDebugStateForTests();
+  setLocaleForTests("en-US");
+  const originalDocument = globalThis.document;
+  const refs = createPopupRefs();
+  const popupLogs: string[] = [];
+
+  Object.assign(globalThis, {
+    document: {
+      activeElement: null,
+    },
+  });
+
+  const renderArgs = {
+    refs,
+    state: {
+      connected: false,
+      serverUrl: "ws://localhost:8787",
+      error: null,
+      roomCode: null,
+      joinToken: null,
+      memberId: null,
+      displayName: null,
+      roomState: null,
+      pendingCreateRoom: false,
+      pendingJoinRoomCode: null,
+      retryInMs: null,
+      retryAttempt: 0,
+      retryAttemptMax: 5,
+      clockOffsetMs: null,
+      rttMs: null,
+      logs: [],
+    },
+    serverUrlDraft: { value: "", dirty: false },
+    roomCodeDraft: "",
+    setRoomCodeDraft: () => {},
+    localStatusMessage: null,
+    roomActionPending: true,
+    lastKnownPendingCreateRoom: false,
+    lastKnownPendingJoinRoomCode: null,
+    lastKnownRoomCode: null,
+    copyRoomSuccess: false,
+    copyLogsSuccess: false,
+    sendPopupLog: async (message: string) => {
+      popupLogs.push(message);
+    },
+  } as const;
+
+  try {
+    renderPopup(renderArgs);
+    renderPopup(renderArgs);
+
+    assert.deepEqual(popupLogs, [
+      "Render room=none connected=false backgroundPendingJoin=none uiPendingAction=true lastKnownPendingJoin=none lastKnownRoom=none",
+    ]);
   } finally {
     setLocaleForTests(null);
     Object.assign(globalThis, { document: originalDocument });

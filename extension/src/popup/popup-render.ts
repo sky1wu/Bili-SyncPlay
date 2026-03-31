@@ -8,6 +8,12 @@ import {
 } from "./server-url-draft";
 import type { PopupRefs } from "./popup-view";
 
+let lastPendingRenderLogKey: string | null = null;
+
+export function resetPopupRenderDebugStateForTests(): void {
+  lastPendingRenderLogKey = null;
+}
+
 export function formatInviteDraft(
   roomCode: string | null,
   joinToken: string | null,
@@ -135,10 +141,25 @@ export function renderPopup(args: {
   renderLogs(args.refs.logs, args.state.logs);
 
   if (args.state.pendingJoinRoomCode || args.roomActionPending) {
+    const logKey = [
+      args.state.roomCode ?? "none",
+      String(args.state.connected),
+      args.state.pendingJoinRoomCode ?? "none",
+      String(args.roomActionPending),
+      args.lastKnownPendingJoinRoomCode ?? "none",
+      args.lastKnownRoomCode ?? "none",
+    ].join("|");
+    if (logKey === lastPendingRenderLogKey) {
+      return;
+    }
+    lastPendingRenderLogKey = logKey;
     void args.sendPopupLog(
-      `Render room=${args.state.roomCode ?? "none"} connected=${args.state.connected} pendingJoin=${args.state.pendingJoinRoomCode ?? "none"} pendingAction=${args.roomActionPending}`,
+      `Render room=${args.state.roomCode ?? "none"} connected=${args.state.connected} backgroundPendingJoin=${args.state.pendingJoinRoomCode ?? "none"} uiPendingAction=${args.roomActionPending} lastKnownPendingJoin=${args.lastKnownPendingJoinRoomCode ?? "none"} lastKnownRoom=${args.lastKnownRoomCode ?? "none"}`,
     );
+    return;
   }
+
+  lastPendingRenderLogKey = null;
 }
 
 function formatVideoMeta(url: string | null): string {
