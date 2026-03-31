@@ -28,7 +28,8 @@ export function createSecurityPolicy(config: SecurityConfig): {
       typeof forwarded === "string" &&
       forwarded.trim()
     ) {
-      return forwarded.split(",")[0]?.trim() ?? null;
+      const parts = forwarded.split(",");
+      return parts[parts.length - 1]?.trim() ?? null;
     }
     return request.socket.remoteAddress ?? null;
   }

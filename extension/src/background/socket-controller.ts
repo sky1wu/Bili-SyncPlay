@@ -1,4 +1,5 @@
 import type { ClientMessage, ServerMessage } from "@bili-syncplay/protocol";
+import { isServerMessage } from "@bili-syncplay/protocol";
 import type { DebugLogEntry } from "../shared/messages";
 import type { ConnectionState, RoomSessionState } from "./runtime-state";
 import { getConnectionErrorMessage } from "./connection-error";
@@ -204,8 +205,18 @@ export function createSocketController(args: {
     });
 
     args.connectionState.socket.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data) as ServerMessage;
-      void args.handleServerMessage(message);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch {
+        args.log("background", "Received invalid JSON from server");
+        return;
+      }
+      if (!isServerMessage(parsed)) {
+        args.log("background", "Received unrecognized server message");
+        return;
+      }
+      void args.handleServerMessage(parsed);
     });
 
     args.connectionState.socket.addEventListener("close", (event) => {

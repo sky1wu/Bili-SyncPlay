@@ -57,6 +57,20 @@ test("security policy respects trusted proxy headers when enabled", () => {
   assert.equal(trustedSecurity.getRemoteAddress(directRequest), "203.0.113.10");
 });
 
+test("security policy uses the last IP from x-forwarded-for to prevent spoofing", () => {
+  const config = getDefaultSecurityConfig();
+  config.allowedOrigins = ["chrome-extension://allowed-extension"];
+  config.trustProxyHeaders = true;
+  const security = createSecurityPolicy(config);
+  const spoofedRequest = createRequest({
+    origin: "chrome-extension://allowed-extension",
+    remoteAddress: "127.0.0.1",
+    forwardedFor: "fake-ip, real-client-ip",
+  });
+
+  assert.equal(security.getRemoteAddress(spoofedRequest), "real-client-ip");
+});
+
 test("security policy rejects upgrades when connection count exceeds the configured maximum", () => {
   const config = getDefaultSecurityConfig();
   config.allowedOrigins = ["chrome-extension://allowed-extension"];
