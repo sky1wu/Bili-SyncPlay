@@ -48,6 +48,40 @@ test("accepts a valid room:state message", () => {
   );
 });
 
+test("accepts room:state when member ids use UUIDs", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: {
+        roomCode: "ABC123",
+        sharedVideo: {
+          videoId: "BV1xx411c7mD",
+          url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+          title: "Video",
+          sharedByMemberId: "123e4567-e89b-12d3-a456-426614174000",
+        },
+        playback: {
+          url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+          currentTime: 12,
+          playState: "playing",
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 1,
+          actorId: "123e4567-e89b-12d3-a456-426614174000",
+          seq: 1,
+        },
+        members: [
+          {
+            id: "123e4567-e89b-12d3-a456-426614174000",
+            name: "Alice",
+          },
+        ],
+      },
+    }),
+    true,
+  );
+});
+
 test("accepts room:state when playback sync intent is explicit-ratechange", () => {
   assert.equal(
     isServerMessage({

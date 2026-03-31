@@ -15,6 +15,7 @@ import type {
 import { isPlaybackSyncIntent } from "../types/domain.js";
 import {
   isFiniteNumber,
+  isOptionalString,
   isPlaybackPlayState,
   isRecord,
   isRoomCode,
@@ -30,20 +31,13 @@ function isBoundedString(value: unknown, maxLength: number): value is string {
   return isString(value) && value.length <= maxLength;
 }
 
-function isOptionalBoundedString(
-  value: unknown,
-  maxLength: number,
-): value is string | undefined {
-  return value === undefined || isBoundedString(value, maxLength);
-}
-
 function isSharedVideo(value: unknown): value is SharedVideo {
   return (
     isRecord(value) &&
     isBoundedString(value.videoId, TITLE_MAX_LENGTH) &&
     isBoundedString(value.url, URL_MAX_LENGTH) &&
     isBoundedString(value.title, TITLE_MAX_LENGTH) &&
-    isOptionalBoundedString(value.sharedByMemberId, DISPLAY_NAME_MAX_LENGTH)
+    isOptionalString(value.sharedByMemberId)
   );
 }
 
@@ -66,7 +60,7 @@ function isPlaybackState(value: unknown): value is PlaybackState {
 export function isRoomMember(value: unknown): value is RoomMember {
   return (
     isRecord(value) &&
-    isBoundedString(value.id, DISPLAY_NAME_MAX_LENGTH) &&
+    isString(value.id) &&
     isBoundedString(value.name, DISPLAY_NAME_MAX_LENGTH)
   );
 }
