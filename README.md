@@ -530,12 +530,12 @@ If the admin UI should talk to a separate API origin, set `GLOBAL_ADMIN_API_BASE
 
 #### Node role configuration matrix
 
-| Role | Typical process | External responsibility | Must be unique | Must stay aligned | Recommended value / note |
-| --- | --- | --- | --- | --- | --- |
-| `room-node` | `server/dist/index.js` | WebSocket, `/`, `/healthz`, `/readyz` | `INSTANCE_ID`, bind address / port | `REDIS_URL`, shared `*_PROVIDER` values, security and rate-limit settings | `GLOBAL_ADMIN_ENABLED=false` |
-| `global-admin` | `server/dist/global-admin-index.js` | `/admin`, `/api/admin/*` | `INSTANCE_ID`, `GLOBAL_ADMIN_PORT` | `REDIS_URL`, admin auth settings, shared provider settings | `GLOBAL_ADMIN_ENABLED=true` |
-| `edge` | `nginx` / `haproxy` / cloud LB | TLS termination, single public entrypoint, reverse proxy, connection distribution | public hostname, certificate, upstream definitions | backend node list | end users connect only to the edge URL |
-| `redis` | `redis-server` | shared persistence, runtime indexes, buses | instance address, password, ACL | every node must point to the same Redis | production should keep it private |
+| Role           | Typical process                     | External responsibility                                                           | Must be unique                                     | Must stay aligned                                                         | Recommended value / note               |
+| -------------- | ----------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------- |
+| `room-node`    | `server/dist/index.js`              | WebSocket, `/`, `/healthz`, `/readyz`                                             | `INSTANCE_ID`, bind address / port                 | `REDIS_URL`, shared `*_PROVIDER` values, security and rate-limit settings | `GLOBAL_ADMIN_ENABLED=false`           |
+| `global-admin` | `server/dist/global-admin-index.js` | `/admin`, `/api/admin/*`                                                          | `INSTANCE_ID`, `GLOBAL_ADMIN_PORT`                 | `REDIS_URL`, admin auth settings, shared provider settings                | `GLOBAL_ADMIN_ENABLED=true`            |
+| `edge`         | `nginx` / `haproxy` / cloud LB      | TLS termination, single public entrypoint, reverse proxy, connection distribution | public hostname, certificate, upstream definitions | backend node list                                                         | end users connect only to the edge URL |
+| `redis`        | `redis-server`                      | shared persistence, runtime indexes, buses                                        | instance address, password, ACL                    | every node must point to the same Redis                                   | production should keep it private      |
 
 #### Which settings must match and which must differ
 
@@ -576,13 +576,13 @@ If you currently have only two machines, a practical rollout looks like this:
 
 Suggested port layout:
 
-| Machine | Role | Suggested bind | Publicly exposed | Notes |
-| --- | --- | --- | --- | --- |
-| server 1 | `nginx` | `80/443` | yes | single public entrypoint |
-| server 1 | `room-node-a` | `127.0.0.1:8787` or private IP | no | proxied by the edge |
-| server 1 | `global-admin` | `127.0.0.1:8788` or private IP | no | proxied by the edge |
-| server 1 | `redis` | `127.0.0.1:6379` or private IP | no | allow only node access |
-| server 2 | `room-node-b` | private IP such as `10.0.0.12:8787` | no | proxied by server 1 edge |
+| Machine  | Role           | Suggested bind                      | Publicly exposed | Notes                    |
+| -------- | -------------- | ----------------------------------- | ---------------- | ------------------------ |
+| server 1 | `nginx`        | `80/443`                            | yes              | single public entrypoint |
+| server 1 | `room-node-a`  | `127.0.0.1:8787` or private IP      | no               | proxied by the edge      |
+| server 1 | `global-admin` | `127.0.0.1:8788` or private IP      | no               | proxied by the edge      |
+| server 1 | `redis`        | `127.0.0.1:6379` or private IP      | no               | allow only node access   |
+| server 2 | `room-node-b`  | private IP such as `10.0.0.12:8787` | no               | proxied by server 1 edge |
 
 ##### Environment examples
 

@@ -530,12 +530,12 @@ node server/dist/global-admin-index.js
 
 #### 节点角色配置矩阵
 
-| 角色 | 典型进程 | 对外职责 | 必须唯一 | 必须保持一致 | 推荐值 / 说明 |
-| --- | --- | --- | --- | --- | --- |
-| `room-node` | `server/dist/index.js` | WebSocket、`/`、`/healthz`、`/readyz` | `INSTANCE_ID`、监听地址/端口 | `REDIS_URL`、各类 `*_PROVIDER`、安全与限流参数 | `GLOBAL_ADMIN_ENABLED=false` |
-| `global-admin` | `server/dist/global-admin-index.js` | `/admin`、`/api/admin/*` | `INSTANCE_ID`、`GLOBAL_ADMIN_PORT` | `REDIS_URL`、管理员认证参数、共享 provider 配置 | `GLOBAL_ADMIN_ENABLED=true` |
-| `edge` | `nginx` / `haproxy` / 云 LB | TLS 终止、统一入口、反向代理、连接分发 | 对外域名、证书、upstream 定义 | 指向的后端节点列表 | 用户只连接统一入口地址 |
-| `redis` | `redis-server` | 共享持久化、运行时索引、总线 | 实例地址、密码、ACL | 所有节点都要指向同一个 Redis | 生产建议仅内网开放 |
+| 角色           | 典型进程                            | 对外职责                               | 必须唯一                           | 必须保持一致                                    | 推荐值 / 说明                |
+| -------------- | ----------------------------------- | -------------------------------------- | ---------------------------------- | ----------------------------------------------- | ---------------------------- |
+| `room-node`    | `server/dist/index.js`              | WebSocket、`/`、`/healthz`、`/readyz`  | `INSTANCE_ID`、监听地址/端口       | `REDIS_URL`、各类 `*_PROVIDER`、安全与限流参数  | `GLOBAL_ADMIN_ENABLED=false` |
+| `global-admin` | `server/dist/global-admin-index.js` | `/admin`、`/api/admin/*`               | `INSTANCE_ID`、`GLOBAL_ADMIN_PORT` | `REDIS_URL`、管理员认证参数、共享 provider 配置 | `GLOBAL_ADMIN_ENABLED=true`  |
+| `edge`         | `nginx` / `haproxy` / 云 LB         | TLS 终止、统一入口、反向代理、连接分发 | 对外域名、证书、upstream 定义      | 指向的后端节点列表                              | 用户只连接统一入口地址       |
+| `redis`        | `redis-server`                      | 共享持久化、运行时索引、总线           | 实例地址、密码、ACL                | 所有节点都要指向同一个 Redis                    | 生产建议仅内网开放           |
 
 #### 哪些配置必须一致，哪些必须不同
 
@@ -576,13 +576,13 @@ node server/dist/global-admin-index.js
 
 建议端口规划：
 
-| 机器 | 角色 | 建议监听 | 是否公网开放 | 说明 |
-| --- | --- | --- | --- | --- |
-| 服务器 1 | `nginx` | `80/443` | 是 | 用户统一入口 |
-| 服务器 1 | `room-node-a` | `127.0.0.1:8787` 或内网地址 | 否 | 由入口层反代 |
-| 服务器 1 | `global-admin` | `127.0.0.1:8788` 或内网地址 | 否 | 由入口层反代 |
-| 服务器 1 | `redis` | `127.0.0.1:6379` 或内网地址 | 否 | 只允许节点访问 |
-| 服务器 2 | `room-node-b` | `10.0.0.12:8787` 等内网地址 | 否 | 由服务器 1 的入口层反代 |
+| 机器     | 角色           | 建议监听                    | 是否公网开放 | 说明                    |
+| -------- | -------------- | --------------------------- | ------------ | ----------------------- |
+| 服务器 1 | `nginx`        | `80/443`                    | 是           | 用户统一入口            |
+| 服务器 1 | `room-node-a`  | `127.0.0.1:8787` 或内网地址 | 否           | 由入口层反代            |
+| 服务器 1 | `global-admin` | `127.0.0.1:8788` 或内网地址 | 否           | 由入口层反代            |
+| 服务器 1 | `redis`        | `127.0.0.1:6379` 或内网地址 | 否           | 只允许节点访问          |
+| 服务器 2 | `room-node-b`  | `10.0.0.12:8787` 等内网地址 | 否           | 由服务器 1 的入口层反代 |
 
 ##### 环境变量示意
 
