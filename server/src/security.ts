@@ -27,6 +27,16 @@ export function createSecurityPolicy(config: SecurityConfig): {
   const ipConnectionCounts = new Map<string, number>();
   let evaluateCount = 0;
 
+  function getTrustedForwardedAddress(forwarded: string): string | null {
+    for (const part of forwarded.split(",")) {
+      const candidate = part.trim();
+      if (candidate) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
   function getRemoteAddress(request: IncomingMessage): string | null {
     const forwarded = request.headers["x-forwarded-for"];
     if (
@@ -34,8 +44,7 @@ export function createSecurityPolicy(config: SecurityConfig): {
       typeof forwarded === "string" &&
       forwarded.trim()
     ) {
-      const parts = forwarded.split(",");
-      return parts[parts.length - 1]?.trim() ?? null;
+      return getTrustedForwardedAddress(forwarded);
     }
     return request.socket.remoteAddress ?? null;
   }
