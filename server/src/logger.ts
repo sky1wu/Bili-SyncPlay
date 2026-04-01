@@ -9,7 +9,9 @@ export function createStructuredLogger(
   eventStore?: GlobalEventStore,
   runtimeStore?: RuntimeStore,
 ): LogEvent {
-  const emitLine = writeLine ?? console.log;
+  const emitLine = (line: string) => {
+    (writeLine ?? console.log)(line);
+  };
 
   return (event, data) => {
     const timestamp = new Date().toISOString();

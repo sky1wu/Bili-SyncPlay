@@ -7,6 +7,7 @@ import {
   createSyncServer,
   getDefaultPersistenceConfig,
   getDefaultSecurityConfig,
+  runShutdownSteps,
 } from "../src/app.js";
 import { createRedisRoomStore } from "../src/redis-room-store.js";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
@@ -166,6 +167,48 @@ test("cleanupSessionAfterClose unregisters and decrements even when leaveRoom fa
     events.some((entry) => entry.event === "ws_connection_cleanup_failed"),
   );
   assert.ok(events.some((entry) => entry.event === "ws_connection_closed"));
+});
+
+test("runShutdownSteps logs timeout and continues closing remaining steps", async () => {
+  const stepsRun: string[] = [];
+  const logs: Array<{ event: string; step: string | null; result: string }> =
+    [];
+
+  await runShutdownSteps(
+    [
+      {
+        name: "hang",
+        run: async () => {
+          stepsRun.push("hang");
+          await new Promise(() => undefined);
+        },
+        timeoutMs: 10,
+      },
+      {
+        name: "after_timeout",
+        run: () => {
+          stepsRun.push("after_timeout");
+        },
+      },
+    ],
+    (event, data) => {
+      logs.push({
+        event,
+        step: typeof data.step === "string" ? data.step : null,
+        result: String(data.result),
+      });
+    },
+    10,
+  );
+
+  assert.deepEqual(stepsRun, ["hang", "after_timeout"]);
+  assert.deepEqual(logs, [
+    {
+      event: "server_shutdown_step_failed",
+      step: "hang",
+      result: "timeout",
+    },
+  ]);
 });
 
 test("websocket lifecycle mirrors sessions into the shared redis runtime store", async (t) => {

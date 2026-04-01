@@ -80,6 +80,7 @@ export {
 } from "./messages.js";
 
 const CLOSE_CODE_POLICY_VIOLATION = 1008;
+const DEFAULT_CLOSE_STEP_TIMEOUT_MS = 5_000;
 const PACKAGE_JSON_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../package.json",
@@ -101,6 +102,50 @@ export type SyncServerDependencies = {
   adminUiConfig?: AdminUiConfig;
   serviceVersion?: string;
 };
+
+type ShutdownStep = {
+  name: string;
+  run: () => Promise<void> | void;
+  timeoutMs?: number;
+};
+
+export async function runShutdownSteps(
+  steps: ShutdownStep[],
+  logEvent: LogEvent,
+  defaultTimeoutMs = DEFAULT_CLOSE_STEP_TIMEOUT_MS,
+): Promise<void> {
+  for (const step of steps) {
+    const timeoutMs = step.timeoutMs ?? defaultTimeoutMs;
+    const pendingStep = Promise.resolve().then(step.run);
+    void pendingStep.catch(() => undefined);
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        pendingStep,
+        new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(new Error(`Shutdown step timed out: ${step.name}.`));
+          }, timeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      const timedOut =
+        error instanceof Error &&
+        error.message === `Shutdown step timed out: ${step.name}.`;
+      logEvent("server_shutdown_step_failed", {
+        step: step.name,
+        timeoutMs,
+        result: timedOut ? "timeout" : "error",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+}
 
 export async function cleanupSessionAfterClose(options: {
   session: Session;
@@ -695,65 +740,108 @@ export async function createSyncServer(
   return {
     httpServer,
     close: async () => {
-      roomReaper.stop();
-      await nodeHeartbeat.stop();
-      await runtimeIndexReaper.stop();
-      for (const client of wss.clients) {
-        client.terminate();
-      }
-      await new Promise<void>((resolve, reject) => {
-        wss.close((wsError) => {
-          if (wsError) {
-            reject(wsError);
-            return;
-          }
-          httpServer.close((httpError) => {
-            if (httpError) {
-              reject(httpError);
-              return;
-            }
-            resolve();
-          });
-        });
-      });
-      await Promise.allSettled(Array.from(pendingSessionCleanup));
       const maybeClosableStore = roomStore as RoomStore & {
         close?: () => Promise<void>;
       };
-      if (typeof maybeClosableStore.close === "function") {
-        await maybeClosableStore.close();
-      }
       const maybeClosableEventStore = eventStore as GlobalEventStore & {
         close?: () => Promise<void>;
       };
-      if (typeof maybeClosableEventStore.close === "function") {
-        await maybeClosableEventStore.close();
-      }
-      if (sharedRuntimeStore !== localRuntimeStore) {
-        const maybeClosableRuntimeStore =
-          sharedRuntimeStore as typeof sharedRuntimeStore & {
-            close?: () => Promise<void>;
-          };
-        if (typeof maybeClosableRuntimeStore.close === "function") {
-          await maybeClosableRuntimeStore.close();
-        }
-      }
-      await adminCommandConsumer.close();
       const maybeClosableAdminCommandBus =
         adminCommandBus as AdminCommandBus & {
           close?: () => Promise<void>;
         };
-      if (typeof maybeClosableAdminCommandBus.close === "function") {
-        await maybeClosableAdminCommandBus.close();
-      }
-      await roomEventConsumer.close();
       const maybeClosableRoomEventBus = roomEventBus as RoomEventBus & {
         close?: () => Promise<void>;
       };
-      if (typeof maybeClosableRoomEventBus.close === "function") {
-        await maybeClosableRoomEventBus.close();
-      }
-      await closeAdminServices();
+      const maybeClosableRuntimeStore =
+        sharedRuntimeStore === localRuntimeStore
+          ? null
+          : (sharedRuntimeStore as typeof sharedRuntimeStore & {
+              close?: () => Promise<void>;
+            });
+
+      await runShutdownSteps(
+        [
+          {
+            name: "stop_room_reaper",
+            run: () => {
+              roomReaper.stop();
+            },
+          },
+          {
+            name: "stop_node_heartbeat",
+            run: () => nodeHeartbeat.stop(),
+          },
+          {
+            name: "stop_runtime_index_reaper",
+            run: () => runtimeIndexReaper.stop(),
+          },
+          {
+            name: "terminate_ws_clients",
+            run: () => {
+              for (const client of wss.clients) {
+                client.terminate();
+              }
+            },
+          },
+          {
+            name: "close_network_servers",
+            run: () =>
+              new Promise<void>((resolve, reject) => {
+                wss.close((wsError) => {
+                  if (wsError) {
+                    reject(wsError);
+                    return;
+                  }
+                  httpServer.close((httpError) => {
+                    if (httpError) {
+                      reject(httpError);
+                      return;
+                    }
+                    resolve();
+                  });
+                });
+              }),
+          },
+          {
+            name: "await_pending_session_cleanup",
+            run: () => Promise.allSettled(Array.from(pendingSessionCleanup)),
+          },
+          {
+            name: "close_room_store",
+            run: () => maybeClosableStore.close?.(),
+          },
+          {
+            name: "close_event_store",
+            run: () => maybeClosableEventStore.close?.(),
+          },
+          {
+            name: "close_shared_runtime_store",
+            run: () => maybeClosableRuntimeStore?.close?.(),
+          },
+          {
+            name: "close_admin_command_consumer",
+            run: () => adminCommandConsumer.close(),
+          },
+          {
+            name: "close_admin_command_bus",
+            run: () => maybeClosableAdminCommandBus.close?.(),
+          },
+          {
+            name: "close_room_event_consumer",
+            run: () => roomEventConsumer.close(),
+          },
+          {
+            name: "close_room_event_bus",
+            run: () => maybeClosableRoomEventBus.close?.(),
+          },
+          {
+            name: "close_admin_services",
+            run: () => closeAdminServices(),
+          },
+        ],
+        logEvent,
+      );
     },
   };
 }
