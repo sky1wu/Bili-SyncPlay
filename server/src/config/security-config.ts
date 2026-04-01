@@ -23,10 +23,10 @@ export function loadSecurityConfig(
       "ALLOW_MISSING_ORIGIN_IN_DEV",
       defaults.allowMissingOriginInDev,
     ),
-    trustProxyHeaders: parseBooleanEnv(
+    trustedProxyAddresses: parseCsvEnv(
       env,
-      "TRUST_PROXY_HEADERS",
-      defaults.trustProxyHeaders,
+      "TRUSTED_PROXY_ADDRESSES",
+      defaults.trustedProxyAddresses,
     ),
     maxConnectionsPerIp: parsePositiveIntegerEnv(
       env,

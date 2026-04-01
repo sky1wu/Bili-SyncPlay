@@ -24,7 +24,7 @@ export function createAdminConfigService(options: {
           allowedOrigins: options.securityConfig.allowedOrigins,
           allowMissingOriginInDev:
             options.securityConfig.allowMissingOriginInDev,
-          trustProxyHeaders: options.securityConfig.trustProxyHeaders,
+          trustedProxyAddresses: options.securityConfig.trustedProxyAddresses,
           maxConnectionsPerIp: options.securityConfig.maxConnectionsPerIp,
           connectionAttemptsPerMinute:
             options.securityConfig.connectionAttemptsPerMinute,

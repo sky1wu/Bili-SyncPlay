@@ -1498,7 +1498,16 @@ async function renderConfigPage() {
               }
             </dd>
             <dt>开发环境允许缺省 Origin</dt><dd>${renderStatus(config.security.allowMissingOriginInDev ? "warning" : "neutral", config.security.allowMissingOriginInDev ? "是" : "否")}</dd>
-            <dt>信任代理请求头</dt><dd>${renderStatus(config.security.trustProxyHeaders ? "warning" : "neutral", config.security.trustProxyHeaders ? "是" : "否")}</dd>
+            <dt>受信代理地址</dt><dd>${
+              config.security.trustedProxyAddresses.length > 0
+                ? `<div class="config-origin-list">${config.security.trustedProxyAddresses
+                    .map(
+                      (item) =>
+                        `<span class="config-origin code">${escapeHtml(item)}</span>`,
+                    )
+                    .join("")}</div>`
+                : renderEmptyValue("未设置")
+            }</dd>
             <dt>单 IP 最大连接数</dt><dd>${config.security.maxConnectionsPerIp}</dd>
             <dt>每分钟连接尝试上限</dt><dd>${config.security.connectionAttemptsPerMinute}</dd>
             <dt>单房间最大成员数</dt><dd>${config.security.maxMembersPerRoom}</dd>
@@ -1927,7 +1936,7 @@ async function mockApiRequest(path, _options = {}) {
           "chrome-extension://demo-extension",
         ],
         allowMissingOriginInDev: false,
-        trustProxyHeaders: true,
+        trustedProxyAddresses: ["127.0.0.1", "10.0.0.10"],
         maxConnectionsPerIp: 24,
         connectionAttemptsPerMinute: 120,
         maxMembersPerRoom: 16,

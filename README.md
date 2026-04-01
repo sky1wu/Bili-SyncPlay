@@ -427,7 +427,7 @@ Example `server.config.json`:
       "chrome-extension://<extension-id>",
       "https://sync.example.com"
     ],
-    "trustProxyHeaders": true
+    "trustedProxyAddresses": ["127.0.0.1", "10.0.0.10"]
   },
   "persistence": {
     "provider": "redis",
@@ -665,7 +665,7 @@ The server accepts the following environment variables. Safe defaults are built 
 - `ALLOWED_ORIGINS`: comma-separated WebSocket `Origin` allowlist
 - if `ALLOWED_ORIGINS` is empty, the server rejects all explicit `Origin` values by default
 - `ALLOW_MISSING_ORIGIN_IN_DEV`: allow missing `Origin` headers when set to `true`
-- `TRUST_PROXY_HEADERS`: only when set to `true`, use `X-Forwarded-For` for connection-level IP limits
+- `TRUSTED_PROXY_ADDRESSES`: comma-separated proxy socket IP allowlist; only requests arriving from these proxies can use `X-Forwarded-For`
 - `MAX_CONNECTIONS_PER_IP`: max concurrent WebSocket connections per IP
 - `CONNECTION_ATTEMPTS_PER_MINUTE`: max handshake attempts per IP per minute
 - `MAX_MEMBERS_PER_ROOM`: room member cap
@@ -707,7 +707,7 @@ Example:
 ```bash
 PORT=8787 \
 ALLOWED_ORIGINS=chrome-extension://<extension-id>,https://sync.example.com,http://localhost:3000 \
-TRUST_PROXY_HEADERS=true \
+TRUSTED_PROXY_ADDRESSES=127.0.0.1,10.0.0.10 \
 ROOM_STORE_PROVIDER=redis \
 REDIS_URL=redis://127.0.0.1:6379 \
 EMPTY_ROOM_TTL_MS=900000 \
@@ -948,7 +948,7 @@ Create `/etc/bili-syncplay/server.config.json` for shared non-secret settings:
       "chrome-extension://<extension-id>",
       "https://sync.example.com"
     ],
-    "trustProxyHeaders": true
+    "trustedProxyAddresses": ["127.0.0.1", "10.0.0.10"]
   },
   "persistence": {
     "provider": "redis",
@@ -1197,7 +1197,7 @@ If you run multiple room nodes, prefer a rolling restart instead of restarting e
 - Room join requires both `roomCode` and `joinToken`; room messages require a valid `memberToken`.
 - `memberToken` is session-bound, never restored from persistence, and is re-issued after reconnect or restart.
 - Handshake origin checks are deny-by-default unless you explicitly allow missing `Origin` in development.
-- `X-Forwarded-For` is ignored unless `TRUST_PROXY_HEADERS=true`.
+- `X-Forwarded-For` is ignored unless the socket peer matches `TRUSTED_PROXY_ADDRESSES`.
 - Health checks are available on both `GET /` and `GET /healthz`; readiness is `GET /readyz`.
 - If you use a cloud firewall, allow inbound `80` and `443`, but keep `8787` private to localhost.
 - If you do not want Nginx, you can expose Node directly, but browsers and extensions should still connect over `wss://` with a valid TLS certificate.
@@ -1218,7 +1218,7 @@ Common developer-facing failure cases:
 - `Member token is invalid.`: the current session lost its room binding, the server restarted, or the client must rejoin to obtain a fresh token.
 - `Too many requests.`: a room action or sync message hit the configured rate limit.
 - handshake rejected with `403`: the request `Origin` is not in `ALLOWED_ORIGINS`, or `Origin` is missing while `ALLOW_MISSING_ORIGIN_IN_DEV` is disabled.
-- connection-level IP limits appear ineffective: verify whether you intended to enable `TRUST_PROXY_HEADERS`; by default the server uses the real socket address only.
+- connection-level IP limits appear ineffective: verify whether the reverse proxy socket IP is included in `TRUSTED_PROXY_ADDRESSES`; by default the server uses the real socket address only.
 - `Please open a Bilibili video page first.`: the active tab URL does not match the extension content-script targets.
 - `Current page does not have a playable video.`: the content script loaded, but the page did not expose a usable video payload.
 - `Cannot access the current page.`: Chrome could not deliver the message to the content script, often because the page was not reloaded after loading the unpacked extension or the tab is on an unsupported URL.

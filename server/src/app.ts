@@ -253,7 +253,7 @@ export function getDefaultSecurityConfig(): SecurityConfig {
   return {
     allowedOrigins: [],
     allowMissingOriginInDev: false,
-    trustProxyHeaders: false,
+    trustedProxyAddresses: [],
     maxConnectionsPerIp: 10,
     connectionAttemptsPerMinute: 20,
     maxMembersPerRoom: 8,

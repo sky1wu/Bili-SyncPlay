@@ -923,10 +923,10 @@ test("does not trust X-Forwarded-For unless proxy trust is explicitly enabled", 
   }
 });
 
-test("uses X-Forwarded-For for connection limiting only when proxy trust is enabled", async () => {
+test("uses X-Forwarded-For for connection limiting only from trusted proxy peers", async () => {
   const server = await startTestServer({
     security: {
-      trustProxyHeaders: true,
+      trustedProxyAddresses: ["127.0.0.1"],
       maxConnectionsPerIp: 1,
     },
   });
@@ -951,23 +951,25 @@ test("uses X-Forwarded-For for connection limiting only when proxy trust is enab
   }
 });
 
-test("trusted proxy connection limiting uses the last forwarded hop instead of spoofable left-most values", async () => {
+test("trusted proxy connection limiting resolves clients through the configured proxy boundary", async () => {
   const server = await startTestServer({
     security: {
-      trustProxyHeaders: true,
+      trustedProxyAddresses: ["127.0.0.1", "198.51.100.7"],
       maxConnectionsPerIp: 1,
     },
   });
   try {
     const first = await connectClientWithHeaders(server.url, {
       origin: ALLOWED_ORIGIN,
-      headers: { "x-forwarded-for": "203.0.113.10, 198.51.100.7" },
+      headers: { "x-forwarded-for": "192.0.2.55, 203.0.113.10, 198.51.100.7" },
     });
     try {
       await assert.rejects(
         connectClientWithHeaders(server.url, {
           origin: ALLOWED_ORIGIN,
-          headers: { "x-forwarded-for": "192.0.2.55, 198.51.100.7" },
+          headers: {
+            "x-forwarded-for": "198.51.100.99, 203.0.113.10, 198.51.100.7",
+          },
         }),
         /Unexpected server response: 429/,
       );

@@ -139,7 +139,7 @@ export type AdminUiConfig = {
 export type SecurityConfig = {
   allowedOrigins: string[];
   allowMissingOriginInDev: boolean;
-  trustProxyHeaders: boolean;
+  trustedProxyAddresses: string[];
   maxConnectionsPerIp: number;
   connectionAttemptsPerMinute: number;
   maxMembersPerRoom: number;

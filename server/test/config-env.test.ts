@@ -11,7 +11,7 @@ import { loadSecurityConfig } from "../src/config/security-config.js";
 test("security config reads overrides and keeps defaults for missing values", () => {
   const config = loadSecurityConfig({
     ALLOWED_ORIGINS: "https://a.example, https://b.example ",
-    TRUST_PROXY_HEADERS: "true",
+    TRUSTED_PROXY_ADDRESSES: "127.0.0.1, 198.51.100.7 ",
     RATE_LIMIT_SYNC_PING_BURST: "5",
   });
 
@@ -19,7 +19,7 @@ test("security config reads overrides and keeps defaults for missing values", ()
     "https://a.example",
     "https://b.example",
   ]);
-  assert.equal(config.trustProxyHeaders, true);
+  assert.deepEqual(config.trustedProxyAddresses, ["127.0.0.1", "198.51.100.7"]);
   assert.equal(config.rateLimits.syncPingBurst, 5);
   assert.equal(config.maxMembersPerRoom, 8);
 });

@@ -63,7 +63,7 @@ function createHandler(adminHandled = false) {
       connectionAttemptsPerMinute: 10,
       maxConnectionsPerIp: 5,
       maxMembersPerRoom: 8,
-      trustProxyHeaders: false,
+      trustedProxyAddresses: [],
       rateLimits: {
         roomCreatePerMinute: 5,
         roomJoinPerMinute: 10,
@@ -150,7 +150,7 @@ test("http handler returns a stable 500 payload when downstream routing throws",
       connectionAttemptsPerMinute: 10,
       maxConnectionsPerIp: 5,
       maxMembersPerRoom: 8,
-      trustProxyHeaders: false,
+      trustedProxyAddresses: [],
       rateLimits: {
         roomCreatePerMinute: 5,
         roomJoinPerMinute: 10,

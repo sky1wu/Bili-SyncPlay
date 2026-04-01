@@ -43,7 +43,7 @@ test("runtime config maps JSON file values through existing loaders", async () =
         globalAdminPort: 9797,
         security: {
           allowedOrigins: ["https://a.example", "https://b.example"],
-          trustProxyHeaders: true,
+          trustedProxyAddresses: ["127.0.0.1", "198.51.100.7"],
           rateLimits: {
             syncPingBurst: 5,
           },
@@ -76,7 +76,10 @@ test("runtime config maps JSON file values through existing loaders", async () =
       "https://a.example",
       "https://b.example",
     ]);
-    assert.equal(config.securityConfig.trustProxyHeaders, true);
+    assert.deepEqual(config.securityConfig.trustedProxyAddresses, [
+      "127.0.0.1",
+      "198.51.100.7",
+    ]);
     assert.equal(config.securityConfig.rateLimits.syncPingBurst, 5);
     assert.equal(config.persistenceConfig.provider, "redis");
     assert.equal(config.persistenceConfig.runtimeStoreProvider, "redis");
@@ -105,7 +108,7 @@ test("environment variables override config file values", async () => {
       JSON.stringify({
         port: 8789,
         security: {
-          trustProxyHeaders: false,
+          trustedProxyAddresses: ["10.0.0.10"],
         },
         persistence: {
           provider: "memory",
@@ -118,7 +121,7 @@ test("environment variables override config file values", async () => {
     const config = await loadRuntimeConfig(
       {
         PORT: "9002",
-        TRUST_PROXY_HEADERS: "true",
+        TRUSTED_PROXY_ADDRESSES: "127.0.0.1, 127.0.0.2",
         ROOM_STORE_PROVIDER: "redis",
         INSTANCE_ID: "room-node-b",
       },
@@ -126,7 +129,10 @@ test("environment variables override config file values", async () => {
     );
 
     assert.equal(config.port, 9002);
-    assert.equal(config.securityConfig.trustProxyHeaders, true);
+    assert.deepEqual(config.securityConfig.trustedProxyAddresses, [
+      "127.0.0.1",
+      "127.0.0.2",
+    ]);
     assert.equal(config.persistenceConfig.provider, "redis");
     assert.equal(config.persistenceConfig.instanceId, "room-node-b");
   });

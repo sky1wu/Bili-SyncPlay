@@ -427,7 +427,7 @@ npm run build:release
       "chrome-extension://<extension-id>",
       "https://sync.example.com"
     ],
-    "trustProxyHeaders": true
+    "trustedProxyAddresses": ["127.0.0.1", "10.0.0.10"]
   },
   "persistence": {
     "provider": "redis",
@@ -665,7 +665,7 @@ node server/dist/global-admin-index.js
 - `ALLOWED_ORIGINS`：逗号分隔的 WebSocket `Origin` 白名单
 - 如果 `ALLOWED_ORIGINS` 为空，服务器默认拒绝所有显式 `Origin`
 - `ALLOW_MISSING_ORIGIN_IN_DEV`：设为 `true` 时允许缺失 `Origin` 头
-- `TRUST_PROXY_HEADERS`：仅在设为 `true` 时，使用 `X-Forwarded-For` 做连接级 IP 限制
+- `TRUSTED_PROXY_ADDRESSES`：逗号分隔的受信代理 socket IP 列表；只有来自这些代理的请求才会使用 `X-Forwarded-For`
 - `MAX_CONNECTIONS_PER_IP`：每个 IP 允许的最大并发 WebSocket 连接数
 - `CONNECTION_ATTEMPTS_PER_MINUTE`：每个 IP 每分钟最大握手尝试次数
 - `MAX_MEMBERS_PER_ROOM`：房间成员上限
@@ -707,7 +707,7 @@ node server/dist/global-admin-index.js
 ```bash
 PORT=8787 \
 ALLOWED_ORIGINS=chrome-extension://<extension-id>,https://sync.example.com,http://localhost:3000 \
-TRUST_PROXY_HEADERS=true \
+TRUSTED_PROXY_ADDRESSES=127.0.0.1,10.0.0.10 \
 ROOM_STORE_PROVIDER=redis \
 REDIS_URL=redis://127.0.0.1:6379 \
 EMPTY_ROOM_TTL_MS=900000 \
@@ -948,7 +948,7 @@ WantedBy=multi-user.target
       "chrome-extension://<extension-id>",
       "https://sync.example.com"
     ],
-    "trustProxyHeaders": true
+    "trustedProxyAddresses": ["127.0.0.1", "10.0.0.10"]
   },
   "persistence": {
     "provider": "redis",
@@ -1197,7 +1197,7 @@ sudo systemctl restart bili-syncplay-global-admin
 - 加入房间需要同时提供 `roomCode` 和 `joinToken`；发送房间消息需要有效的 `memberToken`。
 - `memberToken` 是会话态，不会从持久层恢复；重连或重启后都需要重新加入并重新签发。
 - 握手阶段的 Origin 检查默认拒绝，除非你在开发环境中显式允许缺失 `Origin`。
-- 只有在 `TRUST_PROXY_HEADERS=true` 时才会读取 `X-Forwarded-For`。
+- 只有当 socket 对端命中 `TRUSTED_PROXY_ADDRESSES` 时才会读取 `X-Forwarded-For`。
 - 健康检查同时提供 `GET /` 与 `GET /healthz`；就绪检查为 `GET /readyz`。
 - 如果你使用云防火墙，请放行入站 `80` 和 `443`，并将 `8787` 仅暴露给 localhost。
 - 如果你不想使用 Nginx，也可以直接暴露 Node 服务，但浏览器和扩展仍应通过带有效 TLS 证书的 `wss://` 连接。
@@ -1218,7 +1218,7 @@ sudo systemctl restart bili-syncplay-global-admin
 - `成员令牌无效。`：当前会话丢失了房间绑定、服务端已经重启，或客户端需要重新加入以获取新 token。
 - `请求过于频繁。`：某个房间操作或同步消息触发了配置的限流。
 - 握手阶段返回 `403`：请求的 `Origin` 不在 `ALLOWED_ORIGINS` 中，或者在 `ALLOW_MISSING_ORIGIN_IN_DEV` 关闭时缺少 `Origin`。
-- 连接级 IP 限制看起来未生效：检查你是否真的想启用 `TRUST_PROXY_HEADERS`；默认情况下服务器只使用真实 socket 地址。
+- 连接级 IP 限制看起来未生效：检查反向代理的 socket IP 是否已加入 `TRUSTED_PROXY_ADDRESSES`；默认情况下服务器只使用真实 socket 地址。
 - `请先打开一个哔哩哔哩视频页面。`：当前活动标签页 URL 不匹配扩展内容脚本的目标页面。
 - `当前页面没有可播放的视频。`：内容脚本已加载，但页面没有暴露可用的视频载荷。
 - `无法访问当前页面。`：Chrome 无法把消息传给内容脚本，通常是因为加载未打包扩展后没有刷新页面，或当前标签页 URL 不受支持。

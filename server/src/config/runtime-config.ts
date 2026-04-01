@@ -17,7 +17,7 @@ type JsonObject = Record<string, unknown>;
 type SecurityConfigFile = {
   allowedOrigins?: string[];
   allowMissingOriginInDev?: boolean;
-  trustProxyHeaders?: boolean;
+  trustedProxyAddresses?: string[];
   maxConnectionsPerIp?: number;
   connectionAttemptsPerMinute?: number;
   maxMembersPerRoom?: number;
@@ -177,7 +177,7 @@ function parseConfigFileShape(raw: unknown): ServerConfigFile {
   const security = parseOptionalObject<JsonObject>("security", raw.security, [
     "allowedOrigins",
     "allowMissingOriginInDev",
-    "trustProxyHeaders",
+    "trustedProxyAddresses",
     "maxConnectionsPerIp",
     "connectionAttemptsPerMinute",
     "maxMembersPerRoom",
@@ -238,9 +238,9 @@ function parseConfigFileShape(raw: unknown): ServerConfigFile {
             "security.allowMissingOriginInDev",
             security.allowMissingOriginInDev,
           ),
-          trustProxyHeaders: assertOptionalBoolean(
-            "security.trustProxyHeaders",
-            security.trustProxyHeaders,
+          trustedProxyAddresses: assertOptionalStringArray(
+            "security.trustedProxyAddresses",
+            security.trustedProxyAddresses,
           ),
           maxConnectionsPerIp: assertOptionalNumber(
             "security.maxConnectionsPerIp",
@@ -421,8 +421,8 @@ export function configFileToEnv(fileConfig: ServerConfigFile): EnvSource {
   );
   setEnvValue(
     env,
-    "TRUST_PROXY_HEADERS",
-    fileConfig.security?.trustProxyHeaders,
+    "TRUSTED_PROXY_ADDRESSES",
+    fileConfig.security?.trustedProxyAddresses,
   );
   setEnvValue(
     env,

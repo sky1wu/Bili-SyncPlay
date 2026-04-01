@@ -65,16 +65,16 @@ test("security policy respects trusted proxy headers when enabled", () => {
 
   assert.equal(security.getRemoteAddress(directRequest), "127.0.0.1");
 
-  config.trustProxyHeaders = true;
+  config.trustedProxyAddresses = ["127.0.0.1"];
   const trustedSecurity = createSecurityPolicy(config);
 
   assert.equal(trustedSecurity.getRemoteAddress(directRequest), "203.0.113.10");
 });
 
-test("security policy uses the last trusted forwarded hop when proxy trust is enabled", () => {
+test("security policy ignores forwarded headers from untrusted socket peers", () => {
   const config = getDefaultSecurityConfig();
   config.allowedOrigins = ["chrome-extension://allowed-extension"];
-  config.trustProxyHeaders = true;
+  config.trustedProxyAddresses = ["198.51.100.1"];
   const security = createSecurityPolicy(config);
   const spoofedRequest = createRequest({
     origin: "chrome-extension://allowed-extension",
@@ -85,32 +85,38 @@ test("security policy uses the last trusted forwarded hop when proxy trust is en
   assert.equal(security.getRemoteAddress(spoofedRequest), "127.0.0.1");
 });
 
-test("security policy ignores blank trusted proxy entries", () => {
+test("security policy resolves the client address through trusted proxy chains", () => {
   const config = getDefaultSecurityConfig();
   config.allowedOrigins = ["chrome-extension://allowed-extension"];
-  config.trustProxyHeaders = true;
+  config.trustedProxyAddresses = ["127.0.0.1", "198.51.100.7"];
   const security = createSecurityPolicy(config);
   const request = createRequest({
     origin: "chrome-extension://allowed-extension",
     remoteAddress: "127.0.0.1",
-    forwardedFor: "  , 198.51.100.7 , 127.0.0.1",
+    forwardedFor: "203.0.113.10, 198.51.100.7",
   });
 
-  assert.equal(security.getRemoteAddress(request), "127.0.0.1");
+  assert.equal(security.getRemoteAddress(request), "203.0.113.10");
 });
 
-test("security policy falls back to the only forwarded hop when proxy trust is enabled", () => {
+test("security policy falls back to socket.remoteAddress when forwarded headers are malformed", () => {
   const config = getDefaultSecurityConfig();
   config.allowedOrigins = ["chrome-extension://allowed-extension"];
-  config.trustProxyHeaders = true;
+  config.trustedProxyAddresses = ["127.0.0.1"];
   const security = createSecurityPolicy(config);
-  const request = createRequest({
+  const blankEntryRequest = createRequest({
     origin: "chrome-extension://allowed-extension",
     remoteAddress: "127.0.0.1",
-    forwardedFor: "198.51.100.7",
+    forwardedFor: "198.51.100.7, ",
+  });
+  const invalidEntryRequest = createRequest({
+    origin: "chrome-extension://allowed-extension",
+    remoteAddress: "127.0.0.1",
+    forwardedFor: "unknown",
   });
 
-  assert.equal(security.getRemoteAddress(request), "198.51.100.7");
+  assert.equal(security.getRemoteAddress(blankEntryRequest), "127.0.0.1");
+  assert.equal(security.getRemoteAddress(invalidEntryRequest), "127.0.0.1");
 });
 
 test("security policy rejects upgrades when connection count exceeds the configured maximum", () => {

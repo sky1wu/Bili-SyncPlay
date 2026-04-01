@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import { isIP } from "node:net";
 import {
   consumeFixedWindow,
   createWindowCounter,
@@ -25,31 +26,70 @@ export function createSecurityPolicy(config: SecurityConfig): {
 } {
   const ipAttemptWindows = new Map<string, AttemptWindowEntry>();
   const ipConnectionCounts = new Map<string, number>();
+  const trustedProxyAddresses = new Set(
+    config.trustedProxyAddresses
+      .map(normalizeIpAddress)
+      .filter((address): address is string => address !== null),
+  );
   let evaluateCount = 0;
 
-  function getTrustedForwardedAddress(forwarded: string): string | null {
-    const parts = forwarded
-      .split(",")
-      .map((part) => part.trim())
-      .filter((part) => part.length > 0);
-    if (parts.length === 0) {
+  function parseForwardedChain(forwarded: string): string[] | null {
+    const parts = forwarded.split(",").map((part) => part.trim());
+    if (parts.length === 0 || parts.some((part) => part.length === 0)) {
       return null;
     }
-    // With only a boolean trust flag available, the safest boundary we can
-    // honor is the hop immediately upstream of the connected proxy.
-    return parts.at(-1) ?? null;
+
+    const addresses = parts.map(normalizeIpAddress);
+    if (addresses.some((address) => address === null)) {
+      return null;
+    }
+
+    return addresses.filter((address): address is string => address !== null);
+  }
+
+  function normalizeIpAddress(value: string): string | null {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const unwrapped =
+      trimmed.startsWith("[") && trimmed.endsWith("]")
+        ? trimmed.slice(1, -1)
+        : trimmed;
+    return isIP(unwrapped) === 0 ? null : unwrapped;
+  }
+
+  function getTrustedForwardedAddress(forwarded: string): string | null {
+    const chain = parseForwardedChain(forwarded);
+    if (!chain) {
+      return null;
+    }
+
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      const candidate = chain[index];
+      if (!trustedProxyAddresses.has(candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
   }
 
   function getRemoteAddress(request: IncomingMessage): string | null {
+    const socketRemoteAddress = normalizeIpAddress(
+      request.socket.remoteAddress ?? "",
+    );
     const forwarded = request.headers["x-forwarded-for"];
     if (
-      config.trustProxyHeaders &&
+      socketRemoteAddress &&
+      trustedProxyAddresses.has(socketRemoteAddress) &&
       typeof forwarded === "string" &&
       forwarded.trim()
     ) {
-      return getTrustedForwardedAddress(forwarded);
+      return getTrustedForwardedAddress(forwarded) ?? socketRemoteAddress;
     }
-    return request.socket.remoteAddress ?? null;
+    return socketRemoteAddress;
   }
 
   function isOriginAllowed(
