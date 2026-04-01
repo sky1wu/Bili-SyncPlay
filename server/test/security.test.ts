@@ -71,7 +71,7 @@ test("security policy respects trusted proxy headers when enabled", () => {
   assert.equal(trustedSecurity.getRemoteAddress(directRequest), "203.0.113.10");
 });
 
-test("security policy uses the left-most forwarded IP only when proxy trust is enabled", () => {
+test("security policy uses the last trusted forwarded hop when proxy trust is enabled", () => {
   const config = getDefaultSecurityConfig();
   config.allowedOrigins = ["chrome-extension://allowed-extension"];
   config.trustProxyHeaders = true;
@@ -82,7 +82,7 @@ test("security policy uses the left-most forwarded IP only when proxy trust is e
     forwardedFor: "203.0.113.10, 127.0.0.1",
   });
 
-  assert.equal(security.getRemoteAddress(spoofedRequest), "203.0.113.10");
+  assert.equal(security.getRemoteAddress(spoofedRequest), "127.0.0.1");
 });
 
 test("security policy ignores blank trusted proxy entries", () => {
@@ -94,6 +94,20 @@ test("security policy ignores blank trusted proxy entries", () => {
     origin: "chrome-extension://allowed-extension",
     remoteAddress: "127.0.0.1",
     forwardedFor: "  , 198.51.100.7 , 127.0.0.1",
+  });
+
+  assert.equal(security.getRemoteAddress(request), "127.0.0.1");
+});
+
+test("security policy falls back to the only forwarded hop when proxy trust is enabled", () => {
+  const config = getDefaultSecurityConfig();
+  config.allowedOrigins = ["chrome-extension://allowed-extension"];
+  config.trustProxyHeaders = true;
+  const security = createSecurityPolicy(config);
+  const request = createRequest({
+    origin: "chrome-extension://allowed-extension",
+    remoteAddress: "127.0.0.1",
+    forwardedFor: "198.51.100.7",
   });
 
   assert.equal(security.getRemoteAddress(request), "198.51.100.7");

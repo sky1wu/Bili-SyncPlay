@@ -951,6 +951,34 @@ test("uses X-Forwarded-For for connection limiting only when proxy trust is enab
   }
 });
 
+test("trusted proxy connection limiting uses the last forwarded hop instead of spoofable left-most values", async () => {
+  const server = await startTestServer({
+    security: {
+      trustProxyHeaders: true,
+      maxConnectionsPerIp: 1,
+    },
+  });
+  try {
+    const first = await connectClientWithHeaders(server.url, {
+      origin: ALLOWED_ORIGIN,
+      headers: { "x-forwarded-for": "203.0.113.10, 198.51.100.7" },
+    });
+    try {
+      await assert.rejects(
+        connectClientWithHeaders(server.url, {
+          origin: ALLOWED_ORIGIN,
+          headers: { "x-forwarded-for": "192.0.2.55, 198.51.100.7" },
+        }),
+        /Unexpected server response: 429/,
+      );
+    } finally {
+      await closeClient(first);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("records auth_failed logs for member token validation errors", async () => {
   const server = await startTestServer();
   try {

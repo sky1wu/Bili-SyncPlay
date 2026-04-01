@@ -651,6 +651,22 @@ test("admin action routes reject invalid path params with 400", async () => {
       message: "Invalid memberId.",
       details: { name: "memberId" },
     });
+
+    const malformedRoomCode = await requestJson(
+      server.httpBaseUrl,
+      "/api/admin/rooms/%E0%A4%A/close",
+      {
+        method: "POST",
+        token,
+        body: { reason: "invalid room encoding" },
+      },
+    );
+    assert.equal(malformedRoomCode.status, 400);
+    assert.deepEqual(malformedRoomCode.body.error, {
+      code: "invalid_path_param",
+      message: "Invalid roomCode.",
+      details: { name: "roomCode" },
+    });
   } finally {
     await server.close();
   }

@@ -28,13 +28,16 @@ export function createSecurityPolicy(config: SecurityConfig): {
   let evaluateCount = 0;
 
   function getTrustedForwardedAddress(forwarded: string): string | null {
-    for (const part of forwarded.split(",")) {
-      const candidate = part.trim();
-      if (candidate) {
-        return candidate;
-      }
+    const parts = forwarded
+      .split(",")
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+    if (parts.length === 0) {
+      return null;
     }
-    return null;
+    // With only a boolean trust flag available, the safest boundary we can
+    // honor is the hop immediately upstream of the connected proxy.
+    return parts.at(-1) ?? null;
   }
 
   function getRemoteAddress(request: IncomingMessage): string | null {

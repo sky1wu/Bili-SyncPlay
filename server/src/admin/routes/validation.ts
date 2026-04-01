@@ -21,7 +21,13 @@ export function requireSegment(
 }
 
 export function requireNonEmptyString(value: string, name: string): string {
-  const trimmed = decodeURIComponent(value).trim();
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    throwBadRequest("invalid_path_param", `Invalid ${name}.`, { name });
+  }
+  const trimmed = decoded.trim();
   if (!trimmed) {
     throwBadRequest("invalid_path_param", `Invalid ${name}.`, { name });
   }
