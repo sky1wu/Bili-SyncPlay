@@ -100,6 +100,76 @@ export type SyncServerDependencies = {
   serviceVersion?: string;
 };
 
+export async function cleanupSessionAfterClose(options: {
+  session: Session;
+  code: number;
+  reason: Buffer;
+  messageHandler: { leaveRoom: (session: Session) => Promise<void> };
+  runtimeStore: Pick<RuntimeStore, "unregisterSession">;
+  securityPolicy: {
+    decrementConnectionCount: (remoteAddress: string | null) => void;
+  };
+  logEvent: LogEvent;
+  decodeCloseReason: (reason: Buffer) => string;
+}): Promise<void> {
+  const decodedReason = options.decodeCloseReason(options.reason);
+  const roomCodeAtClose = options.session.roomCode;
+
+  try {
+    await options.messageHandler.leaveRoom(options.session);
+  } catch (error) {
+    options.logEvent("ws_connection_cleanup_failed", {
+      sessionId: options.session.id,
+      roomCode: roomCodeAtClose,
+      remoteAddress: options.session.remoteAddress,
+      origin: options.session.origin,
+      result: "error",
+      step: "leave_room",
+      error: error instanceof Error ? error.message : "unknown_error",
+    });
+  } finally {
+    try {
+      options.runtimeStore.unregisterSession(options.session.id);
+    } catch (error) {
+      options.logEvent("ws_connection_cleanup_failed", {
+        sessionId: options.session.id,
+        roomCode: roomCodeAtClose,
+        remoteAddress: options.session.remoteAddress,
+        origin: options.session.origin,
+        result: "error",
+        step: "unregister_session",
+        error: error instanceof Error ? error.message : "unknown_error",
+      });
+    }
+
+    try {
+      options.securityPolicy.decrementConnectionCount(
+        options.session.remoteAddress,
+      );
+    } catch (error) {
+      options.logEvent("ws_connection_cleanup_failed", {
+        sessionId: options.session.id,
+        roomCode: roomCodeAtClose,
+        remoteAddress: options.session.remoteAddress,
+        origin: options.session.origin,
+        result: "error",
+        step: "decrement_connection_count",
+        error: error instanceof Error ? error.message : "unknown_error",
+      });
+    }
+  }
+
+  options.logEvent("ws_connection_closed", {
+    sessionId: options.session.id,
+    remoteAddress: options.session.remoteAddress,
+    origin: options.session.origin,
+    roomCode: options.session.roomCode ?? roomCodeAtClose,
+    result: "closed",
+    code: options.code,
+    reason: decodedReason,
+  });
+}
+
 function createMirroredRuntimeStore(
   localRuntimeStore: RuntimeStore,
   sharedRuntimeStore: RuntimeStore,
@@ -675,20 +745,16 @@ export async function createSyncServer(
     });
 
     socket.on("close", (code, reason) => {
-      const cleanup = (async () => {
-        securityPolicy.decrementConnectionCount(session.remoteAddress);
-        await messageHandler.leaveRoom(session);
-        runtimeStore.unregisterSession(session.id);
-        logEvent("ws_connection_closed", {
-          sessionId: session.id,
-          remoteAddress: session.remoteAddress,
-          origin: session.origin,
-          roomCode: session.roomCode,
-          result: "closed",
-          code,
-          reason: decodeCloseReason(reason),
-        });
-      })();
+      const cleanup = cleanupSessionAfterClose({
+        session,
+        code,
+        reason,
+        messageHandler,
+        runtimeStore,
+        securityPolicy,
+        logEvent,
+        decodeCloseReason,
+      });
       pendingSessionCleanup.add(cleanup);
       void cleanup.finally(() => {
         pendingSessionCleanup.delete(cleanup);

@@ -3,12 +3,14 @@ import { once } from "node:events";
 import test from "node:test";
 import { WebSocket, type RawData } from "ws";
 import {
+  cleanupSessionAfterClose,
   createSyncServer,
   getDefaultPersistenceConfig,
   getDefaultSecurityConfig,
 } from "../src/app.js";
 import { createRedisRoomStore } from "../src/redis-room-store.js";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
+import type { Session } from "../src/types.js";
 
 const ALLOWED_ORIGIN = "chrome-extension://allowed-extension";
 const REDIS_URL = process.env.REDIS_URL;
@@ -92,6 +94,75 @@ async function closeClient(socket: WebSocket): Promise<void> {
     socket.close();
   });
 }
+
+function createSession(id: string): Session {
+  return {
+    id,
+    socket: {
+      readyState: WebSocket.OPEN,
+      OPEN: WebSocket.OPEN,
+      send() {},
+      close() {},
+      terminate() {},
+    } as Session["socket"],
+    instanceId: "runtime-test-node",
+    remoteAddress: "127.0.0.1",
+    origin: ALLOWED_ORIGIN,
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    displayName: "Alice",
+    memberToken: "token-1",
+    joinedAt: 1_000,
+    invalidMessageCount: 0,
+    rateLimitState: {
+      roomCreate: { windowStart: 0, count: 0 },
+      roomJoin: { windowStart: 0, count: 0 },
+      videoShare: { windowStart: 0, count: 0 },
+      playbackUpdate: { tokens: 0, lastRefillAt: 0 },
+      syncRequest: { windowStart: 0, count: 0 },
+      syncPing: { tokens: 0, lastRefillAt: 0 },
+    },
+  };
+}
+
+test("cleanupSessionAfterClose unregisters and decrements even when leaveRoom fails", async () => {
+  const session = createSession("cleanup-session");
+  const unregistered: string[] = [];
+  const decremented: Array<string | null> = [];
+  const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+
+  await cleanupSessionAfterClose({
+    session,
+    code: 1006,
+    reason: Buffer.from(""),
+    messageHandler: {
+      async leaveRoom() {
+        throw new Error("leave failed");
+      },
+    },
+    runtimeStore: {
+      unregisterSession(sessionId) {
+        unregistered.push(sessionId);
+      },
+    },
+    securityPolicy: {
+      decrementConnectionCount(remoteAddress) {
+        decremented.push(remoteAddress);
+      },
+    },
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    decodeCloseReason() {
+      return "";
+    },
+  });
+
+  assert.deepEqual(unregistered, [session.id]);
+  assert.deepEqual(decremented, [session.remoteAddress]);
+  assert.ok(events.some((entry) => entry.event === "ws_connection_cleanup_failed"));
+  assert.ok(events.some((entry) => entry.event === "ws_connection_closed"));
+});
 
 test("websocket lifecycle mirrors sessions into the shared redis runtime store", async (t) => {
   if (!REDIS_URL) {
