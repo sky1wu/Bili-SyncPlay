@@ -21,6 +21,7 @@ const ACTOR: AdminSession = {
 function createSession(overrides: Partial<Session> = {}): Session {
   return {
     id: "session-1",
+    connectionState: "attached",
     socket: {
       readyState: 1,
       OPEN: 1,

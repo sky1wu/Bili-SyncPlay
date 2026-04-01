@@ -6,6 +6,7 @@ import type { Session } from "../src/types.js";
 function createSession(id: string): Session {
   return {
     id,
+    connectionState: "attached",
     socket: {
       readyState: 1,
       OPEN: 1,

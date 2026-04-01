@@ -52,6 +52,7 @@ import {
 } from "./runtime-store.js";
 import { createSecurityPolicy } from "./security.js";
 import type { GlobalEventStore } from "./admin/global-event-store.js";
+import { hasAttachedSocket } from "./types.js";
 import type {
   AdminConfig,
   AdminUiConfig,
@@ -403,6 +404,9 @@ export async function createSyncServer(
     blockMemberToken: (roomCode, memberToken, expiresAt) =>
       runtimeStore.blockMemberToken(roomCode, memberToken, expiresAt),
     disconnectSessionSocket: (session, reason) => {
+      if (!hasAttachedSocket(session)) {
+        return;
+      }
       if (session.socket.readyState === session.socket.OPEN) {
         session.socket.close(1000, reason);
         return;
@@ -535,7 +539,9 @@ export async function createSyncServer(
     });
 
     if (
-      session.invalidMessageCount >= securityConfig.invalidMessageCloseThreshold
+      session.invalidMessageCount >=
+        securityConfig.invalidMessageCloseThreshold &&
+      hasAttachedSocket(session)
     ) {
       session.socket.close(
         CLOSE_CODE_POLICY_VIOLATION,
@@ -585,6 +591,7 @@ export async function createSyncServer(
     };
     const session: Session = {
       id: randomUUID(),
+      connectionState: "attached",
       socket,
       instanceId: persistenceConfig.instanceId,
       remoteAddress: context.remoteAddress,

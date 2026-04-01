@@ -102,13 +102,6 @@ function nodeStatusKey(prefix: string, instanceId: string): string {
   return `${prefix}node:${instanceId}`;
 }
 
-const DETACHED_SOCKET = {
-  readyState: 3,
-  OPEN: 1,
-  send() {},
-  close() {},
-  terminate() {},
-} as unknown as Session["socket"];
 const DEFAULT_MAX_PENDING_OPERATIONS = 256;
 const DEFAULT_PENDING_OPERATION_TIMEOUT_MS = 5_000;
 
@@ -134,7 +127,8 @@ function deserializeSession(fields: Record<string, string>): Session | null {
 
   return {
     id: fields.id,
-    socket: DETACHED_SOCKET,
+    connectionState: "detached",
+    socket: null,
     instanceId: normalizeNullable(fields.instanceId),
     remoteAddress: normalizeNullable(fields.remoteAddress),
     origin: normalizeNullable(fields.origin),

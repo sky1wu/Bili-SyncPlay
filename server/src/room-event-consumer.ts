@@ -1,4 +1,4 @@
-import type { SendMessage, Session } from "./types.js";
+import { hasAttachedSocket, type SendMessage, type Session } from "./types.js";
 import type { RoomEventBus } from "./room-event-bus.js";
 
 export async function createRoomEventConsumer(options: {
@@ -28,6 +28,9 @@ export async function createRoomEventConsumer(options: {
       }
 
       for (const session of localSessions) {
+        if (!hasAttachedSocket(session)) {
+          continue;
+        }
         options.send(session.socket, {
           type: "room:state",
           payload: state,

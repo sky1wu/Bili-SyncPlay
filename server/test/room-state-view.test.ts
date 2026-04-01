@@ -21,6 +21,7 @@ function createSession(
 ): Session {
   return {
     id,
+    connectionState: "attached",
     socket: {} as WebSocket,
     instanceId: `${id}-node`,
     remoteAddress: "127.0.0.1",

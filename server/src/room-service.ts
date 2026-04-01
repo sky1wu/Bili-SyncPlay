@@ -24,6 +24,7 @@ import {
   type RoomStore,
 } from "./room-store.js";
 import type { RuntimeStore } from "./runtime-store.js";
+import { hasAttachedSocket } from "./types.js";
 import type {
   ActiveRoom,
   LogEvent,
@@ -524,6 +525,7 @@ export function createRoomService(options: {
     if (
       !previousSession ||
       previousSession === currentSession ||
+      !hasAttachedSocket(previousSession) ||
       typeof previousSession.socket.close !== "function" ||
       previousSession.socket.readyState !== previousSession.socket.OPEN
     ) {

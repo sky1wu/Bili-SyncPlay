@@ -14,6 +14,7 @@ function createSession(id: string, instanceId: string): Session {
   return {
     id,
     instanceId,
+    connectionState: "attached",
     socket: {
       readyState: 1,
       OPEN: 1,

@@ -11,6 +11,7 @@ import {
 } from "./messages.js";
 import { RoomServiceError } from "./room-service.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
+import { hasAttachedSocket } from "./types.js";
 import type { LogEvent, SendError, SendMessage, Session } from "./types.js";
 
 export function createMessageHandler(options: {
@@ -141,6 +142,12 @@ export function createMessageHandler(options: {
     message: ClientMessage,
   ): Promise<void> {
     const currentTime = now();
+    if (!hasAttachedSocket(session)) {
+      throw new Error(
+        `Detached session cannot process client message: ${session.id}.`,
+      );
+    }
+    const socket = session.socket;
 
     try {
       switch (message.type) {
@@ -155,7 +162,7 @@ export function createMessageHandler(options: {
             )
           ) {
             handleRateLimitedMessage(session, message.type);
-            sendError(session.socket, "rate_limited", RATE_LIMITED_MESSAGE);
+            sendError(socket, "rate_limited", RATE_LIMITED_MESSAGE);
             return;
           }
 
@@ -167,7 +174,7 @@ export function createMessageHandler(options: {
             options.onRoomLeft?.(session, previousRoomCode);
           }
           options.onRoomJoined?.(session, room.code, previousRoomCode);
-          send(session.socket, {
+          send(socket, {
             type: "room:created",
             payload: {
               roomCode: room.code,
@@ -197,7 +204,7 @@ export function createMessageHandler(options: {
             )
           ) {
             handleRateLimitedMessage(session, message.type);
-            sendError(session.socket, "rate_limited", RATE_LIMITED_MESSAGE);
+            sendError(socket, "rate_limited", RATE_LIMITED_MESSAGE);
             return;
           }
 
@@ -212,7 +219,7 @@ export function createMessageHandler(options: {
             options.onRoomLeft?.(session, previousRoomCode);
           }
           options.onRoomJoined?.(session, room.code, previousRoomCode);
-          send(session.socket, {
+          send(socket, {
             type: "room:joined",
             payload: {
               roomCode: room.code,
@@ -237,7 +244,7 @@ export function createMessageHandler(options: {
             message.payload.memberToken !== session.memberToken
           ) {
             sendError(
-              session.socket,
+              socket,
               "member_token_invalid",
               MEMBER_TOKEN_INVALID_MESSAGE,
             );
@@ -265,7 +272,7 @@ export function createMessageHandler(options: {
             )
           ) {
             handleRateLimitedMessage(session, message.type);
-            sendError(session.socket, "rate_limited", RATE_LIMITED_MESSAGE);
+            sendError(socket, "rate_limited", RATE_LIMITED_MESSAGE);
             return;
           }
 
@@ -311,7 +318,7 @@ export function createMessageHandler(options: {
             )
           ) {
             handleRateLimitedMessage(session, message.type);
-            sendError(session.socket, "rate_limited", RATE_LIMITED_MESSAGE);
+            sendError(socket, "rate_limited", RATE_LIMITED_MESSAGE);
             return;
           }
 
@@ -320,7 +327,7 @@ export function createMessageHandler(options: {
             message.payload.memberToken,
             message.type,
           );
-          send(session.socket, {
+          send(socket, {
             type: "room:state",
             payload: state,
           });
@@ -339,7 +346,7 @@ export function createMessageHandler(options: {
             return;
           }
 
-          send(session.socket, {
+          send(socket, {
             type: "sync:pong",
             payload: {
               clientSendTime: message.payload.clientSendTime,
@@ -356,7 +363,7 @@ export function createMessageHandler(options: {
       }
     } catch (error) {
       if (error instanceof RoomServiceError) {
-        sendError(session.socket, error.code, error.message);
+        sendError(socket, error.code, error.message);
         if (error.reason === "internal_error") {
           logEvent("room_persist_failed", {
             sessionId: session.id,

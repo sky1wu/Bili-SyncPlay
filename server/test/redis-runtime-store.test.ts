@@ -12,6 +12,7 @@ function createKeyPrefix(): string {
 function createSession(id: string): Session {
   return {
     id,
+    connectionState: "attached",
     socket: {
       readyState: 1,
       OPEN: 1,
@@ -146,6 +147,10 @@ test("redis runtime store shares room sessions and member token state across ins
       "member-a",
       "member-b",
     ]);
+    assert.equal(room.members.get("member-a")?.connectionState, "detached");
+    assert.equal(room.members.get("member-a")?.socket, null);
+    assert.equal(room.members.get("member-b")?.connectionState, "detached");
+    assert.equal(room.members.get("member-b")?.socket, null);
     assert.equal(await storeA.countClusterActiveRooms(), 1);
     assert.equal(
       await storeB.findMemberIdByToken("ROOM01", "token-b"),

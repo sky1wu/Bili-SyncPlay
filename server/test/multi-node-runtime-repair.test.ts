@@ -12,18 +12,11 @@ import {
   requestJson,
 } from "./multi-node-test-kit.js";
 
-const DETACHED_SOCKET = {
-  readyState: 3,
-  OPEN: 1,
-  send() {},
-  close() {},
-  terminate() {},
-} as Session["socket"];
-
 function createGhostSession(roomCode: string): Session {
   return {
     id: "offline-session-1",
-    socket: DETACHED_SOCKET,
+    connectionState: "detached",
+    socket: null,
     instanceId: "node-crashed",
     remoteAddress: "127.0.0.10",
     origin: "chrome-extension://allowed-extension",

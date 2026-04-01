@@ -11,6 +11,7 @@ function createSession(
 ): Session {
   return {
     id,
+    connectionState: "attached",
     socket: {
       readyState: 1,
       OPEN: 1,

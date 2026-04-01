@@ -17,6 +17,7 @@ function createSession(id: string): Session {
   const config = getDefaultSecurityConfig();
   return {
     id,
+    connectionState: "attached",
     socket: {} as WebSocket,
     remoteAddress: "127.0.0.1",
     origin: "chrome-extension://allowed-extension",

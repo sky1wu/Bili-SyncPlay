@@ -28,9 +28,8 @@ export type SessionRateLimitState = {
   syncPing: TokenBucket;
 };
 
-export type Session = {
+export type SessionBase = {
   id: string;
-  socket: WebSocket;
   instanceId?: string | null;
   remoteAddress: string | null;
   origin: string | null;
@@ -42,6 +41,24 @@ export type Session = {
   invalidMessageCount: number;
   rateLimitState: SessionRateLimitState;
 };
+
+export type AttachedSession = SessionBase & {
+  connectionState: "attached";
+  socket: WebSocket;
+};
+
+export type DetachedSession = SessionBase & {
+  connectionState: "detached";
+  socket: null;
+};
+
+export type Session = AttachedSession | DetachedSession;
+
+export function hasAttachedSocket(
+  session: Session,
+): session is AttachedSession {
+  return session.connectionState === "attached" && session.socket !== null;
+}
 
 export type PersistedRoom = {
   code: string;

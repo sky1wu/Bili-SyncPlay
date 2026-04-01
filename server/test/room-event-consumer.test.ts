@@ -7,6 +7,7 @@ import type { Session } from "../src/types.js";
 function createSession(id: string, roomCode: string): Session {
   return {
     id,
+    connectionState: "attached",
     socket: {
       readyState: 1,
       OPEN: 1,
@@ -143,6 +144,50 @@ test("room event consumer emits an empty state for deleted rooms", async () => {
   }
 
   assert.deepEqual(sent, [{ roomCode: "ROOM01", members: 0 }]);
+});
+
+test("room event consumer skips detached sessions", async () => {
+  const bus = createInMemoryRoomEventBus();
+  const attachedSession = createSession("member-a", "ROOM01");
+  const detachedSession: Session = {
+    ...createSession("member-b", "ROOM01"),
+    connectionState: "detached",
+    socket: null,
+  };
+  const sent: string[] = [];
+
+  const consumer = await createRoomEventConsumer({
+    roomEventBus: bus,
+    async getRoomStateByCode(roomCode) {
+      return {
+        roomCode,
+        sharedVideo: null,
+        playback: null,
+        members: [{ id: "member-a", name: "Alice" }],
+      };
+    },
+    listLocalSessionsByRoom() {
+      return [attachedSession, detachedSession];
+    },
+    send(socket) {
+      if (socket === attachedSession.socket) {
+        sent.push(attachedSession.id);
+      }
+    },
+  });
+
+  try {
+    await bus.publish({
+      type: "room_member_changed",
+      roomCode: "ROOM01",
+      sourceInstanceId: "instance-a",
+      emittedAt: 1_500,
+    });
+  } finally {
+    await consumer.close();
+  }
+
+  assert.deepEqual(sent, ["member-a"]);
 });
 
 test("room event consumer logs failures without throwing to the bus", async () => {

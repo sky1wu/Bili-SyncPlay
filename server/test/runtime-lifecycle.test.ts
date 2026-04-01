@@ -99,6 +99,7 @@ async function closeClient(socket: WebSocket): Promise<void> {
 function createSession(id: string): Session {
   return {
     id,
+    connectionState: "attached",
     socket: {
       readyState: WebSocket.OPEN,
       OPEN: WebSocket.OPEN,
