@@ -155,6 +155,7 @@ test("redis-backed overview aggregates cluster runtime and node status across in
     nodeHeartbeatEnabled: true,
     nodeHeartbeatIntervalMs: 50,
     nodeHeartbeatTtlMs: 200,
+    redisNamespace: `overview-cluster-${Date.now().toString(36)}`,
     redisUrl,
   };
   const instanceIdA = `node-a-${Date.now().toString(36)}`;
