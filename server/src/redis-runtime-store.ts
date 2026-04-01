@@ -4,6 +4,12 @@ import {
   createInMemoryRuntimeStore,
   type RuntimeStore,
 } from "./runtime-store.js";
+import {
+  findMemberIdByTokenEntries,
+  getPreviousRoomToLeave,
+  resolveRoomCodeToLeave,
+  shouldRemoveMemberBinding,
+} from "./runtime-store-state.js";
 
 type RedisMulti = {
   sadd: (...args: string[]) => RedisMulti;
@@ -344,10 +350,14 @@ export async function createRedisRuntimeStore(
       queueSessionOperation(sessionId, "mark_session_joined_room", async () => {
         const previousRoomCode =
           (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
+        const roomCodeToLeave = getPreviousRoomToLeave(
+          previousRoomCode,
+          roomCode,
+        );
         const transaction = redis.multi();
-        if (previousRoomCode && previousRoomCode !== roomCode) {
+        if (roomCodeToLeave) {
           transaction.srem(
-            roomSessionsKey(keyPrefix, previousRoomCode),
+            roomSessionsKey(keyPrefix, roomCodeToLeave),
             sessionId,
           );
         }
@@ -359,8 +369,8 @@ export async function createRedisRuntimeStore(
         transaction.sadd(roomSessionsKey(keyPrefix, roomCode), sessionId);
         transaction.sadd(`${keyPrefix}rooms`, roomCode);
         await transaction.exec();
-        if (previousRoomCode && previousRoomCode !== roomCode) {
-          await cleanupEmptyRoomIndex(redis, keyPrefix, previousRoomCode);
+        if (roomCodeToLeave) {
+          await cleanupEmptyRoomIndex(redis, keyPrefix, roomCodeToLeave);
         }
       });
     },
@@ -368,10 +378,10 @@ export async function createRedisRuntimeStore(
       ensurePendingCapacity("mark_session_left_room");
       localRuntimeStore.markSessionLeftRoom(sessionId, roomCode);
       queueSessionOperation(sessionId, "mark_session_left_room", async () => {
-        const targetRoomCode =
-          roomCode ??
-          (await loadSession(redis, keyPrefix, sessionId))?.roomCode ??
-          null;
+        const targetRoomCode = resolveRoomCodeToLeave(
+          (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null,
+          roomCode,
+        );
         if (!targetRoomCode) {
           return;
         }
@@ -473,10 +483,12 @@ export async function createRedisRuntimeStore(
       const memberTokens = await redis.hgetall(
         roomMemberTokensKey(keyPrefix, code),
       );
-      for (const [memberId, token] of Object.entries(memberTokens)) {
-        if (token === memberToken) {
-          return memberId;
-        }
+      const matchedMemberId = findMemberIdByTokenEntries(
+        Object.entries(memberTokens),
+        memberToken,
+      );
+      if (matchedMemberId) {
+        return matchedMemberId;
       }
       return localRuntimeStore.findMemberIdByToken(code, memberToken);
     },
@@ -522,7 +534,7 @@ export async function createRedisRuntimeStore(
         roomMembersKey(keyPrefix, code),
         memberId,
       );
-      if (!session || !currentSessionId || currentSessionId === session.id) {
+      if (shouldRemoveMemberBinding(currentSessionId, session?.id)) {
         await redis
           .multi()
           .hdel(roomMembersKey(keyPrefix, code), memberId)

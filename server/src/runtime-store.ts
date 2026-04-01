@@ -1,13 +1,18 @@
 import type { ActiveRoom, ClusterNodeStatus, Session } from "./types.js";
+import {
+  addMemberToRoom,
+  detachSessionFromRoomIndexes,
+  filterActiveBlockedMemberTokens,
+  findMemberIdByTokenEntries,
+  getOrCreateActiveRoom,
+  type KickedMemberBlock,
+  removeMemberFromRoom,
+  resolveRoomCodeToLeave,
+} from "./runtime-store-state.js";
 
 type TimedEvent = {
   event: string;
   timestamp: number;
-};
-
-type KickedMemberBlock = {
-  memberToken: string;
-  expiresAt: number;
 };
 
 const COUNTER_WINDOW_MS = 60_000;
@@ -84,37 +89,12 @@ export function createInMemoryRuntimeStore(
     }
   }
 
-  function detachSessionFromRooms(
-    sessionId: string,
-    preferredRoomCode?: string | null,
-  ): void {
-    const candidateRoomCodes = preferredRoomCode
-      ? [preferredRoomCode, ...roomSessionIds.keys()]
-      : roomSessionIds.keys();
-    const visited = new Set<string>();
-
-    for (const roomCode of candidateRoomCodes) {
-      if (visited.has(roomCode)) {
-        continue;
-      }
-      visited.add(roomCode);
-
-      const ids = roomSessionIds.get(roomCode);
-      ids?.delete(sessionId);
-      if (ids && ids.size === 0) {
-        roomSessionIds.delete(roomCode);
-      }
-    }
-  }
-
   function pruneBlockedMemberTokens(
     code: string,
     currentTime: number,
   ): KickedMemberBlock[] {
     const entries = blockedMemberTokensByRoom.get(code) ?? [];
-    const activeEntries = entries.filter(
-      (entry) => entry.expiresAt > currentTime,
-    );
+    const activeEntries = filterActiveBlockedMemberTokens(entries, currentTime);
     if (activeEntries.length === 0) {
       blockedMemberTokensByRoom.delete(code);
       return [];
@@ -125,20 +105,8 @@ export function createInMemoryRuntimeStore(
     return activeEntries;
   }
 
-  function getOrCreateRoom(code: string): ActiveRoom {
-    const existingRoom = rooms.get(code);
-    if (existingRoom) {
-      return existingRoom;
-    }
-
-    const room: ActiveRoom = {
-      code,
-      members: new Map(),
-      memberTokens: new Map(),
-    };
-    rooms.set(code, room);
-    return room;
-  }
+  const getOrCreateRoom = (code: string): ActiveRoom =>
+    getOrCreateActiveRoom(rooms, code);
 
   return {
     registerSession(session) {
@@ -155,10 +123,10 @@ export function createInMemoryRuntimeStore(
     unregisterSession(sessionId) {
       const session = sessionsById.get(sessionId);
       if (!session) {
-        detachSessionFromRooms(sessionId);
+        detachSessionFromRoomIndexes(roomSessionIds, sessionId);
         return;
       }
-      detachSessionFromRooms(sessionId, session.roomCode);
+      detachSessionFromRoomIndexes(roomSessionIds, sessionId, session.roomCode);
       if (session.remoteAddress) {
         const ids = sessionIdsByRemoteAddress.get(session.remoteAddress);
         ids?.delete(sessionId);
@@ -173,7 +141,7 @@ export function createInMemoryRuntimeStore(
       if (!session) {
         return;
       }
-      detachSessionFromRooms(sessionId, session.roomCode);
+      detachSessionFromRoomIndexes(roomSessionIds, sessionId, session.roomCode);
       const ids = roomSessionIds.get(roomCode) ?? new Set<string>();
       ids.add(sessionId);
       roomSessionIds.set(roomCode, ids);
@@ -181,7 +149,10 @@ export function createInMemoryRuntimeStore(
     },
     markSessionLeftRoom(sessionId, roomCode) {
       const session = sessionsById.get(sessionId);
-      const targetRoomCode = roomCode ?? session?.roomCode ?? null;
+      const targetRoomCode = resolveRoomCodeToLeave(
+        session?.roomCode,
+        roomCode,
+      );
       if (!targetRoomCode) {
         return;
       }
@@ -246,23 +217,17 @@ export function createInMemoryRuntimeStore(
     },
     getOrCreateRoom,
     addMember(code, memberId, session, memberToken) {
-      const room = getOrCreateRoom(code);
-      room.members.set(memberId, session);
-      room.memberTokens.set(memberId, memberToken);
-      return room;
+      return addMemberToRoom(rooms, code, memberId, session, memberToken);
     },
     findMemberIdByToken(code, memberToken) {
       const room = rooms.get(code) ?? null;
       if (!room) {
         return null;
       }
-
-      for (const [memberId, token] of room.memberTokens.entries()) {
-        if (token === memberToken) {
-          return memberId;
-        }
-      }
-      return null;
+      return findMemberIdByTokenEntries(
+        room.memberTokens.entries(),
+        memberToken,
+      );
     },
     blockMemberToken(code, memberToken, expiresAt) {
       const activeEntries = pruneBlockedMemberTokens(code, now());
@@ -274,25 +239,7 @@ export function createInMemoryRuntimeStore(
       return activeEntries.some((entry) => entry.memberToken === memberToken);
     },
     removeMember(code, memberId, session) {
-      const room = rooms.get(code) ?? null;
-      if (!room) {
-        return { room: null, roomEmpty: true };
-      }
-
-      if (session) {
-        const currentSession = room.members.get(memberId);
-        if (currentSession && currentSession !== session) {
-          return { room, roomEmpty: false };
-        }
-      }
-
-      room.members.delete(memberId);
-      room.memberTokens.delete(memberId);
-      const roomEmpty = room.members.size === 0;
-      if (roomEmpty) {
-        rooms.delete(code);
-      }
-      return { room: roomEmpty ? null : room, roomEmpty };
+      return removeMemberFromRoom(rooms, code, memberId, session);
     },
     deleteRoom(code) {
       rooms.delete(code);
