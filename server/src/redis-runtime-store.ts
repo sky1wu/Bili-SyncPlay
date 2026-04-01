@@ -25,11 +25,7 @@ type RedisClient = {
   sadd: (key: string, ...members: string[]) => Promise<unknown>;
   srem: (key: string, ...members: string[]) => Promise<unknown>;
   zadd: (key: string, score: string, member: string) => Promise<unknown>;
-  zremrangebyscore: (
-    key: string,
-    min: number,
-    max: number,
-  ) => Promise<unknown>;
+  zremrangebyscore: (key: string, min: number, max: number) => Promise<unknown>;
   zscore: (key: string, member: string) => Promise<string | null>;
 };
 
@@ -182,13 +178,11 @@ export async function createRedisRuntimeStore(
   redisUrl: string,
   options: RuntimeStoreOptions = {},
 ): Promise<RuntimeStore & { close: () => Promise<void> }> {
-  const redis = (
-    options.redisClient ??
+  const redis = (options.redisClient ??
     new Redis(redisUrl, {
       lazyConnect: true,
       maxRetriesPerRequest: 1,
-    })
-  ) as RedisClient;
+    })) as RedisClient;
   const keyPrefix = options.keyPrefix ?? "bsp:runtime:";
   const now = options.now ?? Date.now;
   const maxPendingOperations =
@@ -330,7 +324,8 @@ export async function createRedisRuntimeStore(
       localRuntimeStore.unregisterSession(sessionId);
       queueSessionOperation(sessionId, "unregister_session", async () => {
         const roomCode =
-          session?.roomCode ?? (await loadSession(redis, keyPrefix, sessionId))?.roomCode;
+          session?.roomCode ??
+          (await loadSession(redis, keyPrefix, sessionId))?.roomCode;
         const transaction = redis.multi();
         transaction.srem(`${keyPrefix}sessions`, sessionId);
         transaction.del(sessionKey(keyPrefix, sessionId));
@@ -346,10 +341,7 @@ export async function createRedisRuntimeStore(
     markSessionJoinedRoom(sessionId: string, roomCode: string) {
       ensurePendingCapacity("mark_session_joined_room");
       localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
-      queueSessionOperation(
-        sessionId,
-        "mark_session_joined_room",
-        async () => {
+      queueSessionOperation(sessionId, "mark_session_joined_room", async () => {
         const previousRoomCode =
           (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
         const transaction = redis.multi();
@@ -359,22 +351,27 @@ export async function createRedisRuntimeStore(
             sessionId,
           );
         }
-        transaction.hset(sessionKey(keyPrefix, sessionId), "roomCode", roomCode);
+        transaction.hset(
+          sessionKey(keyPrefix, sessionId),
+          "roomCode",
+          roomCode,
+        );
         transaction.sadd(roomSessionsKey(keyPrefix, roomCode), sessionId);
         transaction.sadd(`${keyPrefix}rooms`, roomCode);
         await transaction.exec();
         if (previousRoomCode && previousRoomCode !== roomCode) {
           await cleanupEmptyRoomIndex(redis, keyPrefix, previousRoomCode);
         }
-        },
-      );
+      });
     },
     markSessionLeftRoom(sessionId: string, roomCode?: string | null) {
       ensurePendingCapacity("mark_session_left_room");
       localRuntimeStore.markSessionLeftRoom(sessionId, roomCode);
       queueSessionOperation(sessionId, "mark_session_left_room", async () => {
         const targetRoomCode =
-          roomCode ?? (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
+          roomCode ??
+          (await loadSession(redis, keyPrefix, sessionId))?.roomCode ??
+          null;
         if (!targetRoomCode) {
           return;
         }

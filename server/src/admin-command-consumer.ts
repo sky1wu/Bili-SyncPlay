@@ -70,8 +70,7 @@ export async function createAdminCommandConsumer(options: {
             executorInstanceId: options.instanceId,
             sessionId: command.sessionId,
             result: "error",
-            error:
-              error instanceof Error ? error.message : "disconnect_failed",
+            error: error instanceof Error ? error.message : "disconnect_failed",
           });
           return buildErrorResult(
             command,
@@ -149,8 +148,7 @@ export async function createAdminCommandConsumer(options: {
             memberId: command.memberId,
             sessionId: session.id,
             result: "error",
-            error:
-              error instanceof Error ? error.message : "disconnect_failed",
+            error: error instanceof Error ? error.message : "disconnect_failed",
             blockApplied: Boolean(session.memberToken),
           });
           return buildErrorResult(
