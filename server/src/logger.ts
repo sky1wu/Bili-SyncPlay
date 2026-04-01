@@ -9,13 +9,23 @@ export function createStructuredLogger(
   eventStore?: GlobalEventStore,
   runtimeStore?: RuntimeStore,
 ): LogEvent {
+  const emitLine = writeLine ?? console.log;
+
   return (event, data) => {
     const timestamp = new Date().toISOString();
-    (writeLine ?? console.log)(JSON.stringify({ event, timestamp, ...data }));
+    emitLine(JSON.stringify({ event, timestamp, ...data }));
     if (eventStore && !EVENT_STORE_EXCLUDED_EVENTS.has(event)) {
       void Promise.resolve(eventStore.append({ event, timestamp, data })).catch(
         (error: unknown) => {
-          console.error("Failed to append runtime event", error);
+          emitLine(
+            JSON.stringify({
+              event: "runtime_event_append_failed",
+              timestamp: new Date().toISOString(),
+              result: "error",
+              failedEvent: event,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
         },
       );
     }

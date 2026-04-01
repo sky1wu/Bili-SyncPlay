@@ -115,7 +115,15 @@ export function createAdminActionService(options: {
             : commandDetails?.commandResult?.code,
       }),
     ).catch((error: unknown) => {
-      console.error("Failed to append audit log", error);
+      options.logEvent("admin_audit_log_append_failed", {
+        actor: actor.username,
+        action,
+        targetType,
+        targetId,
+        result: "error",
+        instanceId: options.instanceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     });
   }
 

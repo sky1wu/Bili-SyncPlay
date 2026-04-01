@@ -209,7 +209,17 @@ export async function createRedisRuntimeStore(
       options.onPendingOperationError(context, error);
       return;
     }
-    console.error("Redis runtime store operation failed", context, error);
+    console.log(
+      JSON.stringify({
+        event: "redis_runtime_store_operation_failed",
+        timestamp: new Date().toISOString(),
+        operationName: context.operationName,
+        pendingCount: context.pendingCount,
+        reason: context.reason,
+        result: context.reason === "backpressure" ? "rejected" : "error",
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
   }
 
   function ensurePendingCapacity(operationName: string): void {

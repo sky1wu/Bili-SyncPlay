@@ -261,6 +261,17 @@ export async function createSyncServer(
       ? await createRedisRuntimeStore(persistenceConfig.redisUrl, {
           now,
           keyPrefix: getRedisRuntimeKeyPrefix(persistenceConfig.redisNamespace),
+          onPendingOperationError: (context, error) => {
+            logEvent("redis_runtime_store_operation_failed", {
+              instanceId: persistenceConfig.instanceId,
+              provider: persistenceConfig.runtimeStoreProvider,
+              operationName: context.operationName,
+              pendingCount: context.pendingCount,
+              reason: context.reason,
+              result: context.reason === "backpressure" ? "rejected" : "error",
+              error: error instanceof Error ? error.message : String(error),
+            });
+          },
         })
       : localRuntimeStore;
   const runtimeStore =
@@ -632,7 +643,14 @@ export async function createSyncServer(
           try {
             await messageHandler.handleClientMessage(session, parsed);
           } catch (error) {
-            console.error("Unhandled client message error", error);
+            logEvent("ws_client_message_failed", {
+              sessionId: session.id,
+              roomCode: session.roomCode,
+              remoteAddress: session.remoteAddress,
+              origin: session.origin,
+              result: "error",
+              error: error instanceof Error ? error.message : "unknown_error",
+            });
             sendError(socket, "internal_error", INTERNAL_SERVER_ERROR_MESSAGE);
           }
         });
