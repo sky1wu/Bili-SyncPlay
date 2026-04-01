@@ -55,14 +55,14 @@ test("includes playback snapshot when not switching the room shared video", () =
   );
 });
 
-test("omits playback snapshot when switching to a different shared video in-room", () => {
+test("includes playback snapshot when switching to a different shared video in-room", () => {
   assert.equal(
     shouldIncludePlaybackInSharePayload({
       activeRoomCode: "ROOM01",
       activeSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
       nextSharedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
     }),
-    false,
+    true,
   );
 });
 
@@ -77,7 +77,7 @@ test("keeps playback snapshot outside of a room", () => {
   );
 });
 
-test("share controller omits stale playback snapshot while switching to another shared video in-room", () => {
+test("share controller keeps playback snapshot while switching to another shared video in-room", () => {
   const dom = installDomStub({
     href: "https://www.bilibili.com/video/BV199W9zEEcH",
     pathname: "/video/BV199W9zEEcH",
@@ -115,15 +115,10 @@ test("share controller omits stale playback snapshot while switching to another 
       payload?.video.url,
       "https://www.bilibili.com/video/BV199W9zEEcH",
     );
-    assert.equal(payload?.playback, null);
-    assert.equal(
-      debugLogs.some((message) =>
-        message.includes(
-          "Omitted playback snapshot while switching shared video",
-        ),
-      ),
-      true,
-    );
+    assert.equal(payload?.playback?.currentTime, 95.03);
+    assert.equal(payload?.playback?.playbackRate, 1.08);
+    assert.equal(payload?.playback?.playState, "playing");
+    assert.equal(debugLogs.length, 0);
   } finally {
     dom.restore();
   }

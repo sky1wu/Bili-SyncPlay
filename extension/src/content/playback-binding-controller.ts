@@ -92,6 +92,23 @@ export function createPlaybackBindingController(args: {
     }
   }
 
+  function shouldTreatRateChangeAsProgrammatic(
+    video: HTMLVideoElement,
+  ): boolean {
+    const signature = args.runtimeState.programmaticApplySignature;
+    if (!signature || nowOf() >= args.runtimeState.programmaticApplyUntil) {
+      return false;
+    }
+
+    const currentVideo = args.getSharedVideo();
+    const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
+    if (!normalizedCurrentUrl || normalizedCurrentUrl !== signature.url) {
+      return false;
+    }
+
+    return Math.abs(video.playbackRate - signature.playbackRate) <= 0.01;
+  }
+
   function isCurrentVideoShared(currentVideo: SharedVideo | null): boolean {
     if (!currentVideo || !args.runtimeState.activeSharedUrl) {
       return false;
@@ -292,7 +309,9 @@ export function createPlaybackBindingController(args: {
         scheduleBroadcast(video, "seeked", 120);
       },
       onRateChange: () => {
-        rememberExplicitUserAction("ratechange");
+        if (!shouldTreatRateChangeAsProgrammatic(video)) {
+          rememberExplicitUserAction("ratechange");
+        }
         scheduleBroadcast(video, "ratechange", 120);
       },
       onTimeUpdate: () => {

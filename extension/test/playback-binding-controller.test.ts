@@ -204,3 +204,54 @@ test("playback binding controller preserves explicit seek intent across immediat
     dom.restore();
   }
 });
+
+test("playback binding controller does not mark programmatic ratechange as explicit user action", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 1_000;
+  runtimeState.programmaticApplyUntil = 1_800;
+  runtimeState.programmaticApplySignature = {
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "playing",
+    currentTime: 12.4,
+    playbackRate: 1.11,
+  };
+  dom.video.playbackRate = 1.11;
+  const events: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => ({
+      videoId: "BV1xx411c7mD:p1",
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      title: "Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      events.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("ratechange")?.(new Event("ratechange"));
+
+    await Promise.resolve();
+
+    assert.deepEqual(events, ["ratechange"]);
+    assert.equal(runtimeState.lastExplicitUserAction, null);
+  } finally {
+    dom.restore();
+  }
+});
