@@ -26,6 +26,7 @@ async function startRedisServer() {
       ...getDefaultPersistenceConfig(),
       provider: "redis",
       runtimeStoreProvider: "redis",
+      roomEventBusProvider: "redis",
       instanceId,
       redisUrl: REDIS_URL ?? getDefaultPersistenceConfig().redisUrl,
     },
@@ -160,7 +161,9 @@ test("cleanupSessionAfterClose unregisters and decrements even when leaveRoom fa
 
   assert.deepEqual(unregistered, [session.id]);
   assert.deepEqual(decremented, [session.remoteAddress]);
-  assert.ok(events.some((entry) => entry.event === "ws_connection_cleanup_failed"));
+  assert.ok(
+    events.some((entry) => entry.event === "ws_connection_cleanup_failed"),
+  );
   assert.ok(events.some((entry) => entry.event === "ws_connection_closed"));
 });
 
