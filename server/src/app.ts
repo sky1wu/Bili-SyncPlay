@@ -17,7 +17,6 @@ import { createStructuredLogger } from "./logger.js";
 import {
   createInMemoryAdminCommandBus,
   createNoopAdminCommandBus,
-  type AdminCommandBus,
 } from "./admin-command-bus.js";
 import { createAdminCommandConsumer } from "./admin-command-consumer.js";
 import { createMessageHandler } from "./message-handler.js";
@@ -44,14 +43,12 @@ import type { RoomEventBusMessage } from "./room-event-bus.js";
 import {
   createInMemoryRoomEventBus,
   createNoopRoomEventBus,
-  type RoomEventBus,
 } from "./room-event-bus.js";
 import {
   createInMemoryRuntimeStore,
   type RuntimeStore,
 } from "./runtime-store.js";
 import { createSecurityPolicy } from "./security.js";
-import type { GlobalEventStore } from "./admin/global-event-store.js";
 import { hasAttachedSocket } from "./types.js";
 import type {
   AdminConfig,
