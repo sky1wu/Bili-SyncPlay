@@ -301,6 +301,17 @@ export async function createSyncServer(
               payloadSize: payload.length,
             });
           },
+          onHandlerError: (message, error) => {
+            logEvent("room_event_handler_failed", {
+              roomCode: message.roomCode,
+              eventType: message.type,
+              sourceInstanceId: message.sourceInstanceId,
+              instanceId: persistenceConfig.instanceId,
+              provider: persistenceConfig.roomEventBusProvider,
+              result: "error",
+              error: error instanceof Error ? error.message : String(error),
+            });
+          },
         })
       : persistenceConfig.roomEventBusProvider === "none"
         ? createNoopRoomEventBus()
@@ -588,7 +599,16 @@ export async function createSyncServer(
 
     socket.on("message", (raw) => {
       messageQueue = messageQueue
-        .catch(() => undefined)
+        .catch((error: unknown) => {
+          logEvent("ws_message_queue_failed", {
+            sessionId: session.id,
+            roomCode: session.roomCode,
+            remoteAddress: session.remoteAddress,
+            origin: session.origin,
+            result: "error",
+            error: error instanceof Error ? error.message : "unknown_error",
+          });
+        })
         .then(async () => {
           let parsed: unknown;
           try {
