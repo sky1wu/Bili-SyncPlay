@@ -14,6 +14,8 @@ import type {
 } from "../types/domain.js";
 import { isPlaybackSyncIntent } from "../types/domain.js";
 import {
+  isActorId,
+  isBilibiliUrl,
   isFiniteNumber,
   isOptionalString,
   isPlaybackPlayState,
@@ -21,6 +23,7 @@ import {
   isRoomCode,
   isString,
   isToken,
+  isVideoId,
 } from "./primitives.js";
 
 const DISPLAY_NAME_MAX_LENGTH = 32;
@@ -35,9 +38,12 @@ function isSharedVideo(value: unknown): value is SharedVideo {
   return (
     isRecord(value) &&
     isBoundedString(value.videoId, TITLE_MAX_LENGTH) &&
+    isVideoId(value.videoId) &&
     isBoundedString(value.url, URL_MAX_LENGTH) &&
+    isBilibiliUrl(value.url) &&
     isBoundedString(value.title, TITLE_MAX_LENGTH) &&
-    isOptionalString(value.sharedByMemberId)
+    isOptionalString(value.sharedByMemberId) &&
+    (value.sharedByMemberId === undefined || isActorId(value.sharedByMemberId))
   );
 }
 
@@ -52,7 +58,7 @@ function isPlaybackState(value: unknown): value is PlaybackState {
     isFiniteNumber(value.playbackRate) &&
     isFiniteNumber(value.updatedAt) &&
     isFiniteNumber(value.serverTime) &&
-    isString(value.actorId) &&
+    isActorId(value.actorId) &&
     isFiniteNumber(value.seq)
   );
 }
@@ -60,7 +66,7 @@ function isPlaybackState(value: unknown): value is PlaybackState {
 export function isRoomMember(value: unknown): value is RoomMember {
   return (
     isRecord(value) &&
-    isString(value.id) &&
+    isActorId(value.id) &&
     isBoundedString(value.name, DISPLAY_NAME_MAX_LENGTH)
   );
 }
@@ -82,7 +88,7 @@ function isRoomCreatedMessage(value: unknown): value is RoomCreatedMessage {
     value.type === "room:created" &&
     isRecord(value.payload) &&
     isRoomCode(value.payload.roomCode) &&
-    isString(value.payload.memberId) &&
+    isActorId(value.payload.memberId) &&
     isToken(value.payload.joinToken) &&
     isToken(value.payload.memberToken)
   );
@@ -94,7 +100,7 @@ function isRoomJoinedMessage(value: unknown): value is RoomJoinedMessage {
     value.type === "room:joined" &&
     isRecord(value.payload) &&
     isRoomCode(value.payload.roomCode) &&
-    isString(value.payload.memberId) &&
+    isActorId(value.payload.memberId) &&
     isToken(value.payload.memberToken)
   );
 }

@@ -111,6 +111,21 @@ test("accepts room:state when playback sync intent is explicit-ratechange", () =
   );
 });
 
+test("rejects room:created when memberId format is invalid", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:created",
+      payload: {
+        roomCode: "ABC123",
+        memberId: "member 1",
+        joinToken: VALID_TOKEN,
+        memberToken: VALID_TOKEN,
+      },
+    }),
+    false,
+  );
+});
+
 test("rejects room:state when playback sync intent is invalid", () => {
   assert.equal(
     isServerMessage({
@@ -131,6 +146,49 @@ test("rejects room:state when playback sync intent is invalid", () => {
           updatedAt: 1,
           serverTime: 1,
           actorId: "member-1",
+          seq: 1,
+        },
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    }),
+    false,
+  );
+});
+
+test("rejects room:state when shared video url is invalid", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: {
+        roomCode: "ABC123",
+        sharedVideo: {
+          videoId: "BV1xx411c7mD",
+          url: "https://example.com/video/BV1xx411c7mD",
+          title: "Video",
+        },
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    }),
+    false,
+  );
+});
+
+test("rejects room:state when playback actorId format is invalid", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: {
+        roomCode: "ABC123",
+        sharedVideo: null,
+        playback: {
+          url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+          currentTime: 12,
+          playState: "playing",
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 1,
+          actorId: "member 1",
           seq: 1,
         },
         members: [{ id: "member-1", name: "Alice" }],

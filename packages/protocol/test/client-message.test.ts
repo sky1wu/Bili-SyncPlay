@@ -295,6 +295,62 @@ test("accepts a valid playback:update message", () => {
   );
 });
 
+test("rejects video:share with an invalid bilibili url", () => {
+  assert.equal(
+    isClientMessage({
+      type: "video:share",
+      payload: {
+        memberToken: VALID_TOKEN,
+        video: {
+          videoId: "BV1xx411c7mD",
+          url: "https://example.com/video/BV1xx411c7mD",
+          title: "Video",
+        },
+      },
+    }),
+    false,
+  );
+});
+
+test("rejects video:share with an invalid videoId format", () => {
+  assert.equal(
+    isClientMessage({
+      type: "video:share",
+      payload: {
+        memberToken: VALID_TOKEN,
+        video: {
+          videoId: "BV1xx411c7mD/part-1",
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          title: "Video",
+        },
+      },
+    }),
+    false,
+  );
+});
+
+test("rejects playback:update with an invalid actorId format", () => {
+  assert.equal(
+    isClientMessage({
+      type: "playback:update",
+      payload: {
+        memberToken: VALID_TOKEN,
+        playback: {
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          currentTime: 12,
+          playState: "playing",
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 1,
+          actorId: "member 1",
+          seq: 1,
+        },
+      },
+    }),
+    false,
+  );
+});
+
 test("accepts playback:update with explicit-ratechange sync intent", () => {
   assert.equal(
     isClientMessage({
