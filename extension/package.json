@@ -1,6 +1,6 @@
 {
   "name": "@bili-syncplay/extension",
-  "version": "9.1.0",
+  "version": "0.9.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,7 @@
     "coverage": "tsx --test --experimental-test-coverage test/**/*.test.ts"
   },
   "dependencies": {
-    "@bili-syncplay/protocol": "9.1.0"
+    "@bili-syncplay/protocol": "0.9.2"
   },
   "devDependencies": {
     "esbuild": "^0.25.10",
