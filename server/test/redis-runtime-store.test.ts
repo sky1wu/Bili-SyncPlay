@@ -39,6 +39,78 @@ function createSession(id: string): Session {
   };
 }
 
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function createFakeRedisClient(execPromises: Promise<unknown>[]) {
+  let multiIndex = 0;
+  return {
+    async connect() {},
+    async quit() {},
+    multi() {
+      const execPromise = execPromises[multiIndex++] ?? Promise.resolve(null);
+      return {
+        sadd() {
+          return this;
+        },
+        srem() {
+          return this;
+        },
+        del() {
+          return this;
+        },
+        hset() {
+          return this;
+        },
+        hdel() {
+          return this;
+        },
+        exec() {
+          return execPromise;
+        },
+      };
+    },
+    async hgetall() {
+      return {};
+    },
+    async hget() {
+      return null;
+    },
+    async smembers() {
+      return [];
+    },
+    async scard() {
+      return 0;
+    },
+    async sadd() {
+      return null;
+    },
+    async srem() {
+      return null;
+    },
+    async zadd() {
+      return null;
+    },
+    async zremrangebyscore() {
+      return null;
+    },
+    async zscore() {
+      return null;
+    },
+  };
+}
+
 test("redis runtime store shares room sessions and member token state across instances", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
@@ -170,5 +242,67 @@ test("redis runtime store keeps only the latest room membership after rapid room
   } finally {
     await store.close();
     await observer.close();
+  }
+});
+
+test("redis runtime store rejects new pending operations after reaching the configured cap", async () => {
+  const firstOperation = createDeferred<unknown>();
+  const fakeRedis = createFakeRedisClient([firstOperation.promise]);
+  const errors: string[] = [];
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: fakeRedis,
+    maxPendingOperations: 1,
+    onPendingOperationError(context) {
+      errors.push(context.reason);
+    },
+  });
+
+  try {
+    store.registerSession(createSession("pending-a"));
+    assert.throws(
+      () => store.registerSession(createSession("pending-b")),
+      /backpressure/,
+    );
+    assert.deepEqual(errors, ["backpressure"]);
+
+    firstOperation.resolve(null);
+    await store.flush?.();
+
+    store.registerSession(createSession("pending-c"));
+    await store.flush?.();
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store removes timed out pending operations and recovers", async () => {
+  const firstOperation = createDeferred<unknown>();
+  const secondOperation = createDeferred<unknown>();
+  const fakeRedis = createFakeRedisClient([
+    firstOperation.promise,
+    secondOperation.promise,
+  ]);
+  const errors: string[] = [];
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: fakeRedis,
+    maxPendingOperations: 1,
+    pendingOperationTimeoutMs: 20,
+    onPendingOperationError(context) {
+      errors.push(context.reason);
+    },
+  });
+
+  try {
+    store.registerSession(createSession("timed-out"));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await store.flush?.();
+
+    secondOperation.resolve(null);
+    store.registerSession(createSession("recovered"));
+    await store.flush?.();
+
+    assert.ok(errors.includes("timeout"));
+  } finally {
+    await store.close();
   }
 });

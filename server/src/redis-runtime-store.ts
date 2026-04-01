@@ -5,6 +5,40 @@ import {
   type RuntimeStore,
 } from "./runtime-store.js";
 
+type RedisMulti = {
+  sadd: (...args: string[]) => RedisMulti;
+  srem: (...args: string[]) => RedisMulti;
+  del: (...keys: string[]) => RedisMulti;
+  hset: (key: string, ...args: unknown[]) => RedisMulti;
+  hdel: (key: string, ...fields: string[]) => RedisMulti;
+  exec: () => Promise<unknown>;
+};
+
+type RedisClient = {
+  connect: () => Promise<unknown>;
+  quit: () => Promise<unknown>;
+  multi: (...args: unknown[]) => RedisMulti;
+  hgetall: (key: string) => Promise<Record<string, string>>;
+  hget: (key: string, field: string) => Promise<string | null>;
+  smembers: (key: string) => Promise<string[]>;
+  scard: (key: string) => Promise<number>;
+  sadd: (key: string, ...members: string[]) => Promise<unknown>;
+  srem: (key: string, ...members: string[]) => Promise<unknown>;
+  zadd: (key: string, score: string, member: string) => Promise<unknown>;
+  zremrangebyscore: (
+    key: string,
+    min: number,
+    max: number,
+  ) => Promise<unknown>;
+  zscore: (key: string, member: string) => Promise<string | null>;
+};
+
+type PendingOperationLogContext = {
+  operationName: string;
+  pendingCount: number;
+  reason: "backpressure" | "timeout" | "failed";
+};
+
 type RedisRuntimeSession = {
   id: string;
   instanceId: string | null;
@@ -21,6 +55,13 @@ type RedisRuntimeSession = {
 type RuntimeStoreOptions = {
   keyPrefix?: string;
   now?: () => number;
+  maxPendingOperations?: number;
+  pendingOperationTimeoutMs?: number;
+  redisClient?: RedisClient;
+  onPendingOperationError?: (
+    context: PendingOperationLogContext,
+    error: unknown,
+  ) => void;
 };
 
 function normalizeNullable(value: string | undefined): string | null {
@@ -66,6 +107,8 @@ const DETACHED_SOCKET = {
   close() {},
   terminate() {},
 } as unknown as Session["socket"];
+const DEFAULT_MAX_PENDING_OPERATIONS = 256;
+const DEFAULT_PENDING_OPERATION_TIMEOUT_MS = 5_000;
 
 function serializeSession(session: Session): RedisRuntimeSession {
   return {
@@ -114,7 +157,7 @@ function deserializeSession(fields: Record<string, string>): Session | null {
 }
 
 async function loadSession(
-  redis: Redis,
+  redis: RedisClient,
   prefix: string,
   sessionId: string,
 ): Promise<Session | null> {
@@ -126,7 +169,7 @@ async function loadSession(
 }
 
 async function cleanupEmptyRoomIndex(
-  redis: Redis,
+  redis: RedisClient,
   prefix: string,
   roomCode: string,
 ): Promise<void> {
@@ -139,29 +182,107 @@ export async function createRedisRuntimeStore(
   redisUrl: string,
   options: RuntimeStoreOptions = {},
 ): Promise<RuntimeStore & { close: () => Promise<void> }> {
-  const redis = new Redis(redisUrl, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
+  const redis = (
+    options.redisClient ??
+    new Redis(redisUrl, {
+      lazyConnect: true,
+      maxRetriesPerRequest: 1,
+    })
+  ) as RedisClient;
   const keyPrefix = options.keyPrefix ?? "bsp:runtime:";
   const now = options.now ?? Date.now;
+  const maxPendingOperations =
+    options.maxPendingOperations ?? DEFAULT_MAX_PENDING_OPERATIONS;
+  const pendingOperationTimeoutMs =
+    options.pendingOperationTimeoutMs ?? DEFAULT_PENDING_OPERATION_TIMEOUT_MS;
   const localRuntimeStore = createInMemoryRuntimeStore(now);
   const pendingOperations = new Set<Promise<unknown>>();
   const sessionOperationChains = new Map<string, Promise<void>>();
 
   await redis.connect();
 
-  function trackOperation<T>(operation: Promise<T>): void {
-    pendingOperations.add(operation);
-    void operation.finally(() => {
-      pendingOperations.delete(operation);
+  function logPendingOperationError(
+    context: PendingOperationLogContext,
+    error: unknown,
+  ): void {
+    if (options.onPendingOperationError) {
+      options.onPendingOperationError(context, error);
+      return;
+    }
+    console.error("Redis runtime store operation failed", context, error);
+  }
+
+  function ensurePendingCapacity(operationName: string): void {
+    if (pendingOperations.size < maxPendingOperations) {
+      return;
+    }
+    const error = new Error(
+      `Redis runtime store backpressure for ${operationName}.`,
+    );
+    logPendingOperationError(
+      {
+        operationName,
+        pendingCount: pendingOperations.size,
+        reason: "backpressure",
+      },
+      error,
+    );
+    throw error;
+  }
+
+  function trackOperation<T>(
+    operationName: string,
+    operation: Promise<T>,
+  ): Promise<T | undefined> {
+    const trackedOperation = new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const error = new Error(
+          `Redis runtime store operation timed out: ${operationName}.`,
+        );
+        logPendingOperationError(
+          {
+            operationName,
+            pendingCount: pendingOperations.size,
+            reason: "timeout",
+          },
+          error,
+        );
+        reject(error);
+      }, pendingOperationTimeoutMs);
+
+      void operation.then(
+        (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timeout);
+          logPendingOperationError(
+            {
+              operationName,
+              pendingCount: pendingOperations.size,
+              reason: "failed",
+            },
+            error,
+          );
+          reject(error);
+        },
+      );
     });
+    const handledOperation = trackedOperation.catch(() => undefined);
+    pendingOperations.add(handledOperation);
+    void handledOperation.finally(() => {
+      pendingOperations.delete(handledOperation);
+    });
+    return handledOperation;
   }
 
   function queueSessionOperation(
     sessionId: string,
+    operationName: string,
     operation: () => Promise<void>,
   ): void {
+    ensurePendingCapacity(operationName);
     const previous = sessionOperationChains.get(sessionId) ?? Promise.resolve();
     const next = previous
       .catch(() => {})
@@ -172,14 +293,16 @@ export async function createRedisRuntimeStore(
         }
       });
     sessionOperationChains.set(sessionId, next);
-    trackOperation(next);
+    void trackOperation(operationName, next);
   }
 
   const store = {
     registerSession(session: Session) {
+      ensurePendingCapacity("register_session");
       localRuntimeStore.registerSession(session);
       const serialized = serializeSession(session);
-      trackOperation(
+      void trackOperation(
+        "register_session",
         redis
           .multi()
           .sadd(`${keyPrefix}sessions`, session.id)
@@ -205,7 +328,7 @@ export async function createRedisRuntimeStore(
     unregisterSession(sessionId: string) {
       const session = localRuntimeStore.getSession(sessionId);
       localRuntimeStore.unregisterSession(sessionId);
-      queueSessionOperation(sessionId, async () => {
+      queueSessionOperation(sessionId, "unregister_session", async () => {
         const roomCode =
           session?.roomCode ?? (await loadSession(redis, keyPrefix, sessionId))?.roomCode;
         const transaction = redis.multi();
@@ -221,8 +344,12 @@ export async function createRedisRuntimeStore(
       });
     },
     markSessionJoinedRoom(sessionId: string, roomCode: string) {
+      ensurePendingCapacity("mark_session_joined_room");
       localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
-      queueSessionOperation(sessionId, async () => {
+      queueSessionOperation(
+        sessionId,
+        "mark_session_joined_room",
+        async () => {
         const previousRoomCode =
           (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
         const transaction = redis.multi();
@@ -239,11 +366,13 @@ export async function createRedisRuntimeStore(
         if (previousRoomCode && previousRoomCode !== roomCode) {
           await cleanupEmptyRoomIndex(redis, keyPrefix, previousRoomCode);
         }
-      });
+        },
+      );
     },
     markSessionLeftRoom(sessionId: string, roomCode?: string | null) {
+      ensurePendingCapacity("mark_session_left_room");
       localRuntimeStore.markSessionLeftRoom(sessionId, roomCode);
-      queueSessionOperation(sessionId, async () => {
+      queueSessionOperation(sessionId, "mark_session_left_room", async () => {
         const targetRoomCode =
           roomCode ?? (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
         if (!targetRoomCode) {
@@ -326,13 +455,15 @@ export async function createRedisRuntimeStore(
       session: Session,
       memberToken: string,
     ) {
+      ensurePendingCapacity("add_member");
       const room = localRuntimeStore.addMember(
         code,
         memberId,
         session,
         memberToken,
       );
-      trackOperation(
+      void trackOperation(
+        "add_member",
         redis
           .multi()
           .hset(roomMembersKey(keyPrefix, code), memberId, session.id)
@@ -353,8 +484,10 @@ export async function createRedisRuntimeStore(
       return localRuntimeStore.findMemberIdByToken(code, memberToken);
     },
     blockMemberToken(code: string, memberToken: string, expiresAt: number) {
+      ensurePendingCapacity("block_member_token");
       localRuntimeStore.blockMemberToken(code, memberToken, expiresAt);
-      trackOperation(
+      void trackOperation(
+        "block_member_token",
         redis.zadd(
           blockedTokensKey(keyPrefix, code),
           String(expiresAt),
@@ -386,6 +519,7 @@ export async function createRedisRuntimeStore(
       );
     },
     async removeMember(code: string, memberId: string, session?: Session) {
+      ensurePendingCapacity("remove_member");
       const removal = localRuntimeStore.removeMember(code, memberId, session);
       const currentSessionId = await redis.hget(
         roomMembersKey(keyPrefix, code),
@@ -401,8 +535,10 @@ export async function createRedisRuntimeStore(
       return removal;
     },
     deleteRoom(code: string) {
+      ensurePendingCapacity("delete_room");
       localRuntimeStore.deleteRoom(code);
-      trackOperation(
+      void trackOperation(
+        "delete_room",
         redis
           .multi()
           .del(roomMembersKey(keyPrefix, code))
