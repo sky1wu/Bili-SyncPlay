@@ -89,10 +89,10 @@ export function createAdminRoomQueryService(options: {
         selected.map(async (room) => {
           const activeSessions =
             await options.runtimeStore.listClusterSessionsByRoom(room.code);
+          const summary = toSummary(room, activeSessions);
           return {
-            ...toSummary(room, activeSessions),
-            instanceId:
-              activeSessions.length === 0 ? options.instanceId : undefined,
+            ...summary,
+            instanceId: summary.instanceId ?? options.instanceId,
           };
         }),
       );
