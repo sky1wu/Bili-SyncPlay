@@ -9,6 +9,7 @@ Respond in Chinese throughout the entire interaction unless the user explicitly 
 ## Project Overview
 
 Bili-SyncPlay is a monorepo for synchronized Bilibili video playback across multiple users. It consists of:
+
 - **`packages/protocol/`** — Shared TypeScript types, type guards, and URL normalization utilities
 - **`extension/`** — Chrome/Edge browser extension (service worker + content scripts + popup)
 - **`server/`** — Node.js WebSocket server with admin panel
@@ -44,6 +45,7 @@ npm run release:version  # Bump version numbers
 ```
 
 **Before every commit**, run in order:
+
 ```bash
 npm run format:check && npm run lint && npm run typecheck && npm run build && npm test
 ```
@@ -60,14 +62,14 @@ npm run format:check && npm run lint && npm run typecheck && npm run build && np
 
 ### Key Extension Controllers (`extension/src/background/`)
 
-| Controller | Responsibility |
-|---|---|
-| `socket-controller.ts` | WebSocket connection, reconnection, health checks |
-| `room-session-controller.ts` | Room create/join/leave/state |
-| `share-controller.ts` | Shared video and pending local shares |
-| `clock-controller.ts` | NTP-style clock offset for playback sync |
-| `tab-controller.ts` | Bilibili tab tracking, shared vs. local page switching |
-| `message-controller.ts` | Routes popup/content messages to handlers |
+| Controller                   | Responsibility                                         |
+| ---------------------------- | ------------------------------------------------------ |
+| `socket-controller.ts`       | WebSocket connection, reconnection, health checks      |
+| `room-session-controller.ts` | Room create/join/leave/state                           |
+| `share-controller.ts`        | Shared video and pending local shares                  |
+| `clock-controller.ts`        | NTP-style clock offset for playback sync               |
+| `tab-controller.ts`          | Bilibili tab tracking, shared vs. local page switching |
+| `message-controller.ts`      | Routes popup/content messages to handlers              |
 
 The `background/index.ts` entry file only bootstraps and wires controllers — keep it thin.
 
@@ -95,6 +97,7 @@ Single source of truth for `ClientMessage`, `ServerMessage`, domain types (`Room
 ## Commit Conventions
 
 Use Conventional Commits: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`, `ci:`
+
 - One reviewable unit per commit
 - `refactor:` only when behavior is unchanged
 - Do not hide behavior changes in `chore:` or `docs:`
@@ -102,6 +105,7 @@ Use Conventional Commits: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore
 ## Testing Focus
 
 Refactors touching these areas require regression coverage:
+
 - Extension sync flow
 - Popup state and rendering flow
 - Server config loading
