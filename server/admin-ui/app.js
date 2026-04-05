@@ -152,15 +152,6 @@ function formatDuration(ms) {
     .join(":");
 }
 
-function formatPlayback(playback) {
-  if (!playback) {
-    return "未同步";
-  }
-
-  const status = getPlaybackState(playback);
-  return `${status} @ ${Number(playback.currentTime ?? 0).toFixed(1)}s x${Number(playback.playbackRate ?? 1).toFixed(2)}`;
-}
-
 function getPlaybackState(playback) {
   if (!playback) {
     return "paused";
@@ -245,6 +236,392 @@ function renderDataPair(primary, secondary) {
       ${secondary ? `<div class="data-pair-secondary">${secondary}</div>` : ""}
     </div>
   `;
+}
+
+function renderMiniStat(label, value, tone = "neutral") {
+  return `
+    <div class="mini-stat ${escapeHtml(tone)}">
+      <span class="mini-stat-label">${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function formatRelativeDuration(ms) {
+  if (!Number.isFinite(ms)) {
+    return "—";
+  }
+  if (ms <= 0) {
+    return "已到期";
+  }
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) {
+    return "不足 1 分钟";
+  }
+  if (minutes < 60) {
+    return `${minutes} 分钟后`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours} 小时后`;
+  }
+  return `${Math.floor(hours / 24)} 天后`;
+}
+
+function getRoomAttention(item) {
+  const now = Date.now();
+  if (item.isActive && !item.sharedVideo) {
+    return {
+      tone: "warning",
+      label: "活跃但未共享视频",
+      hint: "通常代表成员已进入房间，但还没人发起共享。",
+    };
+  }
+
+  if (item.isActive && item.memberCount >= 4) {
+    return {
+      tone: "success",
+      label: "多人活跃中",
+      hint: `${item.memberCount} 人在线，适合优先关注同步状态。`,
+    };
+  }
+
+  if (!item.isActive && item.expiresAt && item.expiresAt > now) {
+    const remainingMs = item.expiresAt - now;
+    if (remainingMs <= 10 * 60_000) {
+      return {
+        tone: "warning",
+        label: "即将过期",
+        hint: `${formatRelativeDuration(remainingMs)}，若要保留请尽快让成员重新进入。`,
+      };
+    }
+  }
+
+  if (!item.isActive && item.sharedVideo) {
+    return {
+      tone: "neutral",
+      label: "空闲待回访",
+      hint: "房间里保留了共享状态，成员重进后可继续协同。",
+    };
+  }
+
+  return {
+    tone: item.isActive ? "success" : "neutral",
+    label: item.isActive ? "运行中" : "空闲中",
+    hint: item.isActive ? "房间当前有在线成员。" : "当前没有在线成员。",
+  };
+}
+
+function getRoomVideoSummary(item) {
+  if (!item.sharedVideo) {
+    return {
+      primary: "未共享视频",
+      secondary: item.isActive ? "可提醒房主发起共享" : "空闲房间可忽略",
+    };
+  }
+
+  return {
+    primary: item.sharedVideo.title || item.sharedVideo.videoId || "已共享视频",
+    secondary: item.playback
+      ? `${getPlaybackState(item.playback)} @ ${Number(item.playback.currentTime ?? 0).toFixed(1)}s`
+      : "已共享，尚无播放同步状态",
+  };
+}
+
+function getEventPresentation(eventName) {
+  const presentationMap = {
+    room_created: {
+      label: "创建房间",
+      category: "房间生命周期",
+      tone: "success",
+      summary: "有成员新建了房间。",
+    },
+    room_joined: {
+      label: "加入房间",
+      category: "房间生命周期",
+      tone: "success",
+      summary: "有成员进入房间。",
+    },
+    room_left: {
+      label: "离开房间",
+      category: "房间生命周期",
+      tone: "neutral",
+      summary: "有成员离开房间。",
+    },
+    room_restored: {
+      label: "恢复房间",
+      category: "房间生命周期",
+      tone: "success",
+      summary: "成员重新进入了一个已保存的房间。",
+    },
+    room_expired_deleted: {
+      label: "过期清理",
+      category: "房间生命周期",
+      tone: "warning",
+      summary: "空闲房间达到过期条件后被删除。",
+    },
+    room_event_bus_error: {
+      label: "房间事件总线异常",
+      category: "系统维护",
+      tone: "danger",
+      summary: "节点间房间广播出现异常。",
+    },
+    runtime_index_reaper_failed: {
+      label: "运行时索引清理失败",
+      category: "系统维护",
+      tone: "danger",
+      summary: "离线节点残留索引回收失败。",
+    },
+    ws_connection_rejected: {
+      label: "连接被拒绝",
+      category: "连接与安全",
+      tone: "warning",
+      summary: "有 WebSocket 连接在握手阶段被拒绝。",
+    },
+    ws_connection_closed: {
+      label: "连接关闭",
+      category: "连接与安全",
+      tone: "neutral",
+      summary: "一个 WebSocket 会话结束。",
+    },
+    auth_failed: {
+      label: "鉴权失败",
+      category: "连接与安全",
+      tone: "danger",
+      summary: "成员缺少权限、令牌无效或已被踢出。",
+    },
+    invalid_message: {
+      label: "非法消息",
+      category: "连接与安全",
+      tone: "warning",
+      summary: "客户端发送了协议不合法的消息。",
+    },
+    rate_limited: {
+      label: "触发限流",
+      category: "连接与安全",
+      tone: "warning",
+      summary: "某类操作过于频繁，被服务端限流。",
+    },
+    playback_update_applied: {
+      label: "已应用播放同步",
+      category: "播放协同",
+      tone: "success",
+      summary: "新的播放状态已被接受并广播。",
+    },
+    playback_update_ignored: {
+      label: "忽略播放同步",
+      category: "播放协同",
+      tone: "neutral",
+      summary: "收到的播放状态因时序或权限原因未被采用。",
+    },
+    admin_room_closed: {
+      label: "管理员关闭房间",
+      category: "后台治理",
+      tone: "danger",
+      summary: "管理员已关闭房间并断开成员。",
+    },
+    admin_room_expired: {
+      label: "管理员提前过期房间",
+      category: "后台治理",
+      tone: "warning",
+      summary: "管理员主动清理了空闲房间。",
+    },
+    admin_room_video_cleared: {
+      label: "管理员清空共享视频",
+      category: "后台治理",
+      tone: "warning",
+      summary: "管理员已重置当前共享视频和播放状态。",
+    },
+    admin_member_kicked: {
+      label: "管理员踢出成员",
+      category: "后台治理",
+      tone: "danger",
+      summary: "管理员主动移除了某个成员。",
+    },
+    admin_session_disconnected: {
+      label: "管理员断开会话",
+      category: "后台治理",
+      tone: "warning",
+      summary: "管理员强制断开了一个会话。",
+    },
+  };
+
+  return (
+    presentationMap[eventName] || {
+      label: eventName,
+      category: "其他事件",
+      tone: "neutral",
+      summary: "查看详情 JSON 获取完整上下文。",
+    }
+  );
+}
+
+function renderEventNameCell(item) {
+  const meta = getEventPresentation(item.event);
+  return renderDataPair(
+    `
+      <div class="event-primary">
+        <span class="event-name">${escapeHtml(meta.label)}</span>
+        <span class="event-category ${escapeHtml(meta.tone)}">${escapeHtml(meta.category)}</span>
+      </div>
+    `,
+    item.event === meta.label
+      ? meta.summary
+      : `${meta.summary} 原始事件名：${item.event}`,
+  );
+}
+
+function summarizeVisibleEvents(items) {
+  const counters = {
+    governance: 0,
+    security: 0,
+    playback: 0,
+    room: 0,
+  };
+
+  items.forEach((item) => {
+    const category = getEventPresentation(item.event).category;
+    if (category === "后台治理") {
+      counters.governance += 1;
+    } else if (category === "连接与安全") {
+      counters.security += 1;
+    } else if (category === "播放协同") {
+      counters.playback += 1;
+    } else if (category === "房间生命周期") {
+      counters.room += 1;
+    }
+  });
+
+  return counters;
+}
+
+function getAuditActionPresentation(action) {
+  const actionMap = {
+    close_room: {
+      label: "关闭房间",
+      category: "房间治理",
+      tone: "danger",
+      summary: "强制关闭房间并断开成员。",
+    },
+    expire_room: {
+      label: "提前过期房间",
+      category: "房间治理",
+      tone: "warning",
+      summary: "对空闲房间执行立即清理。",
+    },
+    clear_room_video: {
+      label: "清空共享视频",
+      category: "房间治理",
+      tone: "warning",
+      summary: "重置共享视频和播放状态。",
+    },
+    kick_member: {
+      label: "踢出成员",
+      category: "成员治理",
+      tone: "danger",
+      summary: "移除房间中的指定成员。",
+    },
+    disconnect_session: {
+      label: "断开会话",
+      category: "成员治理",
+      tone: "warning",
+      summary: "强制断开指定会话。",
+    },
+  };
+
+  return (
+    actionMap[action] || {
+      label: action,
+      category: "其他治理",
+      tone: "neutral",
+      summary: "查看请求内容了解完整上下文。",
+    }
+  );
+}
+
+function getAuditTargetTypeLabel(targetType) {
+  const labelMap = {
+    room: "房间",
+    session: "会话",
+    member: "成员",
+    config: "配置",
+    block: "封禁",
+  };
+
+  return labelMap[targetType] || targetType || "未知目标";
+}
+
+function renderAuditActionCell(item) {
+  const meta = getAuditActionPresentation(item.action);
+  return renderDataPair(
+    `
+      <div class="event-primary">
+        <span class="event-name">${escapeHtml(meta.label)}</span>
+        <span class="event-category ${escapeHtml(meta.tone)}">${escapeHtml(meta.category)}</span>
+      </div>
+    `,
+    item.action === meta.label
+      ? meta.summary
+      : `${meta.summary} 原始动作名：${item.action}`,
+  );
+}
+
+function renderAuditTargetCell(item) {
+  const targetLabel = getAuditTargetTypeLabel(item.targetType);
+  return renderDataPair(
+    item.targetId
+      ? `<span class="primary-code">${escapeHtml(item.targetId)}</span>`
+      : renderEmptyValue(),
+    `${targetLabel}${item.targetInstanceId ? ` · 目标实例 ${item.targetInstanceId}` : ""}${item.executorInstanceId ? ` · 执行实例 ${item.executorInstanceId}` : ""}`,
+  );
+}
+
+function renderAuditRequestSummary(item) {
+  const fragments = [];
+  if (item.reason) {
+    fragments.push(`原因：${item.reason}`);
+  }
+  if (item.commandStatus) {
+    fragments.push(`命令状态：${item.commandStatus}`);
+  }
+  if (item.commandCode) {
+    fragments.push(`命令代码：${item.commandCode}`);
+  }
+  if (item.commandRequestId) {
+    fragments.push(`请求号：${item.commandRequestId}`);
+  }
+  return fragments.length > 0
+    ? fragments.join(" · ")
+    : "查看请求内容了解更多细节";
+}
+
+function summarizeAuditLogs(items) {
+  const counters = {
+    success: 0,
+    rejected: 0,
+    error: 0,
+    roomGovernance: 0,
+    memberGovernance: 0,
+  };
+
+  items.forEach((item) => {
+    if (item.result === "ok") {
+      counters.success += 1;
+    } else if (item.result === "rejected") {
+      counters.rejected += 1;
+    } else if (item.result === "error") {
+      counters.error += 1;
+    }
+
+    const category = getAuditActionPresentation(item.action).category;
+    if (category === "房间治理") {
+      counters.roomGovernance += 1;
+    } else if (category === "成员治理") {
+      counters.memberGovernance += 1;
+    }
+  });
+
+  return counters;
 }
 
 function isGlobalAdminInstance(instanceId) {
@@ -743,6 +1120,16 @@ function renderStatus(kind, text) {
 async function renderRoomsPage() {
   const query = roomsQueryFromLocation();
   const data = await api.listRooms(query);
+  const activeCount = data.items.filter((item) => item.isActive).length;
+  const idleCount = data.items.length - activeCount;
+  const noVideoCount = data.items.filter((item) => !item.sharedVideo).length;
+  const expiringSoonCount = data.items.filter((item) => {
+    if (!item.expiresAt) {
+      return false;
+    }
+    const remainingMs = item.expiresAt - Date.now();
+    return remainingMs > 0 && remainingMs <= 10 * 60_000;
+  }).length;
   const hasFilters = Boolean(
     query.keyword ||
     query.status !== "all" ||
@@ -793,11 +1180,23 @@ async function renderRoomsPage() {
             </div>
           </form>
         </section>
+        <section class="panel panel-summary">
+          <div class="section-header">
+            <h3>当前页速览</h3>
+            <span class="muted">先看哪些房间值得优先处理</span>
+          </div>
+          <div class="mini-stat-grid">
+            ${renderMiniStat("活跃房间", activeCount, "success")}
+            ${renderMiniStat("空闲房间", idleCount, "neutral")}
+            ${renderMiniStat("未共享视频", noVideoCount, noVideoCount > 0 ? "warning" : "neutral")}
+            ${renderMiniStat("10 分钟内过期", expiringSoonCount, expiringSoonCount > 0 ? "warning" : "neutral")}
+          </div>
+        </section>
         <section class="table-card">
           <div class="toolbar table-toolbar">
             <div>
               <div class="table-title">房间列表</div>
-              <div class="muted">共 ${data.pagination.total} 个结果</div>
+              <div class="muted">把房间健康度、视频状态和下一步建议放在一行里，方便直接处理。</div>
             </div>
             <div class="table-toolbar-actions">
               <div class="pill subtle">每页 ${query.pageSize}</div>
@@ -813,35 +1212,42 @@ async function renderRoomsPage() {
               <thead>
                 <tr>
                   <th>房间号</th>
-                  <th>实例</th>
-                  <th>状态</th>
+                  <th>当前状态</th>
                   <th>成员</th>
-                  <th>共享视频</th>
-                  <th>播放状态</th>
-                  <th>创建时间</th>
-                  <th>最近活跃</th>
-                  <th>过期时间</th>
+                  <th>视频与同步</th>
+                  <th>时间线</th>
+                  <th>建议关注</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
                 ${data.items
-                  .map(
-                    (item) => `
+                  .map((item) => {
+                    const attention = getRoomAttention(item);
+                    const videoSummary = getRoomVideoSummary(item);
+                    return `
                   <tr>
                     <td>${renderDataPair(`<a href="${withDemoQuery(routeHref(`/rooms/${item.roomCode}`))}" data-room-link="${escapeHtml(item.roomCode)}" class="primary-cell-link"><strong>${escapeHtml(item.roomCode)}</strong></a>`, item.sharedVideo?.videoId ? `<span class="primary-code">${escapeHtml(item.sharedVideo.videoId)}</span>` : "")}</td>
-                    <td><span class="primary-code">${escapeHtml(item.instanceId || "—")}</span></td>
-                    <td>${renderStatus(item.isActive ? "success" : "neutral", item.isActive ? "active" : "idle")}</td>
-                    <td><strong>${item.memberCount}</strong></td>
-                    <td>${renderDataPair(escapeHtml(item.sharedVideo?.title || item.sharedVideo?.videoId || "未共享"), item.sharedVideo?.url ? "已设置共享链接" : "")}</td>
-                    <td>${renderDataPair(escapeHtml(formatPlayback(item.playback)), item.playback ? `速度 x${Number(item.playback.playbackRate ?? 1).toFixed(2)}` : "")}</td>
-                    <td>${renderTimeBlock(item.createdAt, "创建")}</td>
-                    <td>${renderTimeBlock(item.lastActiveAt, "活跃")}</td>
-                    <td>${renderTimeBlock(item.expiresAt, "过期")}</td>
+                    <td>${renderDataPair(
+                      renderStatus(
+                        item.isActive ? "success" : "neutral",
+                        item.isActive ? "有人在线" : "当前空闲",
+                      ),
+                      item.instanceId
+                        ? `实例 ${escapeHtml(item.instanceId)}`
+                        : "实例信息未知",
+                    )}</td>
+                    <td>${renderDataPair(`<strong>${item.memberCount}</strong>`, item.memberCount > 0 ? `${item.memberCount} 个在线成员` : "暂无在线成员")}</td>
+                    <td>${renderDataPair(escapeHtml(videoSummary.primary), escapeHtml(videoSummary.secondary))}</td>
+                    <td>${renderDataPair(
+                      `${formatDateTime(item.lastActiveAt)}`,
+                      `创建于 ${new Date(item.createdAt).toLocaleString()}${item.expiresAt ? ` · ${formatRelativeDuration(item.expiresAt - Date.now())}` : ""}`,
+                    )}</td>
+                    <td>${renderDataPair(renderStatus(attention.tone, attention.label), escapeHtml(attention.hint))}</td>
                     <td>${roomActionButtons(item.roomCode, item.isActive)}</td>
                   </tr>
-                `,
-                  )
+                `;
+                  })
                   .join("")}
               </tbody>
             </table>
@@ -1168,7 +1574,7 @@ async function renderRoomDetailPage(roomCode) {
                       (event) => `
                     <tr>
                       <td>${renderTimeBlock(event.timestamp, "事件")}</td>
-                      <td>${renderDataPair(`<span class="event-name">${escapeHtml(event.event)}</span>`, event.roomCode ? `<span class="primary-code">${escapeHtml(event.roomCode)}</span>` : "")}</td>
+                      <td>${renderEventNameCell(event)}</td>
                       <td>${event.sessionId ? `<span class="code">${escapeHtml(event.sessionId)}</span>` : renderEmptyValue()}</td>
                       <td>${event.result ? renderResultBadge(event.result) : renderEmptyValue()}</td>
                       <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(event.details))}'>查看 JSON</button></td>
@@ -1278,13 +1684,22 @@ function bindMemberActionButtons(roomCode) {
 async function renderEventsPage() {
   const query = listQueryFromLocation({ pageSize: "20" });
   const data = await api.listEvents(query);
+  const summary = summarizeVisibleEvents(data.items);
 
   return {
     html: renderLogPage({
       title: "运行事件列表",
-      muted: "仅保证近期事件，服务重启后事件存储可能丢失。",
+      muted:
+        "默认隐藏系统噪音事件，更适合直接排查用户问题；需要时可勾选显示系统事件。",
       filterKicker: "事件筛选",
-      filterIntro: "按事件名、房间号、会话、来源和时间范围筛选近期运行事件。",
+      filterIntro:
+        "按事件名、房间号、会话、来源和时间范围筛选近期运行事件。优先看后台治理、连接与安全、播放协同三类。",
+      summaryCards: `
+        ${renderMiniStat("房间生命周期", summary.room, summary.room > 0 ? "success" : "neutral")}
+        ${renderMiniStat("连接与安全", summary.security, summary.security > 0 ? "warning" : "neutral")}
+        ${renderMiniStat("播放协同", summary.playback, summary.playback > 0 ? "success" : "neutral")}
+        ${renderMiniStat("后台治理", summary.governance, summary.governance > 0 ? "warning" : "neutral")}
+      `,
       tableClass: "events-table",
       filters: `
         ${textField("event", "事件名", query.event)}
@@ -1306,7 +1721,7 @@ async function renderEventsPage() {
           (item) => `
         <tr>
           <td>${renderTimeBlock(item.timestamp, "事件")}</td>
-          <td><span class="event-name">${escapeHtml(item.event)}</span></td>
+          <td>${renderEventNameCell(item)}</td>
           <td>${item.roomCode ? `<span class="primary-code">${escapeHtml(item.roomCode)}</span>` : renderEmptyValue()}</td>
           <td>${renderCompactCode(item.sessionId)}</td>
           <td>${renderCompactCode(item.remoteAddress)}</td>
@@ -1335,13 +1750,21 @@ async function renderEventsPage() {
 async function renderAuditLogsPage() {
   const query = listQueryFromLocation({ pageSize: "20" });
   const data = await api.listAuditLogs(query);
+  const summary = summarizeAuditLogs(data.items);
 
   return {
     html: renderLogPage({
       title: "审计日志",
-      muted: "viewer 也可查看；写操作成功后可回到这里确认最新留痕。",
+      muted: "适合回答“谁做的、对谁做的、执行到哪一步、是否真的生效了”。",
       filterKicker: "审计筛选",
-      filterIntro: "按操作人、动作、目标和结果定位后台治理动作的留痕记录。",
+      filterIntro:
+        "按操作人、动作、目标和结果定位后台治理动作的留痕记录。优先看失败、拒绝和跨节点执行记录。",
+      summaryCards: `
+        ${renderMiniStat("成功执行", summary.success, summary.success > 0 ? "success" : "neutral")}
+        ${renderMiniStat("被拒绝", summary.rejected, summary.rejected > 0 ? "warning" : "neutral")}
+        ${renderMiniStat("执行出错", summary.error, summary.error > 0 ? "danger" : "neutral")}
+        ${renderMiniStat("成员治理", summary.memberGovernance, summary.memberGovernance > 0 ? "warning" : "neutral")}
+      `,
       tableClass: "audit-table",
       filters: `
         ${textField("actor", "操作人", query.actor)}
@@ -1358,21 +1781,20 @@ async function renderAuditLogsPage() {
           (item) => `
         <tr>
           <td>${renderTimeBlock(item.timestamp, "审计")}</td>
-          <td><strong>${escapeHtml(item.actor.username)}</strong></td>
+          <td>${renderDataPair(`<strong>${escapeHtml(item.actor.username)}</strong>`, `账号 ${escapeHtml(item.actor.adminId)}`)}</td>
           <td>${renderResultBadge(item.actor.role)}</td>
-          <td><span class="event-name">${escapeHtml(item.action)}</span></td>
-          <td>${escapeHtml(item.targetType)}</td>
-          <td>${item.targetId ? `<span class="primary-code">${escapeHtml(item.targetId)}</span>` : renderEmptyValue()}</td>
+          <td>${renderAuditActionCell(item)}</td>
+          <td>${renderAuditTargetCell(item)}</td>
           <td>${renderResultBadge(item.result)}</td>
-          <td>${item.reason ? escapeHtml(item.reason) : renderEmptyValue()}</td>
-          <td>${item.instanceId ? `<span class="primary-code">${escapeHtml(item.instanceId)}</span>` : renderEmptyValue()}</td>
+          <td>${renderDataPair(item.reason ? escapeHtml(item.reason) : renderEmptyValue("未填写"), escapeHtml(renderAuditRequestSummary(item)))}</td>
+          <td>${item.instanceId ? renderDataPair(`<span class="primary-code">${escapeHtml(item.instanceId)}</span>`, item.executorInstanceId && item.executorInstanceId !== item.instanceId ? `执行节点 ${escapeHtml(item.executorInstanceId)}` : "由当前控制节点记录") : renderEmptyValue()}</td>
           <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(item.request))}'>查看请求</button></td>
         </tr>
       `,
         )
         .join(""),
       headers:
-        "<th>时间</th><th>操作人</th><th>角色</th><th>动作</th><th>目标类型</th><th>目标 ID</th><th>结果</th><th>原因</th><th>实例</th><th>请求</th>",
+        "<th>时间</th><th>操作人</th><th>角色</th><th>治理动作</th><th>目标</th><th>结果</th><th>执行说明</th><th>记录节点</th><th>请求</th>",
       data,
       query,
       basePath: "/audit-logs",
@@ -1409,6 +1831,21 @@ function renderLogPage(options) {
           </div>
         </form>
       </section>
+      ${
+        options.summaryCards
+          ? `
+        <section class="panel panel-summary">
+          <div class="section-header">
+            <h3>当前页速览</h3>
+            <span class="muted">${escapeHtml(options.muted || "便于快速判断眼前这一页主要在发生什么。")}</span>
+          </div>
+          <div class="mini-stat-grid">
+            ${options.summaryCards}
+          </div>
+        </section>
+      `
+          : ""
+      }
       <section class="table-card">
         <div class="toolbar table-toolbar">
           <div>
