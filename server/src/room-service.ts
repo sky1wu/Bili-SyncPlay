@@ -609,6 +609,8 @@ export function createRoomService(options: {
             code: roomCode,
             joinToken: generateToken(),
             createdAt,
+            ownerMemberId: session.id,
+            ownerDisplayName: session.displayName,
           });
           break;
         } catch {

@@ -8,6 +8,13 @@ function toSummary(
   room: PersistedRoom,
   activeSessions: Session[],
 ): RoomSummary {
+  const ownerSession =
+    room.ownerMemberId !== undefined && room.ownerMemberId !== null
+      ? activeSessions.find((session) => {
+          const memberId = session.memberId ?? session.id;
+          return memberId === room.ownerMemberId;
+        })
+      : null;
   const instanceIds = Array.from(
     new Set(
       activeSessions
@@ -20,6 +27,8 @@ function toSummary(
     instanceId: instanceIds.length === 1 ? instanceIds[0] : undefined,
     roomCode: room.code,
     createdAt: room.createdAt,
+    ownerMemberId: room.ownerMemberId ?? null,
+    ownerDisplayName: ownerSession?.displayName ?? room.ownerDisplayName ?? null,
     lastActiveAt: room.lastActiveAt,
     expiresAt: room.expiresAt,
     sharedVideo: room.sharedVideo,

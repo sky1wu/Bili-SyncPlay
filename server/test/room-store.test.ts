@@ -10,9 +10,13 @@ test("room store persists create, update, delete, and expiry behaviors", async (
     code: "AAAAAA",
     joinToken: "join-token-123456",
     createdAt: 100,
+    ownerMemberId: "member-owner",
+    ownerDisplayName: "Alice",
   });
   assert.equal(createdRoom.code, "AAAAAA");
   assert.equal(createdRoom.version, 0);
+  assert.equal(createdRoom.ownerMemberId, "member-owner");
+  assert.equal(createdRoom.ownerDisplayName, "Alice");
 
   const updated = await store.updateRoom(
     createdRoom.code,

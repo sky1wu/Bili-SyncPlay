@@ -105,6 +105,8 @@ export type RoomSummary = {
   instanceIds?: string[];
   roomCode: string;
   createdAt: number;
+  ownerMemberId: string | null;
+  ownerDisplayName: string | null;
   lastActiveAt: number;
   expiresAt: number | null;
   sharedVideo: SharedVideo | null;

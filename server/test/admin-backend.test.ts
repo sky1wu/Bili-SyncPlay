@@ -333,6 +333,8 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
         rooms.body.data as {
           items: Array<{
             roomCode: string;
+            ownerMemberId: string | null;
+            ownerDisplayName: string | null;
             memberCount: number;
             isActive: boolean;
           }>;
@@ -340,6 +342,8 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
       ).items;
       assert.equal(roomItems.length, 1);
       assert.equal(roomItems[0]?.roomCode, roomCode);
+      assert.equal(roomItems[0]?.ownerDisplayName, "Alice");
+      assert.ok(roomItems[0]?.ownerMemberId);
       assert.equal(roomItems[0]?.memberCount, 1);
       assert.equal(roomItems[0]?.isActive, true);
 

@@ -64,6 +64,8 @@ export type PersistedRoom = {
   code: string;
   joinToken: string;
   createdAt: number;
+  ownerMemberId?: string | null;
+  ownerDisplayName?: string | null;
   sharedVideo: SharedVideo | null;
   playback: PlaybackState | null;
   version: number;

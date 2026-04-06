@@ -942,6 +942,15 @@ function renderStatus(kind, text) {
   return `<span class="status ${escapeHtml(kind)}">${escapeHtml(text)}</span>`;
 }
 
+function getRoomOwnerSummary(item) {
+  const primary = item.ownerDisplayName || item.ownerMemberId || "—";
+  const secondary =
+    item.ownerDisplayName && item.ownerMemberId
+      ? `memberId ${item.ownerMemberId}`
+      : "";
+  return { primary, secondary };
+}
+
 async function renderRoomsPage() {
   const query = roomsQueryFromLocation();
   const data = await api.listRooms(query);
@@ -997,6 +1006,7 @@ async function renderRoomsPage() {
                 <tr>
                   <th>房间号</th>
                   <th>状态</th>
+                  <th>创建者</th>
                   <th>成员</th>
                   <th>视频</th>
                   <th>时间</th>
@@ -1007,10 +1017,12 @@ async function renderRoomsPage() {
                 ${data.items
                   .map((item) => {
                     const videoSummary = getRoomVideoSummary(item);
+                    const ownerSummary = getRoomOwnerSummary(item);
                     return `
                   <tr>
                     <td><a href="${withDemoQuery(routeHref(`/rooms/${item.roomCode}`))}" data-room-link="${escapeHtml(item.roomCode)}" class="primary-cell-link"><strong>${escapeHtml(item.roomCode)}</strong></a></td>
                     <td>${renderStatus(item.isActive ? "success" : "neutral", item.isActive ? "活跃" : "空闲")}</td>
+                    <td>${renderDataPair(escapeHtml(ownerSummary.primary), escapeHtml(ownerSummary.secondary))}</td>
                     <td><strong>${item.memberCount}</strong></td>
                     <td>${renderDataPair(escapeHtml(videoSummary.primary), escapeHtml(videoSummary.secondary))}</td>
                     <td>${renderDataPair(
@@ -1746,6 +1758,8 @@ function createDemoData() {
       roomCode: "ROOM8A",
       instanceId: "instance-1",
       isActive: true,
+      ownerMemberId: "member-alice",
+      ownerDisplayName: "Alice",
       memberCount: 4,
       sharedVideo: {
         title: "【番剧】第 12 话同步播放",
@@ -1761,6 +1775,8 @@ function createDemoData() {
       roomCode: "ROOM2B",
       instanceId: "instance-1",
       isActive: true,
+      ownerMemberId: "member-echo",
+      ownerDisplayName: "Echo",
       memberCount: 2,
       sharedVideo: {
         title: "音乐现场回放",
@@ -1776,6 +1792,8 @@ function createDemoData() {
       roomCode: "ARCH9C",
       instanceId: "instance-2",
       isActive: false,
+      ownerMemberId: "member-archived-owner",
+      ownerDisplayName: null,
       memberCount: 0,
       sharedVideo: null,
       playback: null,

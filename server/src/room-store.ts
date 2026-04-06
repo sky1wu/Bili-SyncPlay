@@ -8,6 +8,8 @@ export type CreatePersistedRoomInput = {
   code: string;
   joinToken: string;
   createdAt: number;
+  ownerMemberId?: string | null;
+  ownerDisplayName?: string | null;
 };
 
 export type PersistedRoomPatch = {
@@ -76,6 +78,8 @@ export function createPersistedRoom(
     code: input.code,
     joinToken: input.joinToken,
     createdAt: input.createdAt,
+    ownerMemberId: input.ownerMemberId ?? null,
+    ownerDisplayName: input.ownerDisplayName ?? null,
     sharedVideo: null,
     playback: null,
     version: 0,
