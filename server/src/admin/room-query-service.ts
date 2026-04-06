@@ -28,7 +28,8 @@ function toSummary(
     roomCode: room.code,
     createdAt: room.createdAt,
     ownerMemberId: room.ownerMemberId ?? null,
-    ownerDisplayName: ownerSession?.displayName ?? room.ownerDisplayName ?? null,
+    ownerDisplayName:
+      ownerSession?.displayName ?? room.ownerDisplayName ?? null,
     lastActiveAt: room.lastActiveAt,
     expiresAt: room.expiresAt,
     sharedVideo: room.sharedVideo,
