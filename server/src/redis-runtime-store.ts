@@ -625,20 +625,25 @@ export async function createRedisRuntimeStore(
         currentTime,
       );
     },
-    async removeMember(code: string, memberId: string, session?: Session) {
+    removeMember(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("remove_member");
       const removal = localRuntimeStore.removeMember(code, memberId, session);
-      const currentSessionId = await redis.hget(
-        roomMembersKey(keyPrefix, code),
-        memberId,
+      void trackOperation(
+        "remove_member",
+        (async () => {
+          const currentSessionId = await redis.hget(
+            roomMembersKey(keyPrefix, code),
+            memberId,
+          );
+          if (shouldRemoveMemberBinding(currentSessionId, session?.id)) {
+            await redis
+              .multi()
+              .hdel(roomMembersKey(keyPrefix, code), memberId)
+              .hdel(roomMemberTokensKey(keyPrefix, code), memberId)
+              .exec();
+          }
+        })(),
       );
-      if (shouldRemoveMemberBinding(currentSessionId, session?.id)) {
-        await redis
-          .multi()
-          .hdel(roomMembersKey(keyPrefix, code), memberId)
-          .hdel(roomMemberTokensKey(keyPrefix, code), memberId)
-          .exec();
-      }
       return removal;
     },
     deleteRoom(code: string) {
