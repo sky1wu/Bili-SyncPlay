@@ -3,6 +3,13 @@ import type { RoomStore } from "../room-store.js";
 import type { RuntimeStore } from "../runtime-store.js";
 import type { PersistenceConfig } from "../types.js";
 
+const OVERVIEW_EVENT_NAMES = [
+  "room_created",
+  "room_joined",
+  "rate_limited",
+  "ws_connection_rejected",
+] as const;
+
 export function createAdminOverviewService(options: {
   instanceId: string;
   serviceName: string;
@@ -15,9 +22,38 @@ export function createAdminOverviewService(options: {
 }) {
   const now = options.now ?? Date.now;
 
+  async function getEventCounts(
+    query: {
+      from?: number;
+      to?: number;
+    } = {},
+  ): Promise<Record<(typeof OVERVIEW_EVENT_NAMES)[number], number>> {
+    const results = await Promise.all(
+      OVERVIEW_EVENT_NAMES.map(async (eventName) => {
+        const result = await options.eventStore.query({
+          event: eventName,
+          from: query.from,
+          to: query.to,
+          page: 1,
+          pageSize: 1,
+        });
+        return [eventName, result.total] as const;
+      }),
+    );
+
+    return Object.fromEntries(results) as Record<
+      (typeof OVERVIEW_EVENT_NAMES)[number],
+      number
+    >;
+  }
+
   return {
     async getOverview() {
       const currentTime = now();
+      const [lastMinuteEventCounts, totalEventCounts] = await Promise.all([
+        getEventCounts({ from: currentTime - 60_000, to: currentTime }),
+        getEventCounts(),
+      ]);
       const totalNonExpired = await options.roomStore.countRooms({
         keyword: undefined,
         includeExpired: false,
@@ -97,19 +133,18 @@ export function createAdminOverviewService(options: {
         },
         events: {
           lastMinute: {
-            room_created: 0,
-            room_joined: 0,
-            rate_limited: 0,
-            ws_connection_rejected: 0,
+            room_created: lastMinuteEventCounts.room_created,
+            room_joined: lastMinuteEventCounts.room_joined,
+            rate_limited: lastMinuteEventCounts.rate_limited,
+            ws_connection_rejected:
+              lastMinuteEventCounts.ws_connection_rejected,
             error: 0,
-            ...options.runtimeStore.getRecentEventCounts(currentTime),
           },
           totals: {
-            room_created: 0,
-            room_joined: 0,
-            ws_connection_rejected: 0,
-            rate_limited: 0,
-            ...options.runtimeStore.getLifetimeEventCounts(),
+            room_created: totalEventCounts.room_created,
+            room_joined: totalEventCounts.room_joined,
+            ws_connection_rejected: totalEventCounts.ws_connection_rejected,
+            rate_limited: totalEventCounts.rate_limited,
           },
         },
       };

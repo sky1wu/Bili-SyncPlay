@@ -85,3 +85,56 @@ test("overview counts only persisted non-expired active rooms and reports orphan
   assert.equal(overview.rooms.active, 1);
   assert.equal(overview.rooms.orphanRuntimeCount, 1);
 });
+
+test("overview aggregates event statistics from the event store", async () => {
+  const now = Date.parse("2026-04-05T12:00:00.000Z");
+  const roomStore = createInMemoryRoomStore({ now: () => now });
+  const runtimeStore = createInMemoryRuntimeStore(() => now);
+  const eventStore = createEventStore();
+  const persistenceConfig = {
+    ...getDefaultPersistenceConfig(),
+    instanceId: "instance-a",
+  };
+
+  await eventStore.append({
+    event: "room_created",
+    timestamp: new Date(now - 30_000).toISOString(),
+    data: { roomCode: "ROOM01", result: "ok" },
+  });
+  await eventStore.append({
+    event: "room_joined",
+    timestamp: new Date(now - 10_000).toISOString(),
+    data: { roomCode: "ROOM01", result: "ok" },
+  });
+  await eventStore.append({
+    event: "rate_limited",
+    timestamp: new Date(now - 90_000).toISOString(),
+    data: { result: "rejected" },
+  });
+  await eventStore.append({
+    event: "ws_connection_rejected",
+    timestamp: new Date(now - 5_000).toISOString(),
+    data: { result: "rejected" },
+  });
+
+  const service = createAdminOverviewService({
+    instanceId: persistenceConfig.instanceId,
+    serviceName: "bili-syncplay-server",
+    serviceVersion: "0.9.2-test",
+    persistenceConfig,
+    roomStore,
+    runtimeStore,
+    eventStore,
+    now: () => now,
+  });
+
+  const overview = await service.getOverview();
+  assert.equal(overview.events.lastMinute.room_created, 1);
+  assert.equal(overview.events.lastMinute.room_joined, 1);
+  assert.equal(overview.events.lastMinute.rate_limited, 0);
+  assert.equal(overview.events.lastMinute.ws_connection_rejected, 1);
+  assert.equal(overview.events.totals.room_created, 1);
+  assert.equal(overview.events.totals.room_joined, 1);
+  assert.equal(overview.events.totals.rate_limited, 1);
+  assert.equal(overview.events.totals.ws_connection_rejected, 1);
+});
