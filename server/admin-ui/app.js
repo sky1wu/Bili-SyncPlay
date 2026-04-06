@@ -238,15 +238,6 @@ function renderDataPair(primary, secondary) {
   `;
 }
 
-function renderMiniStat(label, value, tone = "neutral") {
-  return `
-    <div class="mini-stat ${escapeHtml(tone)}">
-      <span class="mini-stat-label">${escapeHtml(label)}</span>
-      <strong>${escapeHtml(value)}</strong>
-    </div>
-  `;
-}
-
 function formatRelativeDuration(ms) {
   if (!Number.isFinite(ms)) {
     return "—";
@@ -266,50 +257,6 @@ function formatRelativeDuration(ms) {
     return `${hours} 小时后`;
   }
   return `${Math.floor(hours / 24)} 天后`;
-}
-
-function getRoomAttention(item) {
-  const now = Date.now();
-  if (item.isActive && !item.sharedVideo) {
-    return {
-      tone: "warning",
-      label: "活跃但未共享视频",
-      hint: "通常代表成员已进入房间，但还没人发起共享。",
-    };
-  }
-
-  if (item.isActive && item.memberCount >= 4) {
-    return {
-      tone: "success",
-      label: "多人活跃中",
-      hint: `${item.memberCount} 人在线，适合优先关注同步状态。`,
-    };
-  }
-
-  if (!item.isActive && item.expiresAt && item.expiresAt > now) {
-    const remainingMs = item.expiresAt - now;
-    if (remainingMs <= 10 * 60_000) {
-      return {
-        tone: "warning",
-        label: "即将过期",
-        hint: `${formatRelativeDuration(remainingMs)}，若要保留请尽快让成员重新进入。`,
-      };
-    }
-  }
-
-  if (!item.isActive && item.sharedVideo) {
-    return {
-      tone: "neutral",
-      label: "空闲待回访",
-      hint: "房间里保留了共享状态，成员重进后可继续协同。",
-    };
-  }
-
-  return {
-    tone: item.isActive ? "success" : "neutral",
-    label: item.isActive ? "运行中" : "空闲中",
-    hint: item.isActive ? "房间当前有在线成员。" : "当前没有在线成员。",
-  };
 }
 
 function getRoomVideoSummary(item) {
@@ -471,30 +418,6 @@ function renderEventNameCell(item) {
   );
 }
 
-function summarizeVisibleEvents(items) {
-  const counters = {
-    governance: 0,
-    security: 0,
-    playback: 0,
-    room: 0,
-  };
-
-  items.forEach((item) => {
-    const category = getEventPresentation(item.event).category;
-    if (category === "后台治理") {
-      counters.governance += 1;
-    } else if (category === "连接与安全") {
-      counters.security += 1;
-    } else if (category === "播放协同") {
-      counters.playback += 1;
-    } else if (category === "房间生命周期") {
-      counters.room += 1;
-    }
-  });
-
-  return counters;
-}
-
 function getAuditActionPresentation(action) {
   const actionMap = {
     close_room: {
@@ -574,54 +497,6 @@ function renderAuditTargetCell(item) {
       : renderEmptyValue(),
     `${targetLabel}${item.targetInstanceId ? ` · 目标实例 ${item.targetInstanceId}` : ""}${item.executorInstanceId ? ` · 执行实例 ${item.executorInstanceId}` : ""}`,
   );
-}
-
-function renderAuditRequestSummary(item) {
-  const fragments = [];
-  if (item.reason) {
-    fragments.push(`原因：${item.reason}`);
-  }
-  if (item.commandStatus) {
-    fragments.push(`命令状态：${item.commandStatus}`);
-  }
-  if (item.commandCode) {
-    fragments.push(`命令代码：${item.commandCode}`);
-  }
-  if (item.commandRequestId) {
-    fragments.push(`请求号：${item.commandRequestId}`);
-  }
-  return fragments.length > 0
-    ? fragments.join(" · ")
-    : "查看请求内容了解更多细节";
-}
-
-function summarizeAuditLogs(items) {
-  const counters = {
-    success: 0,
-    rejected: 0,
-    error: 0,
-    roomGovernance: 0,
-    memberGovernance: 0,
-  };
-
-  items.forEach((item) => {
-    if (item.result === "ok") {
-      counters.success += 1;
-    } else if (item.result === "rejected") {
-      counters.rejected += 1;
-    } else if (item.result === "error") {
-      counters.error += 1;
-    }
-
-    const category = getAuditActionPresentation(item.action).category;
-    if (category === "房间治理") {
-      counters.roomGovernance += 1;
-    } else if (category === "成员治理") {
-      counters.memberGovernance += 1;
-    }
-  });
-
-  return counters;
 }
 
 function isGlobalAdminInstance(instanceId) {
@@ -826,22 +701,19 @@ async function render() {
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-eyebrow">管理控制台</span>
+          <span class="brand-eyebrow">Admin</span>
           <h1>Bili-SyncPlay</h1>
-          <p>排障、治理和运行观察统一入口。</p>
         </div>
         <nav class="nav">
           ${renderNavLink("/overview", "概览")}
           ${renderNavLink("/rooms", "房间管理")}
           ${renderNavLink("/events", "运行事件")}
           ${renderNavLink("/audit-logs", "审计日志")}
-          ${renderNavLink("/config", "配置摘要")}
+          ${renderNavLink("/config", "配置")}
         </nav>
         <div class="sidebar-meta-card">
-          <div class="sidebar-meta-kicker">${escapeHtml(consoleContext.title)}</div>
-          <div class="sidebar-meta">${escapeHtml(consoleContext.label)}</div>
+          <div class="sidebar-meta-kicker">${escapeHtml(consoleContext.label)}</div>
           <strong>${escapeHtml(instanceId)}</strong>
-          <div class="sidebar-meta">${escapeHtml(consoleContext.description)}</div>
         </div>
       </aside>
       <main class="main">
@@ -849,25 +721,16 @@ async function render() {
         <section class="topbar-card">
           <div class="topbar">
             <div class="page-title">
-              <div class="page-kicker">运营控制台</div>
               <h2>${escapeHtml(meta.title)}</h2>
               <p>${escapeHtml(meta.description)}</p>
             </div>
             <div class="userbar-card">
               <div class="userbar-meta">
-                <div class="userbar-label">当前登录</div>
                 <div class="userbar-name">${escapeHtml(state.me.username)}</div>
-              </div>
-              <div class="userbar">
                 <span class="pill">${escapeHtml(state.me.role)}</span>
-                <span class="pill">${escapeHtml(consoleContext.pill)}</span>
               </div>
-              <button class="button ghost" data-action="logout">退出登录</button>
+              <button class="button ghost" data-action="logout">退出</button>
             </div>
-          </div>
-          <div class="topbar-subline">
-            <div class="pill subtle">${escapeHtml(consoleContext.pill)}</div>
-            <div class="topbar-note">桌面优先的后台工作台，面向排障、治理和运行观察。</div>
           </div>
         </section>
         ${state.notice ? `<div class="notice ${escapeHtml(state.notice.type)}">${escapeHtml(state.notice.message)}</div>` : ""}
@@ -1003,85 +866,47 @@ async function loadPage() {
 }
 
 async function renderOverviewPage() {
-  const [health, ready, overview] = await Promise.all([
-    api.getHealth(),
+  const [ready, overview] = await Promise.all([
     api.getReady(),
     api.getOverview(),
   ]);
   state.lastOverviewData = overview.service;
   const readyWarning = ready.status !== "ready";
-  const overviewHighlights = [
-    [
-      isGlobalAdminInstance(overview.service.instanceId) ? "全局后台" : "实例",
-      overview.service.instanceId,
-    ],
-    ["存储", overview.storage.provider],
-    ["Redis", overview.storage.redisConnected ? "已连接" : "未连接"],
-    [
-      "房间",
-      `${overview.runtime.activeRoomCount} 活跃 / ${overview.rooms.totalNonExpired} 非过期`,
-    ],
-  ];
 
   return {
     autoRefresh: state.overviewAutoRefresh,
     instanceId: overview.service.instanceId,
     serviceName: overview.service.name,
     html: `
-      ${readyWarning ? `<div class="warning-banner">readyz 当前状态为 ${escapeHtml(ready.status)}，请优先检查房间存储与 Redis 连通性。</div>` : ""}
+      ${readyWarning ? `<div class="warning-banner">readyz 状态为 ${escapeHtml(ready.status)}，请检查存储与 Redis 连通性。</div>` : ""}
       <div class="section">
         <div class="toolbar toolbar-elevated">
           <div class="actions">
-            <div class="pill">自动刷新 ${state.overviewAutoRefresh ? "开启" : "关闭"}</div>
-            <button class="button ghost" data-toggle-overview-refresh>${state.overviewAutoRefresh ? "关闭自动刷新" : "开启自动刷新"}</button>
+            <div class="pill">${state.overviewAutoRefresh ? "自动刷新中" : "自动刷新已关"}</div>
+            <button class="button ghost" data-toggle-overview-refresh>${state.overviewAutoRefresh ? "关闭" : "开启"}</button>
           </div>
-          <button class="button" data-refresh-overview>立即刷新</button>
-        </div>
-        <section class="panel overview-strip">
-          ${overviewHighlights
-            .map(
-              ([label, value]) => `
-            <div class="overview-strip-item">
-              <span class="overview-strip-label">${escapeHtml(label)}</span>
-              <strong>${escapeHtml(value)}</strong>
-            </div>
-          `,
-            )
-            .join("")}
-        </section>
-        <div class="grid cards-4">
-          ${metricCard("服务", escapeHtml(overview.service.name), `版本 ${escapeHtml(overview.service.version)}`)}
-          ${metricCard(isGlobalAdminInstance(overview.service.instanceId) ? "全局后台节点" : "实例", escapeHtml(overview.service.instanceId), `启动于 ${new Date(overview.service.startedAt).toLocaleString()}`)}
-          ${metricCard("健康检查", escapeHtml(health.status), `readyz ${escapeHtml(ready.status)}`)}
-          ${metricCard("运行时长", escapeHtml(formatDuration(overview.service.uptimeMs)), "持续运行时长")}
+          <button class="button" data-refresh-overview>刷新</button>
         </div>
         <div class="grid cards-4">
-          ${metricCard("连接数", overview.runtime.connectionCount, "当前 WebSocket 连接")}
-          ${metricCard("在线房间", overview.runtime.activeRoomCount, overview.rooms.orphanRuntimeCount > 0 ? `已忽略 ${overview.rooms.orphanRuntimeCount} 个失配运行时索引` : "活跃房间")}
-          ${metricCard("在线成员", overview.runtime.activeMemberCount, "当前在线成员")}
-          ${metricCard("非过期房间", overview.rooms.totalNonExpired, `空闲 ${overview.rooms.idle}`)}
+          ${metricCard("连接数", overview.runtime.connectionCount, "WebSocket")}
+          ${metricCard("在线房间", overview.runtime.activeRoomCount, `总计 ${overview.rooms.totalNonExpired} 非过期`)}
+          ${metricCard("在线成员", overview.runtime.activeMemberCount, `空闲房间 ${overview.rooms.idle}`)}
+          ${metricCard("运行时长", escapeHtml(formatDuration(overview.service.uptimeMs)), `${escapeHtml(overview.service.name)} v${escapeHtml(overview.service.version)}`)}
         </div>
         <div class="detail-grid">
           <section class="panel">
-            <div class="section-header">
-              <h3>存储状态</h3>
-            </div>
+            <div class="section-header"><h3>存储</h3></div>
             <dl class="kv">
-              <dt>存储提供方</dt><dd>${escapeHtml(overview.storage.provider)}</dd>
+              <dt>提供方</dt><dd>${escapeHtml(overview.storage.provider)}</dd>
               <dt>Redis</dt><dd>${renderStatus(overview.storage.redisConnected ? "success" : "warning", overview.storage.redisConnected ? "已连接" : "未连接")}</dd>
-              <dt>readyz.roomStore</dt><dd>${escapeHtml(ready.checks.roomStore)}</dd>
-              <dt>readyz.redis</dt><dd>${escapeHtml(ready.checks.redis)}</dd>
+              <dt>roomStore</dt><dd>${escapeHtml(ready.checks.roomStore)}</dd>
             </dl>
           </section>
           <section class="panel">
-            <div class="section-header">
-              <h3>事件统计</h3>
-            </div>
+            <div class="section-header"><h3>事件统计</h3></div>
             <dl class="kv">
-              <dt>最近一分钟</dt><dd>room_created ${overview.events.lastMinute.room_created} / room_joined ${overview.events.lastMinute.room_joined} / rate_limited ${overview.events.lastMinute.rate_limited}</dd>
-              <dt>最近一分钟</dt><dd>ws_connection_rejected ${overview.events.lastMinute.ws_connection_rejected} / error ${overview.events.lastMinute.error}</dd>
-              <dt>累计</dt><dd>room_created ${overview.events.totals.room_created} / room_joined ${overview.events.totals.room_joined}</dd>
-              <dt>累计</dt><dd>ws_connection_rejected ${overview.events.totals.ws_connection_rejected} / rate_limited ${overview.events.totals.rate_limited}</dd>
+              <dt>最近一分钟</dt><dd>创建 ${overview.events.lastMinute.room_created} · 加入 ${overview.events.lastMinute.room_joined} · 限流 ${overview.events.lastMinute.rate_limited} · 拒绝 ${overview.events.lastMinute.ws_connection_rejected}</dd>
+              <dt>累计</dt><dd>创建 ${overview.events.totals.room_created} · 加入 ${overview.events.totals.room_joined} · 限流 ${overview.events.totals.rate_limited} · 拒绝 ${overview.events.totals.ws_connection_rejected}</dd>
             </dl>
           </section>
         </div>
@@ -1120,58 +945,33 @@ function renderStatus(kind, text) {
 async function renderRoomsPage() {
   const query = roomsQueryFromLocation();
   const data = await api.listRooms(query);
-  const activeCount = data.items.filter((item) => item.isActive).length;
-  const idleCount = data.items.length - activeCount;
-  const noVideoCount = data.items.filter((item) => !item.sharedVideo).length;
-  const expiringSoonCount = data.items.filter((item) => {
-    if (!item.expiresAt) {
-      return false;
-    }
-    const remainingMs = item.expiresAt - Date.now();
-    return remainingMs > 0 && remainingMs <= 10 * 60_000;
-  }).length;
-  const hasFilters = Boolean(
-    query.keyword ||
-    query.status !== "all" ||
-    query.includeExpired ||
-    query.sortBy !== "lastActiveAt" ||
-    query.sortOrder !== "desc",
-  );
-
   return {
     instanceId: state.lastOverviewData?.instanceId,
     html: `
       <div class="section">
         <section class="panel panel-filter">
-          <div class="panel-intro">
-            <div class="panel-intro-kicker">房间筛选</div>
-            <div class="panel-intro-text">按房间状态、排序方式和过期范围快速收敛目标房间，再进入详情页执行治理动作。</div>
-          </div>
           <form id="rooms-filter" class="form-grid">
-            ${textField("keyword", "房间号关键字", query.keyword)}
+            ${textField("keyword", "关键字", query.keyword)}
             ${selectField("status", "状态", query.status, [
-              ["all", "all"],
-              ["active", "active"],
-              ["idle", "idle"],
+              ["all", "全部"],
+              ["active", "活跃"],
+              ["idle", "空闲"],
             ])}
-            ${selectField("sortBy", "排序字段", query.sortBy, [
-              ["lastActiveAt", "lastActiveAt"],
-              ["createdAt", "createdAt"],
+            ${selectField("sortBy", "排序", query.sortBy, [
+              ["lastActiveAt", "最近活跃"],
+              ["createdAt", "创建时间"],
             ])}
-            ${selectField("sortOrder", "排序方向", query.sortOrder, [
-              ["desc", "desc"],
-              ["asc", "asc"],
+            ${selectField("sortOrder", "方向", query.sortOrder, [
+              ["desc", "降序"],
+              ["asc", "升序"],
             ])}
-            ${textField("pageSize", "每页条数", String(query.pageSize), "number")}
             <div class="field inline align-end">
               <input id="includeExpired" name="includeExpired" type="checkbox" ${query.includeExpired ? "checked" : ""} />
-              <label for="includeExpired">包含已过期房间</label>
+              <label for="includeExpired">含已过期</label>
             </div>
             <div class="filter-footer full-width">
               <div class="filter-summary">
-                <span class="filter-summary-label">当前视图</span>
-                <strong>${hasFilters ? "已应用筛选" : "默认排序"}</strong>
-                <span>共 ${data.pagination.total} 个结果</span>
+                <strong>共 ${data.pagination.total} 个房间</strong>
               </div>
               <div class="actions">
                 <button class="button primary" type="submit">查询</button>
@@ -1180,26 +980,10 @@ async function renderRoomsPage() {
             </div>
           </form>
         </section>
-        <section class="panel panel-summary">
-          <div class="section-header">
-            <h3>当前页速览</h3>
-            <span class="muted">先看哪些房间值得优先处理</span>
-          </div>
-          <div class="mini-stat-grid">
-            ${renderMiniStat("活跃房间", activeCount, "success")}
-            ${renderMiniStat("空闲房间", idleCount, "neutral")}
-            ${renderMiniStat("未共享视频", noVideoCount, noVideoCount > 0 ? "warning" : "neutral")}
-            ${renderMiniStat("10 分钟内过期", expiringSoonCount, expiringSoonCount > 0 ? "warning" : "neutral")}
-          </div>
-        </section>
         <section class="table-card">
           <div class="toolbar table-toolbar">
-            <div>
-              <div class="table-title">房间列表</div>
-              <div class="muted">把房间健康度、视频状态和下一步建议放在一行里，方便直接处理。</div>
-            </div>
+            <div class="table-title">房间列表</div>
             <div class="table-toolbar-actions">
-              <div class="pill subtle">每页 ${query.pageSize}</div>
               <button class="button" data-refresh-rooms>刷新</button>
             </div>
           </div>
@@ -1212,38 +996,29 @@ async function renderRoomsPage() {
               <thead>
                 <tr>
                   <th>房间号</th>
-                  <th>当前状态</th>
+                  <th>状态</th>
                   <th>成员</th>
-                  <th>视频与同步</th>
-                  <th>时间线</th>
-                  <th>建议关注</th>
+                  <th>视频</th>
+                  <th>时间</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
                 ${data.items
                   .map((item) => {
-                    const attention = getRoomAttention(item);
                     const videoSummary = getRoomVideoSummary(item);
                     return `
                   <tr>
-                    <td>${renderDataPair(`<a href="${withDemoQuery(routeHref(`/rooms/${item.roomCode}`))}" data-room-link="${escapeHtml(item.roomCode)}" class="primary-cell-link"><strong>${escapeHtml(item.roomCode)}</strong></a>`, item.sharedVideo?.videoId ? `<span class="primary-code">${escapeHtml(item.sharedVideo.videoId)}</span>` : "")}</td>
-                    <td>${renderDataPair(
-                      renderStatus(
-                        item.isActive ? "success" : "neutral",
-                        item.isActive ? "有人在线" : "当前空闲",
-                      ),
-                      item.instanceId
-                        ? `实例 ${escapeHtml(item.instanceId)}`
-                        : "实例信息未知",
-                    )}</td>
-                    <td>${renderDataPair(`<strong>${item.memberCount}</strong>`, item.memberCount > 0 ? `${item.memberCount} 个在线成员` : "暂无在线成员")}</td>
+                    <td><a href="${withDemoQuery(routeHref(`/rooms/${item.roomCode}`))}" data-room-link="${escapeHtml(item.roomCode)}" class="primary-cell-link"><strong>${escapeHtml(item.roomCode)}</strong></a></td>
+                    <td>${renderStatus(item.isActive ? "success" : "neutral", item.isActive ? "活跃" : "空闲")}</td>
+                    <td><strong>${item.memberCount}</strong></td>
                     <td>${renderDataPair(escapeHtml(videoSummary.primary), escapeHtml(videoSummary.secondary))}</td>
                     <td>${renderDataPair(
                       `${formatDateTime(item.lastActiveAt)}`,
-                      `创建于 ${new Date(item.createdAt).toLocaleString()}${item.expiresAt ? ` · ${formatRelativeDuration(item.expiresAt - Date.now())}` : ""}`,
+                      item.expiresAt
+                        ? formatRelativeDuration(item.expiresAt - Date.now())
+                        : "",
                     )}</td>
-                    <td>${renderDataPair(renderStatus(attention.tone, attention.label), escapeHtml(attention.hint))}</td>
                     <td>${roomActionButtons(item.roomCode, item.isActive)}</td>
                   </tr>
                 `;
@@ -1500,11 +1275,7 @@ async function renderRoomDetailPage(roomCode) {
           </div>
           <section class="table-card">
             <div class="toolbar table-toolbar">
-              <div>
-                <div class="table-title">在线成员</div>
-                <div class="muted">支持复制会话和成员标识。</div>
-              </div>
-              <div class="pill subtle">在线 ${detail.members.length}</div>
+              <div class="table-title">在线成员 (${detail.members.length})</div>
             </div>
             ${
               detail.members.length === 0
@@ -1547,11 +1318,8 @@ async function renderRoomDetailPage(roomCode) {
           </section>
           <section class="table-card">
             <div class="toolbar table-toolbar">
-              <div>
-                <div class="table-title">最近事件</div>
-                <div class="muted">默认展示最近 20 条，服务重启后事件存储会丢失。</div>
-              </div>
-              <button class="button ghost" data-jump-events="${escapeHtml(roomCode)}">带筛选跳转到事件页</button>
+              <div class="table-title">最近事件</div>
+              <button class="button ghost" data-jump-events="${escapeHtml(roomCode)}">查看全部事件</button>
             </div>
             ${
               detail.recentEvents.length === 0
@@ -1684,36 +1452,20 @@ function bindMemberActionButtons(roomCode) {
 async function renderEventsPage() {
   const query = listQueryFromLocation({ pageSize: "20" });
   const data = await api.listEvents(query);
-  const summary = summarizeVisibleEvents(data.items);
-
   return {
     html: renderLogPage({
-      title: "运行事件列表",
-      muted:
-        "默认隐藏系统噪音事件，更适合直接排查用户问题；需要时可勾选显示系统事件。",
-      filterKicker: "事件筛选",
-      filterIntro:
-        "按事件名、房间号、会话、来源和时间范围筛选近期运行事件。优先看后台治理、连接与安全、播放协同三类。",
-      summaryCards: `
-        ${renderMiniStat("房间生命周期", summary.room, summary.room > 0 ? "success" : "neutral")}
-        ${renderMiniStat("连接与安全", summary.security, summary.security > 0 ? "warning" : "neutral")}
-        ${renderMiniStat("播放协同", summary.playback, summary.playback > 0 ? "success" : "neutral")}
-        ${renderMiniStat("后台治理", summary.governance, summary.governance > 0 ? "warning" : "neutral")}
-      `,
+      title: "运行事件",
       tableClass: "events-table",
       filters: `
         ${textField("event", "事件名", query.event)}
         ${textField("roomCode", "房间号", query.roomCode)}
         ${textField("sessionId", "会话 ID", query.sessionId)}
         ${textField("remoteAddress", "远端地址", query.remoteAddress)}
-        ${textField("origin", "来源 Origin", query.origin)}
+        ${textField("origin", "来源", query.origin)}
         ${textField("result", "结果", query.result)}
-        ${textField("from", "开始时间戳(ms)", query.from, "number")}
-        ${textField("to", "结束时间戳(ms)", query.to, "number")}
-        ${textField("pageSize", "每页条数", query.pageSize, "number")}
         <div class="field inline align-end">
           <input id="includeSystem" name="includeSystem" type="checkbox" ${query.includeSystem ? "checked" : ""} />
-          <label for="includeSystem">显示系统事件</label>
+          <label for="includeSystem">含系统事件</label>
         </div>
       `,
       rows: data.items
@@ -1724,16 +1476,15 @@ async function renderEventsPage() {
           <td>${renderEventNameCell(item)}</td>
           <td>${item.roomCode ? `<span class="primary-code">${escapeHtml(item.roomCode)}</span>` : renderEmptyValue()}</td>
           <td>${renderCompactCode(item.sessionId)}</td>
-          <td>${renderCompactCode(item.remoteAddress)}</td>
           <td>${renderOriginValue(item.origin)}</td>
           <td>${item.result ? renderResultBadge(item.result) : renderEmptyValue()}</td>
-          <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(item.details))}'>查看 JSON</button></td>
+          <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(item.details))}'>JSON</button></td>
         </tr>
       `,
         )
         .join(""),
       headers:
-        "<th>时间</th><th>事件名</th><th>房间号</th><th>会话 ID</th><th>远端地址</th><th>来源 Origin</th><th>结果</th><th>详情</th>",
+        "<th>时间</th><th>事件</th><th>房间号</th><th>会话</th><th>来源</th><th>结果</th><th>详情</th>",
       data,
       query,
       basePath: "/events",
@@ -1750,21 +1501,9 @@ async function renderEventsPage() {
 async function renderAuditLogsPage() {
   const query = listQueryFromLocation({ pageSize: "20" });
   const data = await api.listAuditLogs(query);
-  const summary = summarizeAuditLogs(data.items);
-
   return {
     html: renderLogPage({
       title: "审计日志",
-      muted: "适合回答“谁做的、对谁做的、执行到哪一步、是否真的生效了”。",
-      filterKicker: "审计筛选",
-      filterIntro:
-        "按操作人、动作、目标和结果定位后台治理动作的留痕记录。优先看失败、拒绝和跨节点执行记录。",
-      summaryCards: `
-        ${renderMiniStat("成功执行", summary.success, summary.success > 0 ? "success" : "neutral")}
-        ${renderMiniStat("被拒绝", summary.rejected, summary.rejected > 0 ? "warning" : "neutral")}
-        ${renderMiniStat("执行出错", summary.error, summary.error > 0 ? "danger" : "neutral")}
-        ${renderMiniStat("成员治理", summary.memberGovernance, summary.memberGovernance > 0 ? "warning" : "neutral")}
-      `,
       tableClass: "audit-table",
       filters: `
         ${textField("actor", "操作人", query.actor)}
@@ -1772,29 +1511,24 @@ async function renderAuditLogsPage() {
         ${textField("targetType", "目标类型", query.targetType)}
         ${textField("targetId", "目标 ID", query.targetId)}
         ${textField("result", "结果", query.result)}
-        ${textField("from", "开始时间戳(ms)", query.from, "number")}
-        ${textField("to", "结束时间戳(ms)", query.to, "number")}
-        ${textField("pageSize", "每页条数", query.pageSize, "number")}
       `,
       rows: data.items
         .map(
           (item) => `
         <tr>
           <td>${renderTimeBlock(item.timestamp, "审计")}</td>
-          <td>${renderDataPair(`<strong>${escapeHtml(item.actor.username)}</strong>`, `账号 ${escapeHtml(item.actor.adminId)}`)}</td>
-          <td>${renderResultBadge(item.actor.role)}</td>
+          <td>${renderDataPair(`<strong>${escapeHtml(item.actor.username)}</strong>`, escapeHtml(item.actor.role))}</td>
           <td>${renderAuditActionCell(item)}</td>
           <td>${renderAuditTargetCell(item)}</td>
           <td>${renderResultBadge(item.result)}</td>
-          <td>${renderDataPair(item.reason ? escapeHtml(item.reason) : renderEmptyValue("未填写"), escapeHtml(renderAuditRequestSummary(item)))}</td>
-          <td>${item.instanceId ? renderDataPair(`<span class="primary-code">${escapeHtml(item.instanceId)}</span>`, item.executorInstanceId && item.executorInstanceId !== item.instanceId ? `执行节点 ${escapeHtml(item.executorInstanceId)}` : "由当前控制节点记录") : renderEmptyValue()}</td>
-          <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(item.request))}'>查看请求</button></td>
+          <td>${item.reason ? escapeHtml(item.reason) : renderEmptyValue("未填写")}</td>
+          <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(item.request))}'>JSON</button></td>
         </tr>
       `,
         )
         .join(""),
       headers:
-        "<th>时间</th><th>操作人</th><th>角色</th><th>治理动作</th><th>目标</th><th>结果</th><th>执行说明</th><th>记录节点</th><th>请求</th>",
+        "<th>时间</th><th>操作人</th><th>动作</th><th>目标</th><th>结果</th><th>原因</th><th>请求</th>",
       data,
       query,
       basePath: "/audit-logs",
@@ -1812,18 +1546,10 @@ function renderLogPage(options) {
   return `
     <div class="section">
       <section class="panel panel-filter">
-        <div class="panel-intro">
-          <div class="panel-intro-kicker">${escapeHtml(options.filterKicker || "筛选条件")}</div>
-          <div class="panel-intro-text">${escapeHtml(options.filterIntro || "按筛选条件快速定位目标数据。")}</div>
-        </div>
         <form id="${escapeHtml(options.formId)}" class="form-grid">
           ${options.filters}
           <div class="filter-footer full-width">
-            <div class="filter-summary">
-              <span class="filter-summary-label">筛选结果</span>
-              <strong>共 ${escapeHtml(options.data.total)} 条</strong>
-              <span>默认按时间倒序展示</span>
-            </div>
+            <strong>共 ${escapeHtml(options.data.total)} 条</strong>
             <div class="actions">
               <button class="button primary" type="submit">查询</button>
               <button class="button ghost" type="button" data-reset-list="${escapeHtml(options.basePath)}">重置</button>
@@ -1831,31 +1557,9 @@ function renderLogPage(options) {
           </div>
         </form>
       </section>
-      ${
-        options.summaryCards
-          ? `
-        <section class="panel panel-summary">
-          <div class="section-header">
-            <h3>当前页速览</h3>
-            <span class="muted">${escapeHtml(options.muted || "便于快速判断眼前这一页主要在发生什么。")}</span>
-          </div>
-          <div class="mini-stat-grid">
-            ${options.summaryCards}
-          </div>
-        </section>
-      `
-          : ""
-      }
       <section class="table-card">
         <div class="toolbar table-toolbar">
-          <div>
-            <div class="table-title">${escapeHtml(options.title)}</div>
-            <div class="muted">${escapeHtml(options.muted)}</div>
-          </div>
-          <div class="table-toolbar-actions">
-            <div class="pill subtle">总数 ${escapeHtml(options.data.total)}</div>
-            <div class="pill">每页 ${escapeHtml(options.query.pageSize || 20)}</div>
-          </div>
+          <div class="table-title">${escapeHtml(options.title)}</div>
         </div>
         ${
           options.data.items.length === 0
