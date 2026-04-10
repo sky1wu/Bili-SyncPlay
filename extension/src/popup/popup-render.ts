@@ -64,8 +64,13 @@ export function renderPopup(args: {
   args.refs.serverStatus.textContent = args.state.connected
     ? t("statusConnected")
     : t("statusDisconnected");
+  args.refs.serverStatus.classList.toggle("is-connected", args.state.connected);
+  args.refs.serverStatus.classList.toggle(
+    "is-disconnected",
+    !args.state.connected,
+  );
   args.refs.roomStatus.textContent = args.state.roomCode ?? "-";
-  args.refs.membersStatus.textContent = t("membersOnline", {
+  args.refs.membersStatus.textContent = t("membersCount", {
     count: args.state.roomState?.members.length ?? 0,
   });
   args.refs.debugMemberStatus.textContent =
@@ -78,10 +83,16 @@ export function renderPopup(args: {
     args.state.retryAttempt > 0
       ? `(${args.state.retryAttempt}/${args.state.retryAttemptMax})`
       : "";
-  args.refs.clockStatus.textContent = t("clockStatus", {
-    offset: args.state.clockOffsetMs ?? "-",
-    rtt: args.state.rttMs ?? "-",
-  });
+  args.refs.clockStatus.innerHTML = `
+    <span class="clock-metric">
+      <span class="clock-metric-label">${escapeHtml(t("metricClockOffset"))}</span>
+      <span class="clock-metric-value">${escapeHtml(formatClockMetricValue(args.state.clockOffsetMs))}</span>
+    </span>
+    <span class="clock-metric">
+      <span class="clock-metric-label">${escapeHtml(t("metricClockRtt"))}</span>
+      <span class="clock-metric-value">${escapeHtml(formatClockMetricValue(args.state.rttMs))}</span>
+    </span>
+  `;
   const visibleMessage = args.localStatusMessage ?? args.state.error;
   args.refs.message.textContent = visibleMessage ?? "";
   args.refs.message.hidden = !visibleMessage;
@@ -136,8 +147,16 @@ export function renderPopup(args: {
   args.refs.sharedVideoOwner.hidden =
     !args.state.roomState?.sharedVideo?.url || !ownerText;
   args.refs.sharedVideoCard.disabled = !args.state.roomState?.sharedVideo?.url;
+  args.refs.sharedVideoCard.classList.toggle(
+    "is-empty",
+    !args.state.roomState?.sharedVideo?.url,
+  );
 
-  renderMemberList(args.refs.memberList, args.state.roomState?.members ?? []);
+  renderMemberList(
+    args.refs.memberList,
+    args.state.roomState?.members ?? [],
+    args.state.memberId,
+  );
   renderLogs(args.refs.logs, args.state.logs);
 
   if (args.state.pendingJoinRoomCode || args.roomActionPending) {
@@ -170,6 +189,10 @@ function formatVideoMeta(url: string | null): string {
   return match ? match[1] : t("actionOpenSharedVideo");
 }
 
+function formatClockMetricValue(value: number | null): string {
+  return value === null ? "-" : `${value}ms`;
+}
+
 function formatVideoOwner(
   members: RoomMember[],
   actorId: string | null,
@@ -200,15 +223,23 @@ function renderLogs(
     .join("");
 }
 
-function renderMemberList(container: HTMLElement, members: RoomMember[]): void {
+function renderMemberList(
+  container: HTMLElement,
+  members: RoomMember[],
+  currentMemberId: string | null,
+): void {
   if (members.length === 0) {
     container.innerHTML = `<span class="member-chip">${escapeHtml(t("stateNoMembers"))}</span>`;
     return;
   }
 
   container.innerHTML = members
-    .map(
-      (member) => `<span class="member-chip">${escapeHtml(member.name)}</span>`,
-    )
+    .map((member) => {
+      const isCurrentMember = currentMemberId === member.id;
+      const label = isCurrentMember
+        ? t("memberSelf", { name: member.name })
+        : member.name;
+      return `<span class="member-chip${isCurrentMember ? " member-chip-active" : ""}">${escapeHtml(label)}</span>`;
+    })
     .join("");
 }

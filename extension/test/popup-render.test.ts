@@ -163,8 +163,9 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
     });
 
     assert.equal(refs.serverStatus.textContent, "Connected");
+    assert.equal(refs.serverStatus.classList.contains("is-connected"), true);
     assert.equal(refs.roomStatus.textContent, "ROOM01");
-    assert.equal(refs.membersStatus.textContent, "2 online");
+    assert.equal(refs.membersStatus.textContent, "2 members");
     assert.equal(refs.message.textContent, "Ready");
     assert.equal(roomCodeInput.value, "ROOM01:join-token-1");
     assert.equal(serverUrlInput.value, "ws://localhost:8787");
@@ -184,6 +185,7 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
     assert.equal(refs.sharedVideoOwner.hidden, false);
     assert.equal(refs.logs.innerHTML.includes("Connected"), true);
     assert.equal(refs.memberList.innerHTML.includes("Bob"), true);
+    assert.equal(refs.memberList.innerHTML.includes("Me (Alice)"), true);
   } finally {
     setLocaleForTests(null);
     Object.assign(globalThis, { document: originalDocument });
