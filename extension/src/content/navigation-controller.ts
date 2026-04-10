@@ -56,6 +56,9 @@ export function createNavigationController(args: {
     args.runtimeState.hasReceivedInitialRoomState = false;
     args.runtimeState.pendingRoomStateHydration = true;
     args.runtimeState.intendedPlayState = "paused";
+    args.runtimeState.lastUserGestureAt = 0;
+    args.runtimeState.lastExplicitPlaybackAction = null;
+    args.runtimeState.lastExplicitUserAction = null;
     args.activatePauseHold(args.initialRoomStatePauseHoldMs);
     args.debugLog(
       `Detected in-room navigation to ${nextPageUrl}, waiting for room state`,
