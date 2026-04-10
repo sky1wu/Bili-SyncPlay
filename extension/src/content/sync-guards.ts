@@ -13,9 +13,6 @@ export interface HydrationAutoplayGuardInput {
   activeRoomCode: string | null;
   pendingRoomStateHydration: boolean;
   videoPaused: boolean;
-  now: number;
-  lastUserGestureAt: number;
-  userGestureGraceMs: number;
 }
 
 export interface NonSharedPageGuardInput {
@@ -158,7 +155,7 @@ export function shouldForcePauseWhileWaitingForInitialRoomState(
     return false;
   }
 
-  return input.now - input.lastUserGestureAt >= input.userGestureGraceMs;
+  return true;
 }
 
 export function evaluateNonSharedPageGuard(input: NonSharedPageGuardInput): {

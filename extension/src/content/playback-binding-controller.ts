@@ -126,31 +126,8 @@ export function createPlaybackBindingController(args: {
         activeRoomCode: args.runtimeState.activeRoomCode,
         pendingRoomStateHydration: args.runtimeState.pendingRoomStateHydration,
         videoPaused: video.paused,
-        now: nowOf(),
-        lastUserGestureAt: args.runtimeState.lastUserGestureAt,
-        userGestureGraceMs: args.userGestureGraceMs,
       })
     ) {
-      if (
-        args.runtimeState.activeRoomCode &&
-        args.runtimeState.pendingRoomStateHydration &&
-        !video.paused &&
-        nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs
-      ) {
-        args.debugLog(
-          `Allowed user-initiated playback while waiting for initial room state of ${args.runtimeState.activeRoomCode}`,
-        );
-      }
-      return false;
-    }
-
-    if (
-      nowOf() - args.runtimeState.lastUserGestureAt <
-      args.userGestureGraceMs
-    ) {
-      args.debugLog(
-        `Allowed user-initiated playback while waiting for initial room state of ${args.runtimeState.activeRoomCode}`,
-      );
       return false;
     }
 

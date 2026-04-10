@@ -27,31 +27,25 @@ function createPlayback(overrides: Partial<PlaybackState> = {}): PlaybackState {
   };
 }
 
-test("suppresses autoplay while waiting for initial hydration without a recent user gesture", () => {
+test("suppresses autoplay while waiting for initial hydration", () => {
   assert.equal(
     shouldForcePauseWhileWaitingForInitialRoomState({
       activeRoomCode: "ROOM01",
       pendingRoomStateHydration: true,
       videoPaused: false,
-      now: 5_000,
-      lastUserGestureAt: 2_000,
-      userGestureGraceMs: 1_200,
     }),
     true,
   );
 });
 
-test("allows user-initiated playback during initial hydration grace window", () => {
+test("forces pause during initial hydration regardless of user gesture", () => {
   assert.equal(
     shouldForcePauseWhileWaitingForInitialRoomState({
       activeRoomCode: "ROOM01",
       pendingRoomStateHydration: true,
       videoPaused: false,
-      now: 5_000,
-      lastUserGestureAt: 4_400,
-      userGestureGraceMs: 1_200,
     }),
-    false,
+    true,
   );
 });
 

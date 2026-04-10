@@ -62,12 +62,7 @@ export function createNavigationController(args: {
     );
     args.attachPlaybackListeners();
     const video = args.getVideoElement();
-    if (
-      video &&
-      !video.paused &&
-      Date.now() - args.runtimeState.lastUserGestureAt >=
-        args.userGestureGraceMs
-    ) {
+    if (video && !video.paused) {
       args.debugLog(
         `Suppressed autoplay immediately after in-room navigation to ${nextPageUrl}`,
       );
