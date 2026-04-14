@@ -109,7 +109,7 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
     async zscore() {
       return null;
     },
-    async set() {
+    async hset() {
       return null;
     },
   };

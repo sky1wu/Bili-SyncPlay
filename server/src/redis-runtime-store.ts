@@ -33,13 +33,7 @@ type RedisClient = {
   zadd: (key: string, score: string, member: string) => Promise<unknown>;
   zremrangebyscore: (key: string, min: number, max: number) => Promise<unknown>;
   zscore: (key: string, member: string) => Promise<string | null>;
-  set: (
-    key: string,
-    value: string,
-    nx: "NX",
-    px: "PX",
-    milliseconds: number,
-  ) => Promise<string | null>;
+  hset: (key: string, field: string, value: string) => Promise<unknown>;
 };
 
 type PendingOperationLogContext = {
@@ -148,8 +142,8 @@ function blockedTokensKey(prefix: string, roomCode: string): string {
   return `${prefix}room:${roomCode}:blocked-member-tokens`;
 }
 
-function dedupSlotKey(prefix: string, roomCode: string, key: string): string {
-  return `${prefix}room:${roomCode}:dedup:${key}`;
+function dedupHashKey(prefix: string, roomCode: string): string {
+  return `${prefix}room:${roomCode}:dedup`;
 }
 
 function nodesKey(prefix: string): string {
@@ -642,16 +636,13 @@ export async function createRedisRuntimeStore(
       key: string,
       expiresAt: number,
     ) {
-      const ttlMs = Math.max(0, expiresAt - now());
-      if (ttlMs === 0) return true;
-      const result = await redis.set(
-        dedupSlotKey(keyPrefix, roomCode, key),
-        "1",
-        "NX",
-        "PX",
-        ttlMs,
-      );
-      return result !== null;
+      const hashKey = dedupHashKey(keyPrefix, roomCode);
+      const existing = await redis.hget(hashKey, key);
+      if (existing !== null && parseInt(existing, 10) > now()) {
+        return false;
+      }
+      await redis.hset(hashKey, key, String(expiresAt));
+      return true;
     },
     removeMember(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("remove_member");
@@ -685,6 +676,7 @@ export async function createRedisRuntimeStore(
           .del(roomMemberTokensKey(keyPrefix, code))
           .del(blockedTokensKey(keyPrefix, code))
           .del(roomSessionsKey(keyPrefix, code))
+          .del(dedupHashKey(keyPrefix, code))
           .srem(`${keyPrefix}rooms`, code)
           .exec(),
       );
