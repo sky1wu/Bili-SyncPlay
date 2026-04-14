@@ -57,7 +57,7 @@ export type RuntimeStore = {
     code: string,
     memberId: string,
     session?: Session,
-  ) => { room: ActiveRoom | null; roomEmpty: boolean };
+  ) => { room: ActiveRoom | null; roomEmpty: boolean; removed: boolean };
   deleteRoom: (code: string) => void;
   heartbeatNode: (status: ClusterNodeStatus) => Promise<void>;
   listNodeStatuses: (currentTime?: number) => Promise<ClusterNodeStatus[]>;

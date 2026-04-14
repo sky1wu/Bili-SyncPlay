@@ -183,6 +183,84 @@ test("room service restores member state when empty-room expiry scheduling fails
   );
 });
 
+test("room service does not recover stale session leave state when member removal is skipped", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+  const baseService = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => 1_000,
+    createRoomCode: () => "ROOM01",
+  });
+  const failingRoomStore = {
+    ...roomStore,
+    async getRoom() {
+      throw new Error("transient read failure");
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore: failingRoomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 2;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => 1_000,
+  });
+
+  const staleSession = createSession("owner");
+  const created = await baseService.createRoomForSession(staleSession, "Alice");
+  const replacementSession = createSession("owner-replaced");
+  activeRooms.addMember(
+    created.room.code,
+    "owner",
+    replacementSession,
+    created.memberToken,
+  );
+
+  await assert.rejects(
+    service.leaveRoomForSession(staleSession),
+    (error: unknown) =>
+      error instanceof Error && error.message === "Internal server error.",
+  );
+
+  assert.equal(staleSession.roomCode, null);
+  assert.equal(staleSession.memberId, null);
+  assert.equal(
+    activeRooms.getRoom(created.room.code)?.members.get("owner"),
+    replacementSession,
+  );
+  assert.ok(!events.some((entry) => entry.event === "room_leave_recovered"));
+  assert.ok(
+    events.some(
+      (entry) =>
+        entry.event === "room_persist_failed" &&
+        entry.data.reason === "leave_room_persist_failed",
+    ),
+  );
+});
+
 test("room service clears sync intent when sharing a new video with playback", async () => {
   const currentTime = 1_000;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });

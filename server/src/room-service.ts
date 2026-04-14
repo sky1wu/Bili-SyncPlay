@@ -609,7 +609,11 @@ export function createRoomService(options: {
     const sessionSnapshot = snapshotJoinedSession(session);
     const removal = session.memberId
       ? runtimeStore.removeMember(roomCode, session.memberId, session)
-      : { room: runtimeStore.getRoom(roomCode), roomEmpty: false };
+      : {
+          room: runtimeStore.getRoom(roomCode),
+          roomEmpty: false,
+          removed: false,
+        };
     await runtimeStore.flush?.();
     clearSessionRoom(session);
 
@@ -674,13 +678,15 @@ export function createRoomService(options: {
           ? error.details.reason
           : "leave_room_persist_failed";
 
-      await restoreLeaveState({
-        session,
-        snapshot: sessionSnapshot,
-        roomCode,
-        reason,
-        error,
-      });
+      if (removal.removed) {
+        await restoreLeaveState({
+          session,
+          snapshot: sessionSnapshot,
+          roomCode,
+          reason,
+          error,
+        });
+      }
 
       logEvent("room_persist_failed", {
         sessionId: session.id,
