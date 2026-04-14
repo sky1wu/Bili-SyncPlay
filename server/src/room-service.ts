@@ -833,6 +833,10 @@ export function createRoomService(options: {
         return { room: null, ignored: true };
       }
       if (!access.persistedRoom.sharedVideo) {
+        await runtimeStore.releaseMessageSlot(
+          access.persistedRoom.code,
+          playbackDedupKey,
+        );
         throw new RoomServiceError(
           "invalid_message",
           ROOM_HAS_NO_SHARED_VIDEO_MESSAGE,
@@ -845,6 +849,10 @@ export function createRoomService(options: {
       );
       const playbackUrl = normalizeBilibiliUrl(playback.url);
       if (!sharedUrl || !playbackUrl || sharedUrl !== playbackUrl) {
+        await runtimeStore.releaseMessageSlot(
+          access.persistedRoom.code,
+          playbackDedupKey,
+        );
         throw new RoomServiceError(
           "invalid_message",
           PLAYBACK_URL_MISMATCH_MESSAGE,
