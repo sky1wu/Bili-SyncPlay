@@ -739,52 +739,61 @@ export function createRoomService(options: {
         return { room: access.persistedRoom };
       }
 
-      const room = await withVersionRetry(
-        access.persistedRoom.code,
-        async (currentRoom) => {
-          const nextPlayback: PlaybackState = playback
-            ? {
-                ...playback,
-                url: video.url,
-                syncIntent: undefined,
-                actorId: session.memberId ?? session.id,
-                serverTime: currentTime,
-              }
-            : {
-                url: video.url,
-                currentTime: 0,
-                playState: "paused",
-                playbackRate: 1,
-                updatedAt: currentTime,
-                serverTime: currentTime,
-                actorId: session.memberId ?? session.id,
-                seq: 0,
-              };
-          const result = await roomStore.updateRoom(
-            currentRoom.code,
-            currentRoom.version,
-            {
-              sharedVideo: {
-                ...video,
-                sharedByMemberId: session.memberId ?? session.id,
+      let room: Awaited<ReturnType<typeof withVersionRetry>>;
+      try {
+        room = await withVersionRetry(
+          access.persistedRoom.code,
+          async (currentRoom) => {
+            const nextPlayback: PlaybackState = playback
+              ? {
+                  ...playback,
+                  url: video.url,
+                  syncIntent: undefined,
+                  actorId: session.memberId ?? session.id,
+                  serverTime: currentTime,
+                }
+              : {
+                  url: video.url,
+                  currentTime: 0,
+                  playState: "paused",
+                  playbackRate: 1,
+                  updatedAt: currentTime,
+                  serverTime: currentTime,
+                  actorId: session.memberId ?? session.id,
+                  seq: 0,
+                };
+            const result = await roomStore.updateRoom(
+              currentRoom.code,
+              currentRoom.version,
+              {
+                sharedVideo: {
+                  ...video,
+                  sharedByMemberId: session.memberId ?? session.id,
+                },
+                playback: nextPlayback,
+                expiresAt: null,
+                lastActiveAt: currentTime,
               },
-              playback: nextPlayback,
-              expiresAt: null,
-              lastActiveAt: currentTime,
-            },
-          );
-          if (!result.ok) {
-            return null;
-          }
-          recordPlaybackAuthority({
-            roomCode: currentRoom.code,
-            actorId: nextPlayback.actorId,
-            kind: "share",
-            source: "video:share",
-          });
-          return result.room;
-        },
-      );
+            );
+            if (!result.ok) {
+              return null;
+            }
+            recordPlaybackAuthority({
+              roomCode: currentRoom.code,
+              actorId: nextPlayback.actorId,
+              kind: "share",
+              source: "video:share",
+            });
+            return result.room;
+          },
+        );
+      } catch (error) {
+        await runtimeStore.releaseMessageSlot(
+          access.persistedRoom.code,
+          shareDedupKey,
+        );
+        throw error;
+      }
 
       if (!room) {
         await runtimeStore.releaseMessageSlot(
@@ -815,7 +824,7 @@ export function createRoomService(options: {
         "playback:update",
       );
       const playbackActorId = session.memberId ?? session.id;
-      const playbackDedupKey = `playback:${playbackActorId}:${playback.seq}`;
+      const playbackDedupKey = `playback:${playbackActorId}:${session.id}:${playback.seq}`;
       const playbackCurrentTime = now();
       if (
         !(await runtimeStore.tryClaimMessageSlot(
@@ -900,15 +909,24 @@ export function createRoomService(options: {
         return { room: access.persistedRoom, ignored: true };
       }
 
-      const result = await roomStore.updateRoom(
-        access.persistedRoom.code,
-        access.persistedRoom.version,
-        {
-          playback: nextPlayback,
-          expiresAt: null,
-          lastActiveAt: currentTime,
-        },
-      );
+      let result: Awaited<ReturnType<typeof roomStore.updateRoom>>;
+      try {
+        result = await roomStore.updateRoom(
+          access.persistedRoom.code,
+          access.persistedRoom.version,
+          {
+            playback: nextPlayback,
+            expiresAt: null,
+            lastActiveAt: currentTime,
+          },
+        );
+      } catch (error) {
+        await runtimeStore.releaseMessageSlot(
+          access.persistedRoom.code,
+          playbackDedupKey,
+        );
+        throw error;
+      }
       if (!result.ok) {
         if (result.reason === "version_conflict") {
           logEvent("room_version_conflict", {
