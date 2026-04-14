@@ -26,6 +26,7 @@ function createControllerHarness(
     connect: 0,
     sendToServer: [] as unknown[],
     persistState: 0,
+    persistProfileState: 0,
     notifyAll: 0,
     queueOrSendSharedVideo: [] as Array<{
       payload: unknown;
@@ -139,6 +140,9 @@ function createControllerHarness(
     async persistState() {
       calls.persistState += 1;
     },
+    async persistProfileState() {
+      calls.persistProfileState += 1;
+    },
     notifyAll() {
       calls.notifyAll += 1;
     },
@@ -225,7 +229,8 @@ test("message controller persists content:report-user and forwards profile updat
   );
 
   assert.equal(harness.roomSessionState.displayName, "Bob");
-  assert.equal(harness.calls.persistState, 1);
+  assert.equal(harness.calls.persistProfileState, 1);
+  assert.equal(harness.calls.persistState, 0);
   assert.deepEqual(harness.calls.sendToServer, [
     {
       type: "profile:update",

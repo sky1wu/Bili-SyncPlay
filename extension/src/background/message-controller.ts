@@ -70,6 +70,7 @@ export function createMessageController(args: {
   sendToServer: (message: unknown) => void;
   updateServerUrl: (serverUrl: string) => Promise<void>;
   persistState: () => Promise<void>;
+  persistProfileState: () => Promise<void>;
   notifyAll: () => void;
 }): MessageController {
   async function handleRuntimeMessage(
@@ -150,7 +151,7 @@ export function createMessageController(args: {
       case "content:report-user":
         if (args.roomSessionState.displayName !== message.payload.displayName) {
           args.roomSessionState.displayName = message.payload.displayName;
-          await args.persistState();
+          await args.persistProfileState();
           if (
             args.connectionState.connected &&
             args.roomSessionState.roomCode &&

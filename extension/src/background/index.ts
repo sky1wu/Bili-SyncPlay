@@ -38,6 +38,7 @@ import { createBackgroundStateStore } from "./state-store";
 import { createRuntimeSyncController } from "./runtime-sync-controller";
 import {
   loadPersistedBackgroundSnapshot,
+  persistBackgroundProfile,
   persistBackgroundState,
 } from "./storage-manager";
 import { createTabController } from "./tab-controller";
@@ -183,7 +184,7 @@ const serverUrlController = createServerUrlController({
   connectionState,
   roomSessionState,
   shareState,
-  persistState,
+  persistProfileState,
   notifyAll,
   connect: () => socketController.connect(),
   resetReconnectState: () => socketController.resetReconnectState(),
@@ -218,6 +219,7 @@ const messageController = createMessageController({
   sendToServer,
   updateServerUrl,
   persistState,
+  persistProfileState,
   notifyAll,
 });
 
@@ -469,6 +471,10 @@ function notifyAll(): void {
 
 async function persistState(): Promise<void> {
   await runtimeSyncController.persistState();
+}
+
+async function persistProfileState(): Promise<void> {
+  await persistBackgroundProfile(runtimeSyncController.syncRuntimeStateStore());
 }
 
 async function updateServerUrl(nextServerUrl: string): Promise<void> {

@@ -11,7 +11,7 @@ export function createServerUrlController(args: {
   connectionState: ConnectionState;
   roomSessionState: RoomSessionState;
   shareState: ShareState;
-  persistState: () => Promise<void>;
+  persistProfileState: () => Promise<void>;
   notifyAll: () => void;
   connect: () => Promise<void>;
   resetReconnectState: () => void;
@@ -50,7 +50,7 @@ export function createServerUrlController(args: {
 
       args.connectionState.serverUrl = normalized;
       args.connectionState.lastError = null;
-      await args.persistState();
+      await args.persistProfileState();
       args.log(
         "background",
         `Server URL updated to ${args.connectionState.serverUrl}`,

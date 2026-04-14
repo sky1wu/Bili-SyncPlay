@@ -1,5 +1,9 @@
 import type { RoomState } from "@bili-syncplay/protocol";
-import { loadState, saveState } from "../shared/storage";
+import {
+  loadState,
+  saveProfileState,
+  saveSessionState,
+} from "../shared/storage";
 import type { BackgroundRuntimeState } from "./runtime-state";
 
 export interface PersistedBackgroundSnapshot {
@@ -28,13 +32,20 @@ export async function loadPersistedBackgroundSnapshot(): Promise<PersistedBackgr
 export async function persistBackgroundState(
   state: BackgroundRuntimeState,
 ): Promise<void> {
-  await saveState({
+  await saveSessionState({
     roomCode: state.room.roomCode,
     joinToken: state.room.joinToken,
     memberToken: state.room.memberToken,
     memberId: state.room.memberId,
-    displayName: state.room.displayName,
     roomState: state.room.roomState,
+  });
+}
+
+export async function persistBackgroundProfile(
+  state: BackgroundRuntimeState,
+): Promise<void> {
+  await saveProfileState({
+    displayName: state.room.displayName,
     serverUrl: state.connection.serverUrl,
   });
 }

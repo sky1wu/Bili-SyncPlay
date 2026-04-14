@@ -378,6 +378,7 @@ Practical consequences:
 
 - browser restart does not restore the previous room automatically
 - the custom server URL survives browser restart
+- room session state and profile preferences are persisted independently, so a room-state write cannot leave `serverUrl` or `displayName` half-updated
 - the popup can reconnect into the current room only while the browser session still holds both `roomCode` and `joinToken`
 - `memberToken` is intentionally cleared on disconnect and re-issued after a successful rejoin
 - if the persisted server URL becomes invalid, the extension keeps that value visible and stops auto reconnect until the URL is fixed
