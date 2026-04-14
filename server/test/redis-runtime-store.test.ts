@@ -112,6 +112,9 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
     async set() {
       return "OK";
     },
+    async del() {
+      return null;
+    },
   };
 }
 

@@ -71,6 +71,7 @@ export type RuntimeStore = {
     key: string,
     expiresAt: number,
   ) => Promise<boolean>;
+  releaseMessageSlot: (roomCode: string, key: string) => Promise<void>;
 };
 
 export function createInMemoryRuntimeStore(
@@ -262,6 +263,10 @@ export function createInMemoryRuntimeStore(
       roomSlots.set(key, expiresAt);
       claimedSlotsByRoom.set(roomCode, roomSlots);
       return Promise.resolve(true);
+    },
+    releaseMessageSlot(roomCode, key) {
+      claimedSlotsByRoom.get(roomCode)?.delete(key);
+      return Promise.resolve();
     },
     removeMember(code, memberId, session) {
       return removeMemberFromRoom(rooms, code, memberId, session);

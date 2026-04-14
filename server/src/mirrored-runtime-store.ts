@@ -86,6 +86,7 @@ export function createMirroredRuntimeStore(
     ),
     isMemberTokenBlocked: readLocal(localRuntimeStore.isMemberTokenBlocked),
     tryClaimMessageSlot: readShared(sharedRuntimeStore.tryClaimMessageSlot),
+    releaseMessageSlot: readShared(sharedRuntimeStore.releaseMessageSlot),
     removeMember: mirrorLocalResult(
       localRuntimeStore.removeMember,
       sharedRuntimeStore.removeMember,

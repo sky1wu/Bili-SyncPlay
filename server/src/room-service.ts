@@ -787,6 +787,10 @@ export function createRoomService(options: {
       );
 
       if (!room) {
+        await runtimeStore.releaseMessageSlot(
+          access.persistedRoom.code,
+          shareDedupKey,
+        );
         logEvent("room_persist_failed", {
           roomCode: access.persistedRoom.code,
           sessionId: session.id,
@@ -907,6 +911,10 @@ export function createRoomService(options: {
           });
           return { room: null, ignored: true };
         }
+        await runtimeStore.releaseMessageSlot(
+          access.persistedRoom.code,
+          playbackDedupKey,
+        );
         throw new RoomServiceError(
           "room_not_found",
           ROOM_NOT_FOUND_MESSAGE,

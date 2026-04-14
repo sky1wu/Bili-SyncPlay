@@ -12,6 +12,7 @@ export type ActiveRoomRegistry = {
   blockMemberToken: RuntimeStore["blockMemberToken"];
   isMemberTokenBlocked: RuntimeStore["isMemberTokenBlocked"];
   tryClaimMessageSlot: RuntimeStore["tryClaimMessageSlot"];
+  releaseMessageSlot: RuntimeStore["releaseMessageSlot"];
   removeMember: RuntimeStore["removeMember"];
   deleteRoom: RuntimeStore["deleteRoom"];
 };
@@ -31,6 +32,7 @@ export function createActiveRoomRegistry(
     blockMemberToken: store.blockMemberToken,
     isMemberTokenBlocked: store.isMemberTokenBlocked,
     tryClaimMessageSlot: store.tryClaimMessageSlot,
+    releaseMessageSlot: store.releaseMessageSlot,
     removeMember: store.removeMember,
     deleteRoom: store.deleteRoom,
   };

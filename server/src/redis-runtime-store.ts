@@ -40,6 +40,7 @@ type RedisClient = {
     px: "PX",
     milliseconds: number,
   ) => Promise<string | null>;
+  del: (...keys: string[]) => Promise<unknown>;
 };
 
 type PendingOperationLogContext = {
@@ -96,6 +97,7 @@ const RUNTIME_STORE_METHOD_NAMES = [
   "isMemberTokenBlocked",
   "blockMemberToken",
   "tryClaimMessageSlot",
+  "releaseMessageSlot",
   "removeMember",
   "deleteRoom",
   "heartbeatNode",
@@ -150,10 +152,6 @@ function blockedTokensKey(prefix: string, roomCode: string): string {
 
 function dedupSlotKey(prefix: string, roomCode: string, key: string): string {
   return `${prefix}room:${roomCode}:dedup:${key}`;
-}
-
-function dedupTrackingSetKey(prefix: string, roomCode: string): string {
-  return `${prefix}room:${roomCode}:dedup-slots`;
 }
 
 function nodesKey(prefix: string): string {
@@ -650,13 +648,11 @@ export async function createRedisRuntimeStore(
       if (ttlMs === 0) return true;
       const slotKey = dedupSlotKey(keyPrefix, roomCode, key);
       const result = await redis.set(slotKey, "1", "NX", "PX", ttlMs);
-      if (result !== null) {
-        void trackOperation(
-          "track_dedup_slot",
-          redis.sadd(dedupTrackingSetKey(keyPrefix, roomCode), slotKey),
-        );
-      }
       return result !== null;
+    },
+    async releaseMessageSlot(roomCode: string, key: string) {
+      const slotKey = dedupSlotKey(keyPrefix, roomCode, key);
+      await redis.del(slotKey);
     },
     removeMember(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("remove_member");
@@ -684,22 +680,14 @@ export async function createRedisRuntimeStore(
       localRuntimeStore.deleteRoom(code);
       void trackOperation(
         "delete_room",
-        (async () => {
-          const trackingKey = dedupTrackingSetKey(keyPrefix, code);
-          const dedupKeys = await redis.smembers(trackingKey);
-          const multi = redis
-            .multi()
-            .del(roomMembersKey(keyPrefix, code))
-            .del(roomMemberTokensKey(keyPrefix, code))
-            .del(blockedTokensKey(keyPrefix, code))
-            .del(roomSessionsKey(keyPrefix, code))
-            .del(trackingKey)
-            .srem(`${keyPrefix}rooms`, code);
-          if (dedupKeys.length > 0) {
-            multi.del(...dedupKeys);
-          }
-          return multi.exec();
-        })(),
+        redis
+          .multi()
+          .del(roomMembersKey(keyPrefix, code))
+          .del(roomMemberTokensKey(keyPrefix, code))
+          .del(blockedTokensKey(keyPrefix, code))
+          .del(roomSessionsKey(keyPrefix, code))
+          .srem(`${keyPrefix}rooms`, code)
+          .exec(),
       );
     },
     async close() {
