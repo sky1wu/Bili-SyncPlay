@@ -125,11 +125,11 @@ export function removeMemberFromRoom(
     }
   }
 
-  room.members.delete(memberId);
+  const existed = room.members.delete(memberId);
   room.memberTokens.delete(memberId);
   const roomEmpty = room.members.size === 0;
   if (roomEmpty) {
     rooms.delete(code);
   }
-  return { room: roomEmpty ? null : room, roomEmpty, removed: true };
+  return { room: roomEmpty ? null : room, roomEmpty, removed: existed };
 }
