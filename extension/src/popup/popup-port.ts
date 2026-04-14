@@ -1,17 +1,32 @@
 import type {
   BackgroundPopupState,
-  BackgroundPopupStateMessage,
   BackgroundToPopupMessage,
+  PopupToBackgroundMessage,
 } from "../shared/messages";
+import { isBackgroundPopupStateMessage } from "../shared/messages";
 
 export async function queryPopupState(): Promise<BackgroundPopupState> {
-  const response = (await chrome.runtime.sendMessage({
+  const response: unknown = await chrome.runtime.sendMessage({
     type: "popup:get-state",
-  })) as BackgroundToPopupMessage;
-  if (response.type !== "background:state") {
-    throw new Error("Unexpected popup state response");
+  });
+  if (!isBackgroundPopupStateMessage(response)) {
+    throw new Error(
+      `Unexpected popup state response: ${JSON.stringify(response)}`,
+    );
   }
-  return (response as BackgroundPopupStateMessage).payload;
+  return response.payload;
+}
+
+export async function sendPopupAction(
+  message: PopupToBackgroundMessage,
+): Promise<BackgroundPopupState> {
+  const response: unknown = await chrome.runtime.sendMessage(message);
+  if (!isBackgroundPopupStateMessage(response)) {
+    throw new Error(
+      `Unexpected response to ${message.type}: ${JSON.stringify(response)}`,
+    );
+  }
+  return response.payload;
 }
 
 export function connectPopupStatePort(args: {

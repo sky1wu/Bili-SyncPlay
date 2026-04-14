@@ -1,11 +1,9 @@
-import type {
-  BackgroundPopupState,
-  BackgroundPopupStateMessage,
-} from "../shared/messages";
+import type { BackgroundPopupState } from "../shared/messages";
 import { getUiLanguage, t } from "../shared/i18n";
 import { areSharedVideoUrlsEqual } from "../shared/url";
 import { parseInviteValue } from "./helpers";
 import { formatInviteDraft } from "./popup-render";
+import { sendPopupAction } from "./popup-port";
 import type { PopupUiStateStore } from "./popup-store";
 import {
   syncServerUrlDraft,
@@ -52,10 +50,8 @@ export function bindPopupActions(args: {
     void args.sendPopupLog("Create room button clicked");
     patchUiState({ localStatusMessage: null, roomActionPending: true });
     try {
-      const response = (await chrome.runtime.sendMessage({
-        type: "popup:create-room",
-      })) as BackgroundPopupStateMessage;
-      args.applyActionState(response.payload);
+      const state = await sendPopupAction({ type: "popup:create-room" });
+      args.applyActionState(state);
       void args.sendPopupLog("Create room message resolved");
       patchUiState({ roomActionPending: false });
     } finally {
@@ -99,10 +95,8 @@ export function bindPopupActions(args: {
       roomActionPending: true,
     });
     try {
-      const response = (await chrome.runtime.sendMessage({
-        type: "popup:leave-room",
-      })) as BackgroundPopupStateMessage;
-      args.applyActionState(response.payload);
+      const state = await sendPopupAction({ type: "popup:leave-room" });
+      args.applyActionState(state);
       void args.sendPopupLog("Leave room message resolved");
       patchUiState({ roomActionPending: false });
     } finally {
@@ -183,13 +177,13 @@ export function bindPopupActions(args: {
   const saveServerUrl = async () => {
     patchUiState({ localStatusMessage: null });
     const requestedServerUrl = args.serverUrlDraft.value.trim();
-    const response = (await chrome.runtime.sendMessage({
+    const state = await sendPopupAction({
       type: "popup:set-server-url",
       serverUrl: requestedServerUrl,
-    })) as BackgroundPopupStateMessage;
-    args.applyActionState(response.payload);
-    syncServerUrlDraft(args.serverUrlDraft, response.payload.serverUrl);
-    refs.serverUrlInput.value = response.payload.serverUrl;
+    });
+    args.applyActionState(state);
+    syncServerUrlDraft(args.serverUrlDraft, state.serverUrl);
+    refs.serverUrlInput.value = state.serverUrl;
     args.render();
   };
 
@@ -297,12 +291,12 @@ export function bindPopupActions(args: {
     void args.sendPopupLog(`${args2.reasonLabel} room=${invite.roomCode}`);
     patchUiState({ roomActionPending: true });
     try {
-      const response = (await chrome.runtime.sendMessage({
+      const state = await sendPopupAction({
         type: "popup:join-room",
         roomCode: invite.roomCode,
         joinToken: invite.joinToken,
-      })) as BackgroundPopupStateMessage;
-      args.applyActionState(response.payload);
+      });
+      args.applyActionState(state);
       void args.sendPopupLog(`${args2.resolvedLabel} room=${invite.roomCode}`);
       patchUiState({ roomActionPending: false });
     } finally {

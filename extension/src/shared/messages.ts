@@ -74,6 +74,25 @@ export type BackgroundPopupConnected = Extract<
   { type: "background:popup-connected" }
 >["payload"];
 
+export function isBackgroundPopupStateMessage(
+  value: unknown,
+): value is BackgroundPopupStateMessage {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    (value as { type?: unknown }).type !== "background:state"
+  ) {
+    return false;
+  }
+  const payload = (value as { payload?: unknown }).payload;
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    typeof (payload as { connected?: unknown }).connected === "boolean" &&
+    typeof (payload as { serverUrl?: unknown }).serverUrl === "string"
+  );
+}
+
 export type BackgroundToContentMessage =
   | {
       type: "background:apply-room-state";
