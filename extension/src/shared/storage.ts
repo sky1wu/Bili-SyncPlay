@@ -10,13 +10,30 @@ export interface PersistedState {
   serverUrl: string | null;
 }
 
+interface StoredSession {
+  roomCode: string | null;
+  joinToken: string | null;
+  memberToken: string | null;
+  memberId: string | null;
+  roomState: RoomState | null;
+}
+
+interface StoredProfile {
+  displayName: string | null;
+  serverUrl: string | null;
+}
+
 const SESSION_KEY = "bili-syncplay-session";
 const PROFILE_KEY = "bili-syncplay-profile";
 
 export async function loadState(): Promise<PersistedState> {
   const [sessionResult, profileResult] = await Promise.all([
-    chrome.storage.session.get(SESSION_KEY),
-    chrome.storage.local.get(PROFILE_KEY),
+    chrome.storage.session.get<Record<string, StoredSession | undefined>>(
+      SESSION_KEY,
+    ),
+    chrome.storage.local.get<Record<string, StoredProfile | undefined>>(
+      PROFILE_KEY,
+    ),
   ]);
 
   return {
