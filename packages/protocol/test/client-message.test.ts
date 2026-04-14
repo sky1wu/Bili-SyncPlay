@@ -3,6 +3,21 @@ import assert from "node:assert/strict";
 import { isClientMessage } from "../src/index.js";
 
 const VALID_TOKEN = "valid-member-token-123";
+const DISPLAY_NAME_MAX_LENGTH = 32;
+const TITLE_MAX_LENGTH = 128;
+const URL_MAX_LENGTH = 512;
+
+function createBilibiliUrlWithExactLength(targetLength: number): string {
+  const baseUrl = "https://www.bilibili.com/video/BV1xx411c7mD?from=test&pad=";
+  const paddingLength = targetLength - baseUrl.length;
+
+  assert.ok(
+    paddingLength >= 0,
+    `target length ${targetLength} must be at least ${baseUrl.length}`,
+  );
+
+  return `${baseUrl}${"a".repeat(paddingLength)}`;
+}
 
 test("accepts a valid room:create message", () => {
   assert.equal(
@@ -37,6 +52,18 @@ test("rejects room:create when displayName is too long", () => {
       },
     }),
     false,
+  );
+});
+
+test("accepts room:create when displayName is exactly 32 characters", () => {
+  assert.equal(
+    isClientMessage({
+      type: "room:create",
+      payload: {
+        displayName: "a".repeat(DISPLAY_NAME_MAX_LENGTH),
+      },
+    }),
+    true,
   );
 });
 
@@ -105,6 +132,20 @@ test("accepts room:join with an optional memberToken for reconnect", () => {
   );
 });
 
+test("accepts room:join when displayName is exactly 32 characters", () => {
+  assert.equal(
+    isClientMessage({
+      type: "room:join",
+      payload: {
+        roomCode: "ABC123",
+        joinToken: VALID_TOKEN,
+        displayName: "a".repeat(DISPLAY_NAME_MAX_LENGTH),
+      },
+    }),
+    true,
+  );
+});
+
 test("accepts a valid profile:update message", () => {
   assert.equal(
     isClientMessage({
@@ -128,6 +169,19 @@ test("rejects profile:update when displayName is too long", () => {
       },
     }),
     false,
+  );
+});
+
+test("accepts profile:update when displayName is exactly 32 characters", () => {
+  assert.equal(
+    isClientMessage({
+      type: "profile:update",
+      payload: {
+        memberToken: VALID_TOKEN,
+        displayName: "a".repeat(DISPLAY_NAME_MAX_LENGTH),
+      },
+    }),
+    true,
   );
 });
 
@@ -177,6 +231,43 @@ test("rejects video:share when title is too long", () => {
       },
     }),
     false,
+  );
+});
+
+test("accepts video:share when title is exactly 128 characters", () => {
+  assert.equal(
+    isClientMessage({
+      type: "video:share",
+      payload: {
+        memberToken: VALID_TOKEN,
+        video: {
+          videoId: "BV1xx411c7mD",
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          title: "x".repeat(TITLE_MAX_LENGTH),
+        },
+      },
+    }),
+    true,
+  );
+});
+
+test("accepts video:share when url is exactly 512 characters", () => {
+  const exactBoundaryUrl = createBilibiliUrlWithExactLength(URL_MAX_LENGTH);
+
+  assert.equal(exactBoundaryUrl.length, URL_MAX_LENGTH);
+  assert.equal(
+    isClientMessage({
+      type: "video:share",
+      payload: {
+        memberToken: VALID_TOKEN,
+        video: {
+          videoId: "BV1xx411c7mD",
+          url: exactBoundaryUrl,
+          title: "Video",
+        },
+      },
+    }),
+    true,
   );
 });
 
@@ -311,6 +402,31 @@ test("accepts a valid playback:update message", () => {
           currentTime: 12,
           playState: "playing",
           syncIntent: "explicit-seek",
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 1,
+          actorId: "member-1",
+          seq: 1,
+        },
+      },
+    }),
+    true,
+  );
+});
+
+test("accepts playback:update when url is exactly 512 characters", () => {
+  const exactBoundaryUrl = createBilibiliUrlWithExactLength(URL_MAX_LENGTH);
+
+  assert.equal(exactBoundaryUrl.length, URL_MAX_LENGTH);
+  assert.equal(
+    isClientMessage({
+      type: "playback:update",
+      payload: {
+        memberToken: VALID_TOKEN,
+        playback: {
+          url: exactBoundaryUrl,
+          currentTime: 12,
+          playState: "playing",
           playbackRate: 1,
           updatedAt: 1,
           serverTime: 1,
