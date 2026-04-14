@@ -270,6 +270,7 @@ export function createInMemoryRuntimeStore(
       rooms.delete(code);
       roomSessionIds.delete(code);
       blockedMemberTokensByRoom.delete(code);
+      claimedSlotsByRoom.delete(code);
     },
     async heartbeatNode(status) {
       nodeStatuses.set(status.instanceId, { ...status });
