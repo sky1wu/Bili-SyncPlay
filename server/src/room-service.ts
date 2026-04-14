@@ -725,11 +725,11 @@ export function createRoomService(options: {
       const actorId = session.memberId ?? session.id;
       const shareDedupKey = `share:${actorId}:${video.url}`;
       if (
-        !runtimeStore.tryClaimMessageSlot(
+        !(await runtimeStore.tryClaimMessageSlot(
           access.persistedRoom.code,
           shareDedupKey,
           currentTime + 30_000,
-        )
+        ))
       ) {
         logEvent("video_share_deduplicated", {
           roomCode: access.persistedRoom.code,
@@ -814,11 +814,11 @@ export function createRoomService(options: {
       const playbackDedupKey = `playback:${playbackActorId}:${playback.seq}`;
       const playbackCurrentTime = now();
       if (
-        !runtimeStore.tryClaimMessageSlot(
+        !(await runtimeStore.tryClaimMessageSlot(
           access.persistedRoom.code,
           playbackDedupKey,
           playbackCurrentTime + 10_000,
-        )
+        ))
       ) {
         logEvent("playback_update_deduplicated", {
           roomCode: access.persistedRoom.code,

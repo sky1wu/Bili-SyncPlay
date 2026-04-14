@@ -70,7 +70,7 @@ export type RuntimeStore = {
     roomCode: string,
     key: string,
     expiresAt: number,
-  ) => boolean;
+  ) => Promise<boolean>;
 };
 
 export function createInMemoryRuntimeStore(
@@ -257,11 +257,11 @@ export function createInMemoryRuntimeStore(
         if (exp <= currentTime) roomSlots.delete(k);
       }
       if (roomSlots.has(key)) {
-        return false;
+        return Promise.resolve(false);
       }
       roomSlots.set(key, expiresAt);
       claimedSlotsByRoom.set(roomCode, roomSlots);
-      return true;
+      return Promise.resolve(true);
     },
     removeMember(code, memberId, session) {
       return removeMemberFromRoom(rooms, code, memberId, session);

@@ -33,6 +33,13 @@ type RedisClient = {
   zadd: (key: string, score: string, member: string) => Promise<unknown>;
   zremrangebyscore: (key: string, min: number, max: number) => Promise<unknown>;
   zscore: (key: string, member: string) => Promise<string | null>;
+  set: (
+    key: string,
+    value: string,
+    nx: "NX",
+    px: "PX",
+    milliseconds: number,
+  ) => Promise<string | null>;
 };
 
 type PendingOperationLogContext = {
@@ -139,6 +146,10 @@ function roomMemberTokensKey(prefix: string, roomCode: string): string {
 
 function blockedTokensKey(prefix: string, roomCode: string): string {
   return `${prefix}room:${roomCode}:blocked-member-tokens`;
+}
+
+function dedupSlotKey(prefix: string, roomCode: string, key: string): string {
+  return `${prefix}room:${roomCode}:dedup:${key}`;
 }
 
 function nodesKey(prefix: string): string {
@@ -626,8 +637,21 @@ export async function createRedisRuntimeStore(
         currentTime,
       );
     },
-    tryClaimMessageSlot(roomCode: string, key: string, expiresAt: number) {
-      return localRuntimeStore.tryClaimMessageSlot(roomCode, key, expiresAt);
+    async tryClaimMessageSlot(
+      roomCode: string,
+      key: string,
+      expiresAt: number,
+    ) {
+      const ttlMs = Math.max(0, expiresAt - now());
+      if (ttlMs === 0) return true;
+      const result = await redis.set(
+        dedupSlotKey(keyPrefix, roomCode, key),
+        "1",
+        "NX",
+        "PX",
+        ttlMs,
+      );
+      return result !== null;
     },
     removeMember(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("remove_member");
