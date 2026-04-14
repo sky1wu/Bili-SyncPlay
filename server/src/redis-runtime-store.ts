@@ -656,13 +656,17 @@ export async function createRedisRuntimeStore(
       const result = await redis.set(slotKey, "1", "NX", "PX", ttlMs);
       if (result !== null) {
         const trackingKey = dedupTrackingZsetKey(keyPrefix, roomCode);
-        void trackOperation(
-          "track_dedup_slot",
-          Promise.all([
+        try {
+          // Await so deleteRoom's ZRANGE always sees this entry.
+          // If tracking fails, the slot still expires via its TTL.
+          await Promise.all([
             redis.zadd(trackingKey, String(expiresAt), slotKey),
             redis.zremrangebyscore(trackingKey, 0, now() - 1),
-          ]),
-        );
+          ]);
+        } catch {
+          // Tracking write failed; deleteRoom may miss this slot in ZRANGE,
+          // but the slot will expire on its own within the TTL window.
+        }
       }
       return result !== null;
     },
