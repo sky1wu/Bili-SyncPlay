@@ -120,7 +120,20 @@ export function createMessageHandler(options: {
     }
     options.onRoomLeft?.(session, roomCode);
 
-    await publishRoomEvent("room_member_changed", roomCode);
+    try {
+      await publishRoomEvent("room_member_changed", roomCode);
+    } catch (error) {
+      logEvent("room_event_publish_failed", {
+        sessionId: session.id,
+        roomCode,
+        remoteAddress: session.remoteAddress,
+        origin: session.origin,
+        result: "error",
+        reason: "leave_room_broadcast_failed",
+        eventType: "room_member_changed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   function handleRateLimitedMessage(

@@ -102,6 +102,87 @@ test("room service keeps empty rooms for TTL and allows rejoin before expiry", a
   assert.ok(joiner.memberToken);
 });
 
+test("room service restores member state when empty-room expiry scheduling fails", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+  const baseService = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => 1_000,
+    createRoomCode: () => "ROOM01",
+  });
+  const failingRoomStore = {
+    ...roomStore,
+    async updateRoom(code, expectedVersion, patch) {
+      if (patch.expiresAt !== undefined) {
+        throw new Error("expiry write failed");
+      }
+      return roomStore.updateRoom(code, expectedVersion, patch);
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore: failingRoomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 2;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => 1_000,
+  });
+
+  const owner = createSession("owner");
+  const created = await baseService.createRoomForSession(owner, "Alice");
+
+  await assert.rejects(
+    service.leaveRoomForSession(owner),
+    (error: unknown) =>
+      error instanceof Error && error.message === "Internal server error.",
+  );
+
+  assert.equal(owner.roomCode, created.room.code);
+  assert.equal(owner.memberId, "owner");
+  assert.equal(owner.memberToken, created.memberToken);
+  assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
+
+  const persisted = await roomStore.getRoom(created.room.code);
+  assert.equal(persisted?.expiresAt, null);
+  assert.ok(
+    events.some(
+      (entry) =>
+        entry.event === "room_leave_recovered" &&
+        entry.data.reason === "leave_room_persist_failed",
+    ),
+  );
+  assert.ok(
+    events.some(
+      (entry) =>
+        entry.event === "room_persist_failed" &&
+        entry.data.reason === "leave_room_persist_failed",
+    ),
+  );
+});
+
 test("room service clears sync intent when sharing a new video with playback", async () => {
   const currentTime = 1_000;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });

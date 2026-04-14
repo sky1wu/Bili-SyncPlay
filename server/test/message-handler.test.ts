@@ -228,3 +228,79 @@ test("message handler skips room state publish when playback update is ignored",
 
   assert.deepEqual(published, []);
 });
+
+test("message handler keeps leave completed when member change publish fails", async () => {
+  const events: string[] = [];
+  const left: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        currentSession.memberId = null;
+        currentSession.memberToken = null;
+        return {
+          room: {
+            code: "ROOM01",
+            joinToken: "join-token-1",
+            createdAt: 1,
+            ownerMemberId: "member-1",
+            ownerDisplayName: "Alice",
+            sharedVideo: null,
+            playback: null,
+            version: 1,
+            lastActiveAt: 1,
+            expiresAt: null,
+          },
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent(event) {
+      events.push(event);
+    },
+    send() {},
+    sendError() {
+      throw new Error("sendError should not be called");
+    },
+    async publishRoomEvent() {
+      throw new Error("publish failed");
+    },
+    instanceId: "node-a",
+    onRoomLeft(_session, roomCode) {
+      left.push(roomCode);
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+
+  assert.equal(session.roomCode, null);
+  assert.deepEqual(left, ["ROOM01"]);
+  assert.ok(events.includes("room_event_publish_failed"));
+});

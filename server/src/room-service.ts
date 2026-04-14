@@ -75,6 +75,13 @@ type JoinIdentity = {
   memberToken: string;
 };
 
+type JoinedSessionSnapshot = {
+  roomCode: string;
+  memberId: string;
+  memberToken: string;
+  joinedAt: number | null;
+};
+
 export function createRoomService(options: {
   config: SecurityConfig;
   persistence: PersistenceConfig;
@@ -177,6 +184,63 @@ export function createRoomService(options: {
     session.memberId = null;
     session.memberToken = null;
     session.joinedAt = null;
+  }
+
+  function snapshotJoinedSession(
+    session: Session,
+  ): JoinedSessionSnapshot | null {
+    if (!session.roomCode || !session.memberId || !session.memberToken) {
+      return null;
+    }
+
+    return {
+      roomCode: session.roomCode,
+      memberId: session.memberId,
+      memberToken: session.memberToken,
+      joinedAt: session.joinedAt,
+    };
+  }
+
+  function restoreJoinedSession(
+    session: Session,
+    snapshot: JoinedSessionSnapshot,
+  ): void {
+    session.roomCode = snapshot.roomCode;
+    session.memberId = snapshot.memberId;
+    session.memberToken = snapshot.memberToken;
+    session.joinedAt = snapshot.joinedAt;
+  }
+
+  async function restoreLeaveState(args: {
+    session: Session;
+    snapshot: JoinedSessionSnapshot | null;
+    roomCode: string;
+    reason: string;
+    error?: unknown;
+  }): Promise<void> {
+    if (!args.snapshot) {
+      return;
+    }
+
+    runtimeStore.addMember(
+      args.snapshot.roomCode,
+      args.snapshot.memberId,
+      args.session,
+      args.snapshot.memberToken,
+    );
+    restoreJoinedSession(args.session, args.snapshot);
+    await runtimeStore.flush?.();
+
+    logEvent("room_leave_recovered", {
+      sessionId: args.session.id,
+      roomCode: args.roomCode,
+      remoteAddress: args.session.remoteAddress,
+      origin: args.session.origin,
+      result: "ok",
+      reason: args.reason,
+      error:
+        args.error instanceof Error ? args.error.message : String(args.error),
+    });
   }
 
   async function resolveRoom(code: string): Promise<PersistedRoom | null> {
@@ -542,17 +606,58 @@ export function createRoomService(options: {
     }
 
     const roomCode = session.roomCode;
+    const sessionSnapshot = snapshotJoinedSession(session);
     const removal = session.memberId
       ? runtimeStore.removeMember(roomCode, session.memberId, session)
       : { room: runtimeStore.getRoom(roomCode), roomEmpty: false };
+    await runtimeStore.flush?.();
     clearSessionRoom(session);
 
-    const persistedRoom = await resolveRoom(roomCode);
-    if (!persistedRoom) {
-      return { room: null };
-    }
+    try {
+      const persistedRoom = await resolveRoom(roomCode);
+      if (!persistedRoom) {
+        return { room: null };
+      }
 
-    if (!removal.roomEmpty) {
+      if (!removal.roomEmpty) {
+        logEvent("room_left", {
+          sessionId: session.id,
+          roomCode,
+          remoteAddress: session.remoteAddress,
+          origin: session.origin,
+          result: "ok",
+        });
+        return { room: persistedRoom };
+      }
+
+      const expiresAt = now() + persistence.emptyRoomTtlMs;
+      const updatedRoom = await withVersionRetry(roomCode, async (room) => {
+        const result = await roomStore.updateRoom(roomCode, room.version, {
+          expiresAt,
+          lastActiveAt: now(),
+        });
+        if (!result.ok) {
+          return null;
+        }
+        return result.room;
+      });
+
+      if (!updatedRoom) {
+        throw new RoomServiceError(
+          "internal_error",
+          INTERNAL_SERVER_ERROR_MESSAGE,
+          "internal_error",
+          { roomCode, reason: "leave_room_expiry_schedule_failed" },
+        );
+      }
+
+      logEvent("room_expiry_scheduled", {
+        roomCode,
+        version: updatedRoom.version,
+        expiresAt,
+        result: "ok",
+      });
+
       logEvent("room_left", {
         sessionId: session.id,
         roomCode,
@@ -560,39 +665,45 @@ export function createRoomService(options: {
         origin: session.origin,
         result: "ok",
       });
-      return { room: persistedRoom };
-    }
 
-    const expiresAt = now() + persistence.emptyRoomTtlMs;
-    const updatedRoom = await withVersionRetry(roomCode, async (room) => {
-      const result = await roomStore.updateRoom(roomCode, room.version, {
-        expiresAt,
-        lastActiveAt: now(),
-      });
-      if (!result.ok) {
-        return null;
-      }
-      return result.room;
-    });
+      return { room: updatedRoom };
+    } catch (error) {
+      const reason =
+        error instanceof RoomServiceError &&
+        typeof error.details.reason === "string"
+          ? error.details.reason
+          : "leave_room_persist_failed";
 
-    if (updatedRoom) {
-      logEvent("room_expiry_scheduled", {
+      await restoreLeaveState({
+        session,
+        snapshot: sessionSnapshot,
         roomCode,
-        version: updatedRoom.version,
-        expiresAt,
-        result: "ok",
+        reason,
+        error,
       });
+
+      logEvent("room_persist_failed", {
+        sessionId: session.id,
+        roomCode,
+        remoteAddress: session.remoteAddress,
+        origin: session.origin,
+        provider: persistence.provider,
+        result: "error",
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+
+      if (error instanceof RoomServiceError) {
+        throw error;
+      }
+
+      throw new RoomServiceError(
+        "internal_error",
+        INTERNAL_SERVER_ERROR_MESSAGE,
+        "internal_error",
+        { roomCode, reason },
+      );
     }
-
-    logEvent("room_left", {
-      sessionId: session.id,
-      roomCode,
-      remoteAddress: session.remoteAddress,
-      origin: session.origin,
-      result: "ok",
-    });
-
-    return { room: updatedRoom };
   }
 
   return {
