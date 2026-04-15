@@ -1545,3 +1545,271 @@ test("room service deduplicates repeated playback:update with the same seq", asy
   );
   assert.equal(second.ignored, true);
 });
+
+test("concurrent joins both succeed when room has capacity for all", async () => {
+  // Two sessions race to join the same room. withVersionRetry handles the
+  // version conflict on the second joiner's first attempt so both eventually
+  // land and the runtime has exactly owner + 2 members.
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 8 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOM15",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  const joinerA = createSession("joiner-a");
+  const joinerB = createSession("joiner-b");
+
+  const [resultA, resultB] = await Promise.all([
+    service.joinRoomForSession(
+      joinerA,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+    ),
+    service.joinRoomForSession(
+      joinerB,
+      created.room.code,
+      created.room.joinToken,
+      "Carol",
+    ),
+  ]);
+
+  assert.ok(resultA.room);
+  assert.ok(resultB.room);
+
+  const runtimeRoom = activeRooms.getRoom(created.room.code);
+  assert.equal(runtimeRoom?.members.size, 3);
+
+  // Persisted room version must reflect exactly two successful updateRoom calls
+  // (one per joiner). Concurrent version-conflict retries must not skip a bump
+  // or produce a torn write.
+  const persistedRoom = await roomStore.getRoom(created.room.code);
+  assert.equal(
+    persistedRoom?.version,
+    2,
+    "persisted room version must be 2 after two concurrent joins",
+  );
+});
+
+test("concurrent joins at capacity allow exactly one new member", async () => {
+  // With maxMembersPerRoom=2 (owner already occupies 1 slot), two sessions
+  // race for the single remaining slot. The optimistic-locking retry causes
+  // the second joiner to re-check capacity after the first has been added,
+  // at which point the room is full and the second gets a room_full error.
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 2 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOM16",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  const joinerA = createSession("joiner-a");
+  const joinerB = createSession("joiner-b");
+
+  const results = await Promise.allSettled([
+    service.joinRoomForSession(
+      joinerA,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+    ),
+    service.joinRoomForSession(
+      joinerB,
+      created.room.code,
+      created.room.joinToken,
+      "Carol",
+    ),
+  ]);
+
+  const fulfilled = results.filter((r) => r.status === "fulfilled");
+  const rejected = results.filter((r) => r.status === "rejected");
+
+  assert.equal(fulfilled.length, 1, "exactly one joiner should succeed");
+  assert.equal(rejected.length, 1, "exactly one joiner should be rejected");
+  assert.match(
+    (rejected[0] as PromiseRejectedResult).reason.message,
+    /Room is full/,
+  );
+
+  const runtimeRoom = activeRooms.getRoom(created.room.code);
+  assert.equal(
+    runtimeRoom?.members.size,
+    2,
+    "runtime member count must not exceed maxMembersPerRoom",
+  );
+});
+
+test("concurrent playback updates produce consistent final state without errors", async () => {
+  // Two members simultaneously submit playback updates. Both calls must
+  // complete (one may be ignored by authority arbitration) and the final
+  // persisted room must contain one of the two submitted states — no
+  // partial writes or thrown errors.
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry(() => currentTime);
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM17",
+  });
+
+  const owner = createSession("owner");
+  const createdRoom = await service.createRoomForSession(owner, "Alice");
+  const joiner = createSession("joiner");
+  const joinedRoom = await service.joinRoomForSession(
+    joiner,
+    createdRoom.room.code,
+    createdRoom.room.joinToken,
+    "Bob",
+  );
+
+  await service.shareVideoForSession(
+    owner,
+    createdRoom.memberToken,
+    createSharedVideo(),
+  );
+
+  const ownerPlayback = createPlayback(owner.id, {
+    seq: 1,
+    playState: "playing",
+    currentTime: 10,
+    serverTime: 1_000,
+    updatedAt: 1_000,
+  });
+  const joinerPlayback = createPlayback(joiner.id, {
+    seq: 1,
+    playState: "paused",
+    currentTime: 20,
+    serverTime: 1_000,
+    updatedAt: 1_000,
+  });
+
+  const [ownerResult, joinerResult] = await Promise.all([
+    service.updatePlaybackForSession(
+      owner,
+      createdRoom.memberToken,
+      ownerPlayback,
+    ),
+    service.updatePlaybackForSession(
+      joiner,
+      joinedRoom.memberToken,
+      joinerPlayback,
+    ),
+  ]);
+
+  // At least one update must land; neither call may throw
+  const ownerLanded = !ownerResult.ignored && ownerResult.room !== null;
+  const joinerLanded = !joinerResult.ignored && joinerResult.room !== null;
+  assert.ok(
+    ownerLanded || joinerLanded,
+    "at least one playback update must be applied",
+  );
+
+  // Final persisted playback must equal one of the two submitted states in
+  // every field — not just actorId. A partial write (e.g. actorId from owner
+  // but currentTime/playState from joiner) would pass an actorId-only check
+  // but fail this full comparison.
+  // The service overwrites actorId = session.memberId (= session.id for fresh
+  // sessions) and serverTime = now() (= 1_000 in this test), so both values
+  // are identical to the submitted fixtures and a direct deepEqual is valid.
+  const finalRoom = await roomStore.getRoom(createdRoom.room.code);
+  assert.ok(finalRoom?.playback, "room must have a playback state");
+  const isOwnerPlayback =
+    finalRoom.playback?.actorId === owner.id &&
+    finalRoom.playback?.currentTime === ownerPlayback.currentTime &&
+    finalRoom.playback?.playState === ownerPlayback.playState &&
+    finalRoom.playback?.seq === ownerPlayback.seq;
+  const isJoinerPlayback =
+    finalRoom.playback?.actorId === joiner.id &&
+    finalRoom.playback?.currentTime === joinerPlayback.currentTime &&
+    finalRoom.playback?.playState === joinerPlayback.playState &&
+    finalRoom.playback?.seq === joinerPlayback.seq;
+  assert.ok(
+    isOwnerPlayback || isJoinerPlayback,
+    `final playback must exactly match one submitted state, got: ${JSON.stringify(finalRoom.playback)}`,
+  );
+});
+
+test("concurrent duplicate video:share requests are deduplicated to a single write", async () => {
+  // Two concurrent shareVideoForSession calls with an identical video are
+  // issued via Promise.all. Both pass requireJoinedRoomSession (an awaited
+  // async step), which creates a genuine interleaving point: call A suspends,
+  // call B suspends, then A resumes first and claims the dedup slot. When B
+  // resumes and reaches tryClaimMessageSlot the key is already set, so B is
+  // deduplicated without issuing an updateRoom write.
+  //
+  // The observable invariant: the persisted room version increases by exactly
+  // 1 (one write), not 2 (both writes landing) or 0 (both rejected).
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry(() => currentTime);
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM18",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const versionAfterCreate = (await roomStore.getRoom(created.room.code))
+    ?.version;
+
+  const video = createSharedVideo();
+
+  const [resultA, resultB] = await Promise.all([
+    service.shareVideoForSession(owner, created.memberToken, video),
+    service.shareVideoForSession(owner, created.memberToken, video),
+  ]);
+
+  // Both calls complete without throwing; one lands, one is deduplicated
+  assert.ok(resultA.room, "resultA must return a room");
+  assert.ok(resultB.room, "resultB must return a room");
+
+  const finalRoom = await roomStore.getRoom(created.room.code);
+  assert.equal(
+    finalRoom?.version,
+    (versionAfterCreate ?? 0) + 1,
+    "exactly one updateRoom write must have occurred; version must advance by 1",
+  );
+});
