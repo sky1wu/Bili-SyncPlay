@@ -1,14 +1,9 @@
 import { createServer, type Server as HttpServer } from "node:http";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { WebSocketServer, type RawData, type WebSocket } from "ws";
-import {
-  isClientMessage,
-  type ErrorCode,
-  type ServerMessage,
-} from "@bili-syncplay/protocol";
+import { WebSocketServer } from "ws";
 import { createEventStore } from "./admin/event-store.js";
 import { createRedisEventStore } from "./admin/redis-event-store.js";
 import { createAdminServices } from "./bootstrap/admin-services.js";
@@ -22,7 +17,6 @@ import { createAdminCommandConsumer } from "./admin-command-consumer.js";
 import { createMessageHandler } from "./message-handler.js";
 import { createMirroredRuntimeStore } from "./mirrored-runtime-store.js";
 import { createNodeHeartbeat } from "./node-heartbeat.js";
-import { createSessionRateLimitState } from "./rate-limit.js";
 import { createRedisAdminCommandBus } from "./redis-admin-command-bus.js";
 import { createRedisRoomEventBus } from "./redis-room-event-bus.js";
 import { createRoomEventConsumer } from "./room-event-consumer.js";
@@ -50,20 +44,19 @@ import {
 } from "./runtime-store.js";
 import { createSecurityPolicy } from "./security.js";
 import { hasAttachedSocket } from "./types.js";
+import {
+  createWsConnectionHandler,
+  createWsUpgradeHandler,
+  send,
+  sendError,
+} from "./ws-session-handler.js";
 import type {
   AdminConfig,
   AdminUiConfig,
   LogEvent,
   PersistenceConfig,
   SecurityConfig,
-  Session,
 } from "./types.js";
-import {
-  INTERNAL_SERVER_ERROR_MESSAGE,
-  INVALID_CLIENT_MESSAGE_MESSAGE,
-  INVALID_JSON_MESSAGE,
-} from "./messages.js";
-
 export type {
   AdminConfig,
   AdminUiConfig,
@@ -75,8 +68,9 @@ export {
   INVALID_CLIENT_MESSAGE_MESSAGE,
   INVALID_JSON_MESSAGE,
 } from "./messages.js";
+// Re-exported for backward compatibility with existing tests
+export { cleanupSessionAfterClose } from "./ws-session-handler.js";
 
-const CLOSE_CODE_POLICY_VIOLATION = 1008;
 const DEFAULT_CLOSE_STEP_TIMEOUT_MS = 5_000;
 const PACKAGE_JSON_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -148,78 +142,8 @@ export async function runShutdownSteps(
   }
 }
 
-function hasClose(value: object | null | undefined): value is Closeable {
+export function hasClose(value: object | null | undefined): value is Closeable {
   return typeof value === "object" && value !== null && "close" in value;
-}
-
-export async function cleanupSessionAfterClose(options: {
-  session: Session;
-  code: number;
-  reason: Buffer;
-  messageHandler: { leaveRoom: (session: Session) => Promise<void> };
-  runtimeStore: Pick<RuntimeStore, "unregisterSession">;
-  securityPolicy: {
-    decrementConnectionCount: (remoteAddress: string | null) => void;
-  };
-  logEvent: LogEvent;
-  decodeCloseReason: (reason: Buffer) => string;
-}): Promise<void> {
-  const decodedReason = options.decodeCloseReason(options.reason);
-  const roomCodeAtClose = options.session.roomCode;
-
-  try {
-    await options.messageHandler.leaveRoom(options.session);
-  } catch (error) {
-    options.logEvent("ws_connection_cleanup_failed", {
-      sessionId: options.session.id,
-      roomCode: roomCodeAtClose,
-      remoteAddress: options.session.remoteAddress,
-      origin: options.session.origin,
-      result: "error",
-      step: "leave_room",
-      error: error instanceof Error ? error.message : "unknown_error",
-    });
-  } finally {
-    try {
-      options.runtimeStore.unregisterSession(options.session.id);
-    } catch (error) {
-      options.logEvent("ws_connection_cleanup_failed", {
-        sessionId: options.session.id,
-        roomCode: roomCodeAtClose,
-        remoteAddress: options.session.remoteAddress,
-        origin: options.session.origin,
-        result: "error",
-        step: "unregister_session",
-        error: error instanceof Error ? error.message : "unknown_error",
-      });
-    }
-
-    try {
-      options.securityPolicy.decrementConnectionCount(
-        options.session.remoteAddress,
-      );
-    } catch (error) {
-      options.logEvent("ws_connection_cleanup_failed", {
-        sessionId: options.session.id,
-        roomCode: roomCodeAtClose,
-        remoteAddress: options.session.remoteAddress,
-        origin: options.session.origin,
-        result: "error",
-        step: "decrement_connection_count",
-        error: error instanceof Error ? error.message : "unknown_error",
-      });
-    }
-  }
-
-  options.logEvent("ws_connection_closed", {
-    sessionId: options.session.id,
-    remoteAddress: options.session.remoteAddress,
-    origin: options.session.origin,
-    roomCode: options.session.roomCode ?? roomCodeAtClose,
-    result: "closed",
-    code: options.code,
-    reason: decodedReason,
-  });
 }
 
 export async function resolveServiceVersion(): Promise<string> {
@@ -561,197 +485,23 @@ export async function createSyncServer(
   });
   const pendingSessionCleanup = new Set<Promise<void>>();
 
-  function send(socket: WebSocket, message: ServerMessage): void {
-    if (socket.readyState === socket.OPEN) {
-      socket.send(JSON.stringify(message));
-    }
-  }
+  httpServer.on(
+    "upgrade",
+    createWsUpgradeHandler({ securityPolicy, wss, logEvent }),
+  );
 
-  function sendError(
-    socket: WebSocket,
-    code: ErrorCode,
-    message: string,
-  ): void {
-    send(socket, {
-      type: "error",
-      payload: { code, message },
-    });
-  }
-
-  function parseIncomingMessage(raw: RawData): unknown {
-    return JSON.parse(raw.toString());
-  }
-
-  function decodeCloseReason(reason: Buffer): string {
-    const decoded = reason.toString("utf8");
-    return decoded.length > 0 ? decoded : "";
-  }
-
-  function countInvalidMessage(session: Session, reason: string): void {
-    session.invalidMessageCount += 1;
-    logEvent("invalid_message", {
-      sessionId: session.id,
-      roomCode: session.roomCode,
-      remoteAddress: session.remoteAddress,
-      origin: session.origin,
-      result: "rejected",
-      reason,
-      invalidMessageCount: session.invalidMessageCount,
-    });
-
-    if (
-      session.invalidMessageCount >=
-        securityConfig.invalidMessageCloseThreshold &&
-      hasAttachedSocket(session)
-    ) {
-      session.socket.close(
-        CLOSE_CODE_POLICY_VIOLATION,
-        "Too many invalid messages",
-      );
-    }
-  }
-
-  function rejectUpgrade(
-    socket: import("node:stream").Duplex,
-    statusCode: number,
-    statusText: string,
-    details: Record<string, unknown>,
-  ): void {
-    socket.write(
-      `HTTP/1.1 ${statusCode} ${statusText}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
-    );
-    socket.destroy();
-    logEvent("ws_connection_rejected", details);
-  }
-
-  httpServer.on("upgrade", (request, socket, head) => {
-    const decision = securityPolicy.evaluateUpgrade(request);
-    if (!decision.ok) {
-      rejectUpgrade(socket, decision.statusCode, decision.statusText, {
-        remoteAddress: decision.context.remoteAddress,
-        origin: decision.context.origin,
-        result: "rejected",
-        reason: decision.reason,
-      });
-      return;
-    }
-
-    request.biliSyncPlayContext = decision.context;
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit("connection", ws, request);
-    });
-  });
-
-  wss.on("connection", (socket, request) => {
-    const context = request.biliSyncPlayContext ?? {
-      remoteAddress: securityPolicy.getRemoteAddress(request),
-      origin:
-        typeof request.headers.origin === "string"
-          ? request.headers.origin
-          : null,
-    };
-    const session: Session = {
-      id: randomUUID(),
-      connectionState: "attached",
-      socket,
+  wss.on(
+    "connection",
+    createWsConnectionHandler({
+      securityPolicy,
+      securityConfig,
       instanceId: persistenceConfig.instanceId,
-      remoteAddress: context.remoteAddress,
-      origin: context.origin,
-      roomCode: null,
-      memberId: null,
-      displayName: `Guest-${Math.floor(Math.random() * 900 + 100)}`,
-      memberToken: null,
-      joinedAt: null,
-      invalidMessageCount: 0,
-      rateLimitState: createSessionRateLimitState(securityConfig),
-    };
-
-    securityPolicy.incrementConnectionCount(session.remoteAddress);
-    runtimeStore.registerSession(session);
-    logEvent("ws_connection_accepted", {
-      sessionId: session.id,
-      remoteAddress: session.remoteAddress,
-      origin: session.origin,
-      result: "ok",
-    });
-    let messageQueue = Promise.resolve();
-
-    socket.on("message", (raw) => {
-      messageQueue = messageQueue
-        .catch((error: unknown) => {
-          logEvent("ws_message_queue_failed", {
-            sessionId: session.id,
-            roomCode: session.roomCode,
-            remoteAddress: session.remoteAddress,
-            origin: session.origin,
-            result: "error",
-            error: error instanceof Error ? error.message : "unknown_error",
-          });
-        })
-        .then(async () => {
-          let parsed: unknown;
-          try {
-            parsed = parseIncomingMessage(raw);
-          } catch {
-            sendError(socket, "invalid_message", INVALID_JSON_MESSAGE);
-            countInvalidMessage(session, "invalid_json");
-            return;
-          }
-
-          if (!isClientMessage(parsed)) {
-            sendError(
-              socket,
-              "invalid_message",
-              INVALID_CLIENT_MESSAGE_MESSAGE,
-            );
-            countInvalidMessage(session, "invalid_client_message");
-            return;
-          }
-
-          try {
-            await messageHandler.handleClientMessage(session, parsed);
-          } catch (error) {
-            logEvent("ws_client_message_failed", {
-              sessionId: session.id,
-              roomCode: session.roomCode,
-              remoteAddress: session.remoteAddress,
-              origin: session.origin,
-              result: "error",
-              error: error instanceof Error ? error.message : "unknown_error",
-            });
-            sendError(socket, "internal_error", INTERNAL_SERVER_ERROR_MESSAGE);
-          }
-        });
-    });
-
-    socket.on("error", (error) => {
-      logEvent("ws_connection_error", {
-        sessionId: session.id,
-        remoteAddress: session.remoteAddress,
-        origin: session.origin,
-        roomCode: session.roomCode,
-        result: "error",
-        error: error.message,
-      });
-    });
-
-    socket.on("close", (code, reason) => {
-      const cleanup = cleanupSessionAfterClose({
-        session,
-        code,
-        reason,
-        messageHandler,
-        runtimeStore,
-        securityPolicy,
-        logEvent,
-        decodeCloseReason,
-      });
-      pendingSessionCleanup.add(cleanup);
-      void cleanup.finally(() => {
-        pendingSessionCleanup.delete(cleanup);
-      });
-    });
-  });
+      runtimeStore,
+      messageHandler,
+      logEvent,
+      pendingSessionCleanup,
+    }),
+  );
 
   return {
     httpServer,

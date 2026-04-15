@@ -114,3 +114,49 @@ export function isSharedVideoChange(
 ): boolean {
   return previousSharedUrl !== (nextState.sharedVideo?.url ?? null);
 }
+
+export interface TransientShareLifecycleState {
+  pendingLocalShareUrl: string | null;
+  pendingLocalShareExpiresAt: number | null;
+  pendingLocalShareTimer: number | null;
+  pendingShareToast: unknown;
+}
+
+export interface TransientRoomSessionLifecycleState {
+  pendingSharedVideo: unknown;
+  pendingSharedPlayback: unknown;
+}
+
+export function resetRoomLifecycleTransientState(
+  action: RoomLifecycleAction,
+  reason: string,
+  args: {
+    shareState: TransientShareLifecycleState;
+    roomSessionState: TransientRoomSessionLifecycleState;
+    log: (message: string) => void;
+  },
+): void {
+  const cleanup = preparePendingLocalShareCleanupForRoomLifecycle(action, {
+    pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
+    pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
+    pendingLocalShareTimer: args.shareState.pendingLocalShareTimer,
+  });
+  if (cleanup.hadPendingLocalShare) {
+    if (cleanup.shouldCancelTimer) {
+      if (args.shareState.pendingLocalShareTimer !== null) {
+        clearTimeout(args.shareState.pendingLocalShareTimer);
+        args.shareState.pendingLocalShareTimer = null;
+      }
+    }
+    args.log(`Cleared pending local share (${reason})`);
+    args.shareState.pendingLocalShareUrl =
+      cleanup.nextState.pendingLocalShareUrl;
+    args.shareState.pendingLocalShareExpiresAt =
+      cleanup.nextState.pendingLocalShareExpiresAt;
+    args.shareState.pendingLocalShareTimer =
+      cleanup.nextState.pendingLocalShareTimer;
+  }
+  args.shareState.pendingShareToast = null;
+  args.roomSessionState.pendingSharedVideo = null;
+  args.roomSessionState.pendingSharedPlayback = null;
+}

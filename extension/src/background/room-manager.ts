@@ -1,4 +1,5 @@
 import type {
+  ClientMessage,
   PlaybackState,
   RoomState,
   SharedVideo,
@@ -103,4 +104,37 @@ export function flushPendingShare(args: {
     video: args.pendingSharedVideo,
     playback: args.pendingSharedPlayback,
   };
+}
+
+export function executeFlushPendingShare(args: {
+  roomSessionState: {
+    pendingSharedVideo: SharedVideo | null;
+    pendingSharedPlayback: PlaybackState | null;
+    memberToken: string | null;
+    roomCode: string | null;
+  };
+  connectionState: { connected: boolean };
+  sendToServer: (message: ClientMessage) => void;
+}): void {
+  const plan = flushPendingShare({
+    pendingSharedVideo: args.roomSessionState.pendingSharedVideo,
+    pendingSharedPlayback: args.roomSessionState.pendingSharedPlayback,
+    connected: args.connectionState.connected,
+    roomCode: args.roomSessionState.roomCode,
+    memberToken: args.roomSessionState.memberToken,
+  });
+  if (!plan.shouldFlush || !plan.video) {
+    return;
+  }
+  // memberToken is guaranteed non-null when plan.shouldFlush is true
+  args.sendToServer({
+    type: "video:share",
+    payload: {
+      memberToken: args.roomSessionState.memberToken!,
+      video: plan.video,
+      ...(plan.playback ? { playback: plan.playback } : {}),
+    },
+  });
+  args.roomSessionState.pendingSharedVideo = null;
+  args.roomSessionState.pendingSharedPlayback = null;
 }

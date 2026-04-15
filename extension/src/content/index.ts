@@ -1,6 +1,8 @@
 import type { BackgroundToContentMessage } from "../shared/messages";
 import { normalizeSharedVideoUrl } from "../shared/url";
+import { runtimeSendMessage } from "./content-messaging";
 import { createFestivalBridgeController } from "./festival-bridge";
+import { startUserGestureTracking } from "./gesture-tracker";
 import { getVideoElement, pauseVideo } from "./player-binding";
 import { createContentStateStore } from "./content-store";
 import { createNavigationController } from "./navigation-controller";
@@ -9,6 +11,7 @@ import { createRoomStateController } from "./room-state-controller";
 import { createShareController } from "./share-controller";
 import { createSyncController } from "./sync-controller";
 import { createToastCoordinatorState, createToastPresenter } from "./toast";
+import { reportCurrentUser } from "./user-reporter";
 
 const normalizeUrl = normalizeSharedVideoUrl;
 let seq = 0;
@@ -154,28 +157,20 @@ function shouldLogHeartbeat(
   return true;
 }
 
-async function runtimeSendMessage<T>(message: unknown): Promise<T | null> {
-  try {
-    return await chrome.runtime.sendMessage(message);
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.includes("Extension context invalidated")
-    ) {
-      return null;
-    }
-    throw error;
-  }
+function activatePauseHold(durationMs = PAUSE_HOLD_MS): void {
+  runtimeState.pauseHoldUntil = Date.now() + durationMs;
 }
 
 async function init(): Promise<void> {
-  startUserGestureTracking();
+  startUserGestureTracking(() => {
+    runtimeState.lastUserGestureAt = Date.now();
+  });
   playbackBindingController.start();
   navigationController.start();
   document.addEventListener("fullscreenchange", () => {
     toastPresenter.resetMountTarget();
   });
-  void reportCurrentUser();
+  void reportCurrentUser((msg) => runtimeSendMessage(msg));
 
   chrome.runtime.onMessage.addListener(
     (message: BackgroundToContentMessage, _sender, sendResponse) => {
@@ -207,66 +202,4 @@ async function init(): Promise<void> {
   );
 
   await syncController.hydrateRoomState();
-}
-
-function startUserGestureTracking(): void {
-  const markUserGesture = () => {
-    runtimeState.lastUserGestureAt = Date.now();
-  };
-
-  const gestureEvents: Array<keyof DocumentEventMap> = [
-    "pointerdown",
-    "mousedown",
-    "click",
-    "touchstart",
-    "keydown",
-  ];
-
-  for (const eventName of gestureEvents) {
-    document.addEventListener(eventName, markUserGesture, true);
-    window.addEventListener(eventName, markUserGesture, true);
-  }
-}
-
-function activatePauseHold(durationMs = PAUSE_HOLD_MS): void {
-  runtimeState.pauseHoldUntil = Date.now() + durationMs;
-}
-
-async function reportCurrentUser(): Promise<void> {
-  try {
-    const response = await fetch(
-      "https://api.bilibili.com/x/web-interface/nav",
-      {
-        credentials: "include",
-      },
-    );
-    const data = (await response.json()) as {
-      code: number;
-      data?: {
-        isLogin?: boolean;
-        uname?: string;
-        mid?: number;
-      };
-    };
-
-    if (data.code !== 0 || !data.data?.isLogin) {
-      return;
-    }
-
-    const nextDisplayName =
-      data.data.uname?.trim() || (data.data.mid ? `UID-${data.data.mid}` : "");
-    if (!nextDisplayName) {
-      return;
-    }
-
-    const reportResponse = await runtimeSendMessage({
-      type: "content:report-user",
-      payload: { displayName: nextDisplayName },
-    });
-    if (reportResponse === null) {
-      return;
-    }
-  } catch {
-    // Ignore lookup failures and keep guest naming.
-  }
 }

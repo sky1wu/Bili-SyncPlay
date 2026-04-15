@@ -10,26 +10,24 @@ import { createStructuredLogger } from "./logger.js";
 import {
   createInMemoryAdminCommandBus,
   createNoopAdminCommandBus,
-  type AdminCommandBus,
 } from "./admin-command-bus.js";
 import {
   getDefaultPersistenceConfig,
   getDefaultSecurityConfig,
+  hasClose,
   resolveServiceVersion,
+  runShutdownSteps,
 } from "./app.js";
 import { createRedisAdminCommandBus } from "./redis-admin-command-bus.js";
 import { createRedisRoomEventBus } from "./redis-room-event-bus.js";
 import { createInMemoryRoomStore, type RoomStore } from "./room-store.js";
 import { createRoomService } from "./room-service.js";
-import type { RoomEventBus, RoomEventBusMessage } from "./room-event-bus.js";
+import type { RoomEventBusMessage } from "./room-event-bus.js";
 import {
   createInMemoryRoomEventBus,
   createNoopRoomEventBus,
 } from "./room-event-bus.js";
-import {
-  createInMemoryRuntimeStore,
-  type RuntimeStore,
-} from "./runtime-store.js";
+import { createInMemoryRuntimeStore } from "./runtime-store.js";
 import { createRuntimeIndexReaper } from "./runtime-index-reaper.js";
 import { createSecurityPolicy } from "./security.js";
 import { createRedisRoomStore } from "./redis-room-store.js";
@@ -41,7 +39,6 @@ import {
   getRedisRoomEventChannel,
   getRedisRuntimeKeyPrefix,
 } from "./redis-namespace.js";
-import type { GlobalEventStore } from "./admin/global-event-store.js";
 import type {
   AdminConfig,
   AdminUiConfig,
@@ -181,50 +178,55 @@ export async function createGlobalAdminServer(
 
   return {
     httpServer,
-    async close() {
-      await new Promise<void>((resolve, reject) => {
-        httpServer.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
-      await runtimeIndexReaper.stop();
-
-      const maybeClosableRoomStore = roomStore as RoomStore & {
-        close?: () => Promise<void>;
-      };
-      if (typeof maybeClosableRoomStore.close === "function") {
-        await maybeClosableRoomStore.close();
-      }
-      const maybeClosableRuntimeStore = runtimeStore as RuntimeStore & {
-        close?: () => Promise<void>;
-      };
-      if (typeof maybeClosableRuntimeStore.close === "function") {
-        await maybeClosableRuntimeStore.close();
-      }
-      const maybeClosableEventStore = eventStore as GlobalEventStore & {
-        close?: () => Promise<void>;
-      };
-      if (typeof maybeClosableEventStore.close === "function") {
-        await maybeClosableEventStore.close();
-      }
-      const maybeClosableAdminCommandBus =
-        adminCommandBus as AdminCommandBus & {
-          close?: () => Promise<void>;
-        };
-      if (typeof maybeClosableAdminCommandBus.close === "function") {
-        await maybeClosableAdminCommandBus.close();
-      }
-      const maybeClosableRoomEventBus = roomEventBus as RoomEventBus & {
-        close?: () => Promise<void>;
-      };
-      if (typeof maybeClosableRoomEventBus.close === "function") {
-        await maybeClosableRoomEventBus.close();
-      }
-      await closeAdminServices();
-    },
+    close: () =>
+      runShutdownSteps(
+        [
+          {
+            name: "close_http_server",
+            run: () =>
+              new Promise<void>((resolve, reject) => {
+                httpServer.close((error) => {
+                  if (error) {
+                    reject(error);
+                    return;
+                  }
+                  resolve();
+                });
+              }),
+          },
+          {
+            name: "stop_runtime_index_reaper",
+            run: () => runtimeIndexReaper.stop(),
+          },
+          {
+            name: "close_room_store",
+            run: () => (hasClose(roomStore) ? roomStore.close() : undefined),
+          },
+          {
+            name: "close_runtime_store",
+            run: () =>
+              hasClose(runtimeStore) ? runtimeStore.close() : undefined,
+          },
+          {
+            name: "close_event_store",
+            run: () => (hasClose(eventStore) ? eventStore.close() : undefined),
+          },
+          {
+            name: "close_admin_command_bus",
+            run: () =>
+              hasClose(adminCommandBus) ? adminCommandBus.close() : undefined,
+          },
+          {
+            name: "close_room_event_bus",
+            run: () =>
+              hasClose(roomEventBus) ? roomEventBus.close() : undefined,
+          },
+          {
+            name: "close_admin_services",
+            run: () => closeAdminServices(),
+          },
+        ],
+        logEvent,
+      ),
   };
 }

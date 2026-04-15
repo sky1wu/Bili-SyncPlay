@@ -2,27 +2,21 @@ import {
   type ClientMessage,
   type ServerMessage,
 } from "@bili-syncplay/protocol";
-import type {
-  BackgroundToContentMessage,
-  ContentToBackgroundMessage,
-  PopupToBackgroundMessage,
-} from "../shared/messages";
+import type { BackgroundToContentMessage } from "../shared/messages";
 import { normalizeSharedVideoUrl } from "../shared/url";
-import {
-  preparePendingLocalShareCleanupForRoomLifecycle,
-  type RoomLifecycleAction,
-} from "./room-state";
+import { resetRoomLifecycleTransientState } from "./room-state";
 import {
   toConnectionCheckUrl as buildConnectionCheckUrl,
   toHealthcheckUrl as buildHealthcheckUrl,
 } from "./clock-sync";
+import { registerBackgroundListeners } from "./chrome-runtime-bus";
 import { notifyContentTabs } from "./content-bus";
 import { bootstrapBackground } from "./bootstrap";
 import { createClockController } from "./clock-controller";
 import { createDiagnosticsController } from "./diagnostics-controller";
 import { createMessageController } from "./message-controller";
 import { createOutgoingMessageController } from "./outgoing-message-controller";
-import { flushPendingShare as getPendingShareFlushPlan } from "./room-manager";
+import { executeFlushPendingShare } from "./room-manager";
 import { createPopupStateController } from "./popup-state-controller";
 import { createRoomSessionController } from "./room-session-controller";
 import {
@@ -41,6 +35,7 @@ import {
   persistBackgroundProfile,
   persistBackgroundState,
 } from "./storage-manager";
+import { disconnectSocket as executeDisconnectSocket } from "./socket-lifecycle";
 import { createTabController } from "./tab-controller";
 import { t } from "../shared/i18n";
 
@@ -124,7 +119,7 @@ const roomSessionController = createRoomSessionController({
   connect: () => socketController.connect(),
   disconnectSocket,
   resetReconnectState: () => socketController.resetReconnectState(),
-  resetRoomLifecycleTransientState,
+  resetRoomLifecycleTransientState: doResetRoomLifecycleTransientState,
   flushPendingShare,
   ensureSharedVideoOpen: () => tabController.ensureSharedVideoOpen(),
   notifyContentScripts,
@@ -390,73 +385,33 @@ function updateClockOffset(
 }
 
 function flushPendingShare(): void {
-  const plan = getPendingShareFlushPlan({
-    pendingSharedVideo: roomSessionState.pendingSharedVideo,
-    pendingSharedPlayback: roomSessionState.pendingSharedPlayback,
-    connected: connectionState.connected,
-    roomCode: roomSessionState.roomCode,
-    memberToken: roomSessionState.memberToken,
+  executeFlushPendingShare({
+    roomSessionState,
+    connectionState,
+    sendToServer,
   });
-  if (!plan.shouldFlush || !plan.video) {
-    return;
-  }
-  sendToServer({
-    type: "video:share",
-    payload: {
-      memberToken: roomSessionState.memberToken,
-      video: plan.video,
-      ...(plan.playback ? { playback: plan.playback } : {}),
-    },
-  });
-  roomSessionState.pendingSharedVideo = null;
-  roomSessionState.pendingSharedPlayback = null;
 }
 
 function disconnectSocket(): void {
-  socketController.resetReconnectState();
-  clockController.stopClockSyncTimer();
-  shareController.clearPendingLocalShare("socket disconnected");
-  roomSessionState.memberToken = null;
-  if (!connectionState.socket) {
-    connectionState.connected = false;
-    return;
-  }
-
-  const currentSocket = connectionState.socket;
-  connectionState.socket = null;
-  connectionState.connected = false;
-  currentSocket.close();
+  executeDisconnectSocket({
+    connectionState,
+    memberTokenState: roomSessionState,
+    resetReconnectState: () => socketController.resetReconnectState(),
+    stopClockSyncTimer: () => clockController.stopClockSyncTimer(),
+    clearPendingLocalShare: (reason) =>
+      shareController.clearPendingLocalShare(reason),
+  });
 }
 
-function resetRoomLifecycleTransientState(
-  action: RoomLifecycleAction,
+function doResetRoomLifecycleTransientState(
+  action: Parameters<typeof resetRoomLifecycleTransientState>[0],
   reason: string,
 ): void {
-  const cleanup = preparePendingLocalShareCleanupForRoomLifecycle(action, {
-    pendingLocalShareUrl: shareState.pendingLocalShareUrl,
-    pendingLocalShareExpiresAt: shareState.pendingLocalShareExpiresAt,
-    pendingLocalShareTimer: shareState.pendingLocalShareTimer,
+  resetRoomLifecycleTransientState(action, reason, {
+    shareState,
+    roomSessionState,
+    log: (message) => diagnosticsController.log("background", message),
   });
-  if (cleanup.hadPendingLocalShare) {
-    if (cleanup.shouldCancelTimer) {
-      if (shareState.pendingLocalShareTimer !== null) {
-        clearTimeout(shareState.pendingLocalShareTimer);
-        shareState.pendingLocalShareTimer = null;
-      }
-    }
-    diagnosticsController.log(
-      "background",
-      `Cleared pending local share (${reason})`,
-    );
-    ({
-      pendingLocalShareUrl: shareState.pendingLocalShareUrl,
-      pendingLocalShareExpiresAt: shareState.pendingLocalShareExpiresAt,
-      pendingLocalShareTimer: shareState.pendingLocalShareTimer,
-    } = cleanup.nextState);
-  }
-  shareState.pendingShareToast = null;
-  roomSessionState.pendingSharedVideo = null;
-  roomSessionState.pendingSharedPlayback = null;
 }
 
 async function notifyContentScripts(
@@ -481,33 +436,10 @@ async function updateServerUrl(nextServerUrl: string): Promise<void> {
   await serverUrlController.updateServerUrl(nextServerUrl);
 }
 
-chrome.runtime.onMessage.addListener(
-  (
-    message: PopupToBackgroundMessage | ContentToBackgroundMessage,
-    sender,
-    sendResponse,
-  ) => {
-    if (bootstrapStatus !== "ready") {
-      const error =
-        bootstrapStatus === "failed"
-          ? BOOTSTRAP_FAILED_MESSAGE
-          : BOOTSTRAP_PENDING_MESSAGE;
-      if (message.type === "popup:get-state") {
-        sendResponse(popupStateController.popupState());
-      } else {
-        sendResponse({ ok: false, error });
-      }
-      return true;
-    }
-    void messageController.handleRuntimeMessage(message, sender, sendResponse);
-
-    return true;
-  },
-);
-
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "popup-state") {
-    return;
-  }
-  popupStateController.attachPort(port);
+registerBackgroundListeners({
+  getBootstrapStatus: () => bootstrapStatus,
+  bootstrapPendingMessage: BOOTSTRAP_PENDING_MESSAGE,
+  bootstrapFailedMessage: BOOTSTRAP_FAILED_MESSAGE,
+  popupStateController,
+  messageController,
 });
