@@ -158,17 +158,6 @@ export function createRoomStateApplyController(args: {
     args.notifyRoomStateToasts(state);
     args.maybeShowSharedVideoToast(shareToast, state);
 
-    const currentMemberIds = new Set(state.members.map((m) => m.id));
-    const currentPlaybackActorId = state.playback?.actorId;
-    for (const actorId of args.lastAppliedVersionByActor.keys()) {
-      if (
-        !currentMemberIds.has(actorId) &&
-        actorId !== currentPlaybackActorId
-      ) {
-        args.lastAppliedVersionByActor.delete(actorId);
-      }
-    }
-
     const currentVideo = args.getSharedVideo();
     const normalizedSharedUrl = args.normalizeUrl(state.sharedVideo?.url);
     const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
