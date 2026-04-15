@@ -1,8 +1,10 @@
-import { createServer, type Server as HttpServer } from "node:http";
-import { randomBytes } from "node:crypto";
+import type { Server as HttpServer } from "node:http";
 import { WebSocketServer } from "ws";
-import { createAdminServices } from "./bootstrap/admin-services.js";
-import { createHttpRequestHandler } from "./bootstrap/http-handler.js";
+import {
+  createCloseHttpServerStep,
+  createSharedAdminHttpBootstrap,
+  resolveServerRuntimeDependencies,
+} from "./bootstrap/admin-http-bootstrap.js";
 import {
   createServerBootstrapContext,
   createSharedServerShutdownSteps,
@@ -17,10 +19,8 @@ import { createRoomEventConsumer } from "./room-event-consumer.js";
 import { type RoomStore } from "./room-store.js";
 import { createRoomReaper } from "./room-reaper.js";
 import { createRoomService } from "./room-service.js";
-import { createRuntimeIndexReaper } from "./runtime-index-reaper.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
 import { type RuntimeStore } from "./runtime-store.js";
-import { createSecurityPolicy } from "./security.js";
 import { hasAttachedSocket } from "./types.js";
 import {
   createWsConnectionHandler,
@@ -76,9 +76,7 @@ export async function createSyncServer(
   persistenceConfig: PersistenceConfig = getDefaultPersistenceConfig(),
   dependencies: SyncServerDependencies = {},
 ): Promise<SyncServer> {
-  const now = dependencies.now ?? Date.now;
-  const generateToken =
-    dependencies.generateToken ?? (() => randomBytes(24).toString("base64url"));
+  const { now, generateToken } = resolveServerRuntimeDependencies(dependencies);
   const {
     serviceVersion,
     roomStore,
@@ -133,7 +131,6 @@ export async function createSyncServer(
       },
     },
   });
-  const securityPolicy = createSecurityPolicy(securityConfig);
 
   const roomService = createRoomService({
     config: securityConfig,
@@ -255,40 +252,24 @@ export async function createSyncServer(
     logEvent,
   });
   nodeHeartbeat.start();
-  const runtimeIndexReaper = createRuntimeIndexReaper({
-    enabled:
-      persistenceConfig.nodeHeartbeatEnabled &&
-      persistenceConfig.runtimeStoreProvider === "redis",
-    runtimeStore,
-    intervalMs: persistenceConfig.nodeHeartbeatIntervalMs,
-    now,
-    logEvent,
-  });
-  runtimeIndexReaper.start();
-  const { adminRouter, close: closeAdminServices } = await createAdminServices({
-    securityConfig,
-    persistenceConfig,
-    roomStore,
-    runtimeStore,
-    eventStore,
-    roomService,
-    send,
-    publishRoomEvent,
-    requestAdminCommand: (command, timeoutMs) =>
-      adminCommandBus.request(command, timeoutMs),
-    logEvent,
-    now,
-    adminConfig: dependencies.adminConfig,
-    serviceVersion,
-  });
-
-  const httpServer = createServer(
-    createHttpRequestHandler({
-      adminRouter,
-      securityPolicy,
+  const { securityPolicy, httpServer, runtimeIndexReaper, closeAdminServices } =
+    await createSharedAdminHttpBootstrap({
+      securityConfig,
+      persistenceConfig,
+      roomStore,
+      runtimeStore,
+      eventStore,
+      roomService,
+      send,
+      publishRoomEvent,
+      requestAdminCommand: (command, timeoutMs) =>
+        adminCommandBus.request(command, timeoutMs),
+      logEvent,
+      now,
+      adminConfig: dependencies.adminConfig,
       adminUiConfig: dependencies.adminUiConfig,
-    }),
-  );
+      serviceVersion,
+    });
 
   const wss = new WebSocketServer({
     noServer: true,
@@ -353,13 +334,9 @@ export async function createSyncServer(
                     reject(wsError);
                     return;
                   }
-                  httpServer.close((httpError) => {
-                    if (httpError) {
-                      reject(httpError);
-                      return;
-                    }
-                    resolve();
-                  });
+                  Promise.resolve(
+                    createCloseHttpServerStep(httpServer).run(),
+                  ).then(() => resolve(), reject);
                 });
               }),
           },
