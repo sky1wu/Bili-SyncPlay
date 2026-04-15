@@ -31,10 +31,11 @@ import {
   shouldSuppressProgrammaticEvent as shouldSuppressProgrammaticEventGuard,
   shouldSuppressRemotePlayTransition as shouldSuppressRemotePlayTransitionGuard,
 } from "./sync-guards";
+import { createSoftApplyController } from "./soft-apply-controller";
+import { createPendingLocalOverrideController } from "./pending-local-override";
 import type {
   ContentRuntimeState,
   LocalPlaybackEventSource,
-  PendingLocalPlaybackOverride,
 } from "./runtime-state";
 
 export interface SyncController {
@@ -89,30 +90,12 @@ export function createSyncController(args: {
     state: RoomState,
   ) => void;
 }): SyncController {
-  const PENDING_LOCAL_EXPLICIT_SEEK_GUARD_MS = 5_000;
-  const PENDING_LOCAL_EXPLICIT_SEEK_SETTLE_THRESHOLD_SECONDS = 0.35;
-  const PENDING_LOCAL_EXPLICIT_RATECHANGE_GUARD_MS = 5_000;
-  const PENDING_LOCAL_EXPLICIT_RATECHANGE_SETTLE_THRESHOLD = 0.01;
-  const SOFT_APPLY_RECOVERY_THRESHOLD_SECONDS = 0.2;
-  const SOFT_APPLY_MIN_TIMEOUT_MS = 2_000;
-  const SOFT_APPLY_MAX_TIMEOUT_MS = 4_500;
-  const SOFT_APPLY_TIMEOUT_PER_SECOND_MS = 900;
-  const SOFT_APPLY_RTT_TIMEOUT_FACTOR = 2.5;
-  const SOFT_APPLY_TARGET_SHIFT_CANCEL_THRESHOLD_SECONDS = 0.6;
-  const SOFT_APPLY_COOLDOWN_MS = 2_500;
   const nowOf = () => args.getNow?.() ?? Date.now();
-  let activeSoftApply: {
-    normalizedUrl: string;
-    targetTime: number;
-    restorePlaybackRate: number;
-    deadlineAt: number;
-  } | null = null;
-  let activeSoftApplyTimer: number | null = null;
   const ignoredRemotePlaybackLogState = { key: null as string | null, at: 0 };
   const localEchoLogState = { key: null as string | null, at: 0 };
   const dispatchPlaybackLogState = { key: null as string | null, at: 0 };
 
-  function formatPlaybackDiagnostic(args: {
+  function formatPlaybackDiagnostic(argsForLog: {
     actor?: string | null;
     playState: PlaybackState["playState"];
     url: string;
@@ -121,20 +104,20 @@ export function createSyncController(args: {
     result: string;
     extra?: string;
   }): string {
-    const localTime = args.localTime ?? null;
+    const localTime = argsForLog.localTime ?? null;
     const delta =
       localTime === null
         ? "n/a"
-        : Math.abs(localTime - args.targetTime).toFixed(2);
+        : Math.abs(localTime - argsForLog.targetTime).toFixed(2);
     const parts = [
-      `actor=${args.actor ?? "unknown"}`,
-      `playState=${args.playState}`,
-      `url=${args.url}`,
+      `actor=${argsForLog.actor ?? "unknown"}`,
+      `playState=${argsForLog.playState}`,
+      `url=${argsForLog.url}`,
       `delta=${delta}`,
-      `result=${args.result}`,
+      `result=${argsForLog.result}`,
     ];
-    if (args.extra) {
-      parts.push(args.extra);
+    if (argsForLog.extra) {
+      parts.push(argsForLog.extra);
     }
     return parts.join(" ");
   }
@@ -217,229 +200,36 @@ export function createSyncController(args: {
     );
   }
 
-  function clearActiveSoftApplyState(): void {
-    activeSoftApply = null;
-    if (activeSoftApplyTimer !== null) {
-      window.clearTimeout(activeSoftApplyTimer);
-      activeSoftApplyTimer = null;
-    }
-  }
+  const softApply = createSoftApplyController({
+    runtimeState: args.runtimeState,
+    normalizeUrl: args.normalizeUrl,
+    getVideoElement: args.getVideoElement,
+    debugLog: args.debugLog,
+    userGestureGraceMs: args.userGestureGraceMs,
+    programmaticApplyWindowMs: args.programmaticApplyWindowMs,
+    getNow: args.getNow,
+    armProgrammaticApplyWindow,
+  });
 
-  function armSoftApplyCooldown(normalizedUrl: string, reason: string): void {
-    args.runtimeState.softApplyCooldownUrl = normalizedUrl;
-    args.runtimeState.softApplyCooldownUntil = nowOf() + SOFT_APPLY_COOLDOWN_MS;
-    args.debugLog(
-      `Soft apply cooldown armed url=${normalizedUrl} result=${reason} until=${args.runtimeState.softApplyCooldownUntil}`,
-    );
-  }
-
-  function clearSoftApplyCooldown(): void {
-    args.runtimeState.softApplyCooldownUntil = 0;
-    args.runtimeState.softApplyCooldownUrl = null;
-  }
-
-  function computeSoftApplyTimeoutMs(remainingDriftSeconds: number): number {
-    const networkAllowanceMs =
-      args.runtimeState.rttMs === null
-        ? 0
-        : Math.round(args.runtimeState.rttMs * SOFT_APPLY_RTT_TIMEOUT_FACTOR);
-    return Math.min(
-      SOFT_APPLY_MAX_TIMEOUT_MS,
-      Math.max(
-        SOFT_APPLY_MIN_TIMEOUT_MS,
-        Math.round(
-          SOFT_APPLY_MIN_TIMEOUT_MS +
-            networkAllowanceMs +
-            Math.max(
-              0,
-              remainingDriftSeconds - SOFT_APPLY_RECOVERY_THRESHOLD_SECONDS,
-            ) *
-              SOFT_APPLY_TIMEOUT_PER_SECOND_MS,
-        ),
-      ),
-    );
-  }
-
-  function cancelActiveSoftApply(
-    video: HTMLVideoElement | null,
-    reason: string,
-  ): void {
-    if (!activeSoftApply) {
-      return;
-    }
-
-    const session = activeSoftApply;
-    clearActiveSoftApplyState();
-    if (
-      video &&
-      Math.abs(video.playbackRate - session.restorePlaybackRate) > 0.01
-    ) {
-      video.playbackRate = session.restorePlaybackRate;
-      armProgrammaticApplyWindow(
-        {
-          url: session.normalizedUrl,
-          playState: getPlayState(video, args.runtimeState.intendedPlayState),
-          currentTime: video.currentTime,
-          playbackRate: session.restorePlaybackRate,
-        },
-        "apply",
-      );
-    }
-    if (reason === "converged" || reason === "apply-hard-seek") {
-      armSoftApplyCooldown(session.normalizedUrl, reason);
-    } else if (
-      args.runtimeState.softApplyCooldownUrl === session.normalizedUrl
-    ) {
-      clearSoftApplyCooldown();
-    }
-    args.debugLog(
-      `Cancelled soft apply url=${session.normalizedUrl} target=${session.targetTime.toFixed(2)} result=${reason}`,
-    );
-  }
-
-  function scheduleActiveSoftApplyTimeout(): void {
-    if (!activeSoftApply) {
-      return;
-    }
-    if (activeSoftApplyTimer !== null) {
-      window.clearTimeout(activeSoftApplyTimer);
-    }
-    const delayMs = Math.max(0, activeSoftApply.deadlineAt - nowOf());
-    activeSoftApplyTimer = window.setTimeout(() => {
-      activeSoftApplyTimer = null;
-      if (!activeSoftApply) {
-        return;
-      }
-      const video = args.getVideoElement();
-      cancelActiveSoftApply(video, "timeout");
-    }, delayMs);
-  }
-
-  function upsertActiveSoftApply(
-    playback: PlaybackState,
-    remainingDriftSeconds: number,
-  ): void {
-    const normalizedUrl = args.normalizeUrl(playback.url);
-    if (!normalizedUrl) {
-      clearActiveSoftApplyState();
-      return;
-    }
-    const timeoutMs = computeSoftApplyTimeoutMs(remainingDriftSeconds);
-    activeSoftApply = {
-      normalizedUrl,
-      targetTime: playback.currentTime,
-      restorePlaybackRate: playback.playbackRate,
-      deadlineAt: nowOf() + timeoutMs,
-    };
-    scheduleActiveSoftApplyTimeout();
-    args.debugLog(
-      `Started soft apply url=${normalizedUrl} target=${playback.currentTime.toFixed(2)} rate=${playback.playbackRate.toFixed(2)} timeout=${timeoutMs}`,
-    );
-  }
-
-  function shouldCancelActiveSoftApplyForPlayback(
-    playback: PlaybackState | null,
-  ): string | null {
-    if (!activeSoftApply) {
-      return null;
-    }
-    if (!playback) {
-      return "missing-playback";
-    }
-
-    const normalizedUrl = args.normalizeUrl(playback.url);
-    if (!normalizedUrl || normalizedUrl !== activeSoftApply.normalizedUrl) {
-      return "url-changed";
-    }
-    if (playback.playState !== "playing") {
-      return "play-state-changed";
-    }
-    if (
-      shouldTreatAsExplicitSeek({
-        syncIntent: playback.syncIntent,
-        playState: playback.playState,
-      })
-    ) {
-      return "explicit-seek";
-    }
-    if (
-      Math.abs(playback.playbackRate - activeSoftApply.restorePlaybackRate) >
-      0.01
-    ) {
-      return "rate-changed";
-    }
-    if (
-      Math.abs(playback.currentTime - activeSoftApply.targetTime) >
-      SOFT_APPLY_TARGET_SHIFT_CANCEL_THRESHOLD_SECONDS
-    ) {
-      return "target-shifted";
-    }
-    return null;
-  }
-
-  function maintainActiveSoftApply(video: HTMLVideoElement): void {
-    if (!activeSoftApply) {
-      return;
-    }
-    if (nowOf() >= activeSoftApply.deadlineAt) {
-      cancelActiveSoftApply(video, "timeout");
-      return;
-    }
-    if (
-      Math.abs(video.currentTime - activeSoftApply.targetTime) <=
-      SOFT_APPLY_RECOVERY_THRESHOLD_SECONDS
-    ) {
-      cancelActiveSoftApply(video, "converged");
-    }
-  }
-
-  function shouldSuppressActiveSoftApplyBroadcast(input: {
-    normalizedCurrentUrl: string | null;
-    playState: PlaybackState["playState"];
-    eventSource: LocalPlaybackEventSource;
-    now: number;
-  }): boolean {
-    if (
-      !activeSoftApply ||
-      input.now >= activeSoftApply.deadlineAt ||
-      !input.normalizedCurrentUrl ||
-      input.normalizedCurrentUrl !== activeSoftApply.normalizedUrl
-    ) {
-      return false;
-    }
-
-    if (
-      args.runtimeState.lastExplicitUserAction &&
-      input.now - args.runtimeState.lastExplicitUserAction.at <
-        args.userGestureGraceMs
-    ) {
-      return false;
-    }
-
-    args.debugLog(
-      `Skip broadcast ${formatPlaybackDiagnostic({
-        actor: args.runtimeState.localMemberId,
-        playState: input.playState,
-        url: activeSoftApply.normalizedUrl,
-        localTime: null,
-        targetTime: activeSoftApply.targetTime,
-        result: `soft-apply-follow-${input.eventSource}`,
-      })}`,
-    );
-    return true;
-  }
+  const pendingLocalOverride = createPendingLocalOverrideController({
+    runtimeState: args.runtimeState,
+    userGestureGraceMs: args.userGestureGraceMs,
+    normalizeUrl: args.normalizeUrl,
+    getNow: args.getNow,
+    debugLog: args.debugLog,
+  });
 
   function resetPlaybackSyncState(reason: string): void {
-    cancelActiveSoftApply(args.getVideoElement(), `reset:${reason}`);
+    softApply.cancelActiveSoftApply(args.getVideoElement(), `reset:${reason}`);
     args.lastAppliedVersionByActor.clear();
     clearRemoteFollowPlayingWindow();
     args.runtimeState.suppressedRemotePlayback = null;
     args.runtimeState.recentRemotePlayingIntent = null;
     args.runtimeState.pendingPlaybackApplication = null;
-    clearPendingLocalPlaybackOverride();
+    pendingLocalOverride.clearPendingLocalPlaybackOverride("reset");
     args.runtimeState.programmaticApplyUntil = 0;
     args.runtimeState.programmaticApplySignature = null;
-    clearSoftApplyCooldown();
+    softApply.clearSoftApplyCooldown();
     args.runtimeState.lastLocalPlaybackVersion = null;
     args.runtimeState.intendedPlaybackRate = 1;
     args.runtimeState.lastNonSharedGuardUrl = null;
@@ -457,7 +247,7 @@ export function createSyncController(args: {
       },
       onPlaybackAdjusted: (adjustment, playback) => {
         if (adjustment.mode !== "soft-apply") {
-          clearSoftApplyCooldown();
+          softApply.clearSoftApplyCooldown();
         }
         args.debugLog(
           `Playback reconcile actor=${playback.actorId} playState=${playback.playState} url=${playback.url} ${formatPlaybackReconcileDecision(
@@ -469,13 +259,13 @@ export function createSyncController(args: {
           )} wroteTime=${adjustment.didWriteCurrentTime} wroteRate=${adjustment.didWritePlaybackRate} targetTime=${adjustment.targetTime.toFixed(2)} appliedTime=${adjustment.currentTime.toFixed(2)} appliedRate=${adjustment.playbackRate.toFixed(2)} restoreRate=${adjustment.restorePlaybackRate.toFixed(2)}`,
         );
         if (adjustment.mode === "soft-apply") {
-          upsertActiveSoftApply(
+          softApply.upsertActiveSoftApply(
             playback,
             Math.abs(adjustment.targetTime - adjustment.currentTime),
           );
           return;
         }
-        cancelActiveSoftApply(
+        softApply.cancelActiveSoftApply(
           args.getVideoElement(),
           `apply-${adjustment.mode}`,
         );
@@ -507,43 +297,6 @@ export function createSyncController(args: {
     }
   }
 
-  function shouldSuppressBySoftApplyCooldown(
-    video: HTMLVideoElement,
-    playback: PlaybackState,
-  ): boolean {
-    if (
-      args.runtimeState.softApplyCooldownUntil <= nowOf() ||
-      !args.runtimeState.softApplyCooldownUrl
-    ) {
-      return false;
-    }
-
-    const normalizedUrl = args.normalizeUrl(playback.url);
-    if (
-      !normalizedUrl ||
-      normalizedUrl !== args.runtimeState.softApplyCooldownUrl ||
-      video.paused ||
-      playback.playState !== "playing" ||
-      playback.syncIntent === "explicit-seek" ||
-      playback.syncIntent === "explicit-ratechange"
-    ) {
-      return false;
-    }
-
-    const decision = decidePlaybackReconcileMode({
-      localCurrentTime: video.currentTime,
-      targetTime: playback.currentTime,
-      playState: playback.playState,
-      playbackRate: playback.playbackRate,
-      isExplicitSeek: shouldTreatAsExplicitSeek({
-        syncIntent: playback.syncIntent,
-        playState: playback.playState,
-      }),
-    });
-
-    return decision.mode === "rate-only" || decision.mode === "soft-apply";
-  }
-
   function logIgnoredRemotePlayback(argsForLog: {
     playback: PlaybackState;
     video: HTMLVideoElement;
@@ -563,149 +316,6 @@ export function createSyncController(args: {
         extra: argsForLog.extra,
       })}`,
     );
-  }
-
-  function clearPendingLocalPlaybackOverride(reason = "unknown"): void {
-    if (args.runtimeState.pendingLocalPlaybackOverride) {
-      const pending = args.runtimeState.pendingLocalPlaybackOverride;
-      args.debugLog(
-        `Cleared pending local playback override kind=${pending.kind} url=${pending.url} seq=${pending.seq} reason=${reason}`,
-      );
-    }
-    args.runtimeState.pendingLocalPlaybackOverride = null;
-  }
-
-  function getPendingLocalPlaybackOverrideDecision(
-    playback: PlaybackState | null,
-  ): {
-    shouldIgnore: boolean;
-    reason?: string;
-    extra?: string;
-  } {
-    const pending = args.runtimeState.pendingLocalPlaybackOverride;
-    if (!pending) {
-      return { shouldIgnore: false };
-    }
-
-    if (nowOf() >= pending.expiresAt) {
-      clearPendingLocalPlaybackOverride("expired");
-      return { shouldIgnore: false };
-    }
-
-    if (!playback) {
-      return { shouldIgnore: false };
-    }
-
-    const normalizedPlaybackUrl = args.normalizeUrl(playback.url);
-    if (!normalizedPlaybackUrl || normalizedPlaybackUrl !== pending.url) {
-      return { shouldIgnore: false };
-    }
-
-    if (
-      args.runtimeState.localMemberId &&
-      playback.actorId === args.runtimeState.localMemberId &&
-      playback.seq >= pending.seq
-    ) {
-      clearPendingLocalPlaybackOverride("self-echo-ack");
-      return { shouldIgnore: false };
-    }
-
-    if (pending.kind === "seek") {
-      return getPendingLocalSeekOverrideDecision(playback, pending);
-    }
-
-    return getPendingLocalRateOverrideDecision(playback, pending);
-  }
-
-  function getPendingLocalSeekOverrideDecision(
-    playback: PlaybackState,
-    pending: PendingLocalPlaybackOverride,
-  ): {
-    shouldIgnore: boolean;
-    reason?: string;
-    extra?: string;
-  } {
-    if (pending.targetTime === undefined) {
-      return { shouldIgnore: false };
-    }
-
-    const deltaToPending = Math.abs(playback.currentTime - pending.targetTime);
-    if (
-      deltaToPending <= PENDING_LOCAL_EXPLICIT_SEEK_SETTLE_THRESHOLD_SECONDS
-    ) {
-      clearPendingLocalPlaybackOverride("seek-settled");
-      return { shouldIgnore: false };
-    }
-
-    return {
-      shouldIgnore: true,
-      reason: "pending-local-explicit-seek",
-      extra: `seq=${playback.seq} pendingSeq=${pending.seq} seekDelta=${deltaToPending.toFixed(2)} incomingIntent=${playback.syncIntent ?? "none"}`,
-    };
-  }
-
-  function getPendingLocalRateOverrideDecision(
-    playback: PlaybackState,
-    pending: PendingLocalPlaybackOverride,
-  ): {
-    shouldIgnore: boolean;
-    reason?: string;
-    extra?: string;
-  } {
-    if (
-      playback.playState !== "playing" ||
-      pending.playbackRate === undefined
-    ) {
-      return { shouldIgnore: false };
-    }
-
-    const rateDelta = Math.abs(playback.playbackRate - pending.playbackRate);
-    if (rateDelta <= PENDING_LOCAL_EXPLICIT_RATECHANGE_SETTLE_THRESHOLD) {
-      clearPendingLocalPlaybackOverride("rate-settled");
-      return { shouldIgnore: false };
-    }
-
-    return {
-      shouldIgnore: true,
-      reason: "pending-local-explicit-ratechange",
-      extra: `seq=${playback.seq} pendingSeq=${pending.seq} rateDelta=${rateDelta.toFixed(2)} targetRate=${pending.playbackRate.toFixed(2)} incomingRate=${playback.playbackRate.toFixed(2)}`,
-    };
-  }
-
-  function rememberPendingLocalPlaybackOverride(
-    payload: PlaybackState,
-    now: number,
-  ): void {
-    if (payload.syncIntent === "explicit-seek") {
-      args.runtimeState.pendingLocalPlaybackOverride = {
-        kind: "seek",
-        url: args.normalizeUrl(payload.url) ?? payload.url,
-        targetTime: payload.currentTime,
-        seq: payload.seq,
-        expiresAt: now + PENDING_LOCAL_EXPLICIT_SEEK_GUARD_MS,
-      };
-      args.debugLog(
-        `Remember pending local playback override kind=seek url=${payload.url} target=${payload.currentTime.toFixed(2)} seq=${payload.seq} expiresAt=${args.runtimeState.pendingLocalPlaybackOverride.expiresAt}`,
-      );
-      return;
-    }
-
-    if (
-      args.runtimeState.lastExplicitUserAction?.kind === "ratechange" &&
-      now - args.runtimeState.lastExplicitUserAction.at <
-        args.userGestureGraceMs
-    ) {
-      args.runtimeState.pendingLocalPlaybackOverride = {
-        kind: "ratechange",
-        url: args.normalizeUrl(payload.url) ?? payload.url,
-        playbackRate: payload.playbackRate,
-        seq: payload.seq,
-        expiresAt: now + PENDING_LOCAL_EXPLICIT_RATECHANGE_GUARD_MS,
-      };
-      args.debugLog(
-        `Remember pending local playback override kind=ratechange url=${payload.url} rate=${payload.playbackRate.toFixed(2)} seq=${payload.seq} expiresAt=${args.runtimeState.pendingLocalPlaybackOverride.expiresAt}`,
-      );
-    }
   }
 
   function clearRemoteFollowPlayingWindow(): void {
@@ -1219,13 +829,23 @@ export function createSyncController(args: {
       );
     }
     if (
-      shouldSuppressActiveSoftApplyBroadcast({
+      softApply.shouldSuppressActiveSoftApplyBroadcast({
         normalizedCurrentUrl: normalizedCurrentVideoUrl,
         playState,
         eventSource,
         now,
       })
     ) {
+      args.debugLog(
+        `Skip broadcast ${formatPlaybackDiagnostic({
+          actor: args.runtimeState.localMemberId,
+          playState,
+          url: currentVideo.url,
+          localTime: null,
+          targetTime: video.currentTime,
+          result: `soft-apply-follow-${eventSource}`,
+        })}`,
+      );
       logBroadcastTrace(
         "soft-apply-suppress",
         eventSource,
@@ -1412,7 +1032,7 @@ export function createSyncController(args: {
       seq: args.nextSeq(),
       now,
     });
-    rememberPendingLocalPlaybackOverride(payload, now);
+    pendingLocalOverride.rememberPendingLocalPlaybackOverride(payload, now);
 
     if (eventSource === "timeupdate") {
       logHeartbeatMessage(
@@ -1461,6 +1081,7 @@ export function createSyncController(args: {
       );
     }
   }
+
   const roomStateApplyController = createRoomStateApplyController({
     runtimeState: args.runtimeState,
     lastAppliedVersionByActor: args.lastAppliedVersionByActor,
@@ -1478,18 +1099,20 @@ export function createSyncController(args: {
     normalizeUrl: args.normalizeUrl,
     notifyRoomStateToasts: args.notifyRoomStateToasts,
     maybeShowSharedVideoToast: args.maybeShowSharedVideoToast,
-    cancelActiveSoftApply,
+    cancelActiveSoftApply: softApply.cancelActiveSoftApply,
     resetPlaybackSyncState,
     activatePauseHold,
     clearRemoteFollowPlayingWindow,
     acceptInitialRoomStateHydration,
     acceptInitialRoomStateHydrationIfPending,
     logIgnoredRemotePlayback,
-    getPendingLocalPlaybackOverrideDecision,
-    shouldCancelActiveSoftApplyForPlayback,
+    getPendingLocalPlaybackOverrideDecision:
+      pendingLocalOverride.getPendingLocalPlaybackOverrideDecision,
+    shouldCancelActiveSoftApplyForPlayback:
+      softApply.shouldCancelActiveSoftApplyForPlayback,
     shouldApplySelfPlayback,
     shouldIgnoreRemotePlaybackApply,
-    shouldSuppressRemotePlaybackByCooldown: shouldSuppressBySoftApplyCooldown,
+    shouldSuppressRemotePlaybackByCooldown: softApply.shouldSuppressByCooldown,
     rememberRemoteFollowPlayingWindow,
     rememberRemotePlaybackForSuppression,
     armProgrammaticApplyWindow,
@@ -1500,18 +1123,15 @@ export function createSyncController(args: {
   return {
     resetPlaybackSyncState,
     hasRecentRemoteStopIntent,
-    cancelActiveSoftApply,
-    maintainActiveSoftApply,
+    cancelActiveSoftApply: softApply.cancelActiveSoftApply,
+    maintainActiveSoftApply: softApply.maintainActiveSoftApply,
     applyPendingPlaybackApplication,
     broadcastPlayback,
     applyRoomState: roomStateApplyController.applyRoomState,
     hydrateRoomState: roomStateApplyController.hydrateRoomState,
     scheduleHydrationRetry: roomStateApplyController.scheduleHydrationRetry,
     destroy() {
-      if (activeSoftApplyTimer !== null) {
-        window.clearTimeout(activeSoftApplyTimer);
-        activeSoftApplyTimer = null;
-      }
+      softApply.destroy();
       roomStateApplyController.destroy();
     },
   };
