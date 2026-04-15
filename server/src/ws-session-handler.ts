@@ -20,9 +20,20 @@ import type { RuntimeStore } from "./runtime-store.js";
 
 const CLOSE_CODE_POLICY_VIOLATION = 1008;
 
-export function send(socket: WebSocket, message: ServerMessage): void {
+export function send(
+  socket: WebSocket,
+  message: ServerMessage,
+  logEvent?: LogEvent,
+): void {
   if (socket.readyState === socket.OPEN) {
-    socket.send(JSON.stringify(message));
+    try {
+      socket.send(JSON.stringify(message));
+    } catch (error) {
+      logEvent?.("ws_send_failed", {
+        messageType: message.type,
+        error: error instanceof Error ? error.message : "unknown_error",
+      });
+    }
   }
 }
 
