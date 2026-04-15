@@ -3,7 +3,6 @@ import test from "node:test";
 import type { PlaybackState, SharedVideo } from "@bili-syncplay/protocol";
 import type { WebSocket } from "ws";
 import { createActiveRoomRegistry } from "../src/active-room-registry.js";
-import { createInMemoryRuntimeStore } from "../src/runtime-store.js";
 import {
   getDefaultPersistenceConfig,
   getDefaultSecurityConfig,
@@ -1749,25 +1748,53 @@ test("concurrent playback updates produce consistent final state without errors"
   );
 });
 
-test("tryClaimMessageSlot concurrent race allows exactly one caller to claim the slot", async () => {
-  // Two concurrent callers race to claim the same dedup slot. The in-memory
-  // store is synchronous under the hood, so the first Promise.resolve wins and
-  // the second sees the key already set. Exactly one must return true.
-  const store = createInMemoryRuntimeStore(() => 1_000);
-  const roomCode = "RACE01";
-  const key = "share:actor-x:https://example.com:0";
-  const expiresAt = 11_000;
+test("concurrent duplicate video:share requests are deduplicated to a single write", async () => {
+  // Two concurrent shareVideoForSession calls with an identical video are
+  // issued via Promise.all. Both pass requireJoinedRoomSession (an awaited
+  // async step), which creates a genuine interleaving point: call A suspends,
+  // call B suspends, then A resumes first and claims the dedup slot. When B
+  // resumes and reaches tryClaimMessageSlot the key is already set, so B is
+  // deduplicated without issuing an updateRoom write.
+  //
+  // The observable invariant: the persisted room version increases by exactly
+  // 1 (one write), not 2 (both writes landing) or 0 (both rejected).
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry(() => currentTime);
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM18",
+  });
 
-  const [first, second] = await Promise.all([
-    store.tryClaimMessageSlot(roomCode, key, expiresAt),
-    store.tryClaimMessageSlot(roomCode, key, expiresAt),
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const versionAfterCreate = (await roomStore.getRoom(created.room.code))
+    ?.version;
+
+  const video = createSharedVideo();
+
+  const [resultA, resultB] = await Promise.all([
+    service.shareVideoForSession(owner, created.memberToken, video),
+    service.shareVideoForSession(owner, created.memberToken, video),
   ]);
 
-  const claimed = [first, second].filter(Boolean);
+  // Both calls complete without throwing; one lands, one is deduplicated
+  assert.ok(resultA.room, "resultA must return a room");
+  assert.ok(resultB.room, "resultB must return a room");
+
+  const finalRoom = await roomStore.getRoom(created.room.code);
   assert.equal(
-    claimed.length,
-    1,
-    "exactly one concurrent claim must succeed; got: " +
-      JSON.stringify([first, second]),
+    finalRoom?.version,
+    (versionAfterCreate ?? 0) + 1,
+    "exactly one updateRoom write must have occurred; version must advance by 1",
   );
 });
