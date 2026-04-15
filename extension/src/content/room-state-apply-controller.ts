@@ -103,6 +103,7 @@ export function createRoomStateApplyController(args: {
   const ignoredRoomStateLogState = { key: null as string | null, at: 0 };
   const nowOf = () => args.getNow?.() ?? Date.now();
   let hydrateRetryTimer: number | null = null;
+  let destroyed = false;
 
   /**
    * When hydrating an empty room, suppress autoplay only if the video was not
@@ -141,7 +142,7 @@ export function createRoomStateApplyController(args: {
   }
 
   function scheduleHydrationRetry(delayMs = 350): void {
-    if (hydrateRetryTimer !== null) {
+    if (destroyed || hydrateRetryTimer !== null) {
       return;
     }
     const timer = window.setTimeout(() => {
@@ -425,6 +426,9 @@ export function createRoomStateApplyController(args: {
   }
 
   async function hydrateRoomState(): Promise<void> {
+    if (destroyed) {
+      return;
+    }
     if (hydrateRetryTimer !== null) {
       window.clearTimeout(hydrateRetryTimer);
       hydrateRetryTimer = null;
@@ -438,8 +442,8 @@ export function createRoomStateApplyController(args: {
     }>({
       type: "content:get-room-state",
     });
-    if (response === null) {
-      args.runtimeState.hydrationReady = true;
+    if (destroyed || response === null) {
+      if (!destroyed) args.runtimeState.hydrationReady = true;
       return;
     }
     args.runtimeState.localMemberId = response?.memberId ?? null;
@@ -495,6 +499,7 @@ export function createRoomStateApplyController(args: {
   }
 
   function destroy(): void {
+    destroyed = true;
     if (hydrateRetryTimer !== null) {
       window.clearTimeout(hydrateRetryTimer);
       hydrateRetryTimer = null;
