@@ -162,15 +162,13 @@ async function init(): Promise<void> {
   });
   playbackBindingController.start();
   navigationController.start();
-  window.addEventListener(
-    "pagehide",
-    () => {
+  window.addEventListener("pagehide", (event) => {
+    if (!event.persisted) {
       syncController.destroy();
       playbackBindingController.destroy();
       navigationController.destroy();
-    },
-    { once: true },
-  );
+    }
+  });
   document.addEventListener("fullscreenchange", () => {
     toastPresenter.resetMountTarget();
   });
