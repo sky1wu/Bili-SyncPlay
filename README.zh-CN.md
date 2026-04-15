@@ -388,7 +388,7 @@ Chrome 显示的扩展版本来自 `extension/dist/manifest.json`。
 
 推荐环境：
 
-- Node.js 20 或 22
+- Node.js 22（见 `.nvmrc`）
 - Redis
 - Nginx 反向代理
 - 生产环境使用 `wss://` 服务器地址
@@ -793,7 +793,7 @@ node -e "const { createHash } = require('node:crypto'); console.log('sha256:' + 
 - 服务用户：`bili-syncplay`
 - 内部端口：`8787`
 
-先安装 Node.js 20 或 22、Redis 和 Nginx，然后克隆仓库：
+先安装 Node.js 22（见 `.nvmrc`）、Redis 和 Nginx，然后克隆仓库：
 
 ```bash
 sudo mkdir -p /opt/bili-syncplay

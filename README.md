@@ -388,7 +388,7 @@ Practical consequences:
 
 Recommended setup:
 
-- Node.js 20 or 22
+- Node.js 22 (see `.nvmrc`)
 - Redis
 - Nginx reverse proxy
 - `wss://` server URL for production
@@ -793,7 +793,7 @@ Example environment:
 - service user: `bili-syncplay`
 - internal port: `8787`
 
-Install Node.js 20 or 22, Redis, and Nginx first, then clone the repository:
+Install Node.js 22, Redis, and Nginx first, then clone the repository:
 
 ```bash
 sudo mkdir -p /opt/bili-syncplay
