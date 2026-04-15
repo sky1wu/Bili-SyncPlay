@@ -231,6 +231,8 @@ export async function createServerBootstrapContext(
         })
       : createInMemoryRoomStore({ now }));
   const localRuntimeStore = createInMemoryRuntimeStore(now);
+  const runtimeStorePendingOperationLogger =
+    options.loggingHooks?.onRuntimeStorePendingOperationError;
 
   let logEvent: LogEvent = dependencies.logEvent ?? (() => undefined);
 
@@ -239,13 +241,13 @@ export async function createServerBootstrapContext(
       ? await createRedisRuntimeStore(persistenceConfig.redisUrl, {
           now,
           keyPrefix: getRedisRuntimeKeyPrefix(persistenceConfig.redisNamespace),
-          onPendingOperationError: (context, error) => {
-            options.loggingHooks?.onRuntimeStorePendingOperationError?.(
-              logEvent,
-              context,
-              error,
-            );
-          },
+          ...(runtimeStorePendingOperationLogger
+            ? {
+                onPendingOperationError: (context, error) => {
+                  runtimeStorePendingOperationLogger(logEvent, context, error);
+                },
+              }
+            : {}),
         })
       : localRuntimeStore;
   const runtimeStore =
