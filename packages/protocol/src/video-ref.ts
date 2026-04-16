@@ -95,11 +95,11 @@ export function parseBilibiliVideoRef(
     return { videoId, normalizedUrl };
   } catch (err) {
     if (
-      typeof process === "undefined" ||
-      process.env.NODE_ENV !== "production"
+      !(err instanceof TypeError) &&
+      (typeof process === "undefined" || process.env.NODE_ENV !== "production")
     ) {
       console.debug(
-        "[bili-syncplay] parseBilibiliVideoRef: failed to parse URL",
+        "[bili-syncplay] parseBilibiliVideoRef: unexpected error parsing URL",
         url,
         err,
       );
