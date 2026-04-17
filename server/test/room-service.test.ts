@@ -407,10 +407,6 @@ test("room service skips leave recovery when socket is already closed", async ()
   // deleted — restoreLeaveState must not resurrect it and leave a zombie
   // member that `unregisterSession` cannot clean up.
   assert.equal(activeRooms.getRoom(created.room.code), null);
-  // The persisted row had no `expiresAt` set (the expiry write threw).
-  // Without best-effort cleanup it would never be reaped. Assert the
-  // skip path cleans it up so we don't leak orphan rooms.
-  assert.equal(await roomStore.getRoom(created.room.code), null);
   assert.ok(!events.some((entry) => entry.event === "room_leave_recovered"));
   assert.ok(
     events.some(
@@ -419,12 +415,11 @@ test("room service skips leave recovery when socket is already closed", async ()
         entry.data.reason === "socket_detached",
     ),
   );
+  // Empty-leave + failed expiry write could leave an orphan in persistence.
+  // We intentionally do not force-delete here (a concurrent join could have
+  // re-populated the room), but emit a signal for ops/reaper to reconcile.
   assert.ok(
-    events.some(
-      (entry) =>
-        entry.event === "room_orphan_cleaned" &&
-        entry.data.reason === "socket_detached",
-    ),
+    events.some((entry) => entry.event === "room_leave_orphan_possible"),
   );
   assert.ok(
     events.some(

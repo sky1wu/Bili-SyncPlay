@@ -701,35 +701,21 @@ export function createRoomService(options: {
             origin: session.origin,
             reason: "socket_detached",
           });
-          // Emptying-leave plus failed expiry write would leave the persisted
-          // room without `expiresAt`, and the reaper only collects rooms whose
-          // TTL has elapsed. Best-effort delete to avoid orphan rooms.
+          // Emptying-leave plus failed expiry write may leave the persisted
+          // room without `expiresAt`, so the reaper won't collect it. We can
+          // NOT force-delete here: the expiry write could have failed due to
+          // a version conflict caused by a concurrent join, in which case
+          // the room is no longer empty and deletion would erase an active
+          // room. Surface the condition so operators/reaper can reconcile.
           if (removal.roomEmpty) {
-            try {
-              await roomStore.deleteRoom(roomCode);
-              logEvent("room_orphan_cleaned", {
-                sessionId: session.id,
-                roomCode,
-                remoteAddress: session.remoteAddress,
-                origin: session.origin,
-                result: "ok",
-                reason: "socket_detached",
-              });
-            } catch (cleanupError) {
-              logEvent("room_persist_failed", {
-                sessionId: session.id,
-                roomCode,
-                remoteAddress: session.remoteAddress,
-                origin: session.origin,
-                provider: persistence.provider,
-                result: "error",
-                reason: "leave_room_orphan_cleanup_failed",
-                error:
-                  cleanupError instanceof Error
-                    ? cleanupError.message
-                    : String(cleanupError),
-              });
-            }
+            logEvent("room_leave_orphan_possible", {
+              sessionId: session.id,
+              roomCode,
+              remoteAddress: session.remoteAddress,
+              origin: session.origin,
+              provider: persistence.provider,
+              reason,
+            });
           }
         } else {
           let roomStillExists: boolean;
