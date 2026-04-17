@@ -133,7 +133,7 @@ export function isActiveVideoResponse(
     return false;
   }
   if (record.payload === null) {
-    return true;
+    return record.ok === false;
   }
   if (typeof record.payload !== "object") {
     return false;

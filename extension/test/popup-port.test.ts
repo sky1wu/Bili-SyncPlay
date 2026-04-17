@@ -128,6 +128,13 @@ test("isActiveVideoResponse rejects response missing ok boolean", () => {
   assert.equal(isActiveVideoResponse({ payload: null, tabId: null }), false);
 });
 
+test("isActiveVideoResponse rejects ok:true with null payload", () => {
+  assert.equal(
+    isActiveVideoResponse({ ok: true, payload: null, tabId: 1 }),
+    false,
+  );
+});
+
 test("isActiveVideoResponse rejects response with malformed tabId", () => {
   assert.equal(
     isActiveVideoResponse({ ok: true, payload: null, tabId: "1" }),
