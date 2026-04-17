@@ -79,7 +79,7 @@ function createHandler(adminHandled = false) {
   return { handler, adminCalls };
 }
 
-test("http handler responds to connection-check preflight and origin status", () => {
+test("http handler reflects allowed origin on connection-check preflight", () => {
   const { handler, adminCalls } = createHandler();
 
   const preflightResponse = createResponse();
@@ -92,26 +92,83 @@ test("http handler responds to connection-check preflight and origin status", ()
     preflightResponse,
   );
   assert.equal(preflightResponse.statusCode, 204);
-  assert.equal(preflightResponse.headers["access-control-allow-origin"], "*");
+  assert.equal(
+    preflightResponse.headers["access-control-allow-origin"],
+    "chrome-extension://allowed",
+  );
+  assert.equal(preflightResponse.headers["vary"], "origin");
+  assert.equal(adminCalls.length, 0);
+});
 
-  const getResponse = createResponse();
+test("http handler reports websocketAllowed without leaking reason or CORS to disallowed origins", () => {
+  const { handler, adminCalls } = createHandler();
+
+  const allowedResponse = createResponse();
+  handler(
+    createRequest({
+      url: "/api/connection-check",
+      method: "GET",
+      origin: "chrome-extension://allowed",
+    }),
+    allowedResponse,
+  );
+  assert.equal(allowedResponse.statusCode, 200);
+  assert.equal(
+    allowedResponse.headers["access-control-allow-origin"],
+    "chrome-extension://allowed",
+  );
+  assert.equal(allowedResponse.headers["vary"], "origin");
+  assert.deepEqual(JSON.parse(allowedResponse.body), {
+    ok: true,
+    data: {
+      websocketAllowed: true,
+    },
+  });
+
+  const deniedResponse = createResponse();
   handler(
     createRequest({
       url: "/api/connection-check",
       method: "GET",
       origin: "chrome-extension://denied",
     }),
-    getResponse,
+    deniedResponse,
   );
-  assert.equal(getResponse.statusCode, 200);
-  assert.deepEqual(JSON.parse(getResponse.body), {
+  assert.equal(deniedResponse.statusCode, 200);
+  assert.equal(
+    deniedResponse.headers["access-control-allow-origin"],
+    undefined,
+  );
+  assert.equal(deniedResponse.headers["vary"], "origin");
+  assert.deepEqual(JSON.parse(deniedResponse.body), {
     ok: true,
     data: {
       websocketAllowed: false,
-      reason: "origin_not_allowed",
     },
   });
   assert.equal(adminCalls.length, 0);
+});
+
+test("http handler omits CORS headers when origin is missing", () => {
+  const { handler } = createHandler();
+
+  const response = createResponse();
+  handler(
+    createRequest({
+      url: "/api/connection-check",
+      method: "GET",
+    }),
+    response,
+  );
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["access-control-allow-origin"], undefined);
+  assert.equal(response.headers["vary"], "origin");
+  assert.deepEqual(JSON.parse(response.body), {
+    ok: true,
+    data: {
+      websocketAllowed: false,
+    },
+  });
 });
 
 test("http handler preserves admin router responses without falling through to root payload", async () => {

@@ -250,13 +250,13 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
     assert.equal(connectionCheck.status, 200);
     assert.equal(
       connectionCheck.headers.get("access-control-allow-origin"),
-      "*",
+      ALLOWED_ORIGIN,
     );
+    assert.equal(connectionCheck.headers.get("vary"), "origin");
     assert.deepEqual(await connectionCheck.json(), {
       ok: true,
       data: {
         websocketAllowed: true,
-        reason: null,
       },
     });
 

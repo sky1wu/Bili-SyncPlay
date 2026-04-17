@@ -23,20 +23,23 @@ export function createHttpRequestHandler(args: {
       const originHeader = request.headers.origin;
       const origin = typeof originHeader === "string" ? originHeader : null;
       const originCheck = args.securityPolicy.isOriginAllowed(origin);
-      const corsHeaders = {
+      const responseHeaders: Record<string, string> = {
         "content-type": "application/json; charset=utf-8",
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, OPTIONS",
-        "access-control-allow-headers": "content-type",
         "cache-control": "no-store",
+        vary: "origin",
       };
+      if (originCheck.ok && origin) {
+        responseHeaders["access-control-allow-origin"] = origin;
+        responseHeaders["access-control-allow-methods"] = "GET, OPTIONS";
+        responseHeaders["access-control-allow-headers"] = "content-type";
+      }
       if (request.method === "OPTIONS") {
-        response.writeHead(204, corsHeaders);
+        response.writeHead(204, responseHeaders);
         response.end();
         return;
       }
       if (request.method !== "GET") {
-        response.writeHead(405, corsHeaders);
+        response.writeHead(405, responseHeaders);
         response.end(
           JSON.stringify({
             ok: false,
@@ -48,13 +51,12 @@ export function createHttpRequestHandler(args: {
         );
         return;
       }
-      response.writeHead(200, corsHeaders);
+      response.writeHead(200, responseHeaders);
       response.end(
         JSON.stringify({
           ok: true,
           data: {
             websocketAllowed: originCheck.ok,
-            reason: originCheck.ok ? null : originCheck.reason,
           },
         }),
       );
