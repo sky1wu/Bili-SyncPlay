@@ -598,6 +598,17 @@ export function createRoomService(options: {
     previousSession.socket.close(1000, "Session replaced");
   }
 
+  function isSessionSocketOpen(session: Session): boolean {
+    if (!hasAttachedSocket(session)) {
+      return false;
+    }
+    const { readyState, OPEN } = session.socket;
+    if (readyState === undefined || OPEN === undefined) {
+      return true;
+    }
+    return readyState === OPEN;
+  }
+
   async function leaveCurrentRoom(
     session: Session,
   ): Promise<{ room: PersistedRoom | null }> {
@@ -679,31 +690,74 @@ export function createRoomService(options: {
           : "leave_room_persist_failed";
 
       if (removal.removed) {
-        let roomStillExists: boolean;
-        try {
-          roomStillExists = (await roomStore.getRoom(roomCode)) !== null;
-        } catch {
-          // Cannot determine room status — err on the side of restoring to
-          // avoid leaving runtime and persistence out of sync.
-          roomStillExists = true;
-        }
-
-        if (roomStillExists) {
-          await restoreLeaveState({
-            session,
-            snapshot: sessionSnapshot,
-            roomCode,
-            reason,
-            error,
-          });
-        } else {
+        if (!isSessionSocketOpen(session)) {
+          // Socket already closed — re-adding would leave zombie entries in
+          // `rooms[code].members` because `unregisterSession` does not clean
+          // that map. Skip restore and let cleanup finish.
           logEvent("room_leave_recovery_skipped", {
             sessionId: session.id,
             roomCode,
             remoteAddress: session.remoteAddress,
             origin: session.origin,
-            reason: "room_deleted",
+            reason: "socket_detached",
           });
+          // Emptying-leave plus failed expiry write would leave the persisted
+          // room without `expiresAt`, and the reaper only collects rooms whose
+          // TTL has elapsed. Best-effort delete to avoid orphan rooms.
+          if (removal.roomEmpty) {
+            try {
+              await roomStore.deleteRoom(roomCode);
+              logEvent("room_orphan_cleaned", {
+                sessionId: session.id,
+                roomCode,
+                remoteAddress: session.remoteAddress,
+                origin: session.origin,
+                result: "ok",
+                reason: "socket_detached",
+              });
+            } catch (cleanupError) {
+              logEvent("room_persist_failed", {
+                sessionId: session.id,
+                roomCode,
+                remoteAddress: session.remoteAddress,
+                origin: session.origin,
+                provider: persistence.provider,
+                result: "error",
+                reason: "leave_room_orphan_cleanup_failed",
+                error:
+                  cleanupError instanceof Error
+                    ? cleanupError.message
+                    : String(cleanupError),
+              });
+            }
+          }
+        } else {
+          let roomStillExists: boolean;
+          try {
+            roomStillExists = (await roomStore.getRoom(roomCode)) !== null;
+          } catch {
+            // Cannot determine room status — err on the side of restoring to
+            // avoid leaving runtime and persistence out of sync.
+            roomStillExists = true;
+          }
+
+          if (roomStillExists) {
+            await restoreLeaveState({
+              session,
+              snapshot: sessionSnapshot,
+              roomCode,
+              reason,
+              error,
+            });
+          } else {
+            logEvent("room_leave_recovery_skipped", {
+              sessionId: session.id,
+              roomCode,
+              remoteAddress: session.remoteAddress,
+              origin: session.origin,
+              reason: "room_deleted",
+            });
+          }
         }
       }
 

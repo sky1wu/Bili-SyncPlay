@@ -341,6 +341,100 @@ test("room service skips leave recovery when room is concurrently deleted", asyn
   );
 });
 
+test("room service skips leave recovery when socket is already closed", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+  const baseService = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => 1_000,
+    createRoomCode: () => "ROOM01",
+  });
+  const failingRoomStore = {
+    ...roomStore,
+    async updateRoom(code, expectedVersion, patch) {
+      if (patch.expiresAt !== undefined) {
+        throw new Error("expiry write failed");
+      }
+      return roomStore.updateRoom(code, expectedVersion, patch);
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore: failingRoomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 2;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => 1_000,
+  });
+
+  const owner = createSession("owner");
+  owner.socket = { readyState: 3, OPEN: 1 } as unknown as WebSocket;
+  const created = await baseService.createRoomForSession(owner, "Alice");
+
+  await assert.rejects(
+    service.leaveRoomForSession(owner),
+    (error: unknown) =>
+      error instanceof Error && error.message === "Internal server error.",
+  );
+
+  assert.equal(owner.roomCode, null);
+  assert.equal(owner.memberId, null);
+  assert.equal(owner.memberToken, null);
+  // With the last member removed, the in-memory room entry should stay
+  // deleted — restoreLeaveState must not resurrect it and leave a zombie
+  // member that `unregisterSession` cannot clean up.
+  assert.equal(activeRooms.getRoom(created.room.code), null);
+  // The persisted row had no `expiresAt` set (the expiry write threw).
+  // Without best-effort cleanup it would never be reaped. Assert the
+  // skip path cleans it up so we don't leak orphan rooms.
+  assert.equal(await roomStore.getRoom(created.room.code), null);
+  assert.ok(!events.some((entry) => entry.event === "room_leave_recovered"));
+  assert.ok(
+    events.some(
+      (entry) =>
+        entry.event === "room_leave_recovery_skipped" &&
+        entry.data.reason === "socket_detached",
+    ),
+  );
+  assert.ok(
+    events.some(
+      (entry) =>
+        entry.event === "room_orphan_cleaned" &&
+        entry.data.reason === "socket_detached",
+    ),
+  );
+  assert.ok(
+    events.some(
+      (entry) =>
+        entry.event === "room_persist_failed" &&
+        entry.data.reason === "leave_room_persist_failed",
+    ),
+  );
+});
+
 test("room service clears sync intent when sharing a new video with playback", async () => {
   const currentTime = 1_000;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });
