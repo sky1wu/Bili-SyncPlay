@@ -38,7 +38,9 @@ GIT_FLAGS_WITH_ARG = {
 }
 
 ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-ENV_FLAGS_WITH_ARG = {"-u", "--unset", "--chdir", "-C"}
+# `-C`/`--chdir` actually change the working dir of the wrapped command, so
+# they are handled explicitly below, not via this "skip the next token" set.
+ENV_FLAGS_WITH_ARG = {"-u", "--unset"}
 SHELL_CONTROL_TOKENS = {"if", "then", "elif", "else", "fi", "do", "done", "while", "until", "{", "}"}
 EXEC_FLAGS_WITH_ARG = {"-a"}
 
@@ -98,6 +100,7 @@ def _walk_events(cmd: str) -> list[tuple[str, str]]:
             continue
         if cmd.startswith("&&", i) or cmd.startswith("||", i):
             flush()
+            events.append(("short", ""))
             i += 2
             continue
         if c in ";&\n|":
@@ -126,7 +129,15 @@ def _command_start(tokens: list[str]) -> int | None:
     return i if i < len(tokens) else None
 
 
-def _unwrap_shell_prefix(tokens: list[str], start: int) -> int | None:
+def _unwrap_shell_prefix(
+    tokens: list[str], start: int, cwd: Path
+) -> tuple[int | None, Path]:
+    """Peel shell wrappers (env/command/time/nohup/exec) until reaching the real
+    command token. Returns (index of real command, effective cwd). `env -C`/
+    `env --chdir` change the wrapped command's working directory, so we apply
+    them to `cwd` — otherwise `env -C /repo git push` from outside the repo
+    would look like an external push and skip the gate.
+    """
     i = start
     while i < len(tokens):
         executable = tokens[i]
@@ -140,8 +151,17 @@ def _unwrap_shell_prefix(tokens: list[str], start: int) -> int | None:
                 if token == "--":
                     i += 1
                     break
-                if token.startswith("--unset=") or token.startswith("--chdir="):
+                if token.startswith("--chdir="):
+                    cwd = _resolve_path(token.split("=", 1)[1], cwd)
                     i += 1
+                    continue
+                if token.startswith("--unset="):
+                    i += 1
+                    continue
+                if token in ("-C", "--chdir"):
+                    if i + 1 < len(tokens):
+                        cwd = _resolve_path(tokens[i + 1], cwd)
+                    i += 2
                     continue
                 if token in ENV_FLAGS_WITH_ARG:
                     i += 2
@@ -182,15 +202,15 @@ def _unwrap_shell_prefix(tokens: list[str], start: int) -> int | None:
                     continue
                 break
             continue
-        return i if i < len(tokens) else None
-    return None
+        return (i, cwd) if i < len(tokens) else (None, cwd)
+    return (None, cwd)
 
 
 def _git_push_target(tokens: list[str], running_cwd: Path) -> Path | None:
     start = _command_start(tokens)
     if start is None:
         return None
-    start = _unwrap_shell_prefix(tokens, start)
+    start, running_cwd = _unwrap_shell_prefix(tokens, start, running_cwd)
     if start is None:
         return None
 
@@ -279,16 +299,28 @@ def push_targets(cmd: str, hook_cwd: Path) -> list[Path]:
     Tracks a stack of effective working directories so subshells (`( ... )`)
     restore the outer scope on close. `cd X && ...` inside a subshell only
     affects commands within that subshell.
+
+    Bash short-circuits `A && B` / `A || B`, so B may not run — and any
+    `cd` inside it may not apply. To avoid bypasses like
+    `false && cd /tmp; git push`, each `&&`/`||` records the cwd at that
+    point as an alternative; subsequent `git push` segments are evaluated
+    against the current cwd AND each alternative, union of targets.
     """
     targets: list[Path] = []
     cwd_stack: list[Path] = [hook_cwd]
+    alts_stack: list[list[Path]] = [[]]
     for kind, payload in _walk_events(cmd):
         if kind == "open":
             cwd_stack.append(cwd_stack[-1])
+            alts_stack.append([])
             continue
         if kind == "close":
             if len(cwd_stack) > 1:
                 cwd_stack.pop()
+                alts_stack.pop()
+            continue
+        if kind == "short":
+            alts_stack[-1].append(cwd_stack[-1])
             continue
         seg = payload.strip()
         if not seg:
@@ -297,9 +329,15 @@ def push_targets(cmd: str, hook_cwd: Path) -> list[Path]:
             tokens = shlex.split(seg)
         except ValueError:
             continue
-        seg_targets, new_cwd = _segment_git_pushes(tokens, cwd_stack[-1])
-        cwd_stack[-1] = new_cwd
+        cwd = cwd_stack[-1]
+        seg_targets, new_cwd = _segment_git_pushes(tokens, cwd)
         targets.extend(seg_targets)
+        for alt in alts_stack[-1]:
+            if alt == cwd:
+                continue
+            alt_targets, _ = _segment_git_pushes(tokens, alt)
+            targets.extend(alt_targets)
+        cwd_stack[-1] = new_cwd
     return targets
 
 

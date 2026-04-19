@@ -162,6 +162,51 @@ class PushTargetsTest(unittest.TestCase):
             [self.hook_cwd],
         )
 
+    def test_env_short_chdir_applies_to_git_push(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(
+                f"env -C {self.hook_cwd} git push origin HEAD",
+                Path("/tmp"),
+            ),
+            [self.hook_cwd],
+        )
+
+    def test_env_long_chdir_applies_to_git_push(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(
+                f"env --chdir={self.hook_cwd} git push origin HEAD",
+                Path("/tmp"),
+            ),
+            [self.hook_cwd],
+        )
+
+    def test_env_chdir_separate_arg_applies_to_git_push(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(
+                f"env --chdir {self.hook_cwd} git push origin HEAD",
+                Path("/tmp"),
+            ),
+            [self.hook_cwd],
+        )
+
+    def test_short_circuit_and_preserves_alternate_cwd(self) -> None:
+        # `false && cd /tmp` may skip the cd at runtime; push must still be
+        # evaluated against the cwd before the short-circuit (our repo).
+        targets = MODULE.push_targets(
+            "false && cd /tmp; git push origin HEAD",
+            self.hook_cwd,
+        )
+        self.assertIn(self.hook_cwd, targets)
+
+    def test_short_circuit_or_preserves_alternate_cwd(self) -> None:
+        # `cd /tmp || cd <repo>` — whichever branch runs, if either lands in
+        # the repo, checks must fire.
+        targets = MODULE.push_targets(
+            f"cd /tmp || cd {self.hook_cwd}; git push origin HEAD",
+            self.hook_cwd,
+        )
+        self.assertIn(self.hook_cwd, targets)
+
 
 if __name__ == "__main__":
     unittest.main()
