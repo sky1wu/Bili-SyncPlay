@@ -7,4 +7,8 @@ tmp-test-extension/
 release/
 docs/
 .vscode/
-/.claude/
+/.claude/*
+!/.claude/settings.json
+!/.claude/skills/
+!/.claude/agents/
+!/.claude/commands/

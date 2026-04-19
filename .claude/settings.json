@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd=$(python3 -c 'import sys,json;print(json.load(sys.stdin).get(\"tool_input\",{}).get(\"command\",\"\"))'); case \"$cmd\" in *\"git push\"*) : ;; *) exit 0 ;; esac; root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; [ -f \"$root/package.json\" ] || exit 0; cd \"$root\" || exit 0; npm run format:check && npm run lint && exit 0; echo 'pre-push checks failed — fix format/lint locally, then retry push' >&2; exit 2",
+            "timeout": 180,
+            "statusMessage": "git push: running format:check + lint..."
+          }
+        ]
+      }
+    ]
+  }
+}
