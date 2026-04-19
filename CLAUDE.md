@@ -4,7 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Language
 
-Respond in Chinese throughout the entire interaction unless the user explicitly requests another language.
+- Respond in Chinese (中文) unless the user explicitly writes in another language.
+
+## Git Workflow
+
+- ALWAYS create a feature branch before making changes; NEVER push directly to main.
+- ALWAYS run `format:check` / full pre-commit check sequence BEFORE pushing commits to avoid CI failures.
+- After addressing review feedback, re-verify related code paths for similar issues (e.g., state cleanup, error handling) before declaring the fix complete.
+
+## Review Feedback Process
+
+- When addressing Codex/reviewer feedback, audit ALL related code paths for the same class of bug, not just the specific line flagged.
+- For state-cleanup/reset functions, grep for every piece of related state and verify each is handled.
+- For async Redis/lock operations, always `await` and wrap in try/catch to avoid orphan locks or race conditions.
 
 ## Project Overview
 
