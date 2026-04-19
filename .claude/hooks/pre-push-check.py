@@ -38,6 +38,8 @@ GIT_FLAGS_WITH_ARG = {
 }
 
 ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+REDIRECTION_RE = re.compile(r"(?:\d+)?(?:>>?|<<?|<>|>&|<&|&>>|&>)$")
+REDIRECTION_WITH_TARGET_RE = re.compile(r"(?:\d+)?(?:>>?|<<?|<>|>&|<&|&>>|&>).+")
 # `-C`/`--chdir` actually change the working dir of the wrapped command, so
 # they are handled explicitly below, not via this "skip the next token" set.
 ENV_FLAGS_WITH_ARG = {"-u", "--unset"}
@@ -103,7 +105,12 @@ def _walk_events(cmd: str) -> list[tuple[str, str]]:
             events.append(("short", ""))
             i += 2
             continue
-        if c in ";&\n|":
+        if c in "|&":
+            flush()
+            events.append(("subshell_sep", ""))
+            i += 1
+            continue
+        if c in ";\n":
             flush()
             i += 1
             continue
@@ -118,6 +125,31 @@ def _resolve_path(raw: str, cwd: Path) -> Path:
     return path if path.is_absolute() else cwd / path
 
 
+def _parse_redirect(tokens: list[str], start: int) -> int:
+    token = tokens[start]
+    if REDIRECTION_WITH_TARGET_RE.fullmatch(token):
+        return start + 1
+    if REDIRECTION_RE.fullmatch(token) and start + 1 < len(tokens):
+        return start + 2
+    return start
+
+
+def _leading_git_env(tokens: list[str], cwd: Path) -> Path | None:
+    git_dir: Path | None = None
+    work_tree: Path | None = None
+    i = 0
+    while i < len(tokens) and ASSIGNMENT_RE.fullmatch(tokens[i]):
+        name, value = tokens[i].split("=", 1)
+        if name == "GIT_DIR":
+            git_dir = _resolve_path(value, cwd)
+        elif name == "GIT_WORK_TREE":
+            work_tree = _resolve_path(value, cwd)
+        i += 1
+    if git_dir is not None:
+        return git_dir.parent if git_dir.name == ".git" else git_dir
+    return work_tree
+
+
 def _command_start(tokens: list[str]) -> int | None:
     i = 0
     while i < len(tokens) and ASSIGNMENT_RE.fullmatch(tokens[i]):
@@ -126,6 +158,11 @@ def _command_start(tokens: list[str]) -> int | None:
         i += 1
         while i < len(tokens) and ASSIGNMENT_RE.fullmatch(tokens[i]):
             i += 1
+    while i < len(tokens):
+        next_i = _parse_redirect(tokens, i)
+        if next_i == i:
+            break
+        i = next_i
     return i if i < len(tokens) else None
 
 
@@ -213,42 +250,49 @@ def _git_push_target(tokens: list[str], running_cwd: Path) -> Path | None:
     start, running_cwd = _unwrap_shell_prefix(tokens, start, running_cwd)
     if start is None:
         return None
+    repo_dir = _leading_git_env(tokens, running_cwd) or running_cwd
 
     executable = tokens[start]
     if executable != "git" and not executable.endswith("/git"):
         return None
 
     git_cwd = running_cwd
-    repo_dir = running_cwd
+    git_dir_seen = repo_dir != running_cwd
     i = start + 1
     while i < len(tokens):
         token = tokens[i]
         if token == "-C" and i + 1 < len(tokens):
             git_cwd = _resolve_path(tokens[i + 1], git_cwd)
-            repo_dir = git_cwd
+            if not git_dir_seen:
+                repo_dir = git_cwd
             i += 2
             continue
         if token.startswith("-C") and token != "-C":
             git_cwd = _resolve_path(token[2:], git_cwd)
-            repo_dir = git_cwd
+            if not git_dir_seen:
+                repo_dir = git_cwd
             i += 1
             continue
         if token.startswith("--git-dir="):
             git_dir = _resolve_path(token.split("=", 1)[1], git_cwd)
             repo_dir = git_dir.parent if git_dir.name == ".git" else git_dir
+            git_dir_seen = True
             i += 1
             continue
         if token == "--git-dir" and i + 1 < len(tokens):
             git_dir = _resolve_path(tokens[i + 1], git_cwd)
             repo_dir = git_dir.parent if git_dir.name == ".git" else git_dir
+            git_dir_seen = True
             i += 2
             continue
         if token.startswith("--work-tree="):
-            repo_dir = _resolve_path(token.split("=", 1)[1], git_cwd)
+            if not git_dir_seen:
+                repo_dir = _resolve_path(token.split("=", 1)[1], git_cwd)
             i += 1
             continue
         if token == "--work-tree" and i + 1 < len(tokens):
-            repo_dir = _resolve_path(tokens[i + 1], git_cwd)
+            if not git_dir_seen:
+                repo_dir = _resolve_path(tokens[i + 1], git_cwd)
             i += 2
             continue
         if token.startswith("-"):
@@ -341,6 +385,11 @@ def push_targets(cmd: str, hook_cwd: Path) -> list[Path]:
             # cwd is unchanged, and whatever `&&`/`||` led here is now
             # past its left operand.
             prev_cwd_stack[-1] = cwd_stack[-1]
+            last_short_stack[-1] = False
+            continue
+        if kind == "subshell_sep":
+            commit_pending()
+            cwd_stack[-1] = prev_cwd_stack[-1]
             last_short_stack[-1] = False
             continue
         if kind == "short":

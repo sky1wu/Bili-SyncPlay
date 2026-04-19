@@ -189,6 +189,48 @@ class PushTargetsTest(unittest.TestCase):
             [self.hook_cwd],
         )
 
+    def test_pipe_does_not_leak_cd_to_following_push(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets("cd /tmp | cat; git push origin HEAD", self.hook_cwd),
+            [self.hook_cwd],
+        )
+
+    def test_background_does_not_leak_cd_to_following_push(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets("cd /tmp & git push origin HEAD", self.hook_cwd),
+            [self.hook_cwd],
+        )
+
+    def test_skips_leading_redirection_before_git(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(">/tmp/log git push origin HEAD", self.hook_cwd),
+            [self.hook_cwd],
+        )
+
+    def test_skips_split_redirection_before_git(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets("< /dev/null git push origin HEAD", self.hook_cwd),
+            [self.hook_cwd],
+        )
+
+    def test_applies_git_dir_and_work_tree_assignments(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(
+                f"GIT_DIR={self.hook_cwd}/.git GIT_WORK_TREE={self.hook_cwd} git push origin HEAD",
+                Path("/tmp"),
+            ),
+            [self.hook_cwd],
+        )
+
+    def test_git_dir_beats_work_tree_for_repo_identity(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(
+                f"git --git-dir {self.hook_cwd}/.git --work-tree /tmp push origin HEAD",
+                Path("/tmp"),
+            ),
+            [self.hook_cwd],
+        )
+
     def test_short_circuit_and_preserves_alternate_cwd(self) -> None:
         # `false && cd /tmp` may skip the cd at runtime; push must still be
         # evaluated against the cwd before the short-circuit (our repo).
