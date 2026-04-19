@@ -162,6 +162,39 @@ class PushTargetsTest(unittest.TestCase):
             [self.hook_cwd],
         )
 
+    def test_expands_env_var_in_resolve_path(self) -> None:
+        home = Path.home()
+        self.assertEqual(MODULE._resolve_path("$HOME", Path("/tmp")), home)
+        self.assertEqual(MODULE._resolve_path("${HOME}/sub", Path("/tmp")), home / "sub")
+
+    def test_expands_env_var_in_cd_from_outside_repo(self) -> None:
+        home = Path.home()
+        try:
+            rel = self.hook_cwd.relative_to(home)
+        except ValueError:
+            self.skipTest("repo is not under $HOME")
+        self.assertEqual(
+            MODULE.push_targets(
+                f"cd $HOME/{rel} && git push origin HEAD",
+                Path("/tmp"),
+            ),
+            [self.hook_cwd],
+        )
+
+    def test_expands_env_var_in_git_c_from_outside_repo(self) -> None:
+        home = Path.home()
+        try:
+            rel = self.hook_cwd.relative_to(home)
+        except ValueError:
+            self.skipTest("repo is not under $HOME")
+        self.assertEqual(
+            MODULE.push_targets(
+                f"git -C $HOME/{rel} push origin HEAD",
+                Path("/tmp"),
+            ),
+            [self.hook_cwd],
+        )
+
     def test_env_short_chdir_applies_to_git_push(self) -> None:
         self.assertEqual(
             MODULE.push_targets(
@@ -271,6 +304,38 @@ class PushTargetsTest(unittest.TestCase):
             ),
             [self.hook_cwd / "server"],
         )
+
+    def test_if_then_cd_does_not_hide_following_repo_push(self) -> None:
+        targets = MODULE.push_targets(
+            "if false; then cd /tmp; fi; git push origin HEAD",
+            self.hook_cwd,
+        )
+        self.assertIn(self.hook_cwd, targets)
+
+    def test_if_then_skipped_push_is_not_reported(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(
+                "if false; then git push origin HEAD; fi",
+                self.hook_cwd,
+            ),
+            [],
+        )
+
+    def test_if_then_branch_push_still_uses_branch_cwd(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(
+                "if true; then cd /tmp; git push origin HEAD; fi",
+                self.hook_cwd,
+            ),
+            [Path("/tmp")],
+        )
+
+    def test_if_else_keeps_both_possible_following_cwds(self) -> None:
+        targets = MODULE.push_targets(
+            "if false; then cd /tmp; else cd server; fi; git push origin HEAD",
+            self.hook_cwd,
+        )
+        self.assertIn(self.hook_cwd / "server", targets)
 
 
 if __name__ == "__main__":

@@ -45,6 +45,26 @@ REDIRECTION_WITH_TARGET_RE = re.compile(r"(?:\d+)?(?:>>?|<<?|<>|>&|<&|&>>|&>).+"
 ENV_FLAGS_WITH_ARG = {"-u", "--unset"}
 SHELL_CONTROL_TOKENS = {"if", "then", "elif", "else", "fi", "do", "done", "while", "until", "{", "}"}
 EXEC_FLAGS_WITH_ARG = {"-a"}
+NOOP_CONTROL_TOKENS = {"fi", "done", "}"}
+
+
+class IfFrame:
+    def __init__(
+        self,
+        success_states: set[Path] | None = None,
+        failure_states: set[Path] | None = None,
+        after_states: set[Path] | None = None,
+        phase: str = "cond",
+    ) -> None:
+        self.success_states = success_states or set()
+        self.failure_states = failure_states or set()
+        self.after_states = after_states or set()
+        self.phase = phase
+
+
+class LoopFrame:
+    def __init__(self, skip_states: set[Path] | None = None) -> None:
+        self.skip_states = skip_states or set()
 
 
 def _walk_events(cmd: str) -> list[tuple[str, str]]:
@@ -121,7 +141,7 @@ def _walk_events(cmd: str) -> list[tuple[str, str]]:
 
 
 def _resolve_path(raw: str, cwd: Path) -> Path:
-    path = Path(os.path.expanduser(raw))
+    path = Path(os.path.expandvars(os.path.expanduser(raw)))
     return path if path.is_absolute() else cwd / path
 
 
@@ -164,6 +184,13 @@ def _command_start(tokens: list[str]) -> int | None:
             break
         i = next_i
     return i if i < len(tokens) else None
+
+
+def _leading_control_token(tokens: list[str]) -> str | None:
+    i = 0
+    while i < len(tokens) and ASSIGNMENT_RE.fullmatch(tokens[i]):
+        i += 1
+    return tokens[i] if i < len(tokens) and tokens[i] in SHELL_CONTROL_TOKENS else None
 
 
 def _unwrap_shell_prefix(
@@ -337,6 +364,59 @@ def _segment_git_pushes(
     return ([target] if target is not None else []), running_cwd
 
 
+def _segment_outcomes(
+    tokens: list[str], running_cwd: Path
+) -> tuple[list[Path], Path, bool, bool]:
+    """Return targets, next cwd, and whether the segment may succeed/fail."""
+    targets, new_cwd = _segment_git_pushes(tokens, running_cwd)
+
+    start = _command_start(tokens)
+    if start is None:
+        return targets, new_cwd, True, True
+    start, effective_cwd = _unwrap_shell_prefix(tokens, start, running_cwd)
+    if start is None:
+        return targets, new_cwd, True, True
+
+    executable = tokens[start]
+    if executable == "cd":
+        j = start + 1
+        while j < len(tokens) and tokens[j].startswith("-"):
+            if tokens[j] == "--":
+                j += 1
+                break
+            if tokens[j] == "-":
+                return targets, running_cwd, True, True
+            j += 1
+        if j < len(tokens):
+            return targets, new_cwd, new_cwd != effective_cwd, new_cwd == effective_cwd
+        return targets, running_cwd, True, True
+    if executable in {"true", ":"}:
+        return targets, new_cwd, True, False
+    if executable == "false":
+        return targets, new_cwd, False, True
+    return targets, new_cwd, True, True
+
+
+def _run_tokens_for_states(
+    tokens: list[str], states: set[Path]
+) -> tuple[list[Path], set[Path], set[Path], set[Path]]:
+    targets: list[Path] = []
+    next_states: set[Path] = set()
+    success_states: set[Path] = set()
+    failure_states: set[Path] = set()
+
+    for cwd in states:
+        seg_targets, new_cwd, may_succeed, may_fail = _segment_outcomes(tokens, cwd)
+        targets.extend(seg_targets)
+        next_states.add(new_cwd)
+        if may_succeed:
+            success_states.add(new_cwd)
+        if may_fail:
+            failure_states.add(new_cwd)
+
+    return targets, next_states, success_states, failure_states
+
+
 def push_targets(cmd: str, hook_cwd: Path) -> list[Path]:
     """Return directory targets of every `git push` seen in `cmd`.
 
@@ -356,44 +436,41 @@ def push_targets(cmd: str, hook_cwd: Path) -> list[Path]:
     standalone `cd X && git push` therefore still resolves to just X.
     """
     targets: list[Path] = []
-    cwd_stack: list[Path] = [hook_cwd]
-    prev_cwd_stack: list[Path] = [hook_cwd]
-    active_alts_stack: list[list[Path]] = [[]]
-    pending_alts_stack: list[list[Path]] = [[]]
+    state_stack: list[set[Path]] = [{hook_cwd}]
+    prev_state_stack: list[set[Path]] = [{hook_cwd}]
+    pending_alts_stack: list[set[Path]] = [set()]
     last_short_stack: list[bool] = [False]
-
-    def commit_pending() -> None:
-        active_alts_stack[-1].extend(pending_alts_stack[-1])
-        pending_alts_stack[-1] = []
+    if_stack: list[list[IfFrame]] = [[]]
+    loop_stack: list[list[LoopFrame]] = [[]]
 
     for kind, payload in _walk_events(cmd):
         if kind == "open":
-            cwd_stack.append(cwd_stack[-1])
-            prev_cwd_stack.append(cwd_stack[-1])
-            active_alts_stack.append([])
-            pending_alts_stack.append([])
+            state_stack.append(set(state_stack[-1]))
+            prev_state_stack.append(set(state_stack[-1]))
+            pending_alts_stack.append(set())
             last_short_stack.append(False)
+            if_stack.append([])
+            loop_stack.append([])
             continue
         if kind == "close":
-            if len(cwd_stack) > 1:
-                cwd_stack.pop()
-                prev_cwd_stack.pop()
-                active_alts_stack.pop()
+            if len(state_stack) > 1:
+                state_stack.pop()
+                prev_state_stack.pop()
                 pending_alts_stack.pop()
                 last_short_stack.pop()
-            # Subshell behaves like a completed seg at the outer scope:
-            # cwd is unchanged, and whatever `&&`/`||` led here is now
-            # past its left operand.
-            prev_cwd_stack[-1] = cwd_stack[-1]
+                if_stack.pop()
+                loop_stack.pop()
+            prev_state_stack[-1] = set(state_stack[-1])
             last_short_stack[-1] = False
             continue
         if kind == "subshell_sep":
-            commit_pending()
-            cwd_stack[-1] = prev_cwd_stack[-1]
+            state_stack[-1].update(pending_alts_stack[-1])
+            pending_alts_stack[-1].clear()
+            state_stack[-1] = set(prev_state_stack[-1])
             last_short_stack[-1] = False
             continue
         if kind == "short":
-            pending_alts_stack[-1].append(prev_cwd_stack[-1])
+            pending_alts_stack[-1].update(prev_state_stack[-1])
             last_short_stack[-1] = True
             continue
         seg = payload.strip()
@@ -404,17 +481,155 @@ def push_targets(cmd: str, hook_cwd: Path) -> list[Path]:
         except ValueError:
             continue
         if not last_short_stack[-1]:
-            commit_pending()
-        cwd = cwd_stack[-1]
-        seg_targets, new_cwd = _segment_git_pushes(tokens, cwd)
+            state_stack[-1].update(pending_alts_stack[-1])
+            pending_alts_stack[-1].clear()
+
+        states = set(state_stack[-1])
+        prev_state_stack[-1] = set(states)
+        leading = _leading_control_token(tokens)
+        frame_stack = if_stack[-1]
+        loops = loop_stack[-1]
+
+        if leading == "if":
+            command_tokens = tokens[_command_start(tokens) or len(tokens) :]
+            seg_targets, next_states, success_states, failure_states = (
+                _run_tokens_for_states(command_tokens, states)
+                if command_tokens
+                else ([], set(states), set(states), set(states))
+            )
+            targets.extend(seg_targets)
+            frame_stack.append(
+                IfFrame(
+                    success_states=success_states,
+                    failure_states=failure_states,
+                )
+            )
+            state_stack[-1] = next_states
+            last_short_stack[-1] = False
+            continue
+
+        if leading == "then":
+            if frame_stack:
+                frame = frame_stack[-1]
+                frame.phase = "then"
+                states = set(frame.success_states)
+                command_tokens = tokens[_command_start(tokens) or len(tokens) :]
+                if command_tokens:
+                    seg_targets, next_states, _, _ = _run_tokens_for_states(
+                        command_tokens, states
+                    )
+                    targets.extend(seg_targets)
+                    state_stack[-1] = next_states
+                else:
+                    state_stack[-1] = states
+            last_short_stack[-1] = False
+            continue
+
+        if leading == "else":
+            if frame_stack:
+                frame = frame_stack[-1]
+                if frame.phase == "then":
+                    frame.after_states.update(states)
+                frame.phase = "else"
+                states = set(frame.failure_states)
+                command_tokens = tokens[_command_start(tokens) or len(tokens) :]
+                if command_tokens:
+                    seg_targets, next_states, _, _ = _run_tokens_for_states(
+                        command_tokens, states
+                    )
+                    targets.extend(seg_targets)
+                    state_stack[-1] = next_states
+                else:
+                    state_stack[-1] = states
+            last_short_stack[-1] = False
+            continue
+
+        if leading == "elif":
+            if frame_stack:
+                frame = frame_stack[-1]
+                if frame.phase == "then":
+                    frame.after_states.update(states)
+                states = set(frame.failure_states)
+                command_tokens = tokens[_command_start(tokens) or len(tokens) :]
+                seg_targets, next_states, success_states, failure_states = (
+                    _run_tokens_for_states(command_tokens, states)
+                    if command_tokens
+                    else ([], states, states, states)
+                )
+                targets.extend(seg_targets)
+                frame.phase = "cond"
+                frame.success_states = success_states
+                frame.failure_states = failure_states
+                state_stack[-1] = next_states
+            last_short_stack[-1] = False
+            continue
+
+        if leading == "fi":
+            if frame_stack:
+                frame = frame_stack.pop()
+                if frame.phase == "then":
+                    frame.after_states.update(states)
+                    states = frame.after_states | frame.failure_states
+                elif frame.phase == "else":
+                    frame.after_states.update(states)
+                    states = frame.after_states
+                else:
+                    states = frame.after_states | frame.failure_states
+                command_tokens = tokens[_command_start(tokens) or len(tokens) :]
+                if command_tokens:
+                    seg_targets, next_states, _, _ = _run_tokens_for_states(
+                        command_tokens, states
+                    )
+                    targets.extend(seg_targets)
+                    state_stack[-1] = next_states
+                else:
+                    state_stack[-1] = states
+            last_short_stack[-1] = False
+            continue
+
+        if leading == "do":
+            loops.append(LoopFrame(skip_states=set(states)))
+            command_tokens = tokens[_command_start(tokens) or len(tokens) :]
+            if command_tokens:
+                seg_targets, next_states, _, _ = _run_tokens_for_states(
+                    command_tokens, states
+                )
+                targets.extend(seg_targets)
+                state_stack[-1] = next_states
+            last_short_stack[-1] = False
+            continue
+
+        if leading == "done":
+            if loops:
+                states = set(states) | loops.pop().skip_states
+            command_tokens = tokens[_command_start(tokens) or len(tokens) :]
+            if command_tokens:
+                seg_targets, next_states, _, _ = _run_tokens_for_states(
+                    command_tokens, states
+                )
+                targets.extend(seg_targets)
+                state_stack[-1] = next_states
+            else:
+                state_stack[-1] = states
+            last_short_stack[-1] = False
+            continue
+
+        if leading in NOOP_CONTROL_TOKENS:
+            command_tokens = tokens[_command_start(tokens) or len(tokens) :]
+            if command_tokens:
+                seg_targets, next_states, _, _ = _run_tokens_for_states(
+                    command_tokens, states
+                )
+                targets.extend(seg_targets)
+                state_stack[-1] = next_states
+            else:
+                state_stack[-1] = states
+            last_short_stack[-1] = False
+            continue
+
+        seg_targets, next_states, _, _ = _run_tokens_for_states(tokens, states)
         targets.extend(seg_targets)
-        for alt in active_alts_stack[-1]:
-            if alt == cwd:
-                continue
-            alt_targets, _ = _segment_git_pushes(tokens, alt)
-            targets.extend(alt_targets)
-        cwd_stack[-1] = new_cwd
-        prev_cwd_stack[-1] = cwd
+        state_stack[-1] = next_states
         last_short_stack[-1] = False
     return targets
 
