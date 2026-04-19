@@ -39,6 +39,8 @@ GIT_FLAGS_WITH_ARG = {
 
 ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 ENV_FLAGS_WITH_ARG = {"-u", "--unset", "--chdir", "-C"}
+SHELL_CONTROL_TOKENS = {"if", "then", "elif", "else", "fi", "do", "done", "while", "until", "{", "}"}
+EXEC_FLAGS_WITH_ARG = {"-a"}
 
 
 def _walk_events(cmd: str) -> list[tuple[str, str]]:
@@ -117,6 +119,10 @@ def _command_start(tokens: list[str]) -> int | None:
     i = 0
     while i < len(tokens) and ASSIGNMENT_RE.fullmatch(tokens[i]):
         i += 1
+    while i < len(tokens) and tokens[i] in SHELL_CONTROL_TOKENS:
+        i += 1
+        while i < len(tokens) and ASSIGNMENT_RE.fullmatch(tokens[i]):
+            i += 1
     return i if i < len(tokens) else None
 
 
@@ -152,6 +158,29 @@ def _unwrap_shell_prefix(tokens: list[str], start: int) -> int | None:
                     i += 1
                     break
                 i += 1
+            continue
+        if executable in {"time", "nohup"}:
+            i += 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                if tokens[i] == "--":
+                    i += 1
+                    break
+                i += 1
+            continue
+        if executable == "exec":
+            i += 1
+            while i < len(tokens):
+                token = tokens[i]
+                if token == "--":
+                    i += 1
+                    break
+                if token in EXEC_FLAGS_WITH_ARG:
+                    i += 2
+                    continue
+                if token.startswith("-"):
+                    i += 1
+                    continue
+                break
             continue
         return i if i < len(tokens) else None
     return None

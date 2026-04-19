@@ -81,6 +81,42 @@ class PushTargetsTest(unittest.TestCase):
             [self.hook_cwd],
         )
 
+    def test_detects_push_in_if_then_block(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(
+                f"if cd {self.hook_cwd}; then git push origin HEAD; fi",
+                Path("/tmp"),
+            ),
+            [self.hook_cwd],
+        )
+
+    def test_detects_push_in_brace_group(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets(
+                f"{{ cd {self.hook_cwd}; git push origin HEAD; }}",
+                Path("/tmp"),
+            ),
+            [self.hook_cwd],
+        )
+
+    def test_detects_push_through_time_prefix(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets("time git push origin HEAD", self.hook_cwd),
+            [self.hook_cwd],
+        )
+
+    def test_detects_push_through_nohup_prefix(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets("nohup git push origin HEAD", self.hook_cwd),
+            [self.hook_cwd],
+        )
+
+    def test_detects_push_through_exec_prefix(self) -> None:
+        self.assertEqual(
+            MODULE.push_targets("exec git push origin HEAD", self.hook_cwd),
+            [self.hook_cwd],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
