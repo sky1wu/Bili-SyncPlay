@@ -8,9 +8,6 @@ release/
 docs/
 .vscode/
 /.claude/*
-!/.claude/settings.json
 !/.claude/skills/
 !/.claude/agents/
 !/.claude/commands/
-!/.claude/hooks/
-/.claude/hooks/__pycache__/
