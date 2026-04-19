@@ -311,6 +311,146 @@ test("redis runtime store can purge stale sessions for a restarted instance", as
   }
 });
 
+test("redis runtime store clamps dedup slot TTL to a floor when expiresAt is already in the past", async () => {
+  const setCalls: Array<{
+    key: string;
+    value: string;
+    nx: string;
+    px: string;
+    ms: number;
+  }> = [];
+  const zaddCalls: Array<{ key: string; score: string; member: string }> = [];
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async set(
+      key: string,
+      value: string,
+      nx: "NX",
+      px: "PX",
+      milliseconds: number,
+    ) {
+      setCalls.push({ key, value, nx, px, ms: milliseconds });
+      return "OK";
+    },
+    async zadd(key: string, score: string, member: string) {
+      zaddCalls.push({ key, score, member });
+      return null;
+    },
+  };
+
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (message: unknown) => {
+    logs.push(String(message));
+  };
+
+  const currentTime = 5_000;
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: fakeRedis,
+    keyPrefix: "bsp:test:dedup:",
+    now: () => currentTime,
+  });
+
+  try {
+    const claimed = await store.tryClaimMessageSlot(
+      "ROOMXX",
+      "share:actor:url:1",
+      currentTime - 10,
+    );
+    assert.equal(claimed, true, "slot should still be claimed via minimum TTL");
+    assert.equal(setCalls.length, 1);
+    assert.ok(
+      setCalls[0].ms >= 1_000,
+      `expected minimum TTL >= 1000ms, got ${setCalls[0].ms}`,
+    );
+    assert.equal(setCalls[0].nx, "NX");
+    assert.equal(setCalls[0].px, "PX");
+    assert.equal(zaddCalls.length, 1);
+    assert.equal(Number(zaddCalls[0].score), currentTime + setCalls[0].ms);
+
+    const clampLog = logs
+      .map((line) => {
+        try {
+          return JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .find((entry) => entry?.event === "dedup_slot_ttl_clamped");
+    assert.ok(clampLog, "expected dedup_slot_ttl_clamped event to be logged");
+    assert.equal(clampLog.roomCode, "ROOMXX");
+    assert.equal(clampLog.requestedTtlMs, -10);
+    assert.equal(clampLog.appliedTtlMs, 1_000);
+    // Raw key must not be logged (contains caller URL + actor id).
+    assert.equal(clampLog.key, undefined);
+    assert.equal(clampLog.keyKind, "share");
+    assert.equal(typeof clampLog.keyHash, "string");
+    assert.match(clampLog.keyHash as string, /^[0-9a-f]{16}$/);
+  } finally {
+    console.log = originalLog;
+    await store.close();
+  }
+});
+
+test("redis runtime store preserves caller-provided TTL without clamping when expiresAt is in the future", async () => {
+  const setCalls: Array<{ ms: number }> = [];
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async set(
+      _key: string,
+      _value: string,
+      _nx: "NX",
+      _px: "PX",
+      milliseconds: number,
+    ) {
+      setCalls.push({ ms: milliseconds });
+      return "OK";
+    },
+  };
+
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (message: unknown) => {
+    logs.push(String(message));
+  };
+
+  const currentTime = 5_000;
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: fakeRedis,
+    keyPrefix: "bsp:test:dedup:",
+    now: () => currentTime,
+  });
+
+  try {
+    // Large positive TTL: used as-is.
+    const claimedLarge = await store.tryClaimMessageSlot(
+      "ROOMYY",
+      "share:actor:url:1",
+      currentTime + 5_000,
+    );
+    assert.equal(claimedLarge, true);
+    assert.equal(setCalls.at(-1)?.ms, 5_000);
+
+    // Small but positive TTL: must not be extended to the floor — the caller
+    // controls the dedup window and clamping would change its semantics.
+    const claimedSmall = await store.tryClaimMessageSlot(
+      "ROOMYY",
+      "share:actor:url:2",
+      currentTime + 50,
+    );
+    assert.equal(claimedSmall, true);
+    assert.equal(setCalls.at(-1)?.ms, 50);
+
+    const clampLogged = logs.some((line) =>
+      line.includes("dedup_slot_ttl_clamped"),
+    );
+    assert.equal(clampLogged, false);
+  } finally {
+    console.log = originalLog;
+    await store.close();
+  }
+});
+
 test("redis runtime store rejects new pending operations after reaching the configured cap", async () => {
   const firstOperation = createDeferred<unknown>();
   const fakeRedis = createFakeRedisClient([firstOperation.promise]);
