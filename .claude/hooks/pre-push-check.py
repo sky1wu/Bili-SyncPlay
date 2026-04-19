@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -35,6 +36,8 @@ GIT_FLAGS_WITH_ARG = {
     "--exec-path",
     "--config-env",
 }
+
+ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 
 
 def _walk_events(cmd: str) -> list[tuple[str, str]]:
@@ -104,68 +107,87 @@ def _walk_events(cmd: str) -> list[tuple[str, str]]:
     return events
 
 
+def _resolve_path(raw: str, cwd: Path) -> Path:
+    path = Path(raw)
+    return path if path.is_absolute() else cwd / path
+
+
+def _command_start(tokens: list[str]) -> int | None:
+    i = 0
+    while i < len(tokens) and ASSIGNMENT_RE.fullmatch(tokens[i]):
+        i += 1
+    return i if i < len(tokens) else None
+
+
+def _git_push_target(tokens: list[str], running_cwd: Path) -> Path | None:
+    start = _command_start(tokens)
+    if start is None:
+        return None
+
+    executable = tokens[start]
+    if executable != "git" and not executable.endswith("/git"):
+        return None
+
+    git_cwd = running_cwd
+    repo_dir = running_cwd
+    i = start + 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "-C" and i + 1 < len(tokens):
+            git_cwd = _resolve_path(tokens[i + 1], git_cwd)
+            repo_dir = git_cwd
+            i += 2
+            continue
+        if token.startswith("-C") and token != "-C":
+            git_cwd = _resolve_path(token[2:], git_cwd)
+            repo_dir = git_cwd
+            i += 1
+            continue
+        if token.startswith("--git-dir="):
+            git_dir = _resolve_path(token.split("=", 1)[1], git_cwd)
+            repo_dir = git_dir.parent if git_dir.name == ".git" else git_dir
+            i += 1
+            continue
+        if token == "--git-dir" and i + 1 < len(tokens):
+            git_dir = _resolve_path(tokens[i + 1], git_cwd)
+            repo_dir = git_dir.parent if git_dir.name == ".git" else git_dir
+            i += 2
+            continue
+        if token.startswith("--work-tree="):
+            repo_dir = _resolve_path(token.split("=", 1)[1], git_cwd)
+            i += 1
+            continue
+        if token == "--work-tree" and i + 1 < len(tokens):
+            repo_dir = _resolve_path(tokens[i + 1], git_cwd)
+            i += 2
+            continue
+        if token.startswith("-"):
+            if token in GIT_FLAGS_WITH_ARG:
+                i += 2
+            else:
+                i += 1
+            continue
+        return repo_dir if token == "push" else None
+    return None
+
+
 def _segment_git_pushes(
     tokens: list[str], running_cwd: Path
 ) -> tuple[list[Path], Path]:
-    """Scan tokens of one segment for `git ... push` invocations.
+    """Scan one shell segment and return targeted `git push` repos."""
+    if not tokens:
+        return [], running_cwd
 
-    A leading `cd <dir>` is applied to `running_cwd` (the updated value is
-    returned so the caller can carry it into later segments within the same
-    shell scope). Subsequent `git` occurrences in the same segment also use
-    the updated `running_cwd`. Handles `-C`, `--git-dir`, `--work-tree` for
-    re-targeting the repo of a specific `git` call.
-    """
-    targets: list[Path] = []
+    start = _command_start(tokens)
+    if start is None:
+        return [], running_cwd
 
-    if tokens and tokens[0] == "cd" and len(tokens) >= 2:
-        raw = Path(tokens[1])
-        running_cwd = raw if raw.is_absolute() else running_cwd / raw
-        tokens = tokens[2:]
+    if tokens[start] == "cd" and start + 1 < len(tokens):
+        running_cwd = _resolve_path(tokens[start + 1], running_cwd)
+        return [], running_cwd
 
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok == "git" or tok.endswith("/git"):
-            repo_dir = running_cwd
-            j = i + 1
-            while j < len(tokens):
-                t = tokens[j]
-                if t == "-C" and j + 1 < len(tokens):
-                    raw = Path(tokens[j + 1])
-                    repo_dir = raw if raw.is_absolute() else repo_dir / raw
-                    j += 2
-                    continue
-                if t.startswith("--git-dir="):
-                    gd = Path(t.split("=", 1)[1])
-                    repo_dir = gd.parent if gd.name == ".git" else gd
-                    j += 1
-                    continue
-                if t == "--git-dir" and j + 1 < len(tokens):
-                    gd = Path(tokens[j + 1])
-                    repo_dir = gd.parent if gd.name == ".git" else gd
-                    j += 2
-                    continue
-                if t.startswith("--work-tree="):
-                    repo_dir = Path(t.split("=", 1)[1])
-                    j += 1
-                    continue
-                if t == "--work-tree" and j + 1 < len(tokens):
-                    repo_dir = Path(tokens[j + 1])
-                    j += 2
-                    continue
-                if t.startswith("-"):
-                    if t in GIT_FLAGS_WITH_ARG:
-                        j += 2
-                    else:
-                        j += 1
-                    continue
-                if t == "push":
-                    targets.append(repo_dir)
-                break
-            i = j + 1
-            continue
-        i += 1
-    return targets, running_cwd
+    target = _git_push_target(tokens, running_cwd)
+    return ([target] if target is not None else []), running_cwd
 
 
 def push_targets(cmd: str, hook_cwd: Path) -> list[Path]:
