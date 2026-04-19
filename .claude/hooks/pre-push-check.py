@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -26,7 +25,9 @@ from pathlib import Path
 
 OUR_REPO = Path(__file__).resolve().parent.parent.parent
 
-# Git global flags whose argument is a separate shell token.
+# Git global flags whose argument is a separate shell token. `-C`,
+# `--git-dir`, and `--work-tree` are handled explicitly (they affect the
+# effective repo directory) and so are NOT listed here.
 GIT_FLAGS_WITH_ARG = {
     "-c",
     "--namespace",
@@ -35,20 +36,84 @@ GIT_FLAGS_WITH_ARG = {
     "--config-env",
 }
 
-# Split a command line into shell segments on control operators so each
-# segment can be tokenized independently.
-SEGMENT_SPLIT = re.compile(r"\|\|?|&&|[;&\n()]")
+
+def _walk_events(cmd: str) -> list[tuple[str, str]]:
+    """Tokenize the command line into a stream of shell-level events.
+
+    Each event is one of:
+      ("seg", <text>)     — a runnable command segment, fed to shlex.split
+      ("open", "")         — entering a subshell `(`
+      ("close", "")        — leaving a subshell `)`
+    Separators like `;`, `&`, `&&`, `||`, `|`, newline close the current
+    segment without changing scope; quotes and backslash escapes are
+    preserved inside segments and do NOT trigger paren/separator handling.
+    """
+    events: list[tuple[str, str]] = []
+    buf: list[str] = []
+
+    def flush():
+        if buf:
+            events.append(("seg", "".join(buf)))
+            buf.clear()
+
+    i, n = 0, len(cmd)
+    quote: str | None = None
+    while i < n:
+        c = cmd[i]
+        if quote is not None:
+            buf.append(c)
+            if c == "\\" and i + 1 < n:
+                buf.append(cmd[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ('"', "'"):
+            buf.append(c)
+            quote = c
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            buf.append(c)
+            buf.append(cmd[i + 1])
+            i += 2
+            continue
+        if c == "(":
+            flush()
+            events.append(("open", ""))
+            i += 1
+            continue
+        if c == ")":
+            flush()
+            events.append(("close", ""))
+            i += 1
+            continue
+        if cmd.startswith("&&", i) or cmd.startswith("||", i):
+            flush()
+            i += 2
+            continue
+        if c in ";&\n|":
+            flush()
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    flush()
+    return events
 
 
-def _process_segment(
+def _segment_git_pushes(
     tokens: list[str], running_cwd: Path
 ) -> tuple[list[Path], Path]:
-    """Process ONE shell segment. Return (push_target_dirs, updated_running_cwd).
+    """Scan tokens of one segment for `git ... push` invocations.
 
-    A leading `cd <dir>` token updates `running_cwd` for subsequent segments in
-    the same command (approximating shell semantics for `cd X && cmd`). Subshell
-    scoping is not tracked; the result is conservative — if a push falls outside
-    OUR_REPO it is merely skipped rather than wrongly blocked.
+    A leading `cd <dir>` is applied to `running_cwd` (the updated value is
+    returned so the caller can carry it into later segments within the same
+    shell scope). Subsequent `git` occurrences in the same segment also use
+    the updated `running_cwd`. Handles `-C`, `--git-dir`, `--work-tree` for
+    re-targeting the repo of a specific `git` call.
     """
     targets: list[Path] = []
 
@@ -104,17 +169,31 @@ def _process_segment(
 
 
 def push_targets(cmd: str, hook_cwd: Path) -> list[Path]:
+    """Return directory targets of every `git push` seen in `cmd`.
+
+    Tracks a stack of effective working directories so subshells (`( ... )`)
+    restore the outer scope on close. `cd X && ...` inside a subshell only
+    affects commands within that subshell.
+    """
     targets: list[Path] = []
-    running_cwd = hook_cwd
-    for segment in SEGMENT_SPLIT.split(cmd):
-        seg = segment.strip()
+    cwd_stack: list[Path] = [hook_cwd]
+    for kind, payload in _walk_events(cmd):
+        if kind == "open":
+            cwd_stack.append(cwd_stack[-1])
+            continue
+        if kind == "close":
+            if len(cwd_stack) > 1:
+                cwd_stack.pop()
+            continue
+        seg = payload.strip()
         if not seg:
             continue
         try:
             tokens = shlex.split(seg)
         except ValueError:
             continue
-        seg_targets, running_cwd = _process_segment(tokens, running_cwd)
+        seg_targets, new_cwd = _segment_git_pushes(tokens, cwd_stack[-1])
+        cwd_stack[-1] = new_cwd
         targets.extend(seg_targets)
     return targets
 
