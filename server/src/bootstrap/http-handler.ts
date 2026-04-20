@@ -65,7 +65,10 @@ export function createHttpRequestHandler(args: {
 
     try {
       const handled =
-        adminUiEnabled || pathname === "/healthz" || pathname === "/readyz"
+        adminUiEnabled ||
+        pathname === "/healthz" ||
+        pathname === "/readyz" ||
+        pathname === "/metrics"
           ? await args.adminRouter.handle(request, response)
           : false;
       if (handled) {

@@ -1370,6 +1370,10 @@ test("room node can disable admin routes while keeping health probes", async () 
     const ready = await requestJson(server.httpBaseUrl, "/readyz");
     assert.equal(ready.status, 200);
     assert.equal((ready.body.data as { status: string }).status, "ready");
+
+    const metrics = await requestText(server.httpBaseUrl, "/metrics");
+    assert.equal(metrics.status, 200);
+    assert.equal(metrics.body.includes("bili_syncplay_connections"), true);
   } finally {
     await server.close();
   }
