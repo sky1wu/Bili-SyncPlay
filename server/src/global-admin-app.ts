@@ -53,6 +53,7 @@ export async function createGlobalAdminServer(
     roomEventBus,
     eventStore,
     logEvent,
+    metricsCollector,
   } = await createServerBootstrapContext(persistenceConfig, dependencies, {
     useMirroredRuntimeStore: false,
   });
@@ -79,6 +80,7 @@ export async function createGlobalAdminServer(
       requestAdminCommand: (command, timeoutMs) =>
         adminCommandBus.request(command, timeoutMs),
       logEvent,
+      metricsCollector,
       now,
       adminConfig: dependencies.adminConfig,
       adminUiConfig: dependencies.adminUiConfig,

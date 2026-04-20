@@ -4,6 +4,10 @@ import { fileURLToPath } from "node:url";
 import { createEventStore } from "../admin/event-store.js";
 import { createRedisEventStore } from "../admin/redis-event-store.js";
 import {
+  createMetricsCollector,
+  type MetricsCollector,
+} from "../admin/metrics.js";
+import {
   createInMemoryAdminCommandBus,
   createNoopAdminCommandBus,
   type AdminCommandBus,
@@ -101,6 +105,7 @@ export type ServerBootstrapContext = {
   roomEventBus: RoomEventBus;
   eventStore: GlobalEventStore;
   logEvent: LogEvent;
+  metricsCollector: MetricsCollector;
 };
 
 export async function runShutdownSteps(
@@ -231,6 +236,10 @@ export async function createServerBootstrapContext(
         })
       : createInMemoryRoomStore({ now }));
   const localRuntimeStore = createInMemoryRuntimeStore(now);
+  const metricsCollector = createMetricsCollector({
+    runtimeStore: localRuntimeStore,
+    roomStore,
+  });
   const runtimeStorePendingOperationLogger =
     options.loggingHooks?.onRuntimeStorePendingOperationError;
 
@@ -241,6 +250,7 @@ export async function createServerBootstrapContext(
       ? await createRedisRuntimeStore(persistenceConfig.redisUrl, {
           now,
           keyPrefix: getRedisRuntimeKeyPrefix(persistenceConfig.redisNamespace),
+          metricsCollector,
           ...(runtimeStorePendingOperationLogger
             ? {
                 onPendingOperationError: (context, error) => {
@@ -254,6 +264,7 @@ export async function createServerBootstrapContext(
     options.useMirroredRuntimeStore && sharedRuntimeStore !== localRuntimeStore
       ? createMirroredRuntimeStore(localRuntimeStore, sharedRuntimeStore)
       : sharedRuntimeStore;
+  metricsCollector.bindRuntimeStore(runtimeStore);
   const adminCommandBus =
     persistenceConfig.adminCommandBusProvider === "redis"
       ? await createRedisAdminCommandBus(persistenceConfig.redisUrl, {
@@ -271,6 +282,7 @@ export async function createServerBootstrapContext(
     persistenceConfig.roomEventBusProvider === "redis"
       ? await createRedisRoomEventBus(persistenceConfig.redisUrl, {
           channel: getRedisRoomEventChannel(persistenceConfig.redisNamespace),
+          metricsCollector,
           onConnectionError: (role, error) => {
             options.loggingHooks?.onRoomEventBusConnectionError?.(
               logEvent,
@@ -302,9 +314,18 @@ export async function createServerBootstrapContext(
         })
       : createEventStore();
 
-  logEvent =
-    dependencies.logEvent ??
-    createStructuredLogger(undefined, eventStore, runtimeStore);
+  logEvent = dependencies.logEvent
+    ? (event, data) => {
+        dependencies.logEvent?.(event, data);
+        runtimeStore.recordEvent(event, now());
+        metricsCollector.recordEvent(event);
+      }
+    : createStructuredLogger(
+        undefined,
+        eventStore,
+        runtimeStore,
+        metricsCollector,
+      );
 
   const purgedStartupSessions =
     (await runtimeStore.purgeSessionsByInstance?.(
@@ -328,6 +349,7 @@ export async function createServerBootstrapContext(
     roomEventBus,
     eventStore,
     logEvent,
+    metricsCollector,
   };
 }
 

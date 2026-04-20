@@ -87,6 +87,7 @@ export async function createSyncServer(
     roomEventBus,
     eventStore,
     logEvent,
+    metricsCollector,
   } = await createServerBootstrapContext(persistenceConfig, dependencies, {
     useMirroredRuntimeStore: true,
     loggingHooks: {
@@ -218,6 +219,7 @@ export async function createSyncServer(
     sendError,
     publishRoomEvent,
     instanceId: persistenceConfig.instanceId,
+    metricsCollector,
     onRoomJoined: (session, roomCode) => {
       runtimeStore.registerSession(session);
       runtimeStore.markSessionJoinedRoom(session.id, roomCode);
@@ -265,6 +267,7 @@ export async function createSyncServer(
       requestAdminCommand: (command, timeoutMs) =>
         adminCommandBus.request(command, timeoutMs),
       logEvent,
+      metricsCollector,
       now,
       adminConfig: dependencies.adminConfig,
       adminUiConfig: dependencies.adminUiConfig,

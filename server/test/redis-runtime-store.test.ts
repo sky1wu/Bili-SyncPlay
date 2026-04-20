@@ -512,3 +512,31 @@ test("redis runtime store removes timed out pending operations and recovers", as
     await store.close();
   }
 });
+
+test("redis runtime store counts a timed-out operation failure only once", async () => {
+  const pending = createDeferred<unknown>();
+  const failureOperations: string[] = [];
+  const store = await createRedisRuntimeStore("redis://example.test:6379", {
+    redisClient: createFakeRedisClient([pending.promise]),
+    pendingOperationTimeoutMs: 5,
+    metricsCollector: {
+      observeRedisRuntimeStoreDuration() {},
+      observeRedisRuntimeStoreFailure(operation) {
+        failureOperations.push(operation);
+      },
+    },
+  });
+
+  try {
+    const session = createSession("session-timeout");
+    store.registerSession(session);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    pending.reject(new Error("late redis failure"));
+    await store.flush?.();
+
+    assert.deepEqual(failureOperations, ["register_session"]);
+  } finally {
+    await store.close();
+  }
+});

@@ -8,7 +8,7 @@ import { createAdminAuthService } from "../admin/auth-service.js";
 import { createAdminConfigService } from "../admin/config-service.js";
 import type { GlobalAuditStore } from "../admin/global-audit-store.js";
 import type { GlobalEventStore } from "../admin/global-event-store.js";
-import { createMetricsService } from "../admin/metrics.js";
+import type { MetricsCollector } from "../admin/metrics.js";
 import { createAdminOverviewService } from "../admin/overview-service.js";
 import { createAdminRoomQueryService } from "../admin/room-query-service.js";
 import { createRedisAuditStore } from "../admin/redis-audit-store.js";
@@ -42,6 +42,7 @@ export function createAdminServices(args: {
   publishRoomEvent: (message: RoomEventBusMessage) => Promise<void>;
   requestAdminCommand: AdminCommandBus["request"];
   logEvent: LogEvent;
+  metricsCollector: MetricsCollector;
   now: () => number;
   adminConfig?: AdminConfig;
   serviceVersion: string;
@@ -112,10 +113,7 @@ export function createAdminServices(args: {
       runtimeStore: args.runtimeStore,
       eventStore: args.eventStore,
     });
-    const metricsService = createMetricsService({
-      runtimeStore: args.runtimeStore,
-      roomStore: args.roomStore,
-    });
+    const metricsService = args.metricsCollector;
     const configService = createAdminConfigService({
       adminConfig: args.adminConfig ?? null,
       persistenceConfig: args.persistenceConfig,

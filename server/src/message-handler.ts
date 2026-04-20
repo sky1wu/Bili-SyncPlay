@@ -1,4 +1,9 @@
 import type { ClientMessage } from "@bili-syncplay/protocol";
+import { performance } from "node:perf_hooks";
+import type {
+  MetricsCollector,
+  MonitoredMessageType,
+} from "./admin/metrics.js";
 import {
   consumeFixedWindow,
   consumeTokenBucket,
@@ -83,6 +88,7 @@ export function createMessageHandler(options: {
   sendError: SendError;
   publishRoomEvent: (message: RoomEventBusMessage) => Promise<void>;
   instanceId: string;
+  metricsCollector?: Pick<MetricsCollector, "observeMessageHandlerDuration">;
   onRoomJoined?: (
     session: Session,
     roomCode: string,
@@ -99,6 +105,7 @@ export function createMessageHandler(options: {
 } {
   const { config, roomService, logEvent, send, sendError } = options;
   const now = options.now ?? Date.now;
+  const metricsCollector = options.metricsCollector;
 
   async function publishRoomEvent(
     type: RoomEventBusMessage["type"],
@@ -148,6 +155,21 @@ export function createMessageHandler(options: {
       messageType,
       result: "rejected",
     });
+  }
+
+  async function measureMessageHandling(
+    messageType: MonitoredMessageType,
+    handler: () => Promise<void>,
+  ): Promise<void> {
+    const startedAt = performance.now();
+    try {
+      await handler();
+    } finally {
+      metricsCollector?.observeMessageHandlerDuration(
+        messageType,
+        performance.now() - startedAt,
+      );
+    }
   }
 
   async function handleClientMessage(
@@ -221,32 +243,34 @@ export function createMessageHandler(options: {
             return;
           }
 
-          const { room, memberToken } = await roomService.joinRoomForSession(
-            session,
-            message.payload.roomCode,
-            message.payload.joinToken,
-            message.payload.displayName,
-            message.payload.memberToken,
-          );
-          if (previousRoomCode && previousRoomCode !== room.code) {
-            options.onRoomLeft?.(session, previousRoomCode);
-          }
-          options.onRoomJoined?.(session, room.code, previousRoomCode);
-          send(socket, {
-            type: "room:joined",
-            payload: {
+          await measureMessageHandling("room:join", async () => {
+            const { room, memberToken } = await roomService.joinRoomForSession(
+              session,
+              message.payload.roomCode,
+              message.payload.joinToken,
+              message.payload.displayName,
+              message.payload.memberToken,
+            );
+            if (previousRoomCode && previousRoomCode !== room.code) {
+              options.onRoomLeft?.(session, previousRoomCode);
+            }
+            options.onRoomJoined?.(session, room.code, previousRoomCode);
+            send(socket, {
+              type: "room:joined",
+              payload: {
+                roomCode: room.code,
+                memberId: session.memberId ?? session.id,
+                memberToken,
+              },
+            });
+            await publishRoomEvent("room_member_changed", room.code);
+            logEvent("room_joined", {
+              sessionId: session.id,
               roomCode: room.code,
-              memberId: session.memberId ?? session.id,
-              memberToken,
-            },
-          });
-          await publishRoomEvent("room_member_changed", room.code);
-          logEvent("room_joined", {
-            sessionId: session.id,
-            roomCode: room.code,
-            remoteAddress: session.remoteAddress,
-            origin: session.origin,
-            result: "ok",
+              remoteAddress: session.remoteAddress,
+              origin: session.origin,
+              result: "ok",
+            });
           });
           return;
         }
@@ -263,7 +287,7 @@ export function createMessageHandler(options: {
             );
             return;
           }
-          await leaveRoom(session);
+          await measureMessageHandling("room:leave", () => leaveRoom(session));
           return;
         }
         case "profile:update": {
@@ -289,13 +313,15 @@ export function createMessageHandler(options: {
             return;
           }
 
-          const { room } = await roomService.shareVideoForSession(
-            session,
-            message.payload.memberToken,
-            message.payload.video,
-            message.payload.playback,
-          );
-          await publishRoomEvent("room_state_updated", room.code);
+          await measureMessageHandling("video:share", async () => {
+            const { room } = await roomService.shareVideoForSession(
+              session,
+              message.payload.memberToken,
+              message.payload.video,
+              message.payload.playback,
+            );
+            await publishRoomEvent("room_state_updated", room.code);
+          });
           return;
         }
         case "playback:update": {
@@ -311,14 +337,16 @@ export function createMessageHandler(options: {
             return;
           }
 
-          const result = await roomService.updatePlaybackForSession(
-            session,
-            message.payload.memberToken,
-            message.payload.playback,
-          );
-          if (!result.ignored && result.room) {
-            await publishRoomEvent("room_state_updated", result.room.code);
-          }
+          await measureMessageHandling("playback:update", async () => {
+            const result = await roomService.updatePlaybackForSession(
+              session,
+              message.payload.memberToken,
+              message.payload.playback,
+            );
+            if (!result.ignored && result.room) {
+              await publishRoomEvent("room_state_updated", result.room.code);
+            }
+          });
           return;
         }
         case "sync:request": {
