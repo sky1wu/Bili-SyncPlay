@@ -176,15 +176,15 @@ export function bindPopupActions(args: {
 
   const saveServerUrl = async () => {
     patchUiState({ localStatusMessage: null });
-    const requestedServerUrl = args.serverUrlDraft.value.trim();
+    const originalServerUrl = args.serverUrlDraft.value;
     const state = await sendPopupAction({
       type: "popup:set-server-url",
-      serverUrl: requestedServerUrl,
+      serverUrl: originalServerUrl.trim(),
     });
     args.applyActionState(state);
     syncServerUrlDraft(args.serverUrlDraft, state.serverUrl);
     refs.serverUrlInput.value = state.serverUrl;
-    if (requestedServerUrl !== state.serverUrl && !state.error) {
+    if (originalServerUrl !== state.serverUrl && !state.error) {
       patchUiState({
         localStatusMessage: t("serverUrlAdjusted", {
           resolved: state.serverUrl,

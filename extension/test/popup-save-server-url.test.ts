@@ -166,6 +166,44 @@ test("saveServerUrl surfaces a notice when the backend silently normalizes the U
   }
 });
 
+test("saveServerUrl surfaces a notice when only surrounding whitespace was trimmed", async () => {
+  setLocaleForTests("zh-CN");
+  try {
+    const refs = createRefs();
+    const uiStateStore = createPopupUiStateStore();
+    const serverUrlDraft = createServerUrlDraftState();
+    updateServerUrlDraft(
+      serverUrlDraft,
+      "  ws://trimmed.example/  ",
+      "ws://current.example/",
+    );
+
+    const requests: unknown[] = [];
+    installChromeRuntimeStub((message) => {
+      const typed = message as { type?: string; serverUrl?: string };
+      if (typed.type === "popup:set-server-url") {
+        requests.push(typed.serverUrl);
+        return createState({ serverUrl: "ws://trimmed.example/" });
+      }
+      return createState();
+    });
+
+    bindPopupActions(buildBindings({ refs, uiStateStore, serverUrlDraft }));
+
+    (refs.saveServerUrlButton as unknown as EventTarget).dispatchEvent(
+      new Event("click"),
+    );
+    await flushMicrotasks();
+
+    assert.deepEqual(requests, ["ws://trimmed.example/"]);
+    const message = uiStateStore.getState().localStatusMessage ?? "";
+    assert.match(message, /ws:\/\/trimmed\.example\//);
+    assert.match(message, /调整/);
+  } finally {
+    setLocaleForTests(null);
+  }
+});
+
 test("saveServerUrl leaves localStatusMessage untouched when the backend reports an error", async () => {
   setLocaleForTests("zh-CN");
   try {
