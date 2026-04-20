@@ -1,4 +1,6 @@
 import { Redis } from "ioredis";
+import { performance } from "node:perf_hooks";
+import type { MetricsCollector } from "./admin/metrics.js";
 import type { RoomEventBus, RoomEventBusMessage } from "./room-event-bus.js";
 
 const DEFAULT_ROOM_EVENT_CHANNEL = "bsp:room-events";
@@ -46,6 +48,11 @@ export async function createRedisRoomEventBus(
     ) => void;
     onInvalidMessage?: (payload: string) => void;
     onHandlerError?: (message: RoomEventBusMessage, error: unknown) => void;
+    metricsCollector?: Pick<
+      MetricsCollector,
+      | "observeRedisRoomEventBusPublishDuration"
+      | "observeRedisRoomEventBusPublishFailure"
+    >;
   } = {},
 ): Promise<RoomEventBus & { close: () => Promise<void> }> {
   const publishClient = new Redis(redisUrl, {
@@ -93,7 +100,17 @@ export async function createRedisRoomEventBus(
         return;
       }
 
-      await publishClient.publish(channel, JSON.stringify(message));
+      const startedAt = performance.now();
+      try {
+        await publishClient.publish(channel, JSON.stringify(message));
+      } catch (error) {
+        options.metricsCollector?.observeRedisRoomEventBusPublishFailure();
+        throw error;
+      } finally {
+        options.metricsCollector?.observeRedisRoomEventBusPublishDuration(
+          performance.now() - startedAt,
+        );
+      }
     },
     async subscribe(handler) {
       if (closing) {

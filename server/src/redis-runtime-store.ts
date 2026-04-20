@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { Redis } from "ioredis";
+import type { MetricsCollector } from "./admin/metrics.js";
 import type { ActiveRoom, ClusterNodeStatus, Session } from "./types.js";
 import {
   createInMemoryRuntimeStore,
@@ -75,6 +77,10 @@ type RuntimeStoreOptions = {
     context: PendingOperationLogContext,
     error: unknown,
   ) => void;
+  metricsCollector?: Pick<
+    MetricsCollector,
+    "observeRedisRuntimeStoreDuration" | "observeRedisRuntimeStoreFailure"
+  >;
 };
 
 const RUNTIME_STORE_METHOD_NAMES = [
@@ -260,6 +266,7 @@ export async function createRedisRuntimeStore(
     options.maxPendingOperations ?? DEFAULT_MAX_PENDING_OPERATIONS;
   const pendingOperationTimeoutMs =
     options.pendingOperationTimeoutMs ?? DEFAULT_PENDING_OPERATION_TIMEOUT_MS;
+  const metricsCollector = options.metricsCollector;
   const localRuntimeStore = createInMemoryRuntimeStore(now);
   const pendingOperations = new Set<Promise<unknown>>();
   const sessionOperationChains = new Map<string, Promise<void>>();
@@ -309,11 +316,13 @@ export async function createRedisRuntimeStore(
     operationName: string,
     operation: Promise<T>,
   ): Promise<T | undefined> {
+    const startedAt = performance.now();
     const trackedOperation = new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const error = new Error(
           `Redis runtime store operation timed out: ${operationName}.`,
         );
+        metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
         logPendingOperationError(
           {
             operationName,
@@ -332,6 +341,7 @@ export async function createRedisRuntimeStore(
         },
         (error: unknown) => {
           clearTimeout(timeout);
+          metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
           logPendingOperationError(
             {
               operationName,
@@ -348,6 +358,10 @@ export async function createRedisRuntimeStore(
     pendingOperations.add(handledOperation);
     void handledOperation.finally(() => {
       pendingOperations.delete(handledOperation);
+      metricsCollector?.observeRedisRuntimeStoreDuration(
+        operationName,
+        performance.now() - startedAt,
+      );
     });
     return handledOperation;
   }

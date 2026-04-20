@@ -1176,6 +1176,23 @@ test("admin exposes metrics and config summary", async () => {
       metrics.body.includes("bili_syncplay_room_created_total"),
       true,
     );
+    assert.equal(metrics.body.includes("bili_syncplay_events_total"), true);
+    assert.equal(
+      metrics.body.includes("bili_syncplay_message_handler_duration_seconds"),
+      true,
+    );
+    assert.equal(
+      metrics.body.includes(
+        "bili_syncplay_redis_runtime_store_duration_seconds",
+      ),
+      true,
+    );
+    assert.equal(
+      metrics.body.includes(
+        "bili_syncplay_redis_room_event_bus_publish_duration_seconds",
+      ),
+      true,
+    );
 
     const config = await requestJson(server.httpBaseUrl, "/api/admin/config", {
       token,

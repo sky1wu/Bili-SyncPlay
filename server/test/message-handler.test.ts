@@ -304,3 +304,117 @@ test("message handler keeps leave completed when member change publish fails", a
   assert.deepEqual(left, ["ROOM01"]);
   assert.ok(events.includes("room_event_publish_failed"));
 });
+
+test("message handler records monitored duration metrics for critical room paths", async () => {
+  const observedTypes: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = "ROOM01";
+        currentSession.memberId = "member-1";
+        currentSession.memberToken = "member-token-1";
+        return {
+          room: { code: "ROOM01" },
+          memberToken: "member-token-1",
+        };
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        return {
+          room: { code: "ROOM01" },
+          notifyRoom: true,
+        };
+      },
+      async shareVideoForSession() {
+        return { room: { code: "ROOM01" } };
+      },
+      async updatePlaybackForSession() {
+        return { room: { code: "ROOM01" }, ignored: false };
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {
+      throw new Error("sendError should not be called");
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+    metricsCollector: {
+      observeMessageHandlerDuration(messageType) {
+        observedTypes.push(messageType);
+      },
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      displayName: "Alice",
+    },
+  });
+  await handler.handleClientMessage(session, {
+    type: "video:share",
+    payload: {
+      memberToken: "member-token-1",
+      video: {
+        videoId: "BV1xx411c7mD",
+        url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+        title: "Test Episode",
+      },
+      playback: {
+        url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+        currentTime: 0,
+        playState: "paused",
+        playbackRate: 1,
+        updatedAt: 1,
+        serverTime: 0,
+        actorId: "member-1",
+        seq: 1,
+      },
+    },
+  });
+  await handler.handleClientMessage(session, {
+    type: "playback:update",
+    payload: {
+      memberToken: "member-token-1",
+      playback: {
+        currentTime: 5,
+        playState: "playing",
+        playbackRate: 1,
+        updatedAt: 2,
+        serverTime: 0,
+        actorId: "member-1",
+        seq: 2,
+      },
+    },
+  });
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+
+  assert.deepEqual(observedTypes, [
+    "room:join",
+    "video:share",
+    "playback:update",
+    "room:leave",
+  ]);
+});

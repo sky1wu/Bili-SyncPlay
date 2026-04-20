@@ -5,6 +5,7 @@ import type { WebSocket } from "ws";
 import type { GlobalEventStore } from "../admin/global-event-store.js";
 import { createAdminOverviewService } from "../admin/overview-service.js";
 import { createAdminRoomQueryService } from "../admin/room-query-service.js";
+import type { MetricsCollector } from "../admin/metrics.js";
 import type { AdminCommandBus } from "../admin-command-bus.js";
 import type { RoomEventBusMessage } from "../room-event-bus.js";
 import type { RoomStore } from "../room-store.js";
@@ -49,6 +50,7 @@ export async function createSharedAdminHttpBootstrap(args: {
   publishRoomEvent: (message: RoomEventBusMessage) => Promise<void>;
   requestAdminCommand: AdminCommandBus["request"];
   logEvent: LogEvent;
+  metricsCollector: MetricsCollector;
   now: () => number;
   adminConfig?: AdminConfig;
   adminUiConfig?: AdminUiConfig;
@@ -84,6 +86,7 @@ export async function createSharedAdminHttpBootstrap(args: {
     publishRoomEvent: args.publishRoomEvent,
     requestAdminCommand: args.requestAdminCommand,
     logEvent: args.logEvent,
+    metricsCollector: args.metricsCollector,
     now: args.now,
     adminConfig: args.adminConfig,
     serviceVersion: args.serviceVersion,
