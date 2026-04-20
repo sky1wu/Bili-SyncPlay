@@ -48,6 +48,7 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
       "当前房间正在同步《{currentTitle}》。\n是否替换为《{nextTitle}》？",
     errorInvalidInviteFormat: "邀请格式无效，请输入“房间码:加入码”。",
     invalidServerUrl: "服务端地址必须以 ws:// 或 wss:// 开头。",
+    serverUrlAdjusted: "服务端地址已调整为 {resolved}，请核对。",
     connectionServerUnreachable: "无法连接到同步服务器。",
     connectionHandshakeRejected:
       "服务器可达，但 WebSocket 握手被拒绝。请检查服务端状态，以及反向代理是否已正确转发 WebSocket。",
@@ -127,6 +128,7 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     errorInvalidInviteFormat:
       'Invalid invite format. Enter "ROOMCODE:JOINTOKEN".',
     invalidServerUrl: "Server URL must start with ws:// or wss://.",
+    serverUrlAdjusted: "Server URL was adjusted to {resolved}; please verify.",
     connectionServerUnreachable: "Unable to connect to the sync server.",
     connectionHandshakeRejected:
       "The server is reachable, but the WebSocket handshake was rejected. Check the server status and make sure the reverse proxy forwards WebSocket correctly.",
