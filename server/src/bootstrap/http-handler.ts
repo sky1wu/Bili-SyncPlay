@@ -12,6 +12,7 @@ export function createHttpRequestHandler(args: {
   };
   securityPolicy: ReturnType<typeof createSecurityPolicy>;
   adminUiConfig?: AdminUiConfig;
+  metricsEnabled?: boolean;
 }) {
   return async (
     request: IncomingMessage,
@@ -19,6 +20,20 @@ export function createHttpRequestHandler(args: {
   ): Promise<void> => {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
     const adminUiEnabled = args.adminUiConfig?.enabled !== false;
+    const metricsEnabled = args.metricsEnabled ?? true;
+    if (pathname === "/metrics" && !metricsEnabled) {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          ok: false,
+          error: {
+            code: "not_found",
+            message: "Not found.",
+          },
+        }),
+      );
+      return;
+    }
     if (pathname === "/api/connection-check") {
       const originHeader = request.headers.origin;
       const origin = typeof originHeader === "string" ? originHeader : null;

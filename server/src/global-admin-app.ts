@@ -27,6 +27,7 @@ import type {
 
 export type GlobalAdminServer = {
   httpServer: HttpServer;
+  metricsHttpServer: HttpServer | undefined;
   close: () => Promise<void>;
 };
 
@@ -40,6 +41,7 @@ export type GlobalAdminServerDependencies = {
   serviceVersion?: string;
   logLevel?: LogLevel;
   logSampling?: Record<string, number>;
+  metricsPort?: number;
 };
 
 export async function createGlobalAdminServer(
@@ -69,36 +71,45 @@ export async function createGlobalAdminServer(
     logEvent,
     now,
   });
-  const { httpServer, runtimeIndexReaper, closeAdminServices } =
-    await createSharedAdminHttpBootstrap({
-      securityConfig,
-      persistenceConfig,
-      roomStore,
-      runtimeStore,
-      eventStore,
-      roomService,
-      send() {},
-      publishRoomEvent: (message: RoomEventBusMessage) =>
-        roomEventBus.publish(message),
-      requestAdminCommand: (command, timeoutMs) =>
-        adminCommandBus.request(command, timeoutMs),
-      logEvent,
-      metricsCollector,
-      now,
-      adminConfig: dependencies.adminConfig,
-      adminUiConfig: dependencies.adminUiConfig,
-      serviceName: "bili-syncplay-global-admin",
-      createOverviewService: createGlobalAdminOverviewService,
-      createRoomQueryService: createGlobalAdminRoomQueryService,
-      serviceVersion,
-    });
+  const {
+    httpServer,
+    metricsHttpServer,
+    runtimeIndexReaper,
+    closeAdminServices,
+  } = await createSharedAdminHttpBootstrap({
+    securityConfig,
+    persistenceConfig,
+    roomStore,
+    runtimeStore,
+    eventStore,
+    roomService,
+    send() {},
+    publishRoomEvent: (message: RoomEventBusMessage) =>
+      roomEventBus.publish(message),
+    requestAdminCommand: (command, timeoutMs) =>
+      adminCommandBus.request(command, timeoutMs),
+    logEvent,
+    metricsCollector,
+    now,
+    adminConfig: dependencies.adminConfig,
+    adminUiConfig: dependencies.adminUiConfig,
+    serviceName: "bili-syncplay-global-admin",
+    createOverviewService: createGlobalAdminOverviewService,
+    createRoomQueryService: createGlobalAdminRoomQueryService,
+    serviceVersion,
+    metricsPort: dependencies.metricsPort,
+  });
 
   return {
     httpServer,
+    metricsHttpServer,
     close: () =>
       runShutdownSteps(
         [
           createCloseHttpServerStep(httpServer),
+          ...(metricsHttpServer
+            ? [createCloseHttpServerStep(metricsHttpServer)]
+            : []),
           {
             name: "stop_runtime_index_reaper",
             run: () => runtimeIndexReaper.stop(),

@@ -22,6 +22,7 @@ import type {
 import type { RuntimeStore } from "../runtime-store.js";
 import { createAdminServices } from "./admin-services.js";
 import { createHttpRequestHandler } from "./http-handler.js";
+import { createMetricsRequestHandler } from "./metrics-handler.js";
 import type { ShutdownStep } from "./server-bootstrap.js";
 
 export function resolveServerRuntimeDependencies(dependencies: {
@@ -58,9 +59,11 @@ export async function createSharedAdminHttpBootstrap(args: {
   serviceName?: string;
   createOverviewService?: typeof createAdminOverviewService;
   createRoomQueryService?: typeof createAdminRoomQueryService;
+  metricsPort?: number;
 }): Promise<{
   securityPolicy: ReturnType<typeof createSecurityPolicy>;
   httpServer: HttpServer;
+  metricsHttpServer: HttpServer | undefined;
   runtimeIndexReaper: ReturnType<typeof createRuntimeIndexReaper>;
   closeAdminServices: () => Promise<void>;
 }> {
@@ -95,18 +98,28 @@ export async function createSharedAdminHttpBootstrap(args: {
     createRoomQueryService: args.createRoomQueryService,
   });
 
+  const metricsOnMain = args.metricsPort === undefined;
   const httpServer = createServer(
     createHttpRequestHandler({
       adminRouter,
       securityPolicy,
       adminUiConfig: args.adminUiConfig,
+      metricsEnabled: metricsOnMain,
     }),
   );
+  const metricsHttpServer = metricsOnMain
+    ? undefined
+    : createServer(
+        createMetricsRequestHandler({
+          getMetrics: () => args.metricsCollector.render(),
+        }),
+      );
   runtimeIndexReaper.start();
 
   return {
     securityPolicy,
     httpServer,
+    metricsHttpServer,
     runtimeIndexReaper,
     closeAdminServices,
   };

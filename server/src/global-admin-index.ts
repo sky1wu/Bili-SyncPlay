@@ -3,6 +3,7 @@ import { createGlobalAdminServer } from "./global-admin-app.js";
 
 const {
   globalAdminPort: port,
+  metricsPort,
   logLevel,
   securityConfig,
   persistenceConfig,
@@ -10,7 +11,7 @@ const {
   adminUiConfig,
 } = await loadRuntimeConfig();
 
-const { httpServer } = await createGlobalAdminServer(
+const { httpServer, metricsHttpServer } = await createGlobalAdminServer(
   securityConfig,
   persistenceConfig,
   {
@@ -20,6 +21,7 @@ const { httpServer } = await createGlobalAdminServer(
       enabled: true,
     },
     logLevel,
+    metricsPort,
   },
 );
 httpServer.listen(port, () => {
@@ -27,3 +29,10 @@ httpServer.listen(port, () => {
     `Bili-SyncPlay global admin listening on http://localhost:${port}`,
   );
 });
+if (metricsHttpServer && metricsPort !== undefined) {
+  metricsHttpServer.listen(metricsPort, () => {
+    console.log(
+      `Bili-SyncPlay global admin metrics listening on http://localhost:${metricsPort}/metrics`,
+    );
+  });
+}

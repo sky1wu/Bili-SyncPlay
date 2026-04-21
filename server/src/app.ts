@@ -59,6 +59,7 @@ export { cleanupSessionAfterClose } from "./ws-session-handler.js";
 
 export type SyncServer = {
   httpServer: HttpServer;
+  metricsHttpServer: HttpServer | undefined;
   close: () => Promise<void>;
 };
 
@@ -72,6 +73,7 @@ export type SyncServerDependencies = {
   serviceVersion?: string;
   logLevel?: LogLevel;
   logSampling?: Record<string, number>;
+  metricsPort?: number;
 };
 
 export async function createSyncServer(
@@ -257,25 +259,31 @@ export async function createSyncServer(
     logEvent,
   });
   nodeHeartbeat.start();
-  const { securityPolicy, httpServer, runtimeIndexReaper, closeAdminServices } =
-    await createSharedAdminHttpBootstrap({
-      securityConfig,
-      persistenceConfig,
-      roomStore,
-      runtimeStore,
-      eventStore,
-      roomService,
-      send,
-      publishRoomEvent,
-      requestAdminCommand: (command, timeoutMs) =>
-        adminCommandBus.request(command, timeoutMs),
-      logEvent,
-      metricsCollector,
-      now,
-      adminConfig: dependencies.adminConfig,
-      adminUiConfig: dependencies.adminUiConfig,
-      serviceVersion,
-    });
+  const {
+    securityPolicy,
+    httpServer,
+    metricsHttpServer,
+    runtimeIndexReaper,
+    closeAdminServices,
+  } = await createSharedAdminHttpBootstrap({
+    securityConfig,
+    persistenceConfig,
+    roomStore,
+    runtimeStore,
+    eventStore,
+    roomService,
+    send,
+    publishRoomEvent,
+    requestAdminCommand: (command, timeoutMs) =>
+      adminCommandBus.request(command, timeoutMs),
+    logEvent,
+    metricsCollector,
+    now,
+    adminConfig: dependencies.adminConfig,
+    adminUiConfig: dependencies.adminUiConfig,
+    serviceVersion,
+    metricsPort: dependencies.metricsPort,
+  });
 
   const wss = new WebSocketServer({
     noServer: true,
@@ -303,6 +311,7 @@ export async function createSyncServer(
 
   return {
     httpServer,
+    metricsHttpServer,
     close: async () => {
       const maybeClosableRuntimeStore =
         sharedRuntimeStore === localRuntimeStore ? null : sharedRuntimeStore;
@@ -346,6 +355,9 @@ export async function createSyncServer(
                 });
               }),
           },
+          ...(metricsHttpServer
+            ? [createCloseHttpServerStep(metricsHttpServer)]
+            : []),
           {
             name: "await_pending_session_cleanup",
             run: () => Promise.allSettled(Array.from(pendingSessionCleanup)),

@@ -9,7 +9,7 @@ import type {
 } from "../types.js";
 import { loadAdminConfig, loadAdminUiConfig } from "./admin-config.js";
 import type { EnvSource } from "./env.js";
-import { parseIntegerEnv } from "./env.js";
+import { parseIntegerEnv, readTrimmedEnv } from "./env.js";
 import { loadPersistenceConfig } from "./persistence-config.js";
 import {
   getConfigValue,
@@ -71,6 +71,7 @@ type AdminUiConfigFile = {
 export type ServerConfigFile = {
   port?: number;
   globalAdminPort?: number;
+  metricsPort?: number;
   logLevel?: LogLevel;
   security?: SecurityConfigFile;
   persistence?: PersistenceConfigFile;
@@ -80,6 +81,7 @@ export type ServerConfigFile = {
 export type RuntimeConfig = {
   port: number;
   globalAdminPort: number;
+  metricsPort: number | undefined;
   logLevel: LogLevel;
   securityConfig: SecurityConfig;
   persistenceConfig: PersistenceConfig;
@@ -252,6 +254,10 @@ export async function loadRuntimeConfig(
       "GLOBAL_ADMIN_PORT",
       parseIntegerEnv(mergedEnv, "PORT", 8788),
     ),
+    metricsPort:
+      readTrimmedEnv(mergedEnv, "METRICS_PORT") !== undefined
+        ? parseIntegerEnv(mergedEnv, "METRICS_PORT", 0)
+        : undefined,
     logLevel: parseConfigEnvFieldValue<LogLevel>(
       LOG_LEVEL_FIELD,
       mergedEnv,

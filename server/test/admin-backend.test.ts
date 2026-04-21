@@ -1395,3 +1395,71 @@ test("room node can disable admin routes while keeping health probes", async () 
     await server.close();
   }
 });
+
+test("metrics can be exposed on a dedicated port distinct from the admin server", async () => {
+  const server = await createSyncServer(
+    {
+      ...getDefaultSecurityConfig(),
+      allowedOrigins: [ALLOWED_ORIGIN],
+    },
+    getDefaultPersistenceConfig(),
+    {
+      serviceVersion: "0.7.0-test",
+      metricsPort: 0,
+    },
+  );
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.httpServer.listen(0, "127.0.0.1", () => resolve());
+      server.httpServer.once("error", reject);
+    });
+    assert.ok(server.metricsHttpServer, "metrics http server must exist");
+    await new Promise<void>((resolve, reject) => {
+      server.metricsHttpServer!.listen(0, "127.0.0.1", () => resolve());
+      server.metricsHttpServer!.once("error", reject);
+    });
+
+    const adminAddress = server.httpServer.address();
+    const metricsAddress = server.metricsHttpServer!.address();
+    if (
+      !adminAddress ||
+      typeof adminAddress === "string" ||
+      !metricsAddress ||
+      typeof metricsAddress === "string"
+    ) {
+      throw new Error("Failed to determine test server addresses.");
+    }
+    assert.notEqual(adminAddress.port, metricsAddress.port);
+
+    const adminMetrics = await requestText(
+      `http://127.0.0.1:${adminAddress.port}`,
+      "/metrics",
+    );
+    assert.equal(adminMetrics.status, 404);
+
+    const adminHealth = await requestText(
+      `http://127.0.0.1:${adminAddress.port}`,
+      "/healthz",
+    );
+    assert.equal(adminHealth.status, 200);
+
+    const dedicatedMetrics = await requestText(
+      `http://127.0.0.1:${metricsAddress.port}`,
+      "/metrics",
+    );
+    assert.equal(dedicatedMetrics.status, 200);
+    assert.equal(
+      dedicatedMetrics.body.includes("bili_syncplay_connections"),
+      true,
+    );
+
+    const dedicatedOtherPath = await requestText(
+      `http://127.0.0.1:${metricsAddress.port}`,
+      "/healthz",
+    );
+    assert.equal(dedicatedOtherPath.status, 404);
+  } finally {
+    await server.close();
+  }
+});

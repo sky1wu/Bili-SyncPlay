@@ -171,6 +171,49 @@ test("http handler omits CORS headers when origin is missing", () => {
   });
 });
 
+test("http handler returns 404 for /metrics when metrics are routed to a dedicated port", async () => {
+  const adminCalls: Array<{ url?: string }> = [];
+  const handler = createHttpRequestHandler({
+    adminRouter: {
+      handle: async (request) => {
+        adminCalls.push({ url: request.url });
+        return false;
+      },
+    },
+    securityPolicy: createSecurityPolicy({
+      allowedOrigins: ["chrome-extension://allowed"],
+      allowMissingOriginInDev: false,
+      connectionAttemptsPerMinute: 10,
+      maxConnectionsPerIp: 5,
+      maxMembersPerRoom: 8,
+      trustedProxyAddresses: [],
+      rateLimits: {
+        roomCreatePerMinute: 5,
+        roomJoinPerMinute: 10,
+        videoSharePerMinute: 20,
+        playbackUpdatePerSecond: 30,
+        profileUpdatePerMinute: 20,
+        syncPingPerMinute: 30,
+        syncPingBurst: 5,
+      },
+    }),
+    metricsEnabled: false,
+  });
+
+  const response = createResponse();
+  await handler(createRequest({ url: "/metrics" }), response);
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(JSON.parse(response.body), {
+    ok: false,
+    error: {
+      code: "not_found",
+      message: "Not found.",
+    },
+  });
+  assert.equal(adminCalls.length, 0);
+});
+
 test("http handler preserves admin router responses without falling through to root payload", async () => {
   const { handler, adminCalls } = createHandler(true);
   const response = createResponse();

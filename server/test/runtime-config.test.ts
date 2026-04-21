@@ -42,6 +42,7 @@ function readRuntimeValue(
   switch (path[0]) {
     case "port":
     case "globalAdminPort":
+    case "metricsPort":
     case "logLevel":
       return getConfigValue(config as Record<string, unknown>, path);
     case "security":
@@ -74,10 +75,45 @@ test("runtime config falls back to defaults and env when config file is missing"
 
     assert.equal(config.port, 9001);
     assert.equal(config.globalAdminPort, 9001);
+    assert.equal(config.metricsPort, undefined);
     assert.equal(config.logLevel, "info");
     assert.equal(config.persistenceConfig.provider, "memory");
     assert.equal(config.adminUiConfig.enabled, false);
     assert.equal(config.adminConfig, null);
+  });
+});
+
+test("runtime config loads METRICS_PORT from env and config file", async () => {
+  await withTempDir(async (tempDir) => {
+    const envConfig = await loadRuntimeConfig(
+      { METRICS_PORT: "9200" },
+      { cwd: tempDir },
+    );
+    assert.equal(envConfig.metricsPort, 9200);
+
+    await writeFile(
+      join(tempDir, "server.config.json"),
+      JSON.stringify({ metricsPort: 9300 }),
+      "utf8",
+    );
+    const fileConfig = await loadRuntimeConfig({}, { cwd: tempDir });
+    assert.equal(fileConfig.metricsPort, 9300);
+
+    const envOverride = await loadRuntimeConfig(
+      { METRICS_PORT: "9400" },
+      { cwd: tempDir },
+    );
+    assert.equal(envOverride.metricsPort, 9400);
+  });
+});
+
+test("runtime config keeps metricsPort undefined when METRICS_PORT is blank", async () => {
+  await withTempDir(async (tempDir) => {
+    const config = await loadRuntimeConfig(
+      { METRICS_PORT: "   " },
+      { cwd: tempDir },
+    );
+    assert.equal(config.metricsPort, undefined);
   });
 });
 
