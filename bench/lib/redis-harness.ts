@@ -64,6 +64,18 @@ function waitForProcessExit(processRef: ChildProcessWithoutNullStreams) {
   });
 }
 
+function waitForProcessError(processRef: ChildProcessWithoutNullStreams) {
+  return new Promise<never>((_, reject) => {
+    processRef.once("error", (error) => {
+      reject(
+        new Error(
+          `Failed to start redis-server. Make sure redis-server is installed or set REDIS_URL. ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+    });
+  });
+}
+
 export async function ensureRedis(required: boolean): Promise<RedisHarness> {
   const configuredRedisUrl = process.env.REDIS_URL?.trim();
   if (configuredRedisUrl) {
@@ -111,10 +123,12 @@ export async function ensureRedis(required: boolean): Promise<RedisHarness> {
   });
 
   const exitPromise = waitForProcessExit(processRef);
+  const errorPromise = waitForProcessError(processRef);
 
   try {
     await Promise.race([
       waitForPort(port, 5_000),
+      errorPromise,
       exitPromise.then((code) => {
         throw new Error(
           `redis-server exited before becoming ready (code: ${String(code)}).\n${stderrChunks.join("")}`,
@@ -122,7 +136,9 @@ export async function ensureRedis(required: boolean): Promise<RedisHarness> {
       }),
     ]);
   } catch (error) {
-    processRef.kill("SIGTERM");
+    if (processRef.exitCode === null && processRef.pid !== undefined) {
+      processRef.kill("SIGTERM");
+    }
     await rm(directory, { force: true, recursive: true });
     throw error;
   }

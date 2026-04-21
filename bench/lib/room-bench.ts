@@ -321,6 +321,7 @@ export async function runPlaybackBroadcastBenchmark(input: {
     Math.round(input.durationSeconds * input.updatesPerSecond),
   );
   const intervalMs = 1_000 / input.updatesPerSecond;
+  let completedAtMs = startedAtMs;
 
   try {
     for (let index = 0; index < totalUpdates; index += 1) {
@@ -372,6 +373,7 @@ export async function runPlaybackBroadcastBenchmark(input: {
     for (const pending of pendingWatchersBySeq.values()) {
       errors += pending.size;
     }
+    completedAtMs = Date.now();
   } finally {
     detachObservers();
     await environment.cleanup();
@@ -384,7 +386,7 @@ export async function runPlaybackBroadcastBenchmark(input: {
     latencySamplesMs,
     watcherCount: watchers.length,
     startedAtMs,
-    completedAtMs: Date.now(),
+    completedAtMs,
     nodeMode: environment.nodeMode,
   };
 }

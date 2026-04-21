@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildBenchmarkResult } from "../../bench/lib/cli.js";
+import { ensureRedis } from "../../bench/lib/redis-harness.js";
 import { runPlaybackBroadcastBenchmark } from "../../bench/lib/room-bench.js";
 import {
   calculateErrorRate,
@@ -98,4 +99,41 @@ test("playback benchmark skips drain bookkeeping when no watchers are sampled", 
     true,
     "benchmark should not spend 5s draining empty pending watcher sets",
   );
+});
+
+test("benchmark completion timestamp excludes cleanup overhead", async () => {
+  const benchmark = await runPlaybackBroadcastBenchmark({
+    scenario: "single-node-room",
+    memberCount: 1,
+    durationSeconds: 0.1,
+    updatesPerSecond: 1,
+    watcherCount: 0,
+  });
+
+  assert.equal(
+    benchmark.completedAtMs - benchmark.startedAtMs < 3_000,
+    true,
+    "benchmark completion time should be recorded before async cleanup runs",
+  );
+});
+
+test("ensureRedis reports a controlled startup error when redis-server is unavailable", async () => {
+  const originalPath = process.env.PATH;
+  const originalRedisUrl = process.env.REDIS_URL;
+  process.env.PATH = "";
+  delete process.env.REDIS_URL;
+
+  try {
+    await assert.rejects(
+      () => ensureRedis(true),
+      /Failed to start redis-server|Make sure redis-server is installed or set REDIS_URL/,
+    );
+  } finally {
+    process.env.PATH = originalPath;
+    if (originalRedisUrl === undefined) {
+      delete process.env.REDIS_URL;
+    } else {
+      process.env.REDIS_URL = originalRedisUrl;
+    }
+  }
 });
