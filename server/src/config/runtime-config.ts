@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import type {
   AdminConfig,
   AdminUiConfig,
+  LogLevel,
   PersistenceConfig,
   SecurityConfig,
 } from "../types.js";
@@ -12,11 +13,16 @@ import { parseIntegerEnv } from "./env.js";
 import { loadPersistenceConfig } from "./persistence-config.js";
 import {
   getConfigValue,
+  parseConfigEnvFieldValue,
   parseConfigFileFieldValue,
   SERVER_CONFIG_FIELDS,
   SERVER_CONFIG_SCHEMA_TREE,
 } from "./runtime-config-schema.js";
 import { loadSecurityConfig } from "./security-config.js";
+
+const LOG_LEVEL_FIELD = SERVER_CONFIG_FIELDS.find(
+  (field) => field.path[0] === "logLevel",
+)!;
 
 type JsonObject = Record<string, unknown>;
 
@@ -65,6 +71,7 @@ type AdminUiConfigFile = {
 export type ServerConfigFile = {
   port?: number;
   globalAdminPort?: number;
+  logLevel?: LogLevel;
   security?: SecurityConfigFile;
   persistence?: PersistenceConfigFile;
   adminUi?: AdminUiConfigFile;
@@ -73,6 +80,7 @@ export type ServerConfigFile = {
 export type RuntimeConfig = {
   port: number;
   globalAdminPort: number;
+  logLevel: LogLevel;
   securityConfig: SecurityConfig;
   persistenceConfig: PersistenceConfig;
   adminConfig: AdminConfig;
@@ -243,6 +251,11 @@ export async function loadRuntimeConfig(
       mergedEnv,
       "GLOBAL_ADMIN_PORT",
       parseIntegerEnv(mergedEnv, "PORT", 8788),
+    ),
+    logLevel: parseConfigEnvFieldValue<LogLevel>(
+      LOG_LEVEL_FIELD,
+      mergedEnv,
+      "info",
     ),
     securityConfig: loadSecurityConfig(mergedEnv),
     persistenceConfig: loadPersistenceConfig(mergedEnv),

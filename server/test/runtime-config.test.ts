@@ -42,6 +42,7 @@ function readRuntimeValue(
   switch (path[0]) {
     case "port":
     case "globalAdminPort":
+    case "logLevel":
       return getConfigValue(config as Record<string, unknown>, path);
     case "security":
       return getConfigValue(
@@ -73,6 +74,7 @@ test("runtime config falls back to defaults and env when config file is missing"
 
     assert.equal(config.port, 9001);
     assert.equal(config.globalAdminPort, 9001);
+    assert.equal(config.logLevel, "info");
     assert.equal(config.persistenceConfig.provider, "memory");
     assert.equal(config.adminUiConfig.enabled, false);
     assert.equal(config.adminConfig, null);
@@ -289,6 +291,39 @@ test("redisNamespace is loaded from config file and passable through env overrid
       { cwd: tempDir },
     );
     assert.equal(configFromEnv.persistenceConfig.redisNamespace, "from-env");
+  });
+});
+
+test("runtime config loads logLevel from env and config file", async () => {
+  await withTempDir(async (tempDir) => {
+    const envConfig = await loadRuntimeConfig(
+      { LOG_LEVEL: "warn" },
+      { cwd: tempDir },
+    );
+    assert.equal(envConfig.logLevel, "warn");
+
+    await writeFile(
+      join(tempDir, "server.config.json"),
+      JSON.stringify({ logLevel: "debug" }),
+      "utf8",
+    );
+    const fileConfig = await loadRuntimeConfig({}, { cwd: tempDir });
+    assert.equal(fileConfig.logLevel, "debug");
+
+    const envOverride = await loadRuntimeConfig(
+      { LOG_LEVEL: "error" },
+      { cwd: tempDir },
+    );
+    assert.equal(envOverride.logLevel, "error");
+  });
+});
+
+test("runtime config rejects invalid LOG_LEVEL values", async () => {
+  await withTempDir(async (tempDir) => {
+    await assert.rejects(
+      () => loadRuntimeConfig({ LOG_LEVEL: "verbose" }, { cwd: tempDir }),
+      /LOG_LEVEL/,
+    );
   });
 });
 

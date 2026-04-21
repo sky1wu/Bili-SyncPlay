@@ -32,6 +32,7 @@ import type {
   AdminConfig,
   AdminUiConfig,
   LogEvent,
+  LogLevel,
   PersistenceConfig,
   SecurityConfig,
 } from "./types.js";
@@ -69,6 +70,8 @@ export type SyncServerDependencies = {
   adminConfig?: AdminConfig;
   adminUiConfig?: AdminUiConfig;
   serviceVersion?: string;
+  logLevel?: LogLevel;
+  logSampling?: Record<string, number>;
 };
 
 export async function createSyncServer(

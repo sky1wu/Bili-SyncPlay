@@ -1,8 +1,14 @@
 import { createSyncServer } from "./app.js";
 import { loadRuntimeConfig } from "./config/runtime-config.js";
 
-const { port, securityConfig, persistenceConfig, adminConfig, adminUiConfig } =
-  await loadRuntimeConfig();
+const {
+  port,
+  logLevel,
+  securityConfig,
+  persistenceConfig,
+  adminConfig,
+  adminUiConfig,
+} = await loadRuntimeConfig();
 
 const { httpServer } = await createSyncServer(
   securityConfig,
@@ -10,6 +16,7 @@ const { httpServer } = await createSyncServer(
   {
     adminConfig,
     adminUiConfig,
+    logLevel,
   },
 );
 httpServer.listen(port, () => {

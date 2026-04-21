@@ -159,7 +159,17 @@ export type SecurityConfig = {
   };
 };
 
-export type LogEvent = (event: string, data: Record<string, unknown>) => void;
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export type LogEventOptions = {
+  level?: LogLevel;
+};
+
+export type LogEvent = (
+  event: string,
+  data: Record<string, unknown>,
+  options?: LogEventOptions,
+) => void;
 
 export type SendMessage = (socket: WebSocket, message: ServerMessage) => void;
 

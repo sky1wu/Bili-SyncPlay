@@ -12,7 +12,7 @@ import {
   createNoopAdminCommandBus,
   type AdminCommandBus,
 } from "../admin-command-bus.js";
-import { createStructuredLogger } from "../logger.js";
+import { createStructuredLogger, DEFAULT_EVENT_SAMPLING } from "../logger.js";
 import { createMirroredRuntimeStore } from "../mirrored-runtime-store.js";
 import { createRedisAdminCommandBus } from "../redis-admin-command-bus.js";
 import { createRedisRoomEventBus } from "../redis-room-event-bus.js";
@@ -40,6 +40,7 @@ import type { GlobalEventStore } from "../admin/global-event-store.js";
 import type {
   AdminConfig,
   LogEvent,
+  LogLevel,
   PersistenceConfig,
   SecurityConfig,
 } from "../types.js";
@@ -68,6 +69,8 @@ export type ServerBootstrapDependencies = {
   now?: () => number;
   adminConfig?: AdminConfig;
   serviceVersion?: string;
+  logLevel?: LogLevel;
+  logSampling?: Record<string, number>;
 };
 
 type PendingOperationLogContext = {
@@ -315,17 +318,18 @@ export async function createServerBootstrapContext(
       : createEventStore();
 
   logEvent = dependencies.logEvent
-    ? (event, data) => {
-        dependencies.logEvent?.(event, data);
+    ? (event, data, options) => {
+        dependencies.logEvent?.(event, data, options);
         runtimeStore.recordEvent(event, now());
         metricsCollector.recordEvent(event);
       }
-    : createStructuredLogger(
-        undefined,
+    : createStructuredLogger({
         eventStore,
         runtimeStore,
         metricsCollector,
-      );
+        logLevel: dependencies.logLevel,
+        sampling: dependencies.logSampling ?? { ...DEFAULT_EVENT_SAMPLING },
+      });
 
   const purgedStartupSessions =
     (await runtimeStore.purgeSessionsByInstance?.(

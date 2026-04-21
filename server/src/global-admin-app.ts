@@ -20,6 +20,7 @@ import type {
   AdminConfig,
   AdminUiConfig,
   LogEvent,
+  LogLevel,
   PersistenceConfig,
   SecurityConfig,
 } from "./types.js";
@@ -37,6 +38,8 @@ export type GlobalAdminServerDependencies = {
   adminConfig?: AdminConfig;
   adminUiConfig?: AdminUiConfig;
   serviceVersion?: string;
+  logLevel?: LogLevel;
+  logSampling?: Record<string, number>;
 };
 
 export async function createGlobalAdminServer(

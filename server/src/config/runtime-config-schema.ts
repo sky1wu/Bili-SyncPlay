@@ -46,6 +46,12 @@ function createField(
 export const SERVER_CONFIG_FIELDS = [
   createField(["port"], "PORT", "integer"),
   createField(["globalAdminPort"], "GLOBAL_ADMIN_PORT", "integer"),
+  createField(["logLevel"], "LOG_LEVEL", "enum", [
+    "debug",
+    "info",
+    "warn",
+    "error",
+  ]),
   createField(["security", "allowedOrigins"], "ALLOWED_ORIGINS", "stringArray"),
   createField(
     ["security", "allowMissingOriginInDev"],

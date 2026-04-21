@@ -3,6 +3,7 @@ import { createGlobalAdminServer } from "./global-admin-app.js";
 
 const {
   globalAdminPort: port,
+  logLevel,
   securityConfig,
   persistenceConfig,
   adminConfig,
@@ -18,6 +19,7 @@ const { httpServer } = await createGlobalAdminServer(
       ...adminUiConfig,
       enabled: true,
     },
+    logLevel,
   },
 );
 httpServer.listen(port, () => {
