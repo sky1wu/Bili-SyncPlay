@@ -12,6 +12,37 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
   error: 40,
 };
 
+const LEVEL_BY_RESULT: Record<string, LogLevel> = {
+  ok: "info",
+  closed: "info",
+  ignored: "info",
+  conflict: "warn",
+  rate_limited: "warn",
+  rejected: "warn",
+  error: "error",
+  timeout: "error",
+};
+
+export function inferLogLevel(
+  event: string,
+  data: Record<string, unknown>,
+): LogLevel {
+  const result = data.result;
+  if (typeof result === "string") {
+    const mapped = LEVEL_BY_RESULT[result];
+    if (mapped) {
+      return mapped;
+    }
+  }
+  if (event.endsWith("_failed") || event.endsWith("_error")) {
+    return "error";
+  }
+  if (event.endsWith("_rejected")) {
+    return "warn";
+  }
+  return "info";
+}
+
 export const DEFAULT_EVENT_SAMPLING: Readonly<Record<string, number>> =
   Object.freeze({
     playback_update_applied: 10,
@@ -46,7 +77,7 @@ export function createStructuredLogger(
   };
 
   return (event, data, eventOptions) => {
-    const level: LogLevel = eventOptions?.level ?? "info";
+    const level: LogLevel = eventOptions?.level ?? inferLogLevel(event, data);
     const timestamp = new Date().toISOString();
     const payload = { event, level, timestamp, ...data };
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { GlobalEventStoreAppendInput } from "../src/admin/global-event-store.js";
 import type { RuntimeEvent } from "../src/admin/types.js";
-import { createStructuredLogger } from "../src/logger.js";
+import { createStructuredLogger, inferLogLevel } from "../src/logger.js";
 import { createInMemoryRuntimeStore } from "../src/runtime-store.js";
 
 function createCapturingEventStore(): {
@@ -144,6 +144,88 @@ test("error-level events bypass sampling; non-error high-frequency events are sa
   assert.deepEqual(stdoutSeqs, [0, 5, 10, "error-1"]);
 
   assert.equal(appendedEvents.length, 13);
+});
+
+test("log level inference covers result field and event-name suffix fallbacks", () => {
+  assert.equal(inferLogLevel("room_created", { result: "ok" }), "info");
+  assert.equal(
+    inferLogLevel("room_persist_failed", { result: "error" }),
+    "error",
+  );
+  assert.equal(
+    inferLogLevel("server_shutdown_step_failed", { result: "timeout" }),
+    "error",
+  );
+  assert.equal(inferLogLevel("rate_limited", { result: "rejected" }), "warn");
+  assert.equal(inferLogLevel("auth_failed", { result: "rejected" }), "warn");
+  assert.equal(
+    inferLogLevel("room_version_conflict", { result: "conflict" }),
+    "warn",
+  );
+  assert.equal(
+    inferLogLevel("ws_connection_closed", { result: "closed" }),
+    "info",
+  );
+  // No result field: fall back to event-name suffix heuristic.
+  assert.equal(inferLogLevel("ws_send_failed", {}), "error");
+  assert.equal(inferLogLevel("room_event_bus_error", {}), "error");
+  assert.equal(inferLogLevel("admin_room_close_rejected", {}), "warn");
+  assert.equal(inferLogLevel("room_created", {}), "info");
+});
+
+test("LOG_LEVEL=warn keeps production error/warn events visible via inference", async () => {
+  const writtenLines: string[] = [];
+  const { appendedEvents, store } = createCapturingEventStore();
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    eventStore: store,
+    logLevel: "warn",
+  });
+
+  logger("room_created", { roomCode: "ROOM01", result: "ok" });
+  logger("room_persist_failed", { result: "error", error: "disk full" });
+  logger("rate_limited", { result: "rejected", messageType: "video:share" });
+  logger("ws_send_failed", { error: "broken_pipe" });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const stdoutEvents = writtenLines.map(
+    (line) => (JSON.parse(line) as { event: string }).event,
+  );
+  assert.deepEqual(stdoutEvents, [
+    "room_persist_failed",
+    "rate_limited",
+    "ws_send_failed",
+  ]);
+
+  const storedEvents = appendedEvents.map((entry) => entry.event);
+  assert.deepEqual(storedEvents, [
+    "room_created",
+    "room_persist_failed",
+    "rate_limited",
+    "ws_send_failed",
+  ]);
+});
+
+test("explicit options.level overrides result-based inference", () => {
+  const writtenLines: string[] = [];
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    logLevel: "warn",
+  });
+
+  // Would infer "info" via result: "ok", but override forces "error" → still emitted at warn threshold.
+  logger(
+    "room_created",
+    { roomCode: "ROOM01", result: "ok" },
+    { level: "error" },
+  );
+  assert.equal(writtenLines.length, 1);
+  const payload = JSON.parse(writtenLines[0]!) as { level: string };
+  assert.equal(payload.level, "error");
 });
 
 test("sampling counter resets per event name and does not leak across names", () => {
