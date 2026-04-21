@@ -239,6 +239,64 @@ npm test
 - 提交前执行 `npm run lint`、`npm run format:check`、`npm run typecheck`、`npm run build`、`npm test`。
 - 完整贡献约束见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
+### 基准压测
+
+仓库现在在 `bench/` 下提供了可复现的基准脚本，对应 issue `#67` 里要求的三类高负载场景。
+
+命令：
+
+```bash
+npm run bench:single-room
+npm run bench:redis-broadcast
+npm run bench:reconnect-storm
+```
+
+每个脚本都会把标准化 JSON 打到 stdout，也可以用 `--output <path>` 落盘。
+
+示例：
+
+```bash
+npm run bench:single-room -- --output .tmp/bench-single.json
+npm run bench:redis-broadcast -- --duration-seconds 30 --sample-watchers 12
+npm run bench:reconnect-storm -- --members 500 --output .tmp/bench-reconnect.json
+```
+
+默认场景：
+
+- `bench:single-room`：单节点、单房间、100 成员，`playback:update` 以 10 Hz 连续发送 60 秒
+- `bench:redis-broadcast`：两台 room node 通过 Redis 互联，负载与上面一致，owner 固定在节点 A，其余成员固定在节点 B
+- `bench:reconnect-storm`：同一房间 500 成员先断线，再同时带旧 `memberToken` 回连
+
+Redis 行为：
+
+- `bench:redis-broadcast` 在设置了 `REDIS_URL` 时会直接复用该实例。
+- 如果没有设置 `REDIS_URL`，且 `PATH` 中存在 `redis-server`，脚本会自动拉起一个临时本地 Redis。
+- 结果 JSON 结构固定、便于 diff：配置、吞吐、延迟百分位（`P50` / `P95` / `P99`）和错误率都会按同一 schema 输出。
+
+结果结构：
+
+```json
+{
+  "schemaVersion": 1,
+  "scenario": "redis-broadcast",
+  "startedAt": "2026-04-22T10:00:00.000Z",
+  "completedAt": "2026-04-22T10:01:00.250Z",
+  "config": {},
+  "metrics": {
+    "throughput": {},
+    "latency": {},
+    "errorRatePercent": 0,
+    "errors": 0
+  },
+  "notes": []
+}
+```
+
+说明：
+
+- 广播延迟默认只从可配置数量的 watcher socket 采样，避免压测器自己在每次广播上串行等待全量客户端确认。
+- 重连延迟统计的是从 socket 打开到回房后收到第一条 `room:state` 的完整耗时。
+
 构建全部内容：
 
 ```bash

@@ -239,6 +239,64 @@ Development constraints:
 - Run `npm run lint`, `npm run format:check`, `npm run typecheck`, `npm run build`, and `npm test` before committing changes.
 - See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full contribution and refactoring constraints.
 
+### Benchmark Baselines
+
+The repository now includes reproducible benchmark entry points under `bench/` for the main high-load scenarios discussed in issue `#67`.
+
+Commands:
+
+```bash
+npm run bench:single-room
+npm run bench:redis-broadcast
+npm run bench:reconnect-storm
+```
+
+Each script prints standardized JSON to stdout and can also write to a file with `--output <path>`.
+
+Examples:
+
+```bash
+npm run bench:single-room -- --output .tmp/bench-single.json
+npm run bench:redis-broadcast -- --duration-seconds 30 --sample-watchers 12
+npm run bench:reconnect-storm -- --members 500 --output .tmp/bench-reconnect.json
+```
+
+Scenario defaults:
+
+- `bench:single-room`: one node, one room, 100 members, `playback:update` at 10 Hz for 60 seconds
+- `bench:redis-broadcast`: two room nodes bridged through Redis, same load as above, owner pinned to node A and followers pinned to node B
+- `bench:reconnect-storm`: one room with 500 members, then simultaneous reconnects using the previous `memberToken`
+
+Redis behavior:
+
+- `bench:redis-broadcast` uses `REDIS_URL` when provided.
+- If `REDIS_URL` is absent and `redis-server` is available in `PATH`, the script starts an ephemeral local Redis instance automatically.
+- The generated JSON is stable and diff-friendly: config, throughput, latency percentiles (`P50` / `P95` / `P99`), and error rate are always emitted in the same shape.
+
+Result shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "scenario": "redis-broadcast",
+  "startedAt": "2026-04-22T10:00:00.000Z",
+  "completedAt": "2026-04-22T10:01:00.250Z",
+  "config": {},
+  "metrics": {
+    "throughput": {},
+    "latency": {},
+    "errorRatePercent": 0,
+    "errors": 0
+  },
+  "notes": []
+}
+```
+
+Notes:
+
+- Broadcast latency is sampled from a configurable subset of watcher sockets so the load generator does not serialize on every client ack.
+- Reconnect latency measures the full path from socket open to the first post-join `room:state`.
+
 Build everything:
 
 ```bash
