@@ -55,6 +55,12 @@ export function compareBenchmarkToBaseline(input: {
   };
 
   const failures: string[] = [];
+  if (actual.sampleCount < input.baseline.baseline.sampleCount) {
+    failures.push(
+      `sample count ${actual.sampleCount} fell below baseline ${input.baseline.baseline.sampleCount}`,
+    );
+  }
+
   if (actual.errorRatePercent > input.baseline.policy.maxErrorRatePercent) {
     failures.push(
       `error rate ${actual.errorRatePercent}% exceeded ${input.baseline.policy.maxErrorRatePercent}%`,

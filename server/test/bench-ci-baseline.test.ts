@@ -87,6 +87,18 @@ test("compareBenchmarkToBaseline reports error rate and latency regressions", ()
   ]);
 });
 
+test("compareBenchmarkToBaseline fails when sample count falls below baseline", () => {
+  const comparison = compareBenchmarkToBaseline({
+    baseline: createScenario(),
+    result: createResult({ errorRatePercent: 0, p95Ms: 20, sampleCount: 0 }),
+  });
+
+  assert.equal(comparison.passed, false);
+  assert.deepEqual(comparison.failures, [
+    "sample count 0 fell below baseline 144",
+  ]);
+});
+
 test("renderCiBenchmarkSummary includes pass fail statuses", () => {
   const summary = renderCiBenchmarkSummary({
     baselinePath: "bench/ci-light-baseline.json",
