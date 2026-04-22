@@ -178,3 +178,22 @@ test("loadCiBenchmarkBaseline rejects missing required policy fields", async () 
     /Invalid numeric field scenarios\[0\]\.policy\.maxErrorRatePercent: undefined/,
   );
 });
+
+test("loadCiBenchmarkBaseline rejects an empty scenario list", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "bsp-ci-baseline-empty-"));
+  const baselinePath = join(directory, "baseline.json");
+  await writeFile(
+    baselinePath,
+    JSON.stringify({
+      schemaVersion: 1,
+      generatedAt: "2026-04-22T10:00:00.000Z",
+      scenarios: [],
+    }),
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => loadCiBenchmarkBaseline(baselinePath),
+    /Invalid baseline scenarios: expected at least one scenario/,
+  );
+});

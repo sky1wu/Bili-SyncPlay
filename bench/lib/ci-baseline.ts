@@ -170,6 +170,11 @@ export async function loadCiBenchmarkBaseline(
   if (!Array.isArray(parsed.scenarios)) {
     throw new Error("Invalid baseline scenarios: expected array");
   }
+  if (parsed.scenarios.length === 0) {
+    throw new Error(
+      "Invalid baseline scenarios: expected at least one scenario",
+    );
+  }
 
   return {
     schemaVersion: 1,
