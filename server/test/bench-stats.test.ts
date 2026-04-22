@@ -104,6 +104,21 @@ test("playback benchmark skips drain bookkeeping when no watchers are sampled", 
   );
 });
 
+test("playback benchmark clamps sampled watcher count to zero", async () => {
+  const benchmark = await runPlaybackBroadcastBenchmark({
+    scenario: "single-node-room",
+    memberCount: 3,
+    durationSeconds: 0.1,
+    updatesPerSecond: 1,
+    watcherCount: -1,
+  });
+
+  assert.equal(benchmark.watcherCount, 0);
+  assert.equal(benchmark.attempted, 0);
+  assert.equal(benchmark.completed, 0);
+  assert.equal(benchmark.errors, 0);
+});
+
 test("benchmark completion timestamp excludes cleanup overhead", async () => {
   const benchmark = await runPlaybackBroadcastBenchmark({
     scenario: "single-node-room",

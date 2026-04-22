@@ -333,10 +333,11 @@ export async function runPlaybackBroadcastBenchmark(input: {
     mode: input.scenario === "redis-broadcast" ? "multi-node" : "single-node",
   });
 
-  const watchers = environment.joiners.slice(
+  const sampledWatcherCount = Math.max(
     0,
     Math.min(input.watcherCount, environment.joiners.length),
   );
+  const watchers = environment.joiners.slice(0, sampledWatcherCount);
   detachParticipantCollectors([environment.owner, ...environment.joiners]);
   const latencySamplesMs: number[] = [];
   const pendingWatchersBySeq = new Map<number, Set<number>>();
@@ -470,6 +471,7 @@ export async function runReconnectStormBenchmark(input: {
   let completed = 0;
   let errors = 0;
   let completedAtMs = startedAtMs;
+  const reconnectSockets: Array<Awaited<ReturnType<typeof connectClient>>> = [];
 
   detachParticipantCollectors([environment.owner, ...environment.joiners]);
 
@@ -503,13 +505,14 @@ export async function runReconnectStormBenchmark(input: {
         } finally {
           inbox?.detach?.();
           if (socket) {
-            await closeClient(socket);
+            reconnectSockets.push(socket);
           }
         }
       }),
     );
     completedAtMs = Date.now();
   } finally {
+    await Promise.all(reconnectSockets.map((socket) => closeClient(socket)));
     await environment.cleanup();
   }
 
