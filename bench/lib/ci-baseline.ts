@@ -37,11 +37,147 @@ export type CiBenchmarkComparison = {
   failures: string[];
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function readRequiredFiniteNumber(
+  source: Record<string, unknown>,
+  key: string,
+  context: string,
+): number {
+  const value = source[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(
+      `Invalid numeric field ${context}.${key}: ${String(value)}`,
+    );
+  }
+
+  return value;
+}
+
+function readRequiredPositiveNumber(
+  source: Record<string, unknown>,
+  key: string,
+  context: string,
+): number {
+  const value = readRequiredFiniteNumber(source, key, context);
+  if (value <= 0) {
+    throw new Error(
+      `Invalid positive numeric field ${context}.${key}: ${value}`,
+    );
+  }
+
+  return value;
+}
+
+function validateCiBenchmarkScenario(
+  scenario: unknown,
+  index: number,
+): CiBenchmarkScenario {
+  const context = `scenarios[${index}]`;
+  if (!isRecord(scenario)) {
+    throw new Error(`Invalid ${context}: expected object`);
+  }
+
+  if (
+    scenario.scenario !== "single-node-room" &&
+    scenario.scenario !== "redis-broadcast" &&
+    scenario.scenario !== "reconnect-storm"
+  ) {
+    throw new Error(
+      `Invalid ${context}.scenario: ${String(scenario.scenario)}`,
+    );
+  }
+
+  if (!isRecord(scenario.command)) {
+    throw new Error(`Invalid ${context}.command: expected object`);
+  }
+  if (!isRecord(scenario.baseline)) {
+    throw new Error(`Invalid ${context}.baseline: expected object`);
+  }
+  if (!isRecord(scenario.policy)) {
+    throw new Error(`Invalid ${context}.policy: expected object`);
+  }
+
+  return {
+    scenario: scenario.scenario,
+    command: Object.fromEntries(
+      Object.entries(scenario.command).map(([key, value]) => {
+        if (typeof value !== "number" && typeof value !== "string") {
+          throw new Error(
+            `Invalid command field ${context}.command.${key}: ${String(value)}`,
+          );
+        }
+
+        return [key, value];
+      }),
+    ),
+    baseline: {
+      errorRatePercent: readRequiredFiniteNumber(
+        scenario.baseline,
+        "errorRatePercent",
+        `${context}.baseline`,
+      ),
+      p95Ms: readRequiredPositiveNumber(
+        scenario.baseline,
+        "p95Ms",
+        `${context}.baseline`,
+      ),
+      sampleCount: readRequiredPositiveNumber(
+        scenario.baseline,
+        "sampleCount",
+        `${context}.baseline`,
+      ),
+    },
+    policy: {
+      maxErrorRatePercent: readRequiredFiniteNumber(
+        scenario.policy,
+        "maxErrorRatePercent",
+        `${context}.policy`,
+      ),
+      maxP95RegressionMultiplier: readRequiredPositiveNumber(
+        scenario.policy,
+        "maxP95RegressionMultiplier",
+        `${context}.policy`,
+      ),
+    },
+  };
+}
+
 export async function loadCiBenchmarkBaseline(
   baselinePath: string,
 ): Promise<CiBenchmarkBaselineFile> {
   const raw = await readFile(resolve(baselinePath), "utf8");
-  return JSON.parse(raw) as CiBenchmarkBaselineFile;
+  const parsed = JSON.parse(raw) as unknown;
+
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid baseline file: expected object");
+  }
+  if (parsed.schemaVersion !== 1) {
+    throw new Error(
+      `Invalid baseline schemaVersion: ${String(parsed.schemaVersion)}`,
+    );
+  }
+  if (
+    typeof parsed.generatedAt !== "string" ||
+    parsed.generatedAt.length === 0
+  ) {
+    throw new Error(
+      `Invalid baseline generatedAt: ${String(parsed.generatedAt)}`,
+    );
+  }
+  if (!Array.isArray(parsed.scenarios)) {
+    throw new Error("Invalid baseline scenarios: expected array");
+  }
+
+  return {
+    schemaVersion: 1,
+    generatedAt: parsed.generatedAt,
+    scenarios: parsed.scenarios.map((scenario, index) =>
+      validateCiBenchmarkScenario(scenario, index),
+    ),
+  };
 }
 
 export function compareBenchmarkToBaseline(input: {

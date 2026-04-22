@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import {
   compareBenchmarkToBaseline,
+  loadCiBenchmarkBaseline,
   renderCiBenchmarkSummary,
   type CiBenchmarkScenario,
 } from "../../bench/lib/ci-baseline.js";
@@ -135,5 +139,42 @@ test("runCiScenario rejects non-positive required numeric command values", async
         reconnectTimeoutMs: 0,
       }),
     /Invalid numeric command value for reconnectTimeoutMs: 0/,
+  );
+});
+
+test("loadCiBenchmarkBaseline rejects missing required policy fields", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "bsp-ci-baseline-"));
+  const baselinePath = join(directory, "baseline.json");
+  await writeFile(
+    baselinePath,
+    JSON.stringify({
+      schemaVersion: 1,
+      generatedAt: "2026-04-22T10:00:00.000Z",
+      scenarios: [
+        {
+          scenario: "single-node-room",
+          command: {
+            memberCount: 12,
+            durationSeconds: 6,
+            updatesPerSecond: 6,
+            sampledWatchers: 4,
+          },
+          baseline: {
+            errorRatePercent: 0,
+            p95Ms: 10,
+            sampleCount: 144,
+          },
+          policy: {
+            maxP95RegressionMultiplier: 4,
+          },
+        },
+      ],
+    }),
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => loadCiBenchmarkBaseline(baselinePath),
+    /Invalid numeric field scenarios\[0\]\.policy\.maxErrorRatePercent: undefined/,
   );
 });
