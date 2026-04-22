@@ -158,9 +158,9 @@ export async function setupRoomBenchmark(input: {
 
     assert.ok(input.redisUrl, "redisUrl is required in multi-node mode.");
     const testKit = await createMultiNodeTestKit(input.redisUrl);
+    cleanup = () => testKit.closeAll();
     const ownerNode = await testKit.startRoomNode("bench-node-a");
     const memberNode = await testKit.startRoomNode("bench-node-b");
-    cleanup = () => testKit.closeAll();
     const participants = await connectParticipants(
       input.memberCount,
       (index) => (index === 0 ? ownerNode.wsUrl : memberNode.wsUrl),
