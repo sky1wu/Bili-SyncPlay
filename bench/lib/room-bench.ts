@@ -3,6 +3,7 @@ import {
   createSyncServer,
   getDefaultPersistenceConfig,
   getDefaultSecurityConfig,
+  type SecurityConfig,
 } from "../../server/src/app.js";
 import {
   closeClient,
@@ -51,6 +52,49 @@ function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createBenchmarkSecurityConfig(input: {
+  memberCount: number;
+  updatesPerSecond?: number;
+}): SecurityConfig {
+  const defaults = getDefaultSecurityConfig();
+  const requiredMemberCapacity = Math.max(1, input.memberCount);
+  const requiredConnections = requiredMemberCapacity + 2;
+  const requiredJoinRate = requiredMemberCapacity + 2;
+  const requiredPlaybackRate = Math.max(
+    defaults.rateLimits.playbackUpdatePerSecond,
+    (input.updatesPerSecond ?? defaults.rateLimits.playbackUpdatePerSecond) + 2,
+  );
+
+  return {
+    ...defaults,
+    allowedOrigins: [MULTI_NODE_ALLOWED_ORIGIN],
+    maxMembersPerRoom: Math.max(
+      defaults.maxMembersPerRoom,
+      requiredMemberCapacity,
+    ),
+    maxConnectionsPerIp: Math.max(
+      defaults.maxConnectionsPerIp,
+      requiredConnections,
+    ),
+    connectionAttemptsPerMinute: Math.max(
+      defaults.connectionAttemptsPerMinute,
+      requiredConnections * 3,
+    ),
+    rateLimits: {
+      ...defaults.rateLimits,
+      roomJoinPerMinute: Math.max(
+        defaults.rateLimits.roomJoinPerMinute,
+        requiredJoinRate,
+      ),
+      playbackUpdatePerSecond: requiredPlaybackRate,
+      playbackUpdateBurst: Math.max(
+        defaults.rateLimits.playbackUpdateBurst,
+        requiredPlaybackRate + 4,
+      ),
+    },
+  };
+}
+
 function createBenchMessageCollector(
   socket: Awaited<ReturnType<typeof connectClient>>,
 ): Collector {
@@ -88,12 +132,11 @@ function createBenchMessageCollector(
   };
 }
 
-async function listenSingleNode(): Promise<BenchmarkServer> {
+async function listenSingleNode(
+  securityConfig: SecurityConfig,
+): Promise<BenchmarkServer> {
   const server = await createSyncServer(
-    {
-      ...getDefaultSecurityConfig(),
-      allowedOrigins: [MULTI_NODE_ALLOWED_ORIGIN],
-    },
+    securityConfig,
     getDefaultPersistenceConfig(),
     {
       logEvent: () => {},
@@ -142,12 +185,17 @@ export async function setupRoomBenchmark(input: {
   memberCount: number;
   redisUrl?: string;
   mode: "single-node" | "multi-node";
+  updatesPerSecond?: number;
 }): Promise<RoomBenchmarkEnvironment> {
   let cleanup: (() => Promise<void>) | undefined;
+  const securityConfig = createBenchmarkSecurityConfig({
+    memberCount: input.memberCount,
+    updatesPerSecond: input.updatesPerSecond,
+  });
 
   try {
     if (input.mode === "single-node") {
-      const server = await listenSingleNode();
+      const server = await listenSingleNode(securityConfig);
       cleanup = server.cleanup;
       const participants = await connectParticipants(
         input.memberCount,
@@ -157,7 +205,9 @@ export async function setupRoomBenchmark(input: {
     }
 
     assert.ok(input.redisUrl, "redisUrl is required in multi-node mode.");
-    const testKit = await createMultiNodeTestKit(input.redisUrl);
+    const testKit = await createMultiNodeTestKit(input.redisUrl, {
+      securityConfig,
+    });
     cleanup = () => testKit.closeAll();
     const ownerNode = await testKit.startRoomNode("bench-node-a");
     const memberNode = await testKit.startRoomNode("bench-node-b");
@@ -331,6 +381,7 @@ export async function runPlaybackBroadcastBenchmark(input: {
     memberCount: input.memberCount,
     redisUrl: input.redisUrl,
     mode: input.scenario === "redis-broadcast" ? "multi-node" : "single-node",
+    updatesPerSecond: input.updatesPerSecond,
   });
 
   const sampledWatcherCount = Math.max(

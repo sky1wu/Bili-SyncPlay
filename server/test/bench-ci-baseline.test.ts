@@ -1,0 +1,103 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  compareBenchmarkToBaseline,
+  renderCiBenchmarkSummary,
+  type CiBenchmarkScenario,
+} from "../../bench/lib/ci-baseline.js";
+import { type BenchmarkResult } from "../../bench/lib/cli.js";
+
+function createScenario(): CiBenchmarkScenario {
+  return {
+    scenario: "single-node-room",
+    command: {
+      memberCount: 12,
+      durationSeconds: 6,
+      updatesPerSecond: 6,
+      sampledWatchers: 4,
+    },
+    baseline: {
+      errorRatePercent: 0,
+      p95Ms: 10,
+      sampleCount: 144,
+    },
+    policy: {
+      maxErrorRatePercent: 1,
+      maxP95RegressionMultiplier: 4,
+    },
+  };
+}
+
+function createResult(input: {
+  errorRatePercent: number;
+  p95Ms: number;
+  sampleCount?: number;
+}): BenchmarkResult {
+  return {
+    schemaVersion: 1,
+    scenario: "single-node-room",
+    startedAt: "2026-04-22T10:00:00.000Z",
+    completedAt: "2026-04-22T10:00:06.000Z",
+    config: {},
+    metrics: {
+      throughput: {
+        attempted: 144,
+        completed: 144,
+        durationSeconds: 6,
+        attemptedPerSecond: 24,
+        completedPerSecond: 24,
+      },
+      latency: {
+        sampleCount: input.sampleCount ?? 144,
+        minMs: 1,
+        meanMs: 2,
+        p50Ms: 2,
+        p95Ms: input.p95Ms,
+        p99Ms: input.p95Ms,
+        maxMs: input.p95Ms,
+      },
+      errorRatePercent: input.errorRatePercent,
+      errors: 0,
+    },
+    notes: [],
+  };
+}
+
+test("compareBenchmarkToBaseline passes when metrics stay within policy", () => {
+  const comparison = compareBenchmarkToBaseline({
+    baseline: createScenario(),
+    result: createResult({ errorRatePercent: 0, p95Ms: 35 }),
+  });
+
+  assert.equal(comparison.passed, true);
+  assert.deepEqual(comparison.failures, []);
+});
+
+test("compareBenchmarkToBaseline reports error rate and latency regressions", () => {
+  const comparison = compareBenchmarkToBaseline({
+    baseline: createScenario(),
+    result: createResult({ errorRatePercent: 2.5, p95Ms: 45 }),
+  });
+
+  assert.equal(comparison.passed, false);
+  assert.deepEqual(comparison.failures, [
+    "error rate 2.5% exceeded 1%",
+    "P95 45ms exceeded 40ms (4x baseline)",
+  ]);
+});
+
+test("renderCiBenchmarkSummary includes pass fail statuses", () => {
+  const summary = renderCiBenchmarkSummary({
+    baselinePath: "bench/ci-light-baseline.json",
+    comparisons: [
+      compareBenchmarkToBaseline({
+        baseline: createScenario(),
+        result: createResult({ errorRatePercent: 0, p95Ms: 20 }),
+      }),
+    ],
+  });
+
+  assert.match(summary, /CI Benchmark Summary/);
+  assert.match(summary, /single-node-room - PASS/);
+  assert.match(summary, /Baseline file: `bench\/ci-light-baseline.json`/);
+});

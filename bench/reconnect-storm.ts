@@ -1,11 +1,10 @@
 import {
-  buildBenchmarkResult,
   emitBenchmarkResult,
   parseCliOptions,
   readNumberOption,
   readStringOption,
 } from "./lib/cli.js";
-import { runReconnectStormBenchmark } from "./lib/room-bench.js";
+import { runReconnectStormScenario } from "./lib/scenarios.js";
 
 async function main() {
   const options = parseCliOptions(process.argv.slice(2));
@@ -17,28 +16,10 @@ async function main() {
   );
   const outputPath = readStringOption(options, "output");
 
-  const benchmark = await runReconnectStormBenchmark({
-    memberCount,
-    reconnectTimeoutMs,
-  });
-
   await emitBenchmarkResult(
-    buildBenchmarkResult({
-      scenario: "reconnect-storm",
-      startedAtMs: benchmark.startedAtMs,
-      completedAtMs: benchmark.completedAtMs,
-      attempted: benchmark.attempted,
-      completed: benchmark.completed,
-      errors: benchmark.errors,
-      latencySamplesMs: benchmark.latencySamplesMs,
-      config: {
-        memberCount,
-        reconnectTimeoutMs,
-        nodeMode: "single-node",
-      },
-      notes: [
-        "Each reconnect latency measures socket open plus room rejoin until the first room state arrives.",
-      ],
+    await runReconnectStormScenario({
+      memberCount,
+      reconnectTimeoutMs,
     }),
     outputPath,
   );

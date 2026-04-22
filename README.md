@@ -249,6 +249,7 @@ Commands:
 npm run bench:single-room
 npm run bench:redis-broadcast
 npm run bench:reconnect-storm
+npm run bench:ci-light
 ```
 
 Each script prints standardized JSON to stdout and can also write to a file with `--output <path>`.
@@ -266,6 +267,13 @@ Scenario defaults:
 - `bench:single-room`: one node, one room, 100 members, `playback:update` at 10 Hz for 60 seconds
 - `bench:redis-broadcast`: two room nodes bridged through Redis, same load as above, owner pinned to node A and followers pinned to node B
 - `bench:reconnect-storm`: one room with 500 members, then simultaneous reconnects using the previous `memberToken`
+- `bench:ci-light`: CI-focused smoke baseline covering a small single-node playback run plus a small reconnect storm run
+
+CI baseline behavior:
+
+- `bench:ci-light` reads `bench/ci-light-baseline.json`, runs the lightweight scenarios, and writes `results.json`, `comparison.json`, and `summary.md`.
+- The CI job fails only on obvious regressions: error rate above the configured limit or `P95` latency above the configured baseline multiplier.
+- `.github/workflows/ci.yml` uploads the benchmark output as an artifact so PRs keep the raw numbers for inspection.
 
 Redis behavior:
 

@@ -168,7 +168,12 @@ export async function cleanupRedisNamespace(
   }
 }
 
-export async function createMultiNodeTestKit(redisUrl: string) {
+export async function createMultiNodeTestKit(
+  redisUrl: string,
+  options: {
+    securityConfig?: Partial<ReturnType<typeof getDefaultSecurityConfig>>;
+  } = {},
+) {
   const namespace = `bsp:test:${Date.now().toString(36)}:${randomUUID().slice(0, 8)}:`;
   const adminConfig = {
     username: "admin",
@@ -194,6 +199,7 @@ export async function createMultiNodeTestKit(redisUrl: string) {
   };
   const securityConfig = {
     ...getDefaultSecurityConfig(),
+    ...options.securityConfig,
     allowedOrigins: [MULTI_NODE_ALLOWED_ORIGIN],
   };
   const runningNodes: RunningNode[] = [];

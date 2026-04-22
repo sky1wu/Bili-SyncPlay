@@ -249,6 +249,7 @@ npm test
 npm run bench:single-room
 npm run bench:redis-broadcast
 npm run bench:reconnect-storm
+npm run bench:ci-light
 ```
 
 每个脚本都会把标准化 JSON 打到 stdout，也可以用 `--output <path>` 落盘。
@@ -266,6 +267,13 @@ npm run bench:reconnect-storm -- --members 500 --output .tmp/bench-reconnect.jso
 - `bench:single-room`：单节点、单房间、100 成员，`playback:update` 以 10 Hz 连续发送 60 秒
 - `bench:redis-broadcast`：两台 room node 通过 Redis 互联，负载与上面一致，owner 固定在节点 A，其余成员固定在节点 B
 - `bench:reconnect-storm`：同一房间 500 成员先断线，再同时带旧 `memberToken` 回连
+- `bench:ci-light`：面向 CI 的轻量烟雾基线，覆盖一个小规模单节点广播场景和一个小规模重连风暴场景
+
+CI 基线行为：
+
+- `bench:ci-light` 会读取 `bench/ci-light-baseline.json`，运行轻量场景，并输出 `results.json`、`comparison.json` 和 `summary.md`。
+- CI 只在“明显退化”时失败：错误率超过配置上限，或 `P95` 延迟超过基线倍数阈值。
+- `.github/workflows/ci.yml` 会把这些结果作为 artifact 上传，方便在 PR 里回看原始数据。
 
 Redis 行为：
 
