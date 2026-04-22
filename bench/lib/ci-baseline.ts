@@ -82,7 +82,6 @@ function validateCiBenchmarkScenario(
 
   if (
     scenario.scenario !== "single-node-room" &&
-    scenario.scenario !== "redis-broadcast" &&
     scenario.scenario !== "reconnect-storm"
   ) {
     throw new Error(

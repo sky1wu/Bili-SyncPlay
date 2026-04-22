@@ -197,3 +197,40 @@ test("loadCiBenchmarkBaseline rejects an empty scenario list", async () => {
     /Invalid baseline scenarios: expected at least one scenario/,
   );
 });
+
+test("loadCiBenchmarkBaseline rejects unsupported ci-light scenarios", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "bsp-ci-baseline-unsupported-"),
+  );
+  const baselinePath = join(directory, "baseline.json");
+  await writeFile(
+    baselinePath,
+    JSON.stringify({
+      schemaVersion: 1,
+      generatedAt: "2026-04-22T10:00:00.000Z",
+      scenarios: [
+        {
+          scenario: "redis-broadcast",
+          command: {
+            memberCount: 12,
+          },
+          baseline: {
+            errorRatePercent: 0,
+            p95Ms: 10,
+            sampleCount: 144,
+          },
+          policy: {
+            maxErrorRatePercent: 1,
+            maxP95RegressionMultiplier: 4,
+          },
+        },
+      ],
+    }),
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => loadCiBenchmarkBaseline(baselinePath),
+    /Invalid scenarios\[0\]\.scenario: redis-broadcast/,
+  );
+});
