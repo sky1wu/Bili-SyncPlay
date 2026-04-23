@@ -11,3 +11,5 @@ docs/
 !/.claude/skills/
 !/.claude/agents/
 !/.claude/commands/
+.codex/
+.tmp/
