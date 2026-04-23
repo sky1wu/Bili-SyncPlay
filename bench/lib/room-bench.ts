@@ -643,8 +643,7 @@ export async function runReconnectStormBenchmark(input: {
               },
             }),
           );
-          await joinedPromise;
-          await firstStatePromise;
+          await Promise.all([joinedPromise, firstStatePromise]);
           latencySamplesMs.push(Date.now() - reconnectStartedAtMs);
           completed += 1;
         } catch {

@@ -255,3 +255,13 @@ test("reconnect benchmark supports member counts above default room and IP limit
   assert.equal(benchmark.attempted, 12);
   assert.equal(benchmark.errors, 0);
 });
+
+test("reconnect benchmark reports timeout failures without aborting the run", async () => {
+  const benchmark = await runReconnectStormBenchmark({
+    memberCount: 4,
+    reconnectTimeoutMs: 1,
+  });
+
+  assert.equal(benchmark.attempted, 4);
+  assert.equal(benchmark.completed + benchmark.errors, 4);
+});
