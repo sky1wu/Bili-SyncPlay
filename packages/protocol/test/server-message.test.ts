@@ -272,3 +272,65 @@ test("accepts a valid sync:pong message", () => {
     true,
   );
 });
+
+test("accepts room:created with serverProtocolVersion", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:created",
+      payload: {
+        roomCode: "ABC123",
+        memberId: "member-1",
+        joinToken: VALID_TOKEN,
+        memberToken: VALID_TOKEN,
+        serverProtocolVersion: 1,
+      },
+    }),
+    true,
+  );
+});
+
+test("accepts room:joined with serverProtocolVersion", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:joined",
+      payload: {
+        roomCode: "ABC123",
+        memberId: "member-1",
+        memberToken: VALID_TOKEN,
+        serverProtocolVersion: 1,
+      },
+    }),
+    true,
+  );
+});
+
+test("rejects room:created when serverProtocolVersion is not a positive integer", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:created",
+      payload: {
+        roomCode: "ABC123",
+        memberId: "member-1",
+        joinToken: VALID_TOKEN,
+        memberToken: VALID_TOKEN,
+        serverProtocolVersion: 0,
+      },
+    }),
+    false,
+  );
+});
+
+test("rejects room:joined when serverProtocolVersion is negative", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:joined",
+      payload: {
+        roomCode: "ABC123",
+        memberId: "member-1",
+        memberToken: VALID_TOKEN,
+        serverProtocolVersion: -1,
+      },
+    }),
+    false,
+  );
+});

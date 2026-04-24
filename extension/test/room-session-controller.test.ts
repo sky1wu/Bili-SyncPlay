@@ -95,6 +95,68 @@ function createControllerHarness() {
   };
 }
 
+test("room session controller sends create request with protocolVersion", async () => {
+  const harness = createControllerHarness();
+  harness.runtimeState.room.displayName = "Bob";
+
+  await harness.controller.requestCreateRoom();
+
+  assert.equal(harness.connectCalls, 1);
+  assert.equal(harness.runtimeState.room.pendingCreateRoom, false);
+  assert.equal(harness.sendToServerCalls.length, 1);
+  assert.deepEqual(harness.sendToServerCalls[0], {
+    type: "room:create",
+    payload: {
+      displayName: "Bob",
+      protocolVersion: 1,
+    },
+  });
+});
+
+test("room session controller clears pending join on unsupported_protocol_version error", async () => {
+  const harness = createControllerHarness();
+  harness.runtimeState.room.pendingJoinRoomCode = "ROOM-PV";
+  harness.runtimeState.room.pendingJoinToken = "join-token-pv";
+  harness.runtimeState.room.pendingJoinRequestSent = true;
+
+  const resultPromise = harness.controller.waitForJoinAttemptResult(50);
+  await harness.controller.handleServerMessage({
+    type: "error",
+    payload: {
+      code: "unsupported_protocol_version",
+      message: "Your extension version is too old.",
+    },
+  } satisfies ServerMessage);
+
+  assert.equal(await resultPromise, "failed");
+  assert.equal(harness.runtimeState.room.pendingJoinRoomCode, null);
+  assert.equal(harness.runtimeState.room.pendingJoinToken, null);
+  assert.equal(harness.runtimeState.room.pendingJoinRequestSent, false);
+  assert.equal(harness.runtimeState.room.roomCode, null);
+});
+
+test("room session controller clears stored room on unsupported_protocol_version error", async () => {
+  const harness = createControllerHarness();
+  harness.runtimeState.room.roomCode = "ROOM-ST";
+  harness.runtimeState.room.joinToken = "join-token-st";
+  harness.runtimeState.room.memberToken = "member-token-st";
+  harness.runtimeState.room.memberId = "member-st";
+
+  await harness.controller.handleServerMessage({
+    type: "error",
+    payload: {
+      code: "unsupported_protocol_version",
+      message: "Your extension version is too old.",
+    },
+  } satisfies ServerMessage);
+
+  assert.equal(harness.runtimeState.room.roomCode, null);
+  assert.equal(harness.runtimeState.room.joinToken, null);
+  assert.equal(harness.runtimeState.room.memberToken, null);
+  assert.equal(harness.runtimeState.room.memberId, null);
+  assert.equal(harness.runtimeState.room.roomState, null);
+});
+
 test("room session controller sends join request after connect and normalizes pending room data", async () => {
   const harness = createControllerHarness();
   harness.runtimeState.room.displayName = "Alice";
@@ -113,6 +175,7 @@ test("room session controller sends join request after connect and normalizes pe
       roomCode: "ROOM01",
       joinToken: "token-1",
       displayName: "Alice",
+      protocolVersion: 1,
     },
   });
   assert.equal(harness.persistReasons.length, 1);

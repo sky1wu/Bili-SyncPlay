@@ -589,3 +589,72 @@ test("accepts a valid room:join message", () => {
     true,
   );
 });
+
+test("accepts room:create with protocolVersion", () => {
+  assert.equal(
+    isClientMessage({
+      type: "room:create",
+      payload: {
+        displayName: "Alice",
+        protocolVersion: 1,
+      },
+    }),
+    true,
+  );
+});
+
+test("accepts room:join with protocolVersion", () => {
+  assert.equal(
+    isClientMessage({
+      type: "room:join",
+      payload: {
+        roomCode: "ABC123",
+        joinToken: VALID_TOKEN,
+        displayName: "Alice",
+        protocolVersion: 1,
+      },
+    }),
+    true,
+  );
+});
+
+test("rejects room:create when protocolVersion is not a positive integer", () => {
+  assert.equal(
+    isClientMessage({
+      type: "room:create",
+      payload: {
+        displayName: "Alice",
+        protocolVersion: 0,
+      },
+    }),
+    false,
+  );
+});
+
+test("rejects room:join when protocolVersion is negative", () => {
+  assert.equal(
+    isClientMessage({
+      type: "room:join",
+      payload: {
+        roomCode: "ABC123",
+        joinToken: VALID_TOKEN,
+        protocolVersion: -1,
+      },
+    }),
+    false,
+  );
+});
+
+test("rejects room:join when protocolVersion is a float", () => {
+  assert.equal(
+    isClientMessage({
+      type: "room:join",
+      payload: {
+        roomCode: "ABC123",
+        joinToken: VALID_TOKEN,
+        protocolVersion: 1.5,
+      },
+    }),
+    false,
+  );
+});

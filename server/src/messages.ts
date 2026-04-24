@@ -27,3 +27,11 @@ export const ROOM_ACTIVE_MESSAGE =
   "Room still has active members. Close the room instead of expiring it early.";
 export const MEMBER_NOT_FOUND_MESSAGE = "Member not found.";
 export const SESSION_NOT_FOUND_MESSAGE = "Session not found.";
+export const UNSUPPORTED_PROTOCOL_VERSION_MESSAGE =
+  "Your extension version is too old. Please update Bili-SyncPlay to the latest version.";
+
+/** Minimum protocol version this server accepts. */
+export const MIN_PROTOCOL_VERSION = 1;
+
+/** Current protocol version this server implements. */
+export const CURRENT_PROTOCOL_VERSION = 1;

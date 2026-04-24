@@ -16,6 +16,7 @@ import {
   isActorId,
   isBilibiliUrl,
   isFiniteNumber,
+  isOptionalPositiveInteger,
   isPlaybackPlayState,
   isRecord,
   isRoomCode,
@@ -44,7 +45,8 @@ export function isClientHelloPayload(
 ): value is ClientHelloPayload {
   return (
     isRecord(value) &&
-    isOptionalBoundedString(value.displayName, DISPLAY_NAME_MAX_LENGTH)
+    isOptionalBoundedString(value.displayName, DISPLAY_NAME_MAX_LENGTH) &&
+    isOptionalPositiveInteger(value.protocolVersion)
   );
 }
 
@@ -93,7 +95,8 @@ function isJoinRoomPayload(
     isRoomCode(value.roomCode) &&
     isToken(value.joinToken) &&
     (value.memberToken === undefined || isToken(value.memberToken)) &&
-    isOptionalBoundedString(value.displayName, DISPLAY_NAME_MAX_LENGTH)
+    isOptionalBoundedString(value.displayName, DISPLAY_NAME_MAX_LENGTH) &&
+    isOptionalPositiveInteger(value.protocolVersion)
   );
 }
 
