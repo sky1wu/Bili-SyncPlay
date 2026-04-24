@@ -75,6 +75,8 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     serverErrorRoomFull: "房间已满。",
     serverErrorInvalidMessage: "当前请求无效。",
     serverErrorInternal: "服务器内部错误。",
+    serverErrorUnsupportedProtocolVersion:
+      "扩展版本过低，请升级 Bili-SyncPlay 到最新版本。",
     toastMemberJoined: "{name} 加入了房间",
     toastMemberLeft: "{name} 离开了房间",
     toastStartedPlaying: "{name} 开始播放",
@@ -158,6 +160,8 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     serverErrorRoomFull: "Room is full.",
     serverErrorInvalidMessage: "The request was rejected as invalid.",
     serverErrorInternal: "Internal server error.",
+    serverErrorUnsupportedProtocolVersion:
+      "Your extension version is too old. Please update Bili-SyncPlay to the latest version.",
     toastMemberJoined: "{name} joined the room",
     toastMemberLeft: "{name} left the room",
     toastStartedPlaying: "{name} started playback",
@@ -234,6 +238,8 @@ export function localizeServerError(
       return t("serverErrorRoomFull");
     case "invalid_message":
       return t("serverErrorInvalidMessage");
+    case "unsupported_protocol_version":
+      return t("serverErrorUnsupportedProtocolVersion");
     case "internal_error":
       return t("serverErrorInternal");
     default:

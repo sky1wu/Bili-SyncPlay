@@ -3,6 +3,7 @@ import type {
   ServerMessage,
   ClientMessage,
 } from "@bili-syncplay/protocol";
+import { PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import type { BackgroundToContentMessage } from "../shared/messages";
 import {
   decideIncomingRoomState,
@@ -99,6 +100,7 @@ export function createRoomSessionController(args: {
           ? { memberToken: args.roomSessionState.memberToken }
           : {}),
         displayName: args.roomSessionState.displayName ?? undefined,
+        protocolVersion: PROTOCOL_VERSION,
       },
     });
   }
@@ -179,7 +181,8 @@ export function createRoomSessionController(args: {
           args.roomSessionState.pendingJoinRoomCode &&
           (message.payload.code === "room_not_found" ||
             message.payload.code === "join_token_invalid" ||
-            message.payload.code === "invalid_message")
+            message.payload.code === "invalid_message" ||
+            message.payload.code === "unsupported_protocol_version")
         ) {
           args.log(
             "background",
@@ -200,11 +203,12 @@ export function createRoomSessionController(args: {
           args.roomSessionState.roomCode &&
           !args.roomSessionState.pendingJoinRoomCode &&
           (message.payload.code === "room_not_found" ||
-            message.payload.code === "join_token_invalid")
+            message.payload.code === "join_token_invalid" ||
+            message.payload.code === "unsupported_protocol_version")
         ) {
           await clearCurrentRoomContext(
             `server rejected stored room context: ${message.payload.code}`,
-            message.payload.message,
+            args.connectionState.lastError,
           );
           args.logServerError(message.payload.code, message.payload.message);
           return;
@@ -351,6 +355,7 @@ export function createRoomSessionController(args: {
         type: "room:create",
         payload: {
           displayName: args.roomSessionState.displayName ?? undefined,
+          protocolVersion: PROTOCOL_VERSION,
         },
       });
       return;

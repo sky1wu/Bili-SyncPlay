@@ -1,4 +1,5 @@
 import type { ClientMessage } from "@bili-syncplay/protocol";
+import type { WebSocket } from "ws";
 import { performance } from "node:perf_hooks";
 import type {
   MetricsCollector,
@@ -13,6 +14,9 @@ import {
 import {
   MEMBER_TOKEN_INVALID_MESSAGE,
   RATE_LIMITED_MESSAGE,
+  UNSUPPORTED_PROTOCOL_VERSION_MESSAGE,
+  MIN_PROTOCOL_VERSION,
+  CURRENT_PROTOCOL_VERSION,
 } from "./messages.js";
 import { RoomServiceError } from "./room-service.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
@@ -172,6 +176,41 @@ export function createMessageHandler(options: {
     }
   }
 
+  function checkProtocolVersion(
+    session: Session,
+    socket: WebSocket,
+    clientVersion: number | undefined,
+  ): boolean {
+    if (clientVersion === undefined) {
+      // Old extension without protocolVersion — compatible baseline, log deprecation
+      logEvent("protocol_version_missing", {
+        sessionId: session.id,
+        remoteAddress: session.remoteAddress,
+        origin: session.origin,
+        result: "accepted",
+        reason: "legacy_client",
+      });
+      return true;
+    }
+    if (clientVersion < MIN_PROTOCOL_VERSION) {
+      sendError(
+        socket,
+        "unsupported_protocol_version",
+        UNSUPPORTED_PROTOCOL_VERSION_MESSAGE,
+      );
+      logEvent("protocol_version_rejected", {
+        sessionId: session.id,
+        remoteAddress: session.remoteAddress,
+        origin: session.origin,
+        result: "rejected",
+        clientVersion,
+        minVersion: MIN_PROTOCOL_VERSION,
+      });
+      return false;
+    }
+    return true;
+  }
+
   async function handleClientMessage(
     session: Session,
     message: ClientMessage,
@@ -200,6 +239,15 @@ export function createMessageHandler(options: {
             sendError(socket, "rate_limited", RATE_LIMITED_MESSAGE);
             return;
           }
+          if (
+            !checkProtocolVersion(
+              session,
+              socket,
+              message.payload?.protocolVersion,
+            )
+          ) {
+            return;
+          }
 
           const { room, memberToken } = await roomService.createRoomForSession(
             session,
@@ -216,6 +264,7 @@ export function createMessageHandler(options: {
               memberId: session.memberId ?? session.id,
               joinToken: room.joinToken,
               memberToken,
+              serverProtocolVersion: CURRENT_PROTOCOL_VERSION,
             },
           });
           await publishRoomEvent("room_member_changed", room.code);
@@ -242,6 +291,15 @@ export function createMessageHandler(options: {
             sendError(socket, "rate_limited", RATE_LIMITED_MESSAGE);
             return;
           }
+          if (
+            !checkProtocolVersion(
+              session,
+              socket,
+              message.payload.protocolVersion,
+            )
+          ) {
+            return;
+          }
 
           await measureMessageHandling("room:join", async () => {
             const { room, memberToken } = await roomService.joinRoomForSession(
@@ -261,6 +319,7 @@ export function createMessageHandler(options: {
                 roomCode: room.code,
                 memberId: session.memberId ?? session.id,
                 memberToken,
+                serverProtocolVersion: CURRENT_PROTOCOL_VERSION,
               },
             });
             await publishRoomEvent("room_member_changed", room.code);

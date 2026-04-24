@@ -1,5 +1,5 @@
 import type { ClientMessage, ServerMessage } from "@bili-syncplay/protocol";
-import { isServerMessage } from "@bili-syncplay/protocol";
+import { isServerMessage, PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import type { DebugLogEntry } from "../shared/messages";
 import type { ConnectionState, RoomSessionState } from "./runtime-state";
 import { getConnectionErrorMessage } from "./connection-error";
@@ -179,6 +179,7 @@ export function createSocketController(args: {
           type: "room:create",
           payload: {
             displayName: args.roomSessionState.displayName ?? undefined,
+            protocolVersion: PROTOCOL_VERSION,
           },
         });
       } else if (

@@ -8,6 +8,7 @@ export interface RoomCreatedMessage {
     memberId: string;
     joinToken: string;
     memberToken: string;
+    serverProtocolVersion?: number;
   };
 }
 
@@ -17,6 +18,7 @@ export interface RoomJoinedMessage {
     roomCode: RoomCode;
     memberId: string;
     memberToken: string;
+    serverProtocolVersion?: number;
   };
 }
 

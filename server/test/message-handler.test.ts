@@ -418,3 +418,260 @@ test("message handler records monitored duration metrics for critical room paths
     "room:leave",
   ]);
 });
+
+test("message handler accepts room:create without protocolVersion (legacy client)", async () => {
+  const events: string[] = [];
+  const sent: Array<{ type: string; serverProtocolVersion?: number }> = [];
+  const session = createSession("legacy-creator");
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession(currentSession, _displayName) {
+        currentSession.roomCode = "ROOM-L1";
+        currentSession.memberId = "member-l1";
+        currentSession.memberToken = "member-token-l1";
+        return {
+          room: { code: "ROOM-L1", joinToken: "join-token-l1" },
+          memberToken: "member-token-l1",
+        };
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession() {
+        return { room: null };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent(event) {
+      events.push(event);
+    },
+    send(_socket, message) {
+      if (
+        "payload" in message &&
+        message.payload &&
+        "serverProtocolVersion" in message.payload
+      ) {
+        sent.push({
+          type: message.type,
+          serverProtocolVersion: (
+            message.payload as { serverProtocolVersion?: number }
+          ).serverProtocolVersion,
+        });
+      } else {
+        sent.push({ type: message.type });
+      }
+    },
+    sendError() {
+      throw new Error("sendError should not be called");
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:create",
+    payload: { displayName: "Alice" },
+  });
+
+  assert.ok(events.includes("protocol_version_missing"));
+  assert.ok(events.includes("room_created"));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "room:created");
+  assert.equal(sent[0].serverProtocolVersion, 1);
+});
+
+test("message handler rejects room:create with protocolVersion below minimum", async () => {
+  const events: string[] = [];
+  const errors: Array<{ code: string; message: string }> = [];
+  const session = createSession("old-creator");
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession() {
+        return { room: null };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent(event) {
+      events.push(event);
+    },
+    send() {
+      throw new Error("send should not be called");
+    },
+    sendError(_socket, code, message) {
+      errors.push({ code, message });
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:create",
+    payload: { displayName: "Alice", protocolVersion: 0 },
+  });
+
+  assert.ok(events.includes("protocol_version_rejected"));
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, "unsupported_protocol_version");
+});
+
+test("message handler rejects room:join with protocolVersion below minimum", async () => {
+  const events: string[] = [];
+  const errors: Array<{ code: string; message: string }> = [];
+  const session = createSession("old-joiner");
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession() {
+        return { room: null };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent(event) {
+      events.push(event);
+    },
+    send() {
+      throw new Error("send should not be called");
+    },
+    sendError(_socket, code, message) {
+      errors.push({ code, message });
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      protocolVersion: 0,
+    },
+  });
+
+  assert.ok(events.includes("protocol_version_rejected"));
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, "unsupported_protocol_version");
+});
+
+test("message handler accepts room:join with matching protocolVersion and returns serverProtocolVersion", async () => {
+  const sent: Array<{ type: string; serverProtocolVersion?: number }> = [];
+  const session = createSession("modern-joiner");
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = "ROOM-M1";
+        currentSession.memberId = "member-m1";
+        currentSession.memberToken = "member-token-m1";
+        return {
+          room: { code: "ROOM-M1" },
+          memberToken: "member-token-m1",
+        };
+      },
+      async leaveRoomForSession() {
+        return { room: null };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send(_socket, message) {
+      if (
+        "payload" in message &&
+        message.payload &&
+        "serverProtocolVersion" in message.payload
+      ) {
+        sent.push({
+          type: message.type,
+          serverProtocolVersion: (
+            message.payload as { serverProtocolVersion?: number }
+          ).serverProtocolVersion,
+        });
+      } else {
+        sent.push({ type: message.type });
+      }
+    },
+    sendError() {
+      throw new Error("sendError should not be called");
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      protocolVersion: 1,
+    },
+  });
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "room:joined");
+  assert.equal(sent[0].serverProtocolVersion, 1);
+});

@@ -1,6 +1,7 @@
 import {
   parseBilibiliVideoRef,
   type PlaybackState,
+  PROTOCOL_VERSION,
   type SharedVideo,
 } from "@bili-syncplay/protocol";
 import { t } from "../shared/i18n";
@@ -47,6 +48,7 @@ export function createShareController(args: {
           video?: SharedVideo;
           playback?: PlaybackState;
           displayName?: string;
+          protocolVersion?: number;
         }
       | undefined;
   }) => void;
@@ -179,6 +181,7 @@ export function createShareController(args: {
         type: "room:create",
         payload: {
           displayName: args.roomSessionState.displayName ?? undefined,
+          protocolVersion: PROTOCOL_VERSION,
         },
       });
     } else {

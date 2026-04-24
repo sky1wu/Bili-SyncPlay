@@ -1,3 +1,5 @@
+export const PROTOCOL_VERSION = 1;
+
 export type RoomCode = string;
 export type PlaybackPlayState = "playing" | "paused" | "buffering";
 export type ErrorCode =
@@ -10,4 +12,5 @@ export type ErrorCode =
   | "invalid_message"
   | "payload_too_large"
   | "room_full"
+  | "unsupported_protocol_version"
   | "internal_error";

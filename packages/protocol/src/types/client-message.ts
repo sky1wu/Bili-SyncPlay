@@ -3,6 +3,7 @@ import type { PlaybackState, SharedVideo } from "./domain.js";
 
 export interface ClientHelloPayload {
   displayName?: string;
+  protocolVersion?: number;
 }
 
 export interface CreateRoomMessage {
@@ -17,6 +18,7 @@ export interface JoinRoomMessage {
     joinToken: string;
     memberToken?: string;
     displayName?: string;
+    protocolVersion?: number;
   };
 }
 

@@ -18,6 +18,7 @@ import {
   isBilibiliUrl,
   isFiniteNumber,
   isOptionalString,
+  isOptionalPositiveInteger,
   isPlaybackPlayState,
   isRecord,
   isRoomCode,
@@ -90,7 +91,8 @@ function isRoomCreatedMessage(value: unknown): value is RoomCreatedMessage {
     isRoomCode(value.payload.roomCode) &&
     isActorId(value.payload.memberId) &&
     isToken(value.payload.joinToken) &&
-    isToken(value.payload.memberToken)
+    isToken(value.payload.memberToken) &&
+    isOptionalPositiveInteger(value.payload.serverProtocolVersion)
   );
 }
 
@@ -101,7 +103,8 @@ function isRoomJoinedMessage(value: unknown): value is RoomJoinedMessage {
     isRecord(value.payload) &&
     isRoomCode(value.payload.roomCode) &&
     isActorId(value.payload.memberId) &&
-    isToken(value.payload.memberToken)
+    isToken(value.payload.memberToken) &&
+    isOptionalPositiveInteger(value.payload.serverProtocolVersion)
   );
 }
 

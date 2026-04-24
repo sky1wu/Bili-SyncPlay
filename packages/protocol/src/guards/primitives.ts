@@ -37,6 +37,32 @@ export function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+export function isOptionalFiniteNumber(
+  value: unknown,
+): value is number | undefined {
+  return value === undefined || isFiniteNumber(value);
+}
+
+export function isPositiveInteger(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 1 && Number.isInteger(value);
+}
+
+export function isNonNegativeInteger(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 0 && Number.isInteger(value);
+}
+
+export function isOptionalPositiveInteger(
+  value: unknown,
+): value is number | undefined {
+  return value === undefined || isPositiveInteger(value);
+}
+
+export function isOptionalNonNegativeInteger(
+  value: unknown,
+): value is number | undefined {
+  return value === undefined || isNonNegativeInteger(value);
+}
+
 export function isRoomCode(value: unknown): value is RoomCode {
   return isString(value) && ROOM_CODE_PATTERN.test(value);
 }
