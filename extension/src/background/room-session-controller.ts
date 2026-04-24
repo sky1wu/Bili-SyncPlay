@@ -208,7 +208,7 @@ export function createRoomSessionController(args: {
         ) {
           await clearCurrentRoomContext(
             `server rejected stored room context: ${message.payload.code}`,
-            message.payload.message,
+            args.connectionState.lastError,
           );
           args.logServerError(message.payload.code, message.payload.message);
           return;

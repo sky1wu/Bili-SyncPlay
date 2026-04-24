@@ -3,6 +3,7 @@ import test from "node:test";
 import type { RoomState, ServerMessage } from "@bili-syncplay/protocol";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
 import { createRoomSessionController } from "../src/background/room-session-controller";
+import { setLocaleForTests } from "../src/shared/i18n";
 
 function createControllerHarness() {
   const runtimeState = createBackgroundRuntimeState();
@@ -141,20 +142,29 @@ test("room session controller clears stored room on unsupported_protocol_version
   harness.runtimeState.room.joinToken = "join-token-st";
   harness.runtimeState.room.memberToken = "member-token-st";
   harness.runtimeState.room.memberId = "member-st";
+  setLocaleForTests("en-US");
 
-  await harness.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "unsupported_protocol_version",
-      message: "Your extension version is too old.",
-    },
-  } satisfies ServerMessage);
+  try {
+    await harness.controller.handleServerMessage({
+      type: "error",
+      payload: {
+        code: "unsupported_protocol_version",
+        message: "Your extension version is too old.",
+      },
+    } satisfies ServerMessage);
+  } finally {
+    setLocaleForTests(null);
+  }
 
   assert.equal(harness.runtimeState.room.roomCode, null);
   assert.equal(harness.runtimeState.room.joinToken, null);
   assert.equal(harness.runtimeState.room.memberToken, null);
   assert.equal(harness.runtimeState.room.memberId, null);
   assert.equal(harness.runtimeState.room.roomState, null);
+  assert.equal(
+    harness.runtimeState.connection.lastError,
+    "Your extension version is too old. Please update Bili-SyncPlay to the latest version.",
+  );
 });
 
 test("room session controller sends join request after connect and normalizes pending room data", async () => {
