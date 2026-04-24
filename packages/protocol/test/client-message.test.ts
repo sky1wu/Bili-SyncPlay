@@ -618,7 +618,7 @@ test("accepts room:join with protocolVersion", () => {
   );
 });
 
-test("rejects room:create when protocolVersion is not a positive integer", () => {
+test("accepts room:create with protocolVersion below the server minimum", () => {
   assert.equal(
     isClientMessage({
       type: "room:create",
@@ -627,7 +627,7 @@ test("rejects room:create when protocolVersion is not a positive integer", () =>
         protocolVersion: 0,
       },
     }),
-    false,
+    true,
   );
 });
 

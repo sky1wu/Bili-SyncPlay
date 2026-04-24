@@ -318,6 +318,66 @@ test("rejects invalid client message payloads before entering business logic", a
   }
 });
 
+test("rejects unsupported room:create protocolVersion through the websocket entrypoint", async () => {
+  const server = await startTestServer();
+  try {
+    const socket = await connectClient(server.url);
+    try {
+      socket.send(
+        JSON.stringify({
+          type: "room:create",
+          payload: { displayName: "Alice", protocolVersion: 0 },
+        }),
+      );
+      const response = await waitForJsonMessage(socket);
+      assert.equal(response.type, "error");
+      assert.equal(response.payload.code, "unsupported_protocol_version");
+    } finally {
+      await closeClient(socket);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("rejects unsupported room:join protocolVersion through the websocket entrypoint", async () => {
+  const server = await startTestServer();
+  try {
+    const owner = await connectClient(server.url);
+    const joiner = await connectClient(server.url);
+    try {
+      owner.send(
+        JSON.stringify({
+          type: "room:create",
+          payload: { displayName: "Alice" },
+        }),
+      );
+      const created = await waitForJsonMessage(owner);
+      assert.equal(created.type, "room:created");
+
+      joiner.send(
+        JSON.stringify({
+          type: "room:join",
+          payload: {
+            roomCode: created.payload.roomCode,
+            joinToken: created.payload.joinToken,
+            displayName: "Bob",
+            protocolVersion: 0,
+          },
+        }),
+      );
+      const response = await waitForJsonMessage(joiner);
+      assert.equal(response.type, "error");
+      assert.equal(response.payload.code, "unsupported_protocol_version");
+    } finally {
+      await closeClient(owner);
+      await closeClient(joiner);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("rejects non-whitelisted origins during the websocket handshake", async () => {
   const server = await startTestServer();
   try {
