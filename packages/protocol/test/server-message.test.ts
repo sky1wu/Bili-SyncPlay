@@ -169,6 +169,48 @@ test("rejects room:state when playback sync intent is invalid", () => {
   );
 });
 
+test("accepts room:state when sharedByDisplayName is set on the shared video", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: {
+        roomCode: "ABC123",
+        sharedVideo: {
+          videoId: "BV1xx411c7mD",
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          title: "Video",
+          sharedByMemberId: "member-1",
+          sharedByDisplayName: "Alice",
+        },
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    }),
+    true,
+  );
+});
+
+test("rejects room:state when sharedByDisplayName exceeds the display-name bound", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: {
+        roomCode: "ABC123",
+        sharedVideo: {
+          videoId: "BV1xx411c7mD",
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          title: "Video",
+          sharedByMemberId: "member-1",
+          sharedByDisplayName: "x".repeat(33),
+        },
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    }),
+    false,
+  );
+});
+
 test("rejects room:state when sharedByMemberId format is invalid", () => {
   assert.equal(
     isServerMessage({

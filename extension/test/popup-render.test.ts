@@ -310,3 +310,68 @@ test("renderPopup only logs once for repeated identical pending renders", async 
     Object.assign(globalThis, { document: originalDocument });
   }
 });
+
+test("renderPopup falls back to sharedByDisplayName when the sharer is no longer in members", async () => {
+  resetPopupRenderDebugStateForTests();
+  setLocaleForTests("en-US");
+  const originalDocument = globalThis.document;
+  const refs = createPopupRefs();
+
+  Object.assign(globalThis, {
+    document: {
+      activeElement: null,
+    },
+  });
+
+  try {
+    renderPopup({
+      refs,
+      state: {
+        connected: true,
+        serverUrl: "ws://localhost:8787",
+        error: null,
+        roomCode: "ROOM01",
+        joinToken: "join-token-1",
+        memberId: "member-1",
+        displayName: "Alice",
+        roomState: {
+          roomCode: "ROOM01",
+          sharedVideo: {
+            videoId: "BV1xx411c7mD",
+            url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+            title: "Shared Video",
+            sharedByMemberId: "stale-member-99",
+            sharedByDisplayName: "Bob",
+          },
+          playback: null,
+          members: [{ id: "member-1", name: "Alice" }],
+        },
+        pendingCreateRoom: false,
+        pendingJoinRoomCode: null,
+        retryInMs: null,
+        retryAttempt: 0,
+        retryAttemptMax: 5,
+        clockOffsetMs: null,
+        rttMs: null,
+        logs: [],
+      },
+      serverUrlDraft: { value: "", dirty: false },
+      roomCodeDraft: "",
+      setRoomCodeDraft: () => {},
+      localStatusMessage: null,
+      roomActionPending: false,
+      lastKnownPendingCreateRoom: false,
+      lastKnownPendingJoinRoomCode: null,
+      lastKnownRoomCode: "ROOM01",
+      copyRoomSuccess: false,
+      copyLogsSuccess: false,
+      sendPopupLog: async () => {},
+    });
+
+    assert.equal(refs.sharedVideoOwner.textContent, "Shared by Bob");
+    assert.equal(refs.sharedVideoOwner.hidden, false);
+  } finally {
+    setLocaleForTests(null);
+    Object.assign(globalThis, { document: originalDocument });
+  }
+});

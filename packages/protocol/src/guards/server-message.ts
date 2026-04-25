@@ -44,7 +44,10 @@ function isSharedVideo(value: unknown): value is SharedVideo {
     isBilibiliUrl(value.url) &&
     isBoundedString(value.title, TITLE_MAX_LENGTH) &&
     isOptionalString(value.sharedByMemberId) &&
-    (value.sharedByMemberId === undefined || isActorId(value.sharedByMemberId))
+    (value.sharedByMemberId === undefined ||
+      isActorId(value.sharedByMemberId)) &&
+    (value.sharedByDisplayName === undefined ||
+      isBoundedString(value.sharedByDisplayName, DISPLAY_NAME_MAX_LENGTH))
   );
 }
 

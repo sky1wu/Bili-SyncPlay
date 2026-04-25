@@ -142,6 +142,7 @@ export function renderPopup(args: {
   const ownerText = formatVideoOwner(
     args.state.roomState?.members ?? [],
     args.state.roomState?.sharedVideo?.sharedByMemberId ?? null,
+    args.state.roomState?.sharedVideo?.sharedByDisplayName ?? null,
   );
   args.refs.sharedVideoOwner.textContent = ownerText;
   args.refs.sharedVideoOwner.hidden =
@@ -196,11 +197,12 @@ function formatClockMetricValue(value: number | null): string {
 function formatVideoOwner(
   members: RoomMember[],
   actorId: string | null,
+  fallbackDisplayName: string | null,
 ): string {
-  if (!actorId) {
-    return "";
-  }
-  const owner = members.find((member) => member.id === actorId)?.name;
+  const liveName = actorId
+    ? members.find((member) => member.id === actorId)?.name
+    : undefined;
+  const owner = liveName ?? fallbackDisplayName?.trim();
   return owner ? t("ownerSharedBy", { owner }) : "";
 }
 

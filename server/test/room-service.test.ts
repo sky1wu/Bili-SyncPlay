@@ -1993,3 +1993,80 @@ test("concurrent duplicate video:share requests are deduplicated to a single wri
     "exactly one updateRoom write must have occurred; version must advance by 1",
   );
 });
+
+test("shareVideoForSession persists the sharer's display name so popups survive rejoin", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry(() => currentTime);
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM19",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  await service.shareVideoForSession(
+    owner,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  const persisted = await roomStore.getRoom(created.room.code);
+  assert.equal(persisted?.sharedVideo?.sharedByDisplayName, "Alice");
+
+  // Owner leaves and rejoins as a fresh member; sharedByMemberId no longer
+  // matches a current member, but sharedByDisplayName must still be present so
+  // the popup can render the sharer hint.
+  await service.leaveRoomForSession(owner);
+  const rejoined = await service.joinRoomForSession(
+    createSession("owner-2"),
+    created.room.code,
+    created.room.joinToken,
+    "Alice",
+  );
+  assert.equal(rejoined.room.sharedVideo?.sharedByDisplayName, "Alice");
+});
+
+test("shareVideoForSession rejects client-supplied sharedByDisplayName", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(() => currentTime),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM20",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  await service.shareVideoForSession(owner, created.memberToken, {
+    ...createSharedVideo(),
+    sharedByDisplayName: "Spoofed",
+  });
+
+  const persisted = await roomStore.getRoom(created.room.code);
+  assert.equal(
+    persisted?.sharedVideo?.sharedByDisplayName,
+    "Alice",
+    "server must overwrite client-supplied sharedByDisplayName with session.displayName",
+  );
+});

@@ -59,7 +59,9 @@ export function isSharedVideo(value: unknown): value is SharedVideo {
     isBilibiliUrl(value.url) &&
     isBoundedString(value.title, TITLE_MAX_LENGTH) &&
     isOptionalBoundedString(value.sharedByMemberId, DISPLAY_NAME_MAX_LENGTH) &&
-    (value.sharedByMemberId === undefined || isActorId(value.sharedByMemberId))
+    (value.sharedByMemberId === undefined ||
+      isActorId(value.sharedByMemberId)) &&
+    isOptionalBoundedString(value.sharedByDisplayName, DISPLAY_NAME_MAX_LENGTH)
   );
 }
 

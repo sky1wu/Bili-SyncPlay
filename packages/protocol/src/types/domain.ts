@@ -27,6 +27,7 @@ export interface SharedVideo {
   url: string;
   title: string;
   sharedByMemberId?: string;
+  sharedByDisplayName?: string;
 }
 
 export interface PlaybackState {

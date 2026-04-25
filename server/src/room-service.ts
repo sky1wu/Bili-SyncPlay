@@ -958,6 +958,7 @@ export function createRoomService(options: {
                 sharedVideo: {
                   ...video,
                   sharedByMemberId: session.memberId ?? session.id,
+                  sharedByDisplayName: session.displayName,
                 },
                 playback: nextPlayback,
                 expiresAt: null,
