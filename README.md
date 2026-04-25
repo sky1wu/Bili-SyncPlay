@@ -125,9 +125,23 @@ Bili-SyncPlay/
 
 ## Requirements
 
-- Node.js 18+
-- npm 8+
-- Chrome or Edge for loading the unpacked extension
+### Version matrix
+
+| Dependency    | Minimum                    | Recommended    | Notes                                                                                             |
+| ------------- | -------------------------- | -------------- | ------------------------------------------------------------------------------------------------- |
+| Node.js       | 18                         | 22             | see `.nvmrc`; Node 20 and 22 are both supported                                                   |
+| npm           | 8                          | 10             | ship with the corresponding Node.js version                                                       |
+| Chrome / Edge | current stable             | current stable | required to load the unpacked extension                                                           |
+| Redis         | 6.0                        | 7+             | optional for single-node; **required** for multi-node deployments and persistence across restarts |
+| Reverse proxy | any with WebSocket support | Nginx 1.18+    | required in production for TLS termination and `wss://`                                           |
+
+### Non-goals
+
+- **No guaranteed multi-node consistency without Redis.** When `ROOM_STORE_PROVIDER=memory`, each server instance keeps its own room state. Members connected to different nodes will see different rooms.
+- **No built-in load balancer.** Multi-node deployments depend on an external edge layer (Nginx, HAProxy, cloud SLB/ALB) for WebSocket connection distribution. The server does not implement L4/L7 balancing.
+- **No browser session restoration after restart.** Room membership (`roomCode`, `joinToken`, `memberToken`) lives in `chrome.storage.session` and is cleared when the browser closes. Users must rejoin after a browser restart.
+- **No multi-user accounts or authentication for end users.** Room access is controlled by `roomCode:joinToken` invite strings only. There is no user registration or login system for viewers.
+- **No mobile browser or Safari support.** The extension architecture is Chrome/Edge Manifest V3 only.
 
 ## Local Defaults
 
