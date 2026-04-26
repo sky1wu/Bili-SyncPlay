@@ -6,6 +6,7 @@ import {
 import {
   createProgrammaticPlaybackSignature,
   getPlayState,
+  setVideoPlaybackRate,
 } from "./player-binding";
 import type {
   ContentRuntimeState,
@@ -124,7 +125,7 @@ export function createSoftApplyController(args: {
       video &&
       Math.abs(video.playbackRate - session.restorePlaybackRate) > 0.01
     ) {
-      video.playbackRate = session.restorePlaybackRate;
+      setVideoPlaybackRate(video, session.restorePlaybackRate);
       args.armProgrammaticApplyWindow(
         {
           url: session.normalizedUrl,

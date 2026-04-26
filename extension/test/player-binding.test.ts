@@ -14,6 +14,7 @@ function createVideo(
     readyState: 4,
     duration: 120,
     currentTime: 12,
+    defaultPlaybackRate: 1,
     playbackRate: 1,
     pause() {},
     play: async () => undefined,
@@ -218,6 +219,7 @@ test("ignore-window playback update still restores playbackRate when only the ra
   const video = createVideo({
     paused: false,
     currentTime: 12,
+    defaultPlaybackRate: 1.1,
     playbackRate: 1.1,
   });
 
@@ -243,6 +245,7 @@ test("ignore-window playback update still restores playbackRate when only the ra
   assert.equal(applied.adjustment?.didWriteCurrentTime, false);
   assert.equal(applied.adjustment?.didWritePlaybackRate, true);
   assert.ok(Math.abs(video.playbackRate - 1) < 0.001);
+  assert.ok(Math.abs(video.defaultPlaybackRate - 1) < 0.001);
 });
 
 test("buffering playback update does not force-pause an already playing video", () => {

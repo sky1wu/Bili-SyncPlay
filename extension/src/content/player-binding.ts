@@ -53,6 +53,14 @@ export function canApplyPlaybackImmediately(video: HTMLVideoElement): boolean {
   return Number.isFinite(video.duration) && video.readyState >= 1;
 }
 
+export function setVideoPlaybackRate(
+  video: HTMLVideoElement,
+  playbackRate: number,
+): void {
+  video.defaultPlaybackRate = playbackRate;
+  video.playbackRate = playbackRate;
+}
+
 export function createProgrammaticPlaybackSignature(
   playback: PlaybackState,
 ): ProgrammaticPlaybackSignature {
@@ -165,7 +173,7 @@ export function syncPlaybackPosition(
       Math.abs(video.playbackRate - playbackRate) > 0.01;
     video.currentTime = targetTime;
     if (shouldWritePlaybackRate) {
-      video.playbackRate = playbackRate;
+      setVideoPlaybackRate(video, playbackRate);
     }
     return {
       mode: "hard-seek",
@@ -197,7 +205,7 @@ export function syncPlaybackPosition(
       video.currentTime = softApplied.currentTime;
     }
     if (shouldWritePlaybackRate) {
-      video.playbackRate = softApplied.playbackRate;
+      setVideoPlaybackRate(video, softApplied.playbackRate);
     }
     return {
       mode: "soft-apply",
@@ -222,7 +230,7 @@ export function syncPlaybackPosition(
     const shouldWritePlaybackRate =
       Math.abs(video.playbackRate - adjustedPlaybackRate) > 0.01;
     if (shouldWritePlaybackRate) {
-      video.playbackRate = adjustedPlaybackRate;
+      setVideoPlaybackRate(video, adjustedPlaybackRate);
     }
     return {
       mode: "rate-only",
@@ -241,7 +249,7 @@ export function syncPlaybackPosition(
   const shouldWritePlaybackRate =
     Math.abs(video.playbackRate - playbackRate) > 0.01;
   if (shouldWritePlaybackRate) {
-    video.playbackRate = playbackRate;
+    setVideoPlaybackRate(video, playbackRate);
   }
   return {
     mode: "ignore",

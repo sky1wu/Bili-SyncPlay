@@ -48,6 +48,7 @@ function createVideo(
     readyState: 4,
     duration: 120,
     currentTime: 24,
+    defaultPlaybackRate: 1,
     playbackRate: 1,
     pause() {},
     play: async () => undefined,
@@ -59,7 +60,11 @@ test("chained upsertActiveSoftApply preserves the first session's restore rate",
   const windowStub = installWindowStub();
   try {
     const runtimeState = createContentRuntimeState();
-    const video = createVideo({ currentTime: 24, playbackRate: 1.3 });
+    const video = createVideo({
+      currentTime: 24,
+      defaultPlaybackRate: 1.3,
+      playbackRate: 1.3,
+    });
     let now = 10_000;
     const controller = createSoftApplyController({
       runtimeState,
@@ -89,6 +94,10 @@ test("chained upsertActiveSoftApply preserves the first session's restore rate",
     assert.ok(
       Math.abs(video.playbackRate - 1) < 0.001,
       `expected restore to original rate 1, got ${video.playbackRate}`,
+    );
+    assert.ok(
+      Math.abs(video.defaultPlaybackRate - 1) < 0.001,
+      `expected default restore rate 1, got ${video.defaultPlaybackRate}`,
     );
   } finally {
     windowStub.restore();
