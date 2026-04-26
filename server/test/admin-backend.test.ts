@@ -307,6 +307,16 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
       const created = await collector.next("room:created");
       await collector.next("room:state");
       const roomCode = (created.payload as { roomCode: string }).roomCode;
+      const memberToken = (created.payload as { memberToken: string })
+        .memberToken;
+
+      socket.send(
+        JSON.stringify({
+          type: "profile:update",
+          payload: { memberToken, displayName: "Alice Chen" },
+        }),
+      );
+      await collector.next("room:state");
 
       const overview = await requestJson(
         server.httpBaseUrl,
@@ -322,12 +332,35 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
           activeMemberCount: number;
         };
         rooms: { totalNonExpired: number };
+        events: {
+          lastHour: { room_created: number; room_joined: number };
+          lastDay: { room_created: number; room_joined: number };
+        };
+        nodes: {
+          items: Array<{
+            instanceId: string;
+            currentRoomCount: number;
+            currentMemberCount: number;
+            roomCodes: string[];
+            health: string;
+          }>;
+        };
       };
       assert.equal(overviewData.service.instanceId, "instance-1");
       assert.equal(overviewData.runtime.connectionCount, 1);
       assert.equal(overviewData.runtime.activeRoomCount, 1);
       assert.equal(overviewData.runtime.activeMemberCount, 1);
       assert.equal(overviewData.rooms.totalNonExpired, 1);
+      assert.equal(overviewData.events.lastHour.room_created >= 1, true);
+      assert.equal(overviewData.events.lastDay.room_joined >= 0, true);
+      const currentNode = overviewData.nodes.items.find(
+        (item) => item.instanceId === "instance-1",
+      );
+      assert.ok(currentNode);
+      assert.equal(currentNode.health, "ok");
+      assert.equal(currentNode.currentRoomCount, 1);
+      assert.equal(currentNode.currentMemberCount, 1);
+      assert.deepEqual(currentNode.roomCodes, [roomCode]);
 
       const rooms = await requestJson(
         server.httpBaseUrl,
@@ -348,7 +381,7 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
       ).items;
       assert.equal(roomItems.length, 1);
       assert.equal(roomItems[0]?.roomCode, roomCode);
-      assert.equal(roomItems[0]?.ownerDisplayName, "Alice");
+      assert.equal(roomItems[0]?.ownerDisplayName, "Alice Chen");
       assert.ok(roomItems[0]?.ownerMemberId);
       assert.equal(roomItems[0]?.memberCount, 1);
       assert.equal(roomItems[0]?.isActive, true);
@@ -363,11 +396,14 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
         instanceId: string;
         room: { instanceId: string };
         members: Array<{ displayName: string }>;
-        recentEvents: Array<{ event: string }>;
+        recentEvents: Array<{
+          event: string;
+          details: { displayName?: string; memberId?: string };
+        }>;
       };
       assert.equal(detailData.instanceId, "instance-1");
       assert.equal(detailData.room.instanceId, "instance-1");
-      assert.equal(detailData.members[0]?.displayName, "Alice");
+      assert.equal(detailData.members[0]?.displayName, "Alice Chen");
       assert.equal(
         detailData.recentEvents.some((event) => event.event === "room_created"),
         true,
@@ -381,12 +417,18 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
       assert.equal(events.status, 200);
       const eventItems = (
         events.body.data as {
-          items: Array<{ event: string; roomCode: string }>;
+          items: Array<{
+            event: string;
+            roomCode: string;
+            details: { displayName?: string; memberId?: string };
+          }>;
         }
       ).items;
       assert.equal(eventItems.length, 1);
       assert.equal(eventItems[0]?.event, "room_created");
       assert.equal(eventItems[0]?.roomCode, roomCode);
+      assert.equal(eventItems[0]?.details.displayName, "Alice");
+      assert.ok(eventItems[0]?.details.memberId);
     } finally {
       await closeClient(socket);
     }

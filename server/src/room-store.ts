@@ -13,6 +13,7 @@ export type CreatePersistedRoomInput = {
 };
 
 export type PersistedRoomPatch = {
+  ownerDisplayName?: string | null;
   sharedVideo?: SharedVideo | null;
   playback?: PlaybackState | null;
   lastActiveAt?: number;

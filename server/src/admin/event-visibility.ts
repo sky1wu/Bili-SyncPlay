@@ -5,6 +5,7 @@ const HIDDEN_SYSTEM_EVENTS = new Set([
   "redis_runtime_store_operation_failed",
   "room_event_bus_error",
   "room_event_bus_invalid_message",
+  "room_event_consumed",
   "room_event_handler_failed",
   "room_event_publish_failed",
   "room_event_published",

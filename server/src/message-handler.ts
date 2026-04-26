@@ -271,6 +271,8 @@ export function createMessageHandler(options: {
           logEvent("room_created", {
             sessionId: session.id,
             roomCode: room.code,
+            memberId: session.memberId ?? session.id,
+            displayName: session.displayName,
             remoteAddress: session.remoteAddress,
             origin: session.origin,
             result: "ok",
@@ -326,6 +328,8 @@ export function createMessageHandler(options: {
             logEvent("room_joined", {
               sessionId: session.id,
               roomCode: room.code,
+              memberId: session.memberId ?? session.id,
+              displayName: session.displayName,
               remoteAddress: session.remoteAddress,
               origin: session.origin,
               result: "ok",

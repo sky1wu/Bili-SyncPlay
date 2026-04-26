@@ -121,6 +121,11 @@ test("in-memory event store hides system events by default and can include them 
     timestamp: "2026-03-26T12:00:01.000Z",
     data: { result: "error" },
   });
+  await store.append({
+    event: "room_event_consumed",
+    timestamp: "2026-03-26T12:00:02.000Z",
+    data: { roomCode: "ROOM01", result: "ok" },
+  });
 
   const defaultView = await store.query({
     page: 1,
@@ -134,5 +139,5 @@ test("in-memory event store hides system events by default and can include them 
     page: 1,
     pageSize: 10,
   });
-  assert.equal(fullView.total, 2);
+  assert.equal(fullView.total, 3);
 });

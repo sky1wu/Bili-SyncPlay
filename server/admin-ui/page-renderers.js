@@ -3,10 +3,13 @@ import {
   formatDateTime,
   formatDuration,
   formatJson,
+  formatPlaybackPosition,
   formatRelativeDuration,
   getPlaybackState,
+  getRoomPlaybackSummary,
   getRoomOwnerSummary,
   getRoomVideoSummary,
+  groupRuntimeEventsByRoom,
   isGlobalAdminInstance,
   metricCard,
   renderAuditActionCell,
@@ -14,8 +17,8 @@ import {
   renderCompactCode,
   renderDataPair,
   renderEmptyValue,
-  renderEventNameCell,
   renderOriginValue,
+  renderRuntimeEventStoryCell,
   renderResultBadge,
   renderStatus,
   renderTimeBlock,
@@ -406,6 +409,12 @@ export function createPageLoaders(options) {
       ]);
       state.lastOverviewData = overview.service;
       const readyWarning = ready.status !== "ready";
+      const onlineNodes = (overview.nodes?.items || []).filter(
+        (node) => node.health !== "offline",
+      );
+      const lastHourEvents =
+        overview.events.lastHour || overview.events.lastMinute;
+      const lastDayEvents = overview.events.lastDay || overview.events.totals;
 
       return {
         autoRefresh: state.overviewAutoRefresh,
@@ -440,10 +449,54 @@ export function createPageLoaders(options) {
                 <div class="section-header"><h3>事件统计</h3></div>
                 <dl class="kv">
                   <dt>最近一分钟</dt><dd>创建 ${overview.events.lastMinute.room_created} · 加入 ${overview.events.lastMinute.room_joined} · 限流 ${overview.events.lastMinute.rate_limited} · 拒绝 ${overview.events.lastMinute.ws_connection_rejected}</dd>
+                  <dt>最近一小时</dt><dd>创建 ${lastHourEvents.room_created} · 加入 ${lastHourEvents.room_joined} · 限流 ${lastHourEvents.rate_limited} · 拒绝 ${lastHourEvents.ws_connection_rejected}</dd>
+                  <dt>最近一天</dt><dd>创建 ${lastDayEvents.room_created} · 加入 ${lastDayEvents.room_joined} · 限流 ${lastDayEvents.rate_limited} · 拒绝 ${lastDayEvents.ws_connection_rejected}</dd>
                   <dt>累计</dt><dd>创建 ${overview.events.totals.room_created} · 加入 ${overview.events.totals.room_joined} · 限流 ${overview.events.totals.rate_limited} · 拒绝 ${overview.events.totals.ws_connection_rejected}</dd>
                 </dl>
               </section>
             </div>
+            <section class="table-card">
+              <div class="toolbar table-toolbar">
+                <div class="table-title">在线节点 (${onlineNodes.length})</div>
+              </div>
+              ${
+                onlineNodes.length === 0
+                  ? `<div class="empty-state">当前没有在线节点心跳或会话。</div>`
+                  : `
+                <div class="table-scroll">
+                  <table class="logs-table nodes-table">
+                    <thead>
+                      <tr>
+                        <th>节点</th>
+                        <th>状态</th>
+                        <th>连接</th>
+                        <th>房间</th>
+                        <th>用户</th>
+                        <th>最近心跳</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${onlineNodes
+                        .map((node) => {
+                          const roomCodes = node.roomCodes || [];
+                          return `
+                        <tr>
+                          <td>${renderDataPair(`<strong>${escapeHtml(node.instanceId)}</strong>`, escapeHtml(node.version || "unknown"))}</td>
+                          <td>${renderStatus(node.health === "ok" ? "success" : "warning", node.health)}</td>
+                          <td><strong>${escapeHtml(node.connectionCount ?? 0)}</strong></td>
+                          <td><strong>${escapeHtml(node.currentRoomCount ?? roomCodes.length ?? 0)}</strong></td>
+                          <td><strong>${escapeHtml(node.currentMemberCount ?? 0)}</strong></td>
+                          <td>${formatDateTime(node.lastHeartbeatAt)}</td>
+                        </tr>
+                      `;
+                        })
+                        .join("")}
+                    </tbody>
+                  </table>
+                </div>
+              `
+              }
+            </section>
           </div>
         `,
         bind() {
@@ -518,6 +571,7 @@ export function createPageLoaders(options) {
                       <th>创建者</th>
                       <th>成员</th>
                       <th>视频</th>
+                      <th>播放状态</th>
                       <th>时间</th>
                       <th>操作</th>
                     </tr>
@@ -526,6 +580,7 @@ export function createPageLoaders(options) {
                     ${data.items
                       .map((item) => {
                         const videoSummary = getRoomVideoSummary(item);
+                        const playbackSummary = getRoomPlaybackSummary(item);
                         const ownerSummary = getRoomOwnerSummary(item);
                         return `
                       <tr>
@@ -534,6 +589,7 @@ export function createPageLoaders(options) {
                         <td>${renderDataPair(escapeHtml(ownerSummary.primary), escapeHtml(ownerSummary.secondary))}</td>
                         <td><strong>${item.memberCount}</strong></td>
                         <td>${renderDataPair(escapeHtml(videoSummary.primary), escapeHtml(videoSummary.secondary))}</td>
+                        <td>${renderDataPair(renderStatus(playbackSummary.tone, playbackSummary.primary), escapeHtml(playbackSummary.secondary))}</td>
                         <td>${renderDataPair(
                           `${formatDateTime(item.lastActiveAt)}`,
                           item.expiresAt
@@ -651,7 +707,7 @@ export function createPageLoaders(options) {
                     <dt>视频 ID</dt><dd>${detail.room.sharedVideo?.videoId ? `<span class="code">${escapeHtml(detail.room.sharedVideo.videoId)}</span>` : renderEmptyValue()}</dd>
                     <dt>URL</dt><dd>${detail.room.sharedVideo?.url ? `<a href="${escapeHtml(detail.room.sharedVideo.url)}" target="_blank" rel="noreferrer">${escapeHtml(detail.room.sharedVideo.url)}</a>` : renderEmptyValue()}</dd>
                     <dt>播放状态</dt><dd>${detail.room.playback ? renderResultBadge(getPlaybackState(detail.room.playback)) : renderEmptyValue("未同步")}</dd>
-                    <dt>当前时间</dt><dd>${detail.room.playback ? `${Number(detail.room.playback.currentTime || 0).toFixed(1)}s` : renderEmptyValue()}</dd>
+                    <dt>当前时间</dt><dd>${detail.room.playback ? formatPlaybackPosition(detail.room.playback.currentTime) : renderEmptyValue()}</dd>
                     <dt>播放速度</dt><dd>${detail.room.playback ? `x${Number(detail.room.playback.playbackRate || 1).toFixed(2)}` : renderEmptyValue()}</dd>
                   </dl>
                 </section>
@@ -713,7 +769,7 @@ export function createPageLoaders(options) {
                     <thead>
                       <tr>
                         <th>时间</th>
-                        <th>事件名</th>
+                        <th>操作历史</th>
                         <th>会话</th>
                         <th>结果</th>
                         <th>详情</th>
@@ -725,7 +781,7 @@ export function createPageLoaders(options) {
                           (event) => `
                         <tr>
                           <td>${renderTimeBlock(event.timestamp, "事件")}</td>
-                          <td>${renderEventNameCell(event)}</td>
+                          <td>${renderRuntimeEventStoryCell(event)}</td>
                           <td>${event.sessionId ? `<span class="code">${escapeHtml(event.sessionId)}</span>` : renderEmptyValue()}</td>
                           <td>${event.result ? renderResultBadge(event.result) : renderEmptyValue()}</td>
                           <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(event.details))}'>查看 JSON</button></td>
@@ -805,44 +861,94 @@ export function createPageLoaders(options) {
     async renderEventsPage() {
       const query = listQueryFromLocation(location.search, { pageSize: "20" });
       const data = await api.listEvents(query);
+      const groups = groupRuntimeEventsByRoom(data.items);
       return {
-        html: renderLogPage({
-          title: "运行事件",
-          tableClass: "events-table",
-          filters: `
-            ${textField("event", "事件名", query.event)}
-            ${textField("roomCode", "房间号", query.roomCode)}
-            ${textField("sessionId", "会话 ID", query.sessionId)}
-            ${textField("remoteAddress", "远端地址", query.remoteAddress)}
-            ${textField("origin", "来源", query.origin)}
-            ${textField("result", "结果", query.result)}
-            <div class="field inline align-end">
-              <input id="includeSystem" name="includeSystem" type="checkbox" ${query.includeSystem ? "checked" : ""} />
-              <label for="includeSystem">含系统事件</label>
-            </div>
-          `,
-          rows: data.items
-            .map(
-              (item) => `
-            <tr>
-              <td>${renderTimeBlock(item.timestamp, "事件")}</td>
-              <td>${renderEventNameCell(item)}</td>
-              <td>${item.roomCode ? `<span class="primary-code">${escapeHtml(item.roomCode)}</span>` : renderEmptyValue()}</td>
-              <td>${renderCompactCode(item.sessionId)}</td>
-              <td>${renderOriginValue(item.origin)}</td>
-              <td>${item.result ? renderResultBadge(item.result) : renderEmptyValue()}</td>
-              <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(item.details))}'>JSON</button></td>
-            </tr>
-          `,
-            )
-            .join(""),
-          headers:
-            "<th>时间</th><th>事件</th><th>房间号</th><th>会话</th><th>来源</th><th>结果</th><th>详情</th>",
-          data,
-          query,
-          basePath: "/events",
-          formId: "events-filter",
-        }),
+        html: `
+          <div class="section">
+            <section class="panel panel-filter">
+              <form id="events-filter" class="form-grid">
+                ${textField("event", "事件名", query.event)}
+                ${textField("roomCode", "房间号", query.roomCode)}
+                ${textField("sessionId", "会话 ID", query.sessionId)}
+                ${textField("remoteAddress", "远端地址", query.remoteAddress)}
+                ${textField("origin", "来源", query.origin)}
+                ${textField("result", "结果", query.result)}
+                <div class="field inline align-end">
+                  <input id="includeSystem" name="includeSystem" type="checkbox" ${query.includeSystem ? "checked" : ""} />
+                  <label for="includeSystem">含系统事件</label>
+                </div>
+                <div class="filter-footer full-width">
+                  <strong>共 ${escapeHtml(data.total)} 条</strong>
+                  <div class="actions">
+                    <button class="button primary" type="submit">查询</button>
+                    <button class="button ghost" type="button" data-reset-list="${escapeHtml("/events")}">重置</button>
+                  </div>
+                </div>
+              </form>
+            </section>
+            <section class="table-card">
+              <div class="toolbar table-toolbar">
+                <div class="table-title">运行事件</div>
+              </div>
+              ${
+                groups.length === 0
+                  ? `<div class="empty-state">没有匹配结果。</div>`
+                  : `
+                <div class="event-room-groups">
+                  ${groups
+                    .map((group, index) => {
+                      const latest = group.items[0];
+                      const open =
+                        query.roomCode || groups.length === 1 || index === 0
+                          ? "open"
+                          : "";
+                      return `
+                        <details class="event-room-group" ${open}>
+                          <summary>
+                            <span class="event-room-group-title">${escapeHtml(group.label)}</span>
+                            <span class="event-room-group-meta">${group.items.length} 条 · 最近 ${formatDateTime(latest?.timestamp)}</span>
+                          </summary>
+                          <div class="table-scroll">
+                            <table class="logs-table events-table">
+                              <thead>
+                                <tr>
+                                  <th>时间</th>
+                                  <th>操作历史</th>
+                                  <th>会话</th>
+                                  <th>来源</th>
+                                  <th>结果</th>
+                                  <th>详情</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                ${group.items
+                                  .map(
+                                    (item) => `
+                                  <tr>
+                                    <td>${renderTimeBlock(item.timestamp, "事件")}</td>
+                                    <td>${renderRuntimeEventStoryCell(item, { omitRoomContext: true })}</td>
+                                    <td>${renderCompactCode(item.sessionId)}</td>
+                                    <td>${renderOriginValue(item.origin)}</td>
+                                    <td>${item.result ? renderResultBadge(item.result) : renderEmptyValue()}</td>
+                                    <td><button class="button link" type="button" data-view-json='${escapeHtml(JSON.stringify(item.details))}'>JSON</button></td>
+                                  </tr>
+                                `,
+                                  )
+                                  .join("")}
+                              </tbody>
+                            </table>
+                          </div>
+                        </details>
+                      `;
+                    })
+                    .join("")}
+                </div>
+                ${renderPagination(Number(query.page || 1), Number(query.pageSize || 20), data.total, "logs")}
+              `
+              }
+            </section>
+          </div>
+        `,
         bind() {
           bindListFilter(options, "/events", "events-filter");
           bindPageButtons({ ...options, basePath: "/events" });

@@ -86,6 +86,106 @@ test("overview counts only persisted non-expired active rooms and reports orphan
   assert.equal(overview.rooms.orphanRuntimeCount, 1);
 });
 
+test("overview preserves local runtime count fallback when node data is unavailable", async () => {
+  const now = Date.parse("2026-04-05T12:00:00.000Z");
+  const roomStore = createInMemoryRoomStore({ now: () => now });
+  const runtimeStore = createInMemoryRuntimeStore(() => now);
+  const persistenceConfig = {
+    ...getDefaultPersistenceConfig(),
+    instanceId: "instance-a",
+  };
+
+  await roomStore.createRoom({
+    code: "ROOM01",
+    joinToken: "token-1",
+    createdAt: now - 1_000,
+  });
+
+  runtimeStore.registerSession({
+    id: "session-1",
+    connectionState: "detached",
+    socket: null,
+    instanceId: "instance-a",
+    remoteAddress: null,
+    origin: null,
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    displayName: "Alice",
+    memberToken: null,
+    joinedAt: now - 800,
+    invalidMessageCount: 0,
+    rateLimitState: {
+      roomCreate: { windowStart: 0, count: 0 },
+      roomJoin: { windowStart: 0, count: 0 },
+      videoShare: { windowStart: 0, count: 0 },
+      playbackUpdate: { tokens: 0, lastRefillAt: 0 },
+      syncRequest: { windowStart: 0, count: 0 },
+      syncPing: { tokens: 0, lastRefillAt: 0 },
+    },
+  });
+  runtimeStore.markSessionJoinedRoom("session-1", "ROOM01");
+  runtimeStore.listClusterSessions = async () => [];
+
+  const service = createAdminOverviewService({
+    instanceId: persistenceConfig.instanceId,
+    serviceName: "bili-syncplay-server",
+    serviceVersion: "0.9.2-test",
+    persistenceConfig,
+    roomStore,
+    runtimeStore,
+    eventStore: createEventStore(),
+    now: () => now,
+  });
+
+  const overview = await service.getOverview();
+
+  assert.equal(overview.runtime.connectionCount, 1);
+  assert.equal(overview.runtime.activeMemberCount, 1);
+  assert.equal(overview.nodes.items.length, 0);
+});
+
+test("overview falls back to heartbeat room count when node workload is unavailable", async () => {
+  const now = Date.parse("2026-04-05T12:00:00.000Z");
+  const roomStore = createInMemoryRoomStore({ now: () => now });
+  const runtimeStore = createInMemoryRuntimeStore(() => now);
+  const persistenceConfig = {
+    ...getDefaultPersistenceConfig(),
+    instanceId: "instance-a",
+  };
+
+  await runtimeStore.heartbeatNode({
+    instanceId: "instance-b",
+    version: "0.9.2-test",
+    startedAt: now - 2_000,
+    lastHeartbeatAt: now,
+    staleAt: now + 10_000,
+    expiresAt: now + 20_000,
+    connectionCount: 4,
+    activeRoomCount: 3,
+    activeMemberCount: 7,
+    health: "ok",
+  });
+
+  const service = createAdminOverviewService({
+    instanceId: persistenceConfig.instanceId,
+    serviceName: "bili-syncplay-server",
+    serviceVersion: "0.9.2-test",
+    persistenceConfig,
+    roomStore,
+    runtimeStore,
+    eventStore: createEventStore(),
+    now: () => now,
+  });
+
+  const overview = await service.getOverview();
+  const remoteNode = overview.nodes.items.find(
+    (node) => node.instanceId === "instance-b",
+  );
+
+  assert.equal(remoteNode?.currentRoomCount, 3);
+  assert.equal(remoteNode?.currentMemberCount, 7);
+});
+
 test("overview aggregates event statistics from the event store", async () => {
   const now = Date.parse("2026-04-05T12:00:00.000Z");
   const roomStore = createInMemoryRoomStore({ now: () => now });

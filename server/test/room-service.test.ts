@@ -701,6 +701,33 @@ test("room service updates member display name after join", async () => {
   assert.deepEqual(state.members, [{ id: owner.memberId, name: "Alice" }]);
 });
 
+test("room service skips owner persistence when profile display name is unchanged", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOM04",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  await service.updateProfileForSession(owner, created.memberToken, "Alice");
+
+  const persisted = await roomStore.getRoom(created.room.code);
+  assert.equal(persisted?.version, created.room.version);
+  assert.equal(persisted?.lastActiveAt, created.room.lastActiveAt);
+  assert.equal(persisted?.ownerDisplayName, "Alice");
+});
+
 test("room service flushes pending runtime store writes before exposing updated display names", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const clusterSessionsByRoom = new Map<string, Session[]>();
