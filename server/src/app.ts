@@ -366,6 +366,10 @@ export async function createSyncServer(
             run: () => Promise.allSettled(Array.from(pendingSessionCleanup)),
           },
           {
+            name: "flush_pending_room_event_publishes",
+            run: () => messageHandler.flushPendingPublishes(),
+          },
+          {
             name: "close_admin_command_consumer",
             run: () => adminCommandConsumer.close(),
           },

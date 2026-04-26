@@ -162,6 +162,7 @@ test("message handler creates a room, responds, and publishes member change", as
     type: "room:create",
     payload: { displayName: "Alice" },
   });
+  await handler.flushPendingPublishes();
 
   assert.deepEqual(sent, [{ type: "room:created", roomCode: "ROOM01" }]);
   assert.deepEqual(published, ["room_member_changed:ROOM01"]);
@@ -225,6 +226,7 @@ test("message handler skips room state publish when playback update is ignored",
       },
     },
   });
+  await handler.flushPendingPublishes();
 
   assert.deepEqual(published, []);
 });
@@ -299,6 +301,7 @@ test("message handler keeps leave completed when member change publish fails", a
     type: "room:leave",
     payload: { memberToken: "member-token-1" },
   });
+  await handler.flushPendingPublishes();
 
   assert.equal(session.roomCode, null);
   assert.deepEqual(left, ["ROOM01"]);
