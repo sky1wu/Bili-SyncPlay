@@ -94,7 +94,7 @@ export function createMessageHandler(options: {
   instanceId: string;
   metricsCollector?: Pick<MetricsCollector, "observeMessageHandlerDuration">;
   maxPendingPublishes?: number;
-  publishTimeoutMs?: number;
+  backpressureWaitMs?: number;
   onRoomJoined?: (
     session: Session,
     roomCode: string,
@@ -115,34 +115,7 @@ export function createMessageHandler(options: {
   const metricsCollector = options.metricsCollector;
   const pendingPublishes = new Set<Promise<void>>();
   const maxPendingPublishes = options.maxPendingPublishes ?? 256;
-  const publishTimeoutMs = options.publishTimeoutMs ?? 5_000;
-
-  async function publishRoomEvent(
-    type: RoomEventBusMessage["type"],
-    roomCode: string,
-  ): Promise<void> {
-    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutHandle = setTimeout(() => {
-        reject(new Error(`publish_timed_out_after_${publishTimeoutMs}ms`));
-      }, publishTimeoutMs);
-    });
-    try {
-      await Promise.race([
-        options.publishRoomEvent({
-          type,
-          roomCode,
-          sourceInstanceId: options.instanceId,
-          emittedAt: now(),
-        }),
-        timeoutPromise,
-      ]);
-    } finally {
-      if (timeoutHandle !== null) {
-        clearTimeout(timeoutHandle);
-      }
-    }
-  }
+  const backpressureWaitMs = options.backpressureWaitMs ?? 5_000;
 
   async function firePublishRoomEvent(
     type: RoomEventBusMessage["type"],
@@ -166,20 +139,55 @@ export function createMessageHandler(options: {
         pendingCount: pendingPublishes.size,
         maxPending: maxPendingPublishes,
       });
-      await Promise.race(Array.from(pendingPublishes));
-    }
-    const promise = publishRoomEvent(type, roomCode).catch((error: unknown) => {
-      logEvent("room_event_publish_failed", {
-        sessionId: context.sessionId,
-        roomCode,
-        remoteAddress: context.remoteAddress,
-        origin: context.origin,
-        result: "error",
-        reason: context.reason,
-        eventType: type,
-        error: error instanceof Error ? error.message : String(error),
+      let waitTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+      const slotFreed = Promise.race(Array.from(pendingPublishes)).then(
+        () => "ok" as const,
+      );
+      const waitTimedOut = new Promise<"timeout">((resolve) => {
+        waitTimeoutHandle = setTimeout(
+          () => resolve("timeout"),
+          backpressureWaitMs,
+        );
       });
-    });
+      const result = await Promise.race([slotFreed, waitTimedOut]);
+      if (waitTimeoutHandle !== null) {
+        clearTimeout(waitTimeoutHandle);
+      }
+      if (result === "timeout") {
+        logEvent("room_event_publish_dropped", {
+          sessionId: context.sessionId,
+          roomCode,
+          remoteAddress: context.remoteAddress,
+          origin: context.origin,
+          result: "dropped",
+          reason: context.reason,
+          eventType: type,
+          pendingCount: pendingPublishes.size,
+          maxPending: maxPendingPublishes,
+          waitMs: backpressureWaitMs,
+        });
+        return;
+      }
+    }
+    const promise = options
+      .publishRoomEvent({
+        type,
+        roomCode,
+        sourceInstanceId: options.instanceId,
+        emittedAt: now(),
+      })
+      .catch((error: unknown) => {
+        logEvent("room_event_publish_failed", {
+          sessionId: context.sessionId,
+          roomCode,
+          remoteAddress: context.remoteAddress,
+          origin: context.origin,
+          result: "error",
+          reason: context.reason,
+          eventType: type,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     pendingPublishes.add(promise);
     void promise.finally(() => {
       pendingPublishes.delete(promise);
