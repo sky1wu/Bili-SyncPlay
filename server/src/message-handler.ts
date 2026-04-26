@@ -139,34 +139,57 @@ export function createMessageHandler(options: {
         pendingCount: pendingPublishes.size,
         maxPending: maxPendingPublishes,
       });
-      let waitTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
-      const slotFreed = Promise.race(Array.from(pendingPublishes)).then(
-        () => "ok" as const,
-      );
-      const waitTimedOut = new Promise<"timeout">((resolve) => {
-        waitTimeoutHandle = setTimeout(
-          () => resolve("timeout"),
-          backpressureWaitMs,
+      // Loop and re-check size synchronously after each wake-up. A slot
+      // freeing wakes every concurrent waiter at once; the first one
+      // through grabs the slot synchronously (no await between size
+      // check and pendingPublishes.add), the rest see the cap is full
+      // again and wait another round. Total wait is bounded by an
+      // absolute deadline so callers can't be starved past
+      // backpressureWaitMs.
+      const deadline = now() + backpressureWaitMs;
+      while (pendingPublishes.size >= maxPendingPublishes) {
+        const remainingMs = deadline - now();
+        if (remainingMs <= 0) {
+          logEvent("room_event_publish_dropped", {
+            sessionId: context.sessionId,
+            roomCode,
+            remoteAddress: context.remoteAddress,
+            origin: context.origin,
+            result: "dropped",
+            reason: context.reason,
+            eventType: type,
+            pendingCount: pendingPublishes.size,
+            maxPending: maxPendingPublishes,
+            waitMs: backpressureWaitMs,
+          });
+          return;
+        }
+        let waitTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+        const slotFreed = Promise.race(Array.from(pendingPublishes)).then(
+          () => "ok" as const,
         );
-      });
-      const result = await Promise.race([slotFreed, waitTimedOut]);
-      if (waitTimeoutHandle !== null) {
-        clearTimeout(waitTimeoutHandle);
-      }
-      if (result === "timeout") {
-        logEvent("room_event_publish_dropped", {
-          sessionId: context.sessionId,
-          roomCode,
-          remoteAddress: context.remoteAddress,
-          origin: context.origin,
-          result: "dropped",
-          reason: context.reason,
-          eventType: type,
-          pendingCount: pendingPublishes.size,
-          maxPending: maxPendingPublishes,
-          waitMs: backpressureWaitMs,
+        const waitTimedOut = new Promise<"timeout">((resolve) => {
+          waitTimeoutHandle = setTimeout(() => resolve("timeout"), remainingMs);
         });
-        return;
+        const result = await Promise.race([slotFreed, waitTimedOut]);
+        if (waitTimeoutHandle !== null) {
+          clearTimeout(waitTimeoutHandle);
+        }
+        if (result === "timeout") {
+          logEvent("room_event_publish_dropped", {
+            sessionId: context.sessionId,
+            roomCode,
+            remoteAddress: context.remoteAddress,
+            origin: context.origin,
+            result: "dropped",
+            reason: context.reason,
+            eventType: type,
+            pendingCount: pendingPublishes.size,
+            maxPending: maxPendingPublishes,
+            waitMs: backpressureWaitMs,
+          });
+          return;
+        }
       }
     }
     const promise = options
