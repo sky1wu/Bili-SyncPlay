@@ -293,7 +293,6 @@ export async function createSyncServer(
     maxPayload: securityConfig.maxMessageBytes,
   });
   const pendingSessionCleanup = new Set<Promise<void>>();
-  const pendingMessageHandlers = new Set<Promise<void>>();
 
   httpServer.on(
     "upgrade",
@@ -310,7 +309,6 @@ export async function createSyncServer(
       messageHandler,
       logEvent,
       pendingSessionCleanup,
-      pendingMessageHandlers,
     }),
   );
 
@@ -339,10 +337,21 @@ export async function createSyncServer(
           },
           {
             name: "terminate_ws_clients",
-            run: () => {
-              for (const client of wss.clients) {
-                client.terminate();
-              }
+            run: async () => {
+              const closures = Array.from(wss.clients).map(
+                (client) =>
+                  new Promise<void>((resolve) => {
+                    if (client.readyState === client.CLOSED) {
+                      resolve();
+                      return;
+                    }
+                    client.once("close", () => {
+                      resolve();
+                    });
+                    client.terminate();
+                  }),
+              );
+              await Promise.allSettled(closures);
             },
           },
           {
@@ -363,14 +372,6 @@ export async function createSyncServer(
           ...(metricsHttpServer
             ? [createCloseHttpServerStep(metricsHttpServer)]
             : []),
-          {
-            name: "await_pending_message_handlers",
-            run: async () => {
-              while (pendingMessageHandlers.size > 0) {
-                await Promise.allSettled(Array.from(pendingMessageHandlers));
-              }
-            },
-          },
           {
             name: "await_pending_session_cleanup",
             run: async () => {

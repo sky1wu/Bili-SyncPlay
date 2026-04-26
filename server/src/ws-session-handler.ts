@@ -188,7 +188,6 @@ export function createWsConnectionHandler(args: {
   };
   logEvent: LogEvent;
   pendingSessionCleanup: Set<Promise<void>>;
-  pendingMessageHandlers: Set<Promise<void>>;
 }): (socket: WebSocket, request: IncomingMessage) => void {
   return (socket, request) => {
     const context = request.biliSyncPlayContext ?? {
@@ -226,7 +225,7 @@ export function createWsConnectionHandler(args: {
     let messageQueue = Promise.resolve();
 
     socket.on("message", (raw: RawData) => {
-      const handlePromise = messageQueue
+      messageQueue = messageQueue
         .catch((error: unknown) => {
           args.logEvent("ws_message_queue_failed", {
             sessionId: session.id,
@@ -281,11 +280,6 @@ export function createWsConnectionHandler(args: {
             sendError(socket, "internal_error", INTERNAL_SERVER_ERROR_MESSAGE);
           }
         });
-      messageQueue = handlePromise;
-      args.pendingMessageHandlers.add(handlePromise);
-      void handlePromise.finally(() => {
-        args.pendingMessageHandlers.delete(handlePromise);
-      });
     });
 
     socket.on("error", (error) => {
@@ -304,16 +298,20 @@ export function createWsConnectionHandler(args: {
         const decoded = r.toString("utf8");
         return decoded.length > 0 ? decoded : "";
       };
-      const cleanup = cleanupSessionAfterClose({
-        session,
-        code,
-        reason,
-        messageHandler: args.messageHandler,
-        runtimeStore: args.runtimeStore,
-        securityPolicy: args.securityPolicy,
-        logEvent: args.logEvent,
-        decodeCloseReason,
-      });
+      const inFlightMessageHandling = messageQueue;
+      const cleanup = (async () => {
+        await inFlightMessageHandling.catch(() => undefined);
+        await cleanupSessionAfterClose({
+          session,
+          code,
+          reason,
+          messageHandler: args.messageHandler,
+          runtimeStore: args.runtimeStore,
+          securityPolicy: args.securityPolicy,
+          logEvent: args.logEvent,
+          decodeCloseReason,
+        });
+      })();
       args.pendingSessionCleanup.add(cleanup);
       void cleanup.finally(() => {
         args.pendingSessionCleanup.delete(cleanup);
