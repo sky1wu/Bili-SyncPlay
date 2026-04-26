@@ -178,7 +178,9 @@ export function createAdminOverviewService(options: {
             ...status,
             connectionCount:
               workload?.connectionCount ?? status.connectionCount,
-            currentRoomCount: roomCodes.length,
+            currentRoomCount: workload
+              ? roomCodes.length
+              : status.activeRoomCount,
             currentMemberCount:
               workload?.currentMemberCount ?? status.activeMemberCount,
             roomCodes,
