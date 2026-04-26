@@ -93,6 +93,7 @@ export function createMessageHandler(options: {
   publishRoomEvent: (message: RoomEventBusMessage) => Promise<void>;
   instanceId: string;
   metricsCollector?: Pick<MetricsCollector, "observeMessageHandlerDuration">;
+  maxPendingPublishes?: number;
   onRoomJoined?: (
     session: Session,
     roomCode: string,
@@ -112,6 +113,7 @@ export function createMessageHandler(options: {
   const now = options.now ?? Date.now;
   const metricsCollector = options.metricsCollector;
   const pendingPublishes = new Set<Promise<void>>();
+  const maxPendingPublishes = options.maxPendingPublishes ?? 256;
 
   async function publishRoomEvent(
     type: RoomEventBusMessage["type"],
@@ -125,7 +127,7 @@ export function createMessageHandler(options: {
     });
   }
 
-  function firePublishRoomEvent(
+  async function firePublishRoomEvent(
     type: RoomEventBusMessage["type"],
     roomCode: string,
     context: {
@@ -134,7 +136,21 @@ export function createMessageHandler(options: {
       remoteAddress?: string | null;
       origin?: string | null;
     },
-  ): void {
+  ): Promise<void> {
+    if (pendingPublishes.size >= maxPendingPublishes) {
+      logEvent("room_event_publish_backpressure", {
+        sessionId: context.sessionId,
+        roomCode,
+        remoteAddress: context.remoteAddress,
+        origin: context.origin,
+        result: "throttled",
+        reason: context.reason,
+        eventType: type,
+        pendingCount: pendingPublishes.size,
+        maxPending: maxPendingPublishes,
+      });
+      await Promise.race(Array.from(pendingPublishes));
+    }
     const promise = publishRoomEvent(type, roomCode).catch((error: unknown) => {
       logEvent("room_event_publish_failed", {
         sessionId: context.sessionId,
@@ -167,7 +183,7 @@ export function createMessageHandler(options: {
     }
     options.onRoomLeft?.(session, roomCode);
 
-    firePublishRoomEvent("room_member_changed", roomCode, {
+    await firePublishRoomEvent("room_member_changed", roomCode, {
       reason: "leave_room_broadcast_failed",
       sessionId: session.id,
       remoteAddress: session.remoteAddress,
@@ -295,7 +311,7 @@ export function createMessageHandler(options: {
               serverProtocolVersion: CURRENT_PROTOCOL_VERSION,
             },
           });
-          firePublishRoomEvent("room_member_changed", room.code, {
+          await firePublishRoomEvent("room_member_changed", room.code, {
             reason: "create_room_broadcast_failed",
             sessionId: session.id,
             remoteAddress: session.remoteAddress,
@@ -357,7 +373,7 @@ export function createMessageHandler(options: {
                 serverProtocolVersion: CURRENT_PROTOCOL_VERSION,
               },
             });
-            firePublishRoomEvent("room_member_changed", room.code, {
+            await firePublishRoomEvent("room_member_changed", room.code, {
               reason: "join_room_broadcast_failed",
               sessionId: session.id,
               remoteAddress: session.remoteAddress,
@@ -397,7 +413,7 @@ export function createMessageHandler(options: {
             message.payload.memberToken,
             message.payload.displayName,
           );
-          firePublishRoomEvent("room_state_updated", room.code, {
+          await firePublishRoomEvent("room_state_updated", room.code, {
             reason: "profile_update_broadcast_failed",
             sessionId: session.id,
             remoteAddress: session.remoteAddress,
@@ -426,7 +442,7 @@ export function createMessageHandler(options: {
               message.payload.video,
               message.payload.playback,
             );
-            firePublishRoomEvent("room_state_updated", room.code, {
+            await firePublishRoomEvent("room_state_updated", room.code, {
               reason: "video_share_broadcast_failed",
               sessionId: session.id,
               remoteAddress: session.remoteAddress,
@@ -455,12 +471,16 @@ export function createMessageHandler(options: {
               message.payload.playback,
             );
             if (!result.ignored && result.room) {
-              firePublishRoomEvent("room_state_updated", result.room.code, {
-                reason: "playback_update_broadcast_failed",
-                sessionId: session.id,
-                remoteAddress: session.remoteAddress,
-                origin: session.origin,
-              });
+              await firePublishRoomEvent(
+                "room_state_updated",
+                result.room.code,
+                {
+                  reason: "playback_update_broadcast_failed",
+                  sessionId: session.id,
+                  remoteAddress: session.remoteAddress,
+                  origin: session.origin,
+                },
+              );
             }
           });
           return;
