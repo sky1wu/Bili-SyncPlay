@@ -19,6 +19,7 @@ export type BenchmarkResult = {
   metrics: {
     throughput: ThroughputSummary;
     latency: LatencySummary;
+    phases?: Record<string, LatencySummary>;
     errorRatePercent: number;
     errors: number;
   };
@@ -87,6 +88,7 @@ export function buildBenchmarkResult(input: {
   completed: number;
   errors: number;
   latencySamplesMs: number[];
+  phaseSamplesMs?: Record<string, number[]>;
   config: Record<string, unknown>;
   notes?: string[];
 }): BenchmarkResult {
@@ -105,6 +107,16 @@ export function buildBenchmarkResult(input: {
         durationMs: input.completedAtMs - input.startedAtMs,
       }),
       latency: summarizeLatencies(input.latencySamplesMs),
+      ...(input.phaseSamplesMs
+        ? {
+            phases: Object.fromEntries(
+              Object.entries(input.phaseSamplesMs).map(([phase, samples]) => [
+                phase,
+                summarizeLatencies(samples),
+              ]),
+            ),
+          }
+        : {}),
       errorRatePercent: calculateErrorRate(input.errors, totalObservations),
       errors: input.errors,
     },

@@ -605,6 +605,11 @@ export async function runReconnectStormBenchmark(input: {
 
   const startedAtMs = Date.now();
   const latencySamplesMs: number[] = [];
+  const phaseSamplesMs: Record<string, number[]> = {
+    socketOpen: [],
+    roomJoined: [],
+    firstRoomState: [],
+  };
   let completed = 0;
   let errors = 0;
   let completedAtMs = startedAtMs;
@@ -623,21 +628,27 @@ export async function runReconnectStormBenchmark(input: {
           socket = await connectClient(seed.wsUrl, {
             openTimeoutMs: input.reconnectTimeoutMs,
           });
+          const socketOpenedAtMs = Date.now();
+          phaseSamplesMs.socketOpen?.push(
+            socketOpenedAtMs - reconnectStartedAtMs,
+          );
           inbox = createBenchMessageCollector(socket, {
             trackedTypes: ["room:joined", "room:state"],
           });
           const remainingTimeoutMs =
-            input.reconnectTimeoutMs - (Date.now() - reconnectStartedAtMs);
+            input.reconnectTimeoutMs -
+            (socketOpenedAtMs - reconnectStartedAtMs);
           if (remainingTimeoutMs <= 0) {
             throw new Error(
               `Reconnect socket open consumed the ${input.reconnectTimeoutMs}ms timeout budget.`,
             );
           }
-          const joinedPromise = inbox.next("room:joined", remainingTimeoutMs);
-          const firstStatePromise = inbox.next(
-            "room:state",
-            remainingTimeoutMs,
-          );
+          const joinedPromise = inbox
+            .next("room:joined", remainingTimeoutMs)
+            .then(() => Date.now());
+          const firstStatePromise = inbox
+            .next("room:state", remainingTimeoutMs)
+            .then(() => Date.now());
           socket.send(
             JSON.stringify({
               type: "room:join",
@@ -649,7 +660,13 @@ export async function runReconnectStormBenchmark(input: {
               },
             }),
           );
-          await Promise.all([joinedPromise, firstStatePromise]);
+          const joinSentAtMs = Date.now();
+          const [joinedAtMs, firstStateAtMs] = await Promise.all([
+            joinedPromise,
+            firstStatePromise,
+          ]);
+          phaseSamplesMs.roomJoined?.push(joinedAtMs - joinSentAtMs);
+          phaseSamplesMs.firstRoomState?.push(firstStateAtMs - joinSentAtMs);
           latencySamplesMs.push(Date.now() - reconnectStartedAtMs);
           completed += 1;
         } catch {
@@ -673,6 +690,7 @@ export async function runReconnectStormBenchmark(input: {
     completed,
     errors,
     latencySamplesMs,
+    phaseSamplesMs,
     startedAtMs,
     completedAtMs,
   };

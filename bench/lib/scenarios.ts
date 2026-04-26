@@ -109,6 +109,7 @@ export async function runReconnectStormScenario(
     completed: benchmark.completed,
     errors: benchmark.errors,
     latencySamplesMs: benchmark.latencySamplesMs,
+    phaseSamplesMs: benchmark.phaseSamplesMs,
     config: {
       memberCount: input.memberCount,
       reconnectTimeoutMs: input.reconnectTimeoutMs,
@@ -116,6 +117,7 @@ export async function runReconnectStormScenario(
     },
     notes: [
       "Each reconnect latency measures socket open plus room rejoin until the first room state arrives.",
+      "Phase latency summaries are partial: socketOpen records successful WebSocket opens, roomJoined records received join acknowledgements, and firstRoomState records received initial room states.",
     ],
   });
 }

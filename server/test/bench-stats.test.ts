@@ -92,6 +92,54 @@ test("benchmark result uses a stable JSON-friendly schema", () => {
   });
 });
 
+test("benchmark result includes optional phase latency summaries", () => {
+  const result = buildBenchmarkResult({
+    scenario: "reconnect-storm",
+    startedAtMs: Date.UTC(2026, 3, 22, 10, 0, 0),
+    completedAtMs: Date.UTC(2026, 3, 22, 10, 0, 5),
+    attempted: 4,
+    completed: 3,
+    errors: 1,
+    latencySamplesMs: [100, 200, 300],
+    phaseSamplesMs: {
+      socketOpen: [10, 20, 30, 40],
+      roomJoined: [50, 70, 90],
+      firstRoomState: [80, 120, 160],
+    },
+    config: { memberCount: 4, reconnectTimeoutMs: 5_000 },
+  });
+
+  assert.deepEqual(result.metrics.phases, {
+    socketOpen: {
+      sampleCount: 4,
+      minMs: 10,
+      meanMs: 25,
+      p50Ms: 20,
+      p95Ms: 40,
+      p99Ms: 40,
+      maxMs: 40,
+    },
+    roomJoined: {
+      sampleCount: 3,
+      minMs: 50,
+      meanMs: 70,
+      p50Ms: 70,
+      p95Ms: 90,
+      p99Ms: 90,
+      maxMs: 90,
+    },
+    firstRoomState: {
+      sampleCount: 3,
+      minMs: 80,
+      meanMs: 120,
+      p50Ms: 120,
+      p95Ms: 160,
+      p99Ms: 160,
+      maxMs: 160,
+    },
+  });
+});
+
 test("playback benchmark skips drain bookkeeping when no watchers are sampled", async () => {
   const benchmark = await runPlaybackBroadcastBenchmark({
     scenario: "single-node-room",
@@ -254,6 +302,23 @@ test("reconnect benchmark supports member counts above default room and IP limit
 
   assert.equal(benchmark.attempted, 12);
   assert.equal(benchmark.errors, 0);
+});
+
+test("reconnect benchmark records phase latency samples", async () => {
+  const benchmark = await runReconnectStormBenchmark({
+    memberCount: 4,
+    reconnectTimeoutMs: 3_000,
+  });
+
+  assert.equal(benchmark.phaseSamplesMs.socketOpen.length, 4);
+  assert.equal(benchmark.phaseSamplesMs.roomJoined.length, 4);
+  assert.equal(benchmark.phaseSamplesMs.firstRoomState.length, 4);
+  for (const samples of Object.values(benchmark.phaseSamplesMs)) {
+    assert.equal(
+      samples.every((sample) => sample >= 0),
+      true,
+    );
+  }
 });
 
 test("reconnect benchmark reports timeout failures without aborting the run", async () => {
