@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer, type Socket } from "node:net";
 import test from "node:test";
 import {
   closeClient,
@@ -7,6 +8,39 @@ import {
   createMultiNodeTestKit,
   requestJson,
 } from "./multi-node-test-kit.js";
+
+test("connectClient rejects when WebSocket open exceeds the timeout", async () => {
+  const acceptedSockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    acceptedSockets.add(socket);
+    socket.once("close", () => acceptedSockets.delete(socket));
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+    server.once("error", reject);
+  });
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+
+    await assert.rejects(
+      () =>
+        connectClient(`ws://127.0.0.1:${address.port}`, {
+          openTimeoutMs: 10,
+        }),
+      /Timed out opening WebSocket after 10ms\./,
+    );
+  } finally {
+    for (const socket of acceptedSockets) {
+      socket.destroy();
+    }
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
 
 test("multi-node test kit starts two room nodes and one global admin on the same redis namespace", async (t) => {
   const redisUrl = process.env.REDIS_URL;

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { once } from "node:events";
 import { Redis } from "ioredis";
 import { WebSocket, type RawData } from "ws";
 import { createGlobalAdminServer } from "../src/global-admin-app.js";
@@ -72,11 +71,82 @@ export async function requestJson(
   };
 }
 
-export async function connectClient(wsUrl: string): Promise<WebSocket> {
+export async function connectClient(
+  wsUrl: string,
+  options: { openTimeoutMs?: number } = {},
+): Promise<WebSocket> {
   const socket = new WebSocket(wsUrl, {
     origin: MULTI_NODE_ALLOWED_ORIGIN,
   });
-  await once(socket, "open");
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let timeout: NodeJS.Timeout | undefined;
+
+      const cleanup = () => {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+        socket.off("open", handleOpen);
+        socket.off("error", handleError);
+        socket.off("close", handleClose);
+      };
+
+      const handleOpen = () => {
+        cleanup();
+        resolve();
+      };
+
+      const handleError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+
+      const handleClose = () => {
+        cleanup();
+        reject(new Error("WebSocket closed before opening."));
+      };
+
+      const terminateOpeningSocket = () => {
+        socket.on("error", () => {});
+        try {
+          socket.terminate();
+        } catch {
+          // Ignore close-time failures after the connect attempt has timed out.
+        }
+      };
+
+      socket.once("open", handleOpen);
+      socket.once("error", handleError);
+      socket.once("close", handleClose);
+
+      if (options.openTimeoutMs !== undefined) {
+        timeout = setTimeout(() => {
+          cleanup();
+          terminateOpeningSocket();
+          reject(
+            new Error(
+              `Timed out opening WebSocket after ${options.openTimeoutMs}ms.`,
+            ),
+          );
+        }, options.openTimeoutMs);
+      }
+    });
+  } catch (error) {
+    if (
+      socket.readyState !== WebSocket.CLOSING &&
+      socket.readyState !== WebSocket.CLOSED
+    ) {
+      socket.on("error", () => {});
+      try {
+        socket.terminate();
+      } catch {
+        // Ignore close-time failures after the connect attempt has failed.
+      }
+    }
+    throw error;
+  }
+
   return socket;
 }
 

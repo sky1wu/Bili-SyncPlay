@@ -620,17 +620,23 @@ export async function runReconnectStormBenchmark(input: {
         let inbox: Collector | undefined;
 
         try {
-          socket = await connectClient(seed.wsUrl);
+          socket = await connectClient(seed.wsUrl, {
+            openTimeoutMs: input.reconnectTimeoutMs,
+          });
           inbox = createBenchMessageCollector(socket, {
             trackedTypes: ["room:joined", "room:state"],
           });
-          const joinedPromise = inbox.next(
-            "room:joined",
-            input.reconnectTimeoutMs,
-          );
+          const remainingTimeoutMs =
+            input.reconnectTimeoutMs - (Date.now() - reconnectStartedAtMs);
+          if (remainingTimeoutMs <= 0) {
+            throw new Error(
+              `Reconnect socket open consumed the ${input.reconnectTimeoutMs}ms timeout budget.`,
+            );
+          }
+          const joinedPromise = inbox.next("room:joined", remainingTimeoutMs);
           const firstStatePromise = inbox.next(
             "room:state",
-            input.reconnectTimeoutMs,
+            remainingTimeoutMs,
           );
           socket.send(
             JSON.stringify({
