@@ -157,10 +157,12 @@ export function createAdminOverviewService(options: {
         nodeStatuses.map((status) => [status.instanceId, status]),
       );
       const nodeInstanceIds = new Set<string>([
-        options.instanceId,
         ...nodeStatuses.map((status) => status.instanceId),
         ...nodeWorkloads.keys(),
       ]);
+      if (nodeInstanceIds.size > 0) {
+        nodeInstanceIds.add(options.instanceId);
+      }
       const nodeItems = Array.from(nodeInstanceIds)
         .sort((left, right) => left.localeCompare(right))
         .map((instanceId) => {
