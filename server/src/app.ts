@@ -1,7 +1,6 @@
 import type { Server as HttpServer } from "node:http";
 import { WebSocketServer } from "ws";
 import {
-  createCloseHttpServerStep,
   createSharedAdminHttpBootstrap,
   resolveServerRuntimeDependencies,
 } from "./bootstrap/admin-http-bootstrap.js";
@@ -319,6 +318,33 @@ export async function createSyncServer(
       const maybeClosableRuntimeStore =
         sharedRuntimeStore === localRuntimeStore ? null : sharedRuntimeStore;
 
+      // Stop accepting new connections immediately, before any shutdown step runs.
+      // httpServer.close() returns synchronously after detaching the listener;
+      // its callback only fires once existing sockets disconnect. Capture the
+      // promises now so terminate_ws_clients can run with a stable client snapshot.
+      const httpServerClosed = new Promise<void>((resolve, reject) => {
+        httpServer.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+      httpServerClosed.catch(() => undefined);
+      const metricsHttpServerClosed = metricsHttpServer
+        ? new Promise<void>((resolve, reject) => {
+            metricsHttpServer.close((error) => {
+              if (error) {
+                reject(error);
+                return;
+              }
+              resolve();
+            });
+          })
+        : null;
+      metricsHttpServerClosed?.catch(() => undefined);
+
       await runShutdownSteps(
         [
           {
@@ -363,14 +389,17 @@ export async function createSyncServer(
                     reject(wsError);
                     return;
                   }
-                  Promise.resolve(
-                    createCloseHttpServerStep(httpServer).run(),
-                  ).then(() => resolve(), reject);
+                  httpServerClosed.then(() => resolve(), reject);
                 });
               }),
           },
-          ...(metricsHttpServer
-            ? [createCloseHttpServerStep(metricsHttpServer)]
+          ...(metricsHttpServerClosed
+            ? [
+                {
+                  name: "close_metrics_http_server",
+                  run: () => metricsHttpServerClosed,
+                },
+              ]
             : []),
           {
             name: "await_pending_session_cleanup",
@@ -382,6 +411,10 @@ export async function createSyncServer(
           },
           {
             name: "flush_pending_room_event_publishes",
+            // Allow generous time to drain in-flight publishes before
+            // close_room_event_consumer / close_room_event_bus tears the bus down,
+            // so we don't lose final broadcasts under Redis backpressure.
+            timeoutMs: 30_000,
             run: () => messageHandler.flushPendingPublishes(),
           },
           {
