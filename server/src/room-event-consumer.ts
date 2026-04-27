@@ -1,8 +1,17 @@
-import { hasAttachedSocket, type SendMessage, type Session } from "./types.js";
+import {
+  hasAttachedSocket,
+  type AttachedSession,
+  type SendMessage,
+  type Session,
+} from "./types.js";
 import type { RoomEventBus, RoomEventBusMessage } from "./room-event-bus.js";
 import type { ServerMessage } from "@bili-syncplay/protocol";
 
 const MEMBER_DELTA_PROTOCOL_VERSION = 2;
+type MemberDeltaMessage = Extract<
+  RoomEventBusMessage,
+  { type: "room_member_joined" | "room_member_left" }
+>;
 
 function supportsIncrementalMemberEvents(session: Session): boolean {
   return (session.protocolVersion ?? 1) >= MEMBER_DELTA_PROTOCOL_VERSION;
@@ -38,6 +47,23 @@ function createMemberMessage(
   return null;
 }
 
+function isRoomEventRecipient(
+  session: Session,
+  roomCode: string,
+): session is AttachedSession {
+  return hasAttachedSocket(session) && session.roomCode === roomCode;
+}
+
+function isMemberDeltaRecipient(
+  session: Session,
+  message: MemberDeltaMessage,
+): session is AttachedSession {
+  return (
+    isRoomEventRecipient(session, message.roomCode) &&
+    session.memberId !== message.memberId
+  );
+}
+
 export async function createRoomEventConsumer(options: {
   roomEventBus: RoomEventBus;
   getRoomStateByCode: (
@@ -62,11 +88,19 @@ export async function createRoomEventConsumer(options: {
         let legacyRoomState:
           | Awaited<ReturnType<typeof options.getRoomStateByCode>>
           | undefined;
+        let legacyRoomStateLoaded = false;
+        async function getLegacyRoomState() {
+          if (!legacyRoomStateLoaded) {
+            legacyRoomState = await options.getRoomStateByCode(
+              message.roomCode,
+            );
+            legacyRoomStateLoaded = true;
+          }
+          return legacyRoomState;
+        }
+
         for (const session of localSessions) {
-          if (
-            !hasAttachedSocket(session) ||
-            session.memberId === message.memberId
-          ) {
+          if (!isMemberDeltaRecipient(session, message)) {
             continue;
           }
           if (supportsIncrementalMemberEvents(session)) {
@@ -74,15 +108,14 @@ export async function createRoomEventConsumer(options: {
             continue;
           }
 
-          legacyRoomState ??= await options.getRoomStateByCode(
-            message.roomCode,
-          );
-          if (legacyRoomState) {
-            options.send(session.socket, {
-              type: "room:state",
-              payload: legacyRoomState,
-            });
+          const roomState = await getLegacyRoomState();
+          if (!roomState || !isMemberDeltaRecipient(session, message)) {
+            continue;
           }
+          options.send(session.socket, {
+            type: "room:state",
+            payload: roomState,
+          });
         }
 
         options.logEvent?.("room_event_consumed", {
@@ -110,7 +143,7 @@ export async function createRoomEventConsumer(options: {
       }
 
       for (const session of localSessions) {
-        if (!hasAttachedSocket(session)) {
+        if (!isRoomEventRecipient(session, message.roomCode)) {
           continue;
         }
         options.send(session.socket, {

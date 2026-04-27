@@ -238,6 +238,89 @@ test("room event consumer sends full room state for legacy member event sessions
   ]);
 });
 
+test("room event consumer re-checks legacy sessions after loading fallback room state", async () => {
+  const bus = createInMemoryRoomEventBus();
+  const joiningSession = createSession("member-a", "ROOM01", 2);
+  const detachingLegacySession = createSession("member-b", "ROOM01", 1);
+  const remainingLegacySession = createSession("member-c", "ROOM01", 1);
+  const sent: Array<{
+    sessionId: string;
+    type: string;
+    memberCount: number;
+  }> = [];
+  const logs: Array<{ event: string; result: string }> = [];
+  let roomStateLoads = 0;
+
+  const consumer = await createRoomEventConsumer({
+    roomEventBus: bus,
+    async getRoomStateByCode(roomCode) {
+      roomStateLoads += 1;
+      detachingLegacySession.connectionState = "detached";
+      detachingLegacySession.socket = null;
+      detachingLegacySession.roomCode = null;
+      return {
+        roomCode,
+        sharedVideo: null,
+        playback: null,
+        members: [
+          { id: "member-a", name: "Alice" },
+          { id: "member-c", name: "Carol" },
+        ],
+      };
+    },
+    listLocalSessionsByRoom() {
+      return [joiningSession, detachingLegacySession, remainingLegacySession];
+    },
+    send(socket, message) {
+      assert.notEqual(socket, null, "detached socket should not be used");
+      const session =
+        socket === remainingLegacySession.socket
+          ? remainingLegacySession
+          : detachingLegacySession;
+      sent.push({
+        sessionId: session.id,
+        type: message.type,
+        memberCount:
+          message.type === "room:state" ? message.payload.members.length : 1,
+      });
+    },
+    logEvent(event, data) {
+      logs.push({
+        event,
+        result: String(data.result),
+      });
+    },
+  });
+
+  try {
+    await bus.publish({
+      type: "room_member_joined",
+      roomCode: "ROOM01",
+      sourceInstanceId: "instance-b",
+      emittedAt: 1_100,
+      memberId: "member-a",
+      displayName: "Alice",
+    });
+  } finally {
+    await consumer.close();
+  }
+
+  assert.equal(roomStateLoads, 1);
+  assert.deepEqual(sent, [
+    {
+      sessionId: "member-c",
+      type: "room:state",
+      memberCount: 2,
+    },
+  ]);
+  assert.deepEqual(logs, [
+    {
+      event: "room_event_consumed",
+      result: "ok",
+    },
+  ]);
+});
+
 test("room event consumer sends member leave deltas to remaining room sessions", async () => {
   const bus = createInMemoryRoomEventBus();
   const remainingSession = createSession("member-b", "ROOM01");
@@ -359,6 +442,47 @@ test("room event consumer skips detached sessions", async () => {
   }
 
   assert.deepEqual(sent, ["member-a"]);
+});
+
+test("room event consumer re-checks room membership after loading room state", async () => {
+  const bus = createInMemoryRoomEventBus();
+  const movedSession = createSession("member-a", "ROOM01");
+  const remainingSession = createSession("member-b", "ROOM01");
+  const sent: string[] = [];
+
+  const consumer = await createRoomEventConsumer({
+    roomEventBus: bus,
+    async getRoomStateByCode(roomCode) {
+      movedSession.roomCode = "ROOM02";
+      return {
+        roomCode,
+        sharedVideo: null,
+        playback: null,
+        members: [{ id: "member-b", name: "Bob" }],
+      };
+    },
+    listLocalSessionsByRoom() {
+      return [movedSession, remainingSession];
+    },
+    send(socket) {
+      const session =
+        socket === movedSession.socket ? movedSession : remainingSession;
+      sent.push(session.id);
+    },
+  });
+
+  try {
+    await bus.publish({
+      type: "room_state_updated",
+      roomCode: "ROOM01",
+      sourceInstanceId: "instance-a",
+      emittedAt: 1_600,
+    });
+  } finally {
+    await consumer.close();
+  }
+
+  assert.deepEqual(sent, ["member-b"]);
 });
 
 test("room event consumer logs failures without throwing to the bus", async () => {
