@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
 import { WebSocket, type RawData } from "ws";
+import { EventEmitter } from "node:events";
 import {
   cleanupSessionAfterClose,
   createSyncServer,
@@ -9,6 +10,7 @@ import {
   getDefaultSecurityConfig,
   runShutdownSteps,
 } from "../src/app.js";
+import { createWsConnectionHandler } from "../src/ws-session-handler.js";
 import { createRedisRoomStore } from "../src/redis-room-store.js";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
 import type { Session } from "../src/types.js";
@@ -209,6 +211,93 @@ test("runShutdownSteps logs timeout and continues closing remaining steps", asyn
       result: "timeout",
     },
   ]);
+});
+
+test("ws close cleanup proceeds after drain timeout when handler is hung", async () => {
+  const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+  const unregistered: string[] = [];
+  const decremented: Array<string | null> = [];
+  const pendingSessionCleanup = new Set<Promise<void>>();
+
+  const fakeSocket = Object.assign(new EventEmitter(), {
+    readyState: 1,
+    OPEN: 1,
+    send() {},
+    close() {},
+    terminate() {},
+  }) as unknown as Parameters<ReturnType<typeof createWsConnectionHandler>>[0];
+
+  const handler = createWsConnectionHandler({
+    securityPolicy: {
+      getRemoteAddress: () => "127.0.0.1",
+      incrementConnectionCount() {},
+      decrementConnectionCount(remoteAddress) {
+        decremented.push(remoteAddress);
+      },
+    },
+    securityConfig: getDefaultSecurityConfig(),
+    instanceId: "drain-timeout-node",
+    runtimeStore: {
+      registerSession() {},
+      unregisterSession(sessionId) {
+        unregistered.push(sessionId);
+      },
+      markSessionJoinedRoom() {},
+      markSessionLeftRoom() {},
+      // Other RuntimeStore members are unused by the connection handler.
+    } as unknown as Parameters<
+      typeof createWsConnectionHandler
+    >[0]["runtimeStore"],
+    messageHandler: {
+      // Hangs forever — simulates a deadlocked downstream call.
+      handleClientMessage: () => new Promise<void>(() => undefined),
+      async leaveRoom() {},
+    },
+    logEvent(event, data) {
+      events.push({ event, data: data as Record<string, unknown> });
+    },
+    pendingSessionCleanup,
+    messageQueueDrainTimeoutMs: 30,
+  });
+
+  const fakeRequest = {
+    biliSyncPlayContext: {
+      remoteAddress: "127.0.0.1",
+      origin: "chrome-extension://allowed-extension",
+    },
+    headers: {},
+  } as unknown as Parameters<ReturnType<typeof createWsConnectionHandler>>[1];
+
+  handler(fakeSocket, fakeRequest);
+
+  // Push a message that will be picked up but never finish handling.
+  (fakeSocket as unknown as EventEmitter).emit(
+    "message",
+    Buffer.from(
+      JSON.stringify({
+        type: "sync:ping",
+        payload: { clientSendTime: Date.now() },
+      }),
+    ),
+  );
+
+  // Yield once so the messageQueue chain extends with the hung handler.
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // Trigger close — cleanup should proceed after drainTimeoutMs even though
+  // the handler is still pending.
+  (fakeSocket as unknown as EventEmitter).emit("close", 1006, Buffer.from(""));
+
+  await Promise.allSettled(Array.from(pendingSessionCleanup));
+
+  assert.equal(unregistered.length, 1);
+  assert.equal(decremented.length, 1);
+  assert.equal(decremented[0], "127.0.0.1");
+  assert.ok(
+    events.some((entry) => entry.event === "ws_close_drain_timeout"),
+    "ws_close_drain_timeout must be logged when the queue does not drain",
+  );
+  assert.ok(events.some((entry) => entry.event === "ws_connection_closed"));
 });
 
 test("websocket lifecycle mirrors sessions into the shared redis runtime store", async (t) => {

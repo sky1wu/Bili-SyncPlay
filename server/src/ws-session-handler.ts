@@ -188,7 +188,9 @@ export function createWsConnectionHandler(args: {
   };
   logEvent: LogEvent;
   pendingSessionCleanup: Set<Promise<void>>;
+  messageQueueDrainTimeoutMs?: number;
 }): (socket: WebSocket, request: IncomingMessage) => void {
+  const drainTimeoutMs = args.messageQueueDrainTimeoutMs ?? 10_000;
   return (socket, request) => {
     const context = request.biliSyncPlayContext ?? {
       remoteAddress: args.securityPolicy.getRemoteAddress(request),
@@ -300,7 +302,41 @@ export function createWsConnectionHandler(args: {
       };
       const inFlightMessageHandling = messageQueue;
       const cleanup = (async () => {
-        await inFlightMessageHandling.catch(() => undefined);
+        // Bound the wait on in-flight handlers so a hung handleClientMessage
+        // (e.g. a deadlocked downstream call) cannot stall cleanup forever.
+        // Without a bound, the session would never unregister, the per-IP
+        // connection count would never decrement, and reconnects from that
+        // address would soon hit maxConnectionsPerIp.
+        let drainTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+        const drainOutcome = await Promise.race<"drained" | "timeout">([
+          inFlightMessageHandling.then(
+            () => "drained" as const,
+            () => "drained" as const,
+          ),
+          new Promise<"timeout">((resolve) => {
+            drainTimeoutHandle = setTimeout(
+              () => resolve("timeout"),
+              drainTimeoutMs,
+            );
+          }),
+        ]);
+        if (drainTimeoutHandle !== null) {
+          clearTimeout(drainTimeoutHandle);
+          drainTimeoutHandle = null;
+        }
+        if (drainOutcome === "timeout") {
+          // The in-flight handler may still be running when cleanup proceeds;
+          // we accept that race in exchange for guaranteeing the session is
+          // unregistered and the connection slot is freed.
+          args.logEvent("ws_close_drain_timeout", {
+            sessionId: session.id,
+            roomCode: session.roomCode,
+            remoteAddress: session.remoteAddress,
+            origin: session.origin,
+            result: "timeout",
+            timeoutMs: drainTimeoutMs,
+          });
+        }
         await cleanupSessionAfterClose({
           session,
           code,
