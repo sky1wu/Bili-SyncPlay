@@ -848,3 +848,53 @@ test("publish backpressure drops new events when wait deadline elapses", async (
   await first;
   await handler.flushPendingPublishes();
 });
+
+test("publish wrapper times out so a hung publish frees its slot", async () => {
+  const timeoutEvents: Array<{ reason: unknown; timeoutMs: unknown }> = [];
+  const failedEvents: string[] = [];
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: createBackpressureRoomService(),
+    logEvent(event, data) {
+      if (event === "room_event_publish_timeout") {
+        const payload = data as { reason?: unknown; timeoutMs?: unknown };
+        timeoutEvents.push({
+          reason: payload.reason,
+          timeoutMs: payload.timeoutMs,
+        });
+      }
+      if (event === "room_event_publish_failed") {
+        failedEvents.push(event);
+      }
+    },
+    send() {},
+    sendError() {
+      throw new Error("sendError should not be called");
+    },
+    // Underlying publish never resolves — simulates a Redis hang.
+    publishRoomEvent: () => new Promise<void>(() => {}),
+    instanceId: "node-a",
+    maxPendingPublishes: 1,
+    // Caller should never park on the gate; the wrapper should free the slot
+    // via its own timeout instead.
+    backpressureWaitMs: 60_000,
+    publishTimeoutMs: 30,
+  });
+
+  const first = handler.handleClientMessage(createSession("s-hung"), {
+    type: "room:create",
+    payload: { displayName: "hung" },
+  });
+  await first;
+
+  // Wait long enough for the wrapper timeout to fire and free the slot.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await handler.flushPendingPublishes();
+
+  assert.equal(timeoutEvents.length, 1);
+  assert.equal(timeoutEvents[0].reason, "create_room_broadcast_failed");
+  assert.equal(timeoutEvents[0].timeoutMs, 30);
+  // Underlying publish never rejected, so the failed-event log must stay quiet.
+  assert.equal(failedEvents.length, 0);
+});

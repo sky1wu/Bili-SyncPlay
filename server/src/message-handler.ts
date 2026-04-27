@@ -95,6 +95,7 @@ export function createMessageHandler(options: {
   metricsCollector?: Pick<MetricsCollector, "observeMessageHandlerDuration">;
   maxPendingPublishes?: number;
   backpressureWaitMs?: number;
+  publishTimeoutMs?: number;
   onRoomJoined?: (
     session: Session,
     roomCode: string,
@@ -116,6 +117,7 @@ export function createMessageHandler(options: {
   const pendingPublishes = new Set<Promise<void>>();
   const maxPendingPublishes = options.maxPendingPublishes ?? 256;
   const backpressureWaitMs = options.backpressureWaitMs ?? 5_000;
+  const publishTimeoutMs = options.publishTimeoutMs ?? 5_000;
 
   async function firePublishRoomEvent(
     type: RoomEventBusMessage["type"],
@@ -192,28 +194,72 @@ export function createMessageHandler(options: {
         }
       }
     }
-    const promise = options
-      .publishRoomEvent({
-        type,
-        roomCode,
-        sourceInstanceId: options.instanceId,
-        emittedAt: now(),
-      })
-      .catch((error: unknown) => {
-        logEvent("room_event_publish_failed", {
+    // Bound each publish so a hung bus call (Redis disconnect, slow network)
+    // can't pin a slot indefinitely. Track the wrapper rather than the raw
+    // publish so:
+    //   - The cap reflects what message-handler is willing to wait for, not
+    //     the bus's true in-flight count (which the bus driver is responsible
+    //     for managing).
+    //   - flushPendingPublishes() always drains within publishTimeoutMs
+    //     regardless of whether the underlying call ever resolves.
+    // The underlying publish keeps running after timeout so the bus can still
+    // deliver if it eventually unblocks; we just stop accounting for it here.
+    const realPublish = options.publishRoomEvent({
+      type,
+      roomCode,
+      sourceInstanceId: options.instanceId,
+      emittedAt: now(),
+    });
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    let timedOut = false;
+    const wrapper = Promise.race<"ok" | "timeout">([
+      realPublish.then(
+        () => "ok" as const,
+        (error: unknown) => {
+          // If the publish rejects after the timeout has already won, the
+          // timeout log captured the incident — suppress the duplicate.
+          if (!timedOut) {
+            logEvent("room_event_publish_failed", {
+              sessionId: context.sessionId,
+              roomCode,
+              remoteAddress: context.remoteAddress,
+              origin: context.origin,
+              result: "error",
+              reason: context.reason,
+              eventType: type,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          return "ok" as const;
+        },
+      ),
+      new Promise<"timeout">((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          timedOut = true;
+          resolve("timeout");
+        }, publishTimeoutMs);
+      }),
+    ]).then((outcome) => {
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+      if (outcome === "timeout") {
+        logEvent("room_event_publish_timeout", {
           sessionId: context.sessionId,
           roomCode,
           remoteAddress: context.remoteAddress,
           origin: context.origin,
-          result: "error",
+          result: "timeout",
           reason: context.reason,
           eventType: type,
-          error: error instanceof Error ? error.message : String(error),
+          timeoutMs: publishTimeoutMs,
         });
-      });
-    pendingPublishes.add(promise);
-    void promise.finally(() => {
-      pendingPublishes.delete(promise);
+      }
+    });
+    pendingPublishes.add(wrapper);
+    void wrapper.finally(() => {
+      pendingPublishes.delete(wrapper);
     });
   }
 

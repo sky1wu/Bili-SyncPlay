@@ -403,6 +403,11 @@ export async function createSyncServer(
             : []),
           {
             name: "await_pending_session_cleanup",
+            // Session cleanup now drains in-flight handlers before leaveRoom,
+            // so it can take longer than the 5s shutdown-step default. Give it
+            // 30s to fully drain so the subsequent flush_pending_room_event_publishes
+            // step doesn't run while leaveRoom broadcasts are still being queued.
+            timeoutMs: 30_000,
             run: async () => {
               while (pendingSessionCleanup.size > 0) {
                 await Promise.allSettled(Array.from(pendingSessionCleanup));
