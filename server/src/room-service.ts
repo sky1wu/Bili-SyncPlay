@@ -75,6 +75,11 @@ type JoinIdentity = {
   memberToken: string;
 };
 
+type PersistJoinedRoomResult = {
+  room: PersistedRoom;
+  joinTargetState: JoinTargetState;
+};
+
 type JoinedSessionSnapshot = {
   roomCode: string;
   memberId: string;
@@ -435,10 +440,10 @@ export function createRoomService(options: {
     return { session, persistedRoom, activeRoom };
   }
 
-  async function withVersionRetry(
+  async function withVersionRetry<T = PersistedRoom>(
     roomCode: string,
-    action: (room: PersistedRoom) => Promise<PersistedRoom | null>,
-  ): Promise<PersistedRoom | null> {
+    action: (room: PersistedRoom) => Promise<T | null>,
+  ): Promise<T | null> {
     for (let attempt = 0; attempt < MAX_VERSION_RETRIES; attempt += 1) {
       const room = await resolveRoom(roomCode);
       if (!room) {
@@ -548,9 +553,9 @@ export function createRoomService(options: {
     roomCode: string;
     joinToken: string;
     previousMemberToken?: string;
-  }): Promise<PersistedRoom | null> {
+  }): Promise<PersistJoinedRoomResult | null> {
     return withVersionRetry(args.roomCode, async (room) => {
-      await ensureJoinRequestAllowed({
+      const joinTargetState = await ensureJoinRequestAllowed({
         session: args.session,
         room,
         roomCode: args.roomCode,
@@ -565,7 +570,7 @@ export function createRoomService(options: {
       if (!result.ok) {
         return null;
       }
-      return result.room;
+      return { room: result.room, joinTargetState };
     });
   }
 
@@ -868,14 +873,14 @@ export function createRoomService(options: {
       setSessionDisplayName(session, displayName);
       await leaveCurrentRoom(session);
 
-      const joinedRoom = await persistJoinedRoom({
+      const joined = await persistJoinedRoom({
         session,
         roomCode,
         joinToken,
         previousMemberToken,
       });
 
-      if (!joinedRoom) {
+      if (!joined) {
         throw new RoomServiceError(
           "room_not_found",
           ROOM_NOT_FOUND_MESSAGE,
@@ -883,10 +888,8 @@ export function createRoomService(options: {
         );
       }
 
-      const reconnectMemberId = previousMemberToken
-        ? (await resolveJoinTargetState(joinedRoom.code, previousMemberToken))
-            .reconnectMemberId
-        : null;
+      const joinedRoom = joined.room;
+      const reconnectMemberId = joined.joinTargetState.reconnectMemberId;
       const joinIdentity = buildJoinIdentity(
         session,
         reconnectMemberId,
@@ -949,7 +952,7 @@ export function createRoomService(options: {
         return { room: access.persistedRoom };
       }
 
-      let room: Awaited<ReturnType<typeof withVersionRetry>>;
+      let room: PersistedRoom | null;
       try {
         room = await withVersionRetry(
           access.persistedRoom.code,

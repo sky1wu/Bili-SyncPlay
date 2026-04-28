@@ -1590,6 +1590,7 @@ test("room service consults shared kick blocks when rejoining through another no
 
 test("room service reuses shared member identity during reconnect checks", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  let resolveMemberIdCalls = 0;
   const service = createRoomService({
     config: getDefaultSecurityConfig(),
     persistence: getDefaultPersistenceConfig(),
@@ -1607,8 +1608,10 @@ test("room service reuses shared member identity during reconnect checks", async
       members: new Map(),
       memberTokens: new Map([["shared-member", "shared-token"]]),
     }),
-    resolveMemberIdByToken: async (_roomCode, memberToken) =>
-      memberToken === "shared-token" ? "shared-member" : null,
+    resolveMemberIdByToken: async (_roomCode, memberToken) => {
+      resolveMemberIdCalls += 1;
+      return memberToken === "shared-token" ? "shared-member" : null;
+    },
   });
 
   const owner = createSession("owner");
@@ -1624,6 +1627,7 @@ test("room service reuses shared member identity during reconnect checks", async
 
   assert.equal(reconnecting.memberId, "shared-member");
   assert.equal(joined.memberToken, "shared-token");
+  assert.equal(resolveMemberIdCalls, 1);
 });
 
 test("room service enforces room capacity from shared room membership", async () => {
