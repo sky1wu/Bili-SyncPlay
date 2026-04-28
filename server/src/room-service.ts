@@ -37,6 +37,7 @@ import type {
 
 const PLAYBACK_AUTHORITY_WINDOW_MS = 1200;
 const MAX_VERSION_RETRIES = 3;
+const ROOM_LAST_ACTIVE_WRITE_INTERVAL_MS = 30_000;
 
 type ServiceErrorReason =
   | "room_not_found"
@@ -555,6 +556,7 @@ export function createRoomService(options: {
     previousMemberToken?: string;
   }): Promise<PersistJoinedRoomResult | null> {
     return withVersionRetry(args.roomCode, async (room) => {
+      const currentTime = now();
       const joinTargetState = await ensureJoinRequestAllowed({
         session: args.session,
         room,
@@ -562,10 +564,21 @@ export function createRoomService(options: {
         joinToken: args.joinToken,
         previousMemberToken: args.previousMemberToken,
       });
+      const needsCapacitySerialization =
+        joinTargetState.reconnectMemberId === null &&
+        joinTargetState.activeMemberCount >= config.maxMembersPerRoom - 1;
+
+      if (
+        room.expiresAt === null &&
+        currentTime - room.lastActiveAt < ROOM_LAST_ACTIVE_WRITE_INTERVAL_MS &&
+        !needsCapacitySerialization
+      ) {
+        return { room, joinTargetState };
+      }
 
       const result = await roomStore.updateRoom(args.roomCode, room.version, {
-        expiresAt: null,
-        lastActiveAt: now(),
+        ...(room.expiresAt === null ? {} : { expiresAt: null }),
+        lastActiveAt: currentTime,
       });
       if (!result.ok) {
         return null;

@@ -102,6 +102,92 @@ test("room service keeps empty rooms for TTL and allows rejoin before expiry", a
   assert.ok(joiner.memberToken);
 });
 
+test("room service skips lastActiveAt persistence for active room joins within refresh window", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  let updateCount = 0;
+  const roomStore = {
+    ...baseRoomStore,
+    async updateRoom(...args: Parameters<typeof baseRoomStore.updateRoom>) {
+      updateCount += 1;
+      return baseRoomStore.updateRoom(...args);
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM02",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  currentTime = 2_000;
+  const joiner = createSession("joiner");
+  const joined = await service.joinRoomForSession(
+    joiner,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  const persisted = await baseRoomStore.getRoom(created.room.code);
+  assert.equal(updateCount, 0);
+  assert.equal(joined.room.version, created.room.version);
+  assert.equal(persisted?.lastActiveAt, created.room.lastActiveAt);
+});
+
+test("room service refreshes lastActiveAt for active room joins after refresh window", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const patches: Array<Parameters<typeof baseRoomStore.updateRoom>[2]> = [];
+  const roomStore = {
+    ...baseRoomStore,
+    async updateRoom(...args: Parameters<typeof baseRoomStore.updateRoom>) {
+      patches.push(args[2]);
+      return baseRoomStore.updateRoom(...args);
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM03",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  currentTime = 31_000;
+  const joiner = createSession("joiner");
+  const joined = await service.joinRoomForSession(
+    joiner,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  const persisted = await baseRoomStore.getRoom(created.room.code);
+  assert.deepEqual(patches, [{ lastActiveAt: currentTime }]);
+  assert.equal(joined.room.version, created.room.version + 1);
+  assert.equal(persisted?.lastActiveAt, currentTime);
+});
+
 test("room service restores member state when empty-room expiry scheduling fails", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();
@@ -1804,14 +1890,13 @@ test("concurrent joins both succeed when room has capacity for all", async () =>
   const runtimeRoom = activeRooms.getRoom(created.room.code);
   assert.equal(runtimeRoom?.members.size, 3);
 
-  // Persisted room version must reflect exactly two successful updateRoom calls
-  // (one per joiner). Concurrent version-conflict retries must not skip a bump
-  // or produce a torn write.
+  // Active room joins below the capacity boundary should not write through to
+  // persistence just to bump lastActiveAt.
   const persistedRoom = await roomStore.getRoom(created.room.code);
   assert.equal(
     persistedRoom?.version,
-    2,
-    "persisted room version must be 2 after two concurrent joins",
+    0,
+    "persisted room version should stay unchanged after non-boundary joins",
   );
 });
 
