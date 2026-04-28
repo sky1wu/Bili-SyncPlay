@@ -1,15 +1,11 @@
+import {
+  readFestivalVideoDetailFromSources,
+  type PageInitialState,
+  type PlayerInput,
+} from "./page-bridge-detail";
+
 const REQUEST_TYPE = "bili-syncplay:get-festival-video";
 const RESPONSE_TYPE = "bili-syncplay:festival-video";
-
-interface PageVideoCandidate {
-  id?: string | number;
-  ep_id?: string | number;
-  epId?: string | number;
-  bvid?: string;
-  cid?: string | number;
-  title?: string;
-  long_title?: string;
-}
 
 window.addEventListener("message", (event) => {
   if (event.source !== window || event.data?.type !== REQUEST_TYPE) {
@@ -38,24 +34,10 @@ function readFestivalVideoDetail(): {
   try {
     const initialState = (
       window as typeof window & {
-        __INITIAL_STATE__?: {
-          epInfo?: PageVideoCandidate;
-          sectionEpisodes?: PageVideoCandidate[];
-          episodes?: PageVideoCandidate[];
-          epList?: PageVideoCandidate[];
-          videoInfo?: {
-            bvid?: string;
-            cid?: string | number;
-            title?: string;
-          };
-        };
+        __INITIAL_STATE__?: PageInitialState;
         player?: {
           __getUserParams?: () => {
-            input?: {
-              bvid?: string;
-              cid?: string | number;
-              aid?: string | number;
-            };
+            input?: PlayerInput;
           };
         };
       }
@@ -77,85 +59,23 @@ function readFestivalVideoDetail(): {
         ?.textContent?.trim() ||
       null;
 
-    const episodes = [
-      ...(Array.isArray(initialState?.sectionEpisodes)
-        ? initialState.sectionEpisodes
-        : []),
-      ...(Array.isArray(initialState?.episodes) ? initialState.episodes : []),
-      ...(Array.isArray(initialState?.epList) ? initialState.epList : []),
-    ];
-    const matchedByEpId = activeEpId
-      ? episodes.find(
-          (episode) =>
-            String(episode?.id ?? "") === activeEpId ||
-            String(episode?.ep_id ?? "") === activeEpId ||
-            String(episode?.epId ?? "") === activeEpId,
-        )
-      : null;
-    const matchedByCid = activeCid
-      ? episodes.find((episode) => String(episode?.cid ?? "") === activeCid)
-      : null;
-    const matchedByTitle =
-      !matchedByEpId && !matchedByCid && activeTitle
-        ? episodes.find(
-            (episode) =>
-              (episode?.title || "").trim() === activeTitle ||
-              (episode?.long_title || "").trim() === activeTitle,
-          )
-        : null;
-
     const playerInput = (
       window as typeof window & {
         player?: {
           __getUserParams?: () => {
-            input?: {
-              bvid?: string;
-              cid?: string | number;
-            };
+            input?: PlayerInput;
           };
         };
       }
     ).player?.__getUserParams?.()?.input;
 
-    const matched: PageVideoCandidate | null =
-      matchedByEpId ??
-      matchedByCid ??
-      matchedByTitle ??
-      initialState?.epInfo ??
-      playerInput ??
-      initialState?.videoInfo ??
-      null;
-    const epId =
-      typeof matched === "object" && matched !== null
-        ? (matched.epId ?? matched.ep_id ?? matched.id)
-        : undefined;
-
-    if (!epId && (!matched?.bvid || matched.cid === undefined)) {
-      return null;
-    }
-
-    return {
-      epId,
-      bvid: matched.bvid,
-      cid: matched.cid,
-      title:
-        (typeof matched === "object" &&
-        matched !== null &&
-        "title" in matched &&
-        typeof matched.title === "string"
-          ? matched.title
-          : undefined) ||
-        (typeof matched === "object" &&
-        matched !== null &&
-        "long_title" in matched &&
-        typeof matched.long_title === "string"
-          ? matched.long_title
-          : undefined) ||
-        activeTitle ||
-        initialState?.epInfo?.title ||
-        initialState?.epInfo?.long_title ||
-        initialState?.videoInfo?.title,
-    };
+    return readFestivalVideoDetailFromSources({
+      initialState,
+      playerInput,
+      activeCid,
+      activeEpId,
+      activeTitle,
+    });
   } catch {
     return null;
   }
