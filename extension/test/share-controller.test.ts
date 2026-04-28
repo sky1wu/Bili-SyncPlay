@@ -11,6 +11,8 @@ function installDomStub(args: {
   pathname: string;
   title: string;
   currentPartTitle?: string | null;
+  currentPartEpId?: string | null;
+  currentPartCid?: string | null;
   video?: HTMLVideoElement | null;
 }): { restore: () => void } {
   const originalWindow = globalThis.window;
@@ -31,10 +33,22 @@ function installDomStub(args: {
           return args.video ?? null;
         }
         if (
-          args.currentPartTitle &&
-          selector.includes("bpx-state-multi-active-item")
+          args.currentPartTitle ||
+          args.currentPartEpId ||
+          args.currentPartCid
         ) {
-          return { textContent: args.currentPartTitle };
+          return {
+            textContent: args.currentPartTitle ?? "",
+            getAttribute(name: string) {
+              if (name === "data-ep-id") {
+                return args.currentPartEpId ?? null;
+              }
+              if (name === "data-cid") {
+                return args.currentPartCid ?? null;
+              }
+              return null;
+            },
+          };
         }
         return null;
       },
@@ -242,6 +256,7 @@ test("share controller reuses matching cached bangumi snapshot for current page 
       url: "https://www.bilibili.com/bangumi/play/ep508404",
       title: "第46话",
       updatedAt: Date.now(),
+      epId: "ep508404",
       pathname: "/bangumi/play/ss357",
       pageUrl:
         "https://www.bilibili.com/bangumi/play/ss357?from_spmid=666.25.series.0",
@@ -258,6 +273,98 @@ test("share controller reuses matching cached bangumi snapshot for current page 
     assert.equal(
       payload.video.url,
       "https://www.bilibili.com/bangumi/play/ep508404",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller reuses cached bangumi snapshot by active episode id without title", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/bangumi/play/ss357",
+    pathname: "/bangumi/play/ss357",
+    title: "猫和老鼠_番剧_bilibili",
+    currentPartEpId: "508404",
+    video: {
+      currentTime: 10.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  const controller = createShareController({
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 6,
+    getFestivalSnapshot: () => ({
+      videoId: "ep508404",
+      url: "https://www.bilibili.com/bangumi/play/ep508404",
+      title: "第46话",
+      updatedAt: Date.now(),
+      epId: "ep508404",
+      pathname: "/bangumi/play/ss357",
+      pageUrl: "https://www.bilibili.com/bangumi/play/ss357",
+    }),
+    refreshFestivalBridge: async () => null,
+    debugLog: () => undefined,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.ok(payload);
+    assert.equal(payload.video.videoId, "ep508404");
+    assert.equal(
+      payload.video.url,
+      "https://www.bilibili.com/bangumi/play/ep508404",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller reuses cached bangumi snapshot by active cid without title", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/bangumi/play/ss357",
+    pathname: "/bangumi/play/ss357",
+    title: "猫和老鼠_番剧_bilibili",
+    currentPartCid: "987654",
+    video: {
+      currentTime: 10.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  const controller = createShareController({
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 7,
+    getFestivalSnapshot: () => ({
+      videoId: "BV1abc:987654",
+      url: "https://www.bilibili.com/video/BV1abc?cid=987654",
+      title: "第46话",
+      updatedAt: Date.now(),
+      cid: "987654",
+      pathname: "/bangumi/play/ss357",
+      pageUrl: "https://www.bilibili.com/bangumi/play/ss357",
+    }),
+    refreshFestivalBridge: async () => null,
+    debugLog: () => undefined,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.ok(payload);
+    assert.equal(payload.video.videoId, "BV1abc:987654");
+    assert.equal(
+      payload.video.url,
+      "https://www.bilibili.com/video/BV1abc?cid=987654",
     );
   } finally {
     dom.restore();

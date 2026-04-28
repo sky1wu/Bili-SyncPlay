@@ -10,8 +10,15 @@ export interface FestivalSnapshot {
   url: string;
   title: string;
   updatedAt: number;
+  epId?: string;
+  cid?: string;
   pathname?: string;
   pageUrl?: string;
+}
+
+interface PageVideoSnapshot extends SharedVideo {
+  epId?: string;
+  cid?: string;
 }
 
 export interface FestivalBridgeController {
@@ -31,11 +38,11 @@ export function createFestivalBridgeController(): FestivalBridgeController {
   async function readFestivalSnapshotFromPageContext(
     pathname: string,
     pageUrl: string,
-  ): Promise<SharedVideo | null> {
+  ): Promise<PageVideoSnapshot | null> {
     ensureFestivalBridge();
     const requestId = `bili-syncplay-festival-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    return await new Promise<SharedVideo | null>((resolve) => {
+    return await new Promise<PageVideoSnapshot | null>((resolve) => {
       const timeoutId = window.setTimeout(() => {
         cleanup();
         resolve(null);
@@ -76,10 +83,13 @@ export function createFestivalBridgeController(): FestivalBridgeController {
 
         if (pathname.startsWith("/bangumi/play/") && detail.epId) {
           const epId = String(detail.epId);
+          const normalizedEpId = epId.startsWith("ep") ? epId : `ep${epId}`;
           resolve({
-            videoId: epId.startsWith("ep") ? epId : `ep${epId}`,
+            videoId: normalizedEpId,
             url: buildBangumiEpisodeShareUrl(epId),
             title: detail.title.trim(),
+            epId: normalizedEpId,
+            cid: detail.cid === undefined ? undefined : String(detail.cid),
           });
           return;
         }
@@ -95,6 +105,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
             ? buildFestivalShareUrl(pageUrl, detail.bvid, String(detail.cid))
             : buildBvidCidShareUrl(detail.bvid, String(detail.cid)),
           title: detail.title.trim(),
+          cid: String(detail.cid),
         });
       };
 

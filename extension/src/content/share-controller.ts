@@ -22,8 +22,16 @@ export interface ShareController {
 
 interface CachedPageSnapshot extends SharedVideo {
   updatedAt: number;
+  epId?: string;
+  cid?: string;
   pathname?: string;
   pageUrl?: string;
+}
+
+interface CurrentPartIdentity {
+  title: string | null;
+  epId: string | null;
+  cid: string | null;
 }
 
 export function shouldIncludePlaybackInSharePayload(args: {
@@ -60,7 +68,7 @@ export function createShareController(args: {
   function canUseMatchingCachedPageSnapshot(argsForMatch: {
     pathname: string;
     snapshot: CachedPageSnapshot | null;
-    currentPartTitle: string | null;
+    currentPart: CurrentPartIdentity;
   }): boolean {
     if (!argsForMatch.snapshot) {
       return false;
@@ -69,26 +77,61 @@ export function createShareController(args: {
       return true;
     }
     const cachedPagePathname = argsForMatch.snapshot.pathname;
+    const snapshotEpId =
+      argsForMatch.snapshot.epId ??
+      (argsForMatch.snapshot.videoId.startsWith("ep")
+        ? argsForMatch.snapshot.videoId
+        : null);
+    const snapshotCid =
+      argsForMatch.snapshot.cid ??
+      (argsForMatch.snapshot.videoId.includes(":")
+        ? (argsForMatch.snapshot.videoId.split(":").at(-1) ?? null)
+        : null);
+    const titleMatches =
+      argsForMatch.currentPart.title !== null &&
+      argsForMatch.snapshot.title.trim() === argsForMatch.currentPart.title;
     return (
       argsForMatch.pathname.startsWith("/bangumi/play/") &&
       cachedPagePathname === argsForMatch.pathname &&
-      argsForMatch.currentPartTitle !== null &&
-      argsForMatch.snapshot.title.trim() === argsForMatch.currentPartTitle
+      ((snapshotEpId !== null &&
+        snapshotEpId === argsForMatch.currentPart.epId) ||
+        (snapshotCid !== null &&
+          snapshotCid === argsForMatch.currentPart.cid) ||
+        titleMatches)
     );
   }
 
-  function getCurrentPartTitle(): string | null {
-    return (
-      document
-        .querySelector("li.bpx-state-multi-active-item")
-        ?.textContent?.trim() ||
-      document
-        .querySelector(
-          ".video-section-list li.on, .video-section-list li.active, [data-cid].bpx-state-multi-active-item",
-        )
-        ?.textContent?.trim() ||
-      null
+  function getCurrentPartIdentity(): CurrentPartIdentity {
+    const active = document.querySelector<HTMLElement>(
+      [
+        "li.bpx-state-multi-active-item",
+        ".video-section-list li.on",
+        ".video-section-list li.active",
+        "li[data-cid].bpx-state-active",
+        "[data-cid].bpx-state-active",
+        "[data-cid].bpx-state-multi-active-item",
+        "[data-cid].active",
+        "[data-cid].selected",
+        "[data-ep-id].active",
+        "[data-episode-id].active",
+        "[data-epid].active",
+      ].join(", "),
     );
+    const rawEpId =
+      active?.getAttribute("data-ep-id") ??
+      active?.getAttribute("data-episode-id") ??
+      active?.getAttribute("data-epid") ??
+      null;
+    const title = active?.textContent?.trim() || null;
+    return {
+      title,
+      epId: rawEpId
+        ? rawEpId.startsWith("ep")
+          ? rawEpId
+          : `ep${rawEpId}`
+        : null,
+      cid: active?.getAttribute("data-cid") ?? null,
+    };
   }
 
   function createSharePayload(sharedVideo: SharedVideo): {
@@ -115,19 +158,19 @@ export function createShareController(args: {
     const festivalSnapshot = args.getFestivalSnapshot();
     const pathname = window.location.pathname;
     const pageUrl = window.location.href.split("#")[0];
-    const currentPartTitle = getCurrentPartTitle();
+    const currentPart = getCurrentPartIdentity();
     return resolvePageSharedVideo({
       pageUrl,
       pathname,
       documentTitle: document.title,
       headingTitle: document.querySelector("h1")?.textContent?.trim() ?? null,
-      currentPartTitle,
+      currentPartTitle: currentPart.title,
       pageSnapshot:
         festivalSnapshot &&
         canUseMatchingCachedPageSnapshot({
           pathname,
           snapshot: festivalSnapshot,
-          currentPartTitle,
+          currentPart,
         })
           ? {
               videoId: festivalSnapshot.videoId,
