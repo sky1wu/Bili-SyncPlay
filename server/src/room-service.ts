@@ -1178,20 +1178,55 @@ export function createRoomService(options: {
       }
 
       const nextAuthority = getPlaybackAuthority(access.persistedRoom.code);
-      logEvent("playback_update_applied", {
-        roomCode: access.persistedRoom.code,
-        sessionId: session.id,
-        ...actorDetails(session),
-        seq: nextPlayback.seq,
-        playState: nextPlayback.playState,
-        currentTime: nextPlayback.currentTime,
-        playbackRate: nextPlayback.playbackRate,
-        syncIntent: nextPlayback.syncIntent ?? "none",
-        result: "ok",
-        authorityKind: nextAuthority?.kind ?? null,
-        authorityActorId: nextAuthority?.actorId ?? null,
-        authorityUntil: nextAuthority?.until ?? null,
-      });
+      // Skip steady timeupdate ticks so the admin event store keeps user
+      // operations visible without being flooded by ~every-2s broadcasts:
+      // log when playState, playbackRate, or syncIntent changes, or when
+      // currentTime jumps beyond what natural progression at the prior
+      // playback rate would produce. Anything else is a no-op tick. Actor
+      // identity is intentionally not part of the steady-tick check because
+      // the authority window (PLAYBACK_AUTHORITY_WINDOW_MS, 1.2s) is shorter
+      // than the timeupdate cadence (~2s), so in multi-member rooms the
+      // accepted actor rotates on each tick even when nobody touches
+      // playback — gating on actor would re-flood the log. Elapsed time
+      // uses the server-stamped serverTime — not the client-reported
+      // updatedAt — so a modified client cannot forge a matching updatedAt
+      // delta to mask a real seek.
+      const previousPlayback = access.persistedRoom.playback;
+      const elapsedSeconds =
+        previousPlayback === null
+          ? 0
+          : (nextPlayback.serverTime - previousPlayback.serverTime) / 1000;
+      const expectedTimeDelta =
+        previousPlayback === null || previousPlayback.playState !== "playing"
+          ? 0
+          : previousPlayback.playbackRate * elapsedSeconds;
+      const actualTimeDelta =
+        previousPlayback === null
+          ? 0
+          : nextPlayback.currentTime - previousPlayback.currentTime;
+      const isSteadyTick =
+        previousPlayback !== null &&
+        previousPlayback.playState === nextPlayback.playState &&
+        Math.abs(previousPlayback.playbackRate - nextPlayback.playbackRate) <
+          0.01 &&
+        !nextPlayback.syncIntent &&
+        Math.abs(actualTimeDelta - expectedTimeDelta) < 1;
+      if (!isSteadyTick) {
+        logEvent("playback_update_applied", {
+          roomCode: access.persistedRoom.code,
+          sessionId: session.id,
+          ...actorDetails(session),
+          seq: nextPlayback.seq,
+          playState: nextPlayback.playState,
+          currentTime: nextPlayback.currentTime,
+          playbackRate: nextPlayback.playbackRate,
+          syncIntent: nextPlayback.syncIntent ?? "none",
+          result: "ok",
+          authorityKind: nextAuthority?.kind ?? null,
+          authorityActorId: nextAuthority?.actorId ?? null,
+          authorityUntil: nextAuthority?.until ?? null,
+        });
+      }
 
       return { room: result.room, ignored: false };
     },

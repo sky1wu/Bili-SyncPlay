@@ -45,7 +45,6 @@ export function inferLogLevel(
 
 export const DEFAULT_EVENT_SAMPLING: Readonly<Record<string, number>> =
   Object.freeze({
-    playback_update_applied: 10,
     sync_ping: 10,
   });
 

@@ -2097,3 +2097,366 @@ test("shareVideoForSession rejects client-supplied sharedByDisplayName", async (
     "server must overwrite client-supplied sharedByDisplayName with session.displayName",
   );
 });
+
+test("playback_update_applied skips steady timeupdate ticks but logs user actions", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const events: { event: string; data: Record<string, unknown> }[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => currentTime,
+    createRoomCode: () => "ROOM21",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const ownerId = owner.memberId ?? owner.id;
+
+  // Baseline: share video at t=10, playing @ 1x.
+  await service.shareVideoForSession(
+    owner,
+    created.memberToken,
+    createSharedVideo(),
+    createPlayback(ownerId, {
+      currentTime: 10,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 1_000,
+      seq: 1,
+    }),
+  );
+  events.length = 0;
+
+  // Steady tick: +2s wall, +2s media, no state change.
+  currentTime = 3_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 12,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 3_000,
+      seq: 2,
+    }),
+  );
+  // Another steady tick.
+  currentTime = 5_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 14,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 5_000,
+      seq: 3,
+    }),
+  );
+
+  // User pause: state change → logged.
+  currentTime = 5_500;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 14,
+      playState: "paused",
+      playbackRate: 1,
+      updatedAt: 5_500,
+      seq: 4,
+    }),
+  );
+
+  // Steady paused tick: time should not advance during pause → not logged.
+  currentTime = 7_500;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 14,
+      playState: "paused",
+      playbackRate: 1,
+      updatedAt: 7_500,
+      seq: 5,
+    }),
+  );
+
+  // User resume: state change → logged.
+  currentTime = 9_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 14,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 9_000,
+      seq: 6,
+    }),
+  );
+
+  // User explicit seek (forward): → logged via syncIntent.
+  currentTime = 11_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 80,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 11_000,
+      syncIntent: "explicit-seek",
+      seq: 7,
+    }),
+  );
+
+  // Steady tick after seek: +2s wall, +2s media → not logged.
+  currentTime = 13_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 82,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 13_000,
+      seq: 8,
+    }),
+  );
+
+  // Time jump without explicit intent (e.g., recovery from buffering on the
+  // client): expected +2s, actual +30s → logged.
+  currentTime = 15_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 112,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 15_000,
+      seq: 9,
+    }),
+  );
+
+  // Rate change → logged even with naturally-advancing time.
+  currentTime = 17_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 114,
+      playState: "playing",
+      playbackRate: 2,
+      updatedAt: 17_000,
+      seq: 10,
+    }),
+  );
+
+  // Steady tick at the new 2x rate: +2s wall, +4s media → not logged.
+  currentTime = 19_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 118,
+      playState: "playing",
+      playbackRate: 2,
+      updatedAt: 19_000,
+      seq: 11,
+    }),
+  );
+
+  const applied = events.filter(
+    (entry) => entry.event === "playback_update_applied",
+  );
+  assert.deepEqual(
+    applied.map((entry) => ({
+      seq: entry.data.seq,
+      playState: entry.data.playState,
+      playbackRate: entry.data.playbackRate,
+      syncIntent: entry.data.syncIntent,
+    })),
+    [
+      { seq: 4, playState: "paused", playbackRate: 1, syncIntent: "none" },
+      { seq: 6, playState: "playing", playbackRate: 1, syncIntent: "none" },
+      {
+        seq: 7,
+        playState: "playing",
+        playbackRate: 1,
+        syncIntent: "explicit-seek",
+      },
+      { seq: 9, playState: "playing", playbackRate: 1, syncIntent: "none" },
+      { seq: 10, playState: "playing", playbackRate: 2, syncIntent: "none" },
+    ],
+  );
+});
+
+test("playback_update_applied still logs seeks when a modified client forges a matching updatedAt delta", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const events: { event: string; data: Record<string, unknown> }[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => currentTime,
+    createRoomCode: () => "ROOM22",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const ownerId = owner.memberId ?? owner.id;
+
+  await service.shareVideoForSession(
+    owner,
+    created.memberToken,
+    createSharedVideo(),
+    createPlayback(ownerId, {
+      currentTime: 10,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 1_000,
+      seq: 1,
+    }),
+  );
+  events.length = 0;
+
+  // Server clock advances by ~2s (one normal broadcast interval), but the
+  // client claims its own clock advanced by 30s and that media moved 30s
+  // forward — i.e., a forged steady tick masking a 30s seek. Without using
+  // the server-stamped serverTime as the elapsed-time source, this would be
+  // classified as steady and silently dropped.
+  currentTime = 3_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 40,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 31_000,
+      seq: 2,
+    }),
+  );
+
+  const applied = events.filter(
+    (entry) => entry.event === "playback_update_applied",
+  );
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0]?.data.seq, 2);
+  assert.equal(applied[0]?.data.currentTime, 40);
+});
+
+test("playback_update_applied skips steady ticks across actor handovers in multi-member rooms", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const events: { event: string; data: Record<string, unknown> }[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => currentTime,
+    createRoomCode: () => "ROOM23",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const guest = createSession("guest");
+  const joined = await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  const ownerId = owner.memberId ?? owner.id;
+  const guestId = guest.memberId ?? guest.id;
+
+  await service.shareVideoForSession(
+    owner,
+    created.memberToken,
+    createSharedVideo(),
+    createPlayback(ownerId, {
+      currentTime: 10,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 1_000,
+      seq: 1,
+    }),
+  );
+  events.length = 0;
+
+  // Authority window is 1.2s but timeupdate cadence is ~2s, so after the
+  // owner's authority expires the guest's tick can be accepted on a
+  // following broadcast. With actor identity gating the steady-tick check,
+  // each handover would re-flood the log — even though no one touched
+  // playback. Verify both actors' steady ticks stay silent.
+  currentTime = 3_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 12,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 3_000,
+      seq: 2,
+    }),
+  );
+  currentTime = 5_000;
+  await service.updatePlaybackForSession(
+    guest,
+    joined.memberToken,
+    createPlayback(guestId, {
+      currentTime: 14,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 5_000,
+      seq: 1,
+    }),
+  );
+  currentTime = 7_000;
+  await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(ownerId, {
+      currentTime: 16,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 7_000,
+      seq: 3,
+    }),
+  );
+
+  const applied = events.filter(
+    (entry) => entry.event === "playback_update_applied",
+  );
+  assert.deepEqual(applied, []);
+});
