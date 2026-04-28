@@ -1844,9 +1844,9 @@ test("room service deduplicates repeated playback:update with the same seq", asy
 });
 
 test("concurrent joins both succeed when room has capacity for all", async () => {
-  // Two sessions race to join the same room. withVersionRetry handles the
-  // version conflict on the second joiner's first attempt so both eventually
-  // land and the runtime has exactly owner + 2 members.
+  // Two sessions race to join the same room. The per-room join admission lock
+  // serializes capacity checks with runtime membership updates, so both land
+  // and the runtime has exactly owner + 2 members.
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();
   const service = createRoomService({
@@ -1900,11 +1900,65 @@ test("concurrent joins both succeed when room has capacity for all", async () =>
   );
 });
 
+test("concurrent joins with multiple open slots do not exceed room capacity", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOM16",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const joiners = [
+    createSession("joiner-a"),
+    createSession("joiner-b"),
+    createSession("joiner-c"),
+  ];
+
+  const results = await Promise.allSettled(
+    joiners.map((joiner, index) =>
+      service.joinRoomForSession(
+        joiner,
+        created.room.code,
+        created.room.joinToken,
+        `User ${index}`,
+      ),
+    ),
+  );
+
+  const fulfilled = results.filter((r) => r.status === "fulfilled");
+  const rejected = results.filter((r) => r.status === "rejected");
+
+  assert.equal(fulfilled.length, 2, "two open slots should be filled");
+  assert.equal(rejected.length, 1, "overflow joiner should be rejected");
+  assert.match(
+    (rejected[0] as PromiseRejectedResult).reason.message,
+    /Room is full/,
+  );
+
+  const runtimeRoom = activeRooms.getRoom(created.room.code);
+  assert.equal(
+    runtimeRoom?.members.size,
+    3,
+    "runtime member count must stay at maxMembersPerRoom",
+  );
+});
+
 test("concurrent joins at capacity allow exactly one new member", async () => {
   // With maxMembersPerRoom=2 (owner already occupies 1 slot), two sessions
-  // race for the single remaining slot. The optimistic-locking retry causes
-  // the second joiner to re-check capacity after the first has been added,
-  // at which point the room is full and the second gets a room_full error.
+  // race for the single remaining slot. The per-room join admission lock
+  // causes the second joiner to re-check capacity after the first has been
+  // added, at which point the room is full and the second gets room_full.
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();
   const service = createRoomService({
@@ -1918,7 +1972,7 @@ test("concurrent joins at capacity allow exactly one new member", async () => {
     })(),
     logEvent: (() => undefined) satisfies LogEvent,
     now: () => 1_000,
-    createRoomCode: () => "ROOM16",
+    createRoomCode: () => "ROOM17",
   });
 
   const owner = createSession("owner");

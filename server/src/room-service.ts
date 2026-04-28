@@ -176,6 +176,30 @@ export function createRoomService(options: {
       Promise.resolve(
         runtimeStore.isMemberTokenBlocked(roomCode, memberToken, currentTime),
       ));
+  const roomJoinLocks = new Map<string, Promise<void>>();
+
+  async function withRoomJoinLock<T>(
+    roomCode: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const previous = roomJoinLocks.get(roomCode) ?? Promise.resolve();
+    let releaseNext: () => void = () => undefined;
+    const next = new Promise<void>((resolve) => {
+      releaseNext = resolve;
+    });
+    const tail = previous.catch(() => undefined).then(() => next);
+    roomJoinLocks.set(roomCode, tail);
+
+    await previous.catch(() => undefined);
+    try {
+      return await action();
+    } finally {
+      releaseNext();
+      if (roomJoinLocks.get(roomCode) === tail) {
+        roomJoinLocks.delete(roomCode);
+      }
+    }
+  }
 
   function setSessionDisplayName(
     session: Session,
@@ -886,57 +910,59 @@ export function createRoomService(options: {
       setSessionDisplayName(session, displayName);
       await leaveCurrentRoom(session);
 
-      const joined = await persistJoinedRoom({
-        session,
-        roomCode,
-        joinToken,
-        previousMemberToken,
-      });
+      return withRoomJoinLock(roomCode, async () => {
+        const joined = await persistJoinedRoom({
+          session,
+          roomCode,
+          joinToken,
+          previousMemberToken,
+        });
 
-      if (!joined) {
-        throw new RoomServiceError(
-          "room_not_found",
-          ROOM_NOT_FOUND_MESSAGE,
-          "room_not_found",
+        if (!joined) {
+          throw new RoomServiceError(
+            "room_not_found",
+            ROOM_NOT_FOUND_MESSAGE,
+            "room_not_found",
+          );
+        }
+
+        const joinedRoom = joined.room;
+        const reconnectMemberId = joined.joinTargetState.reconnectMemberId;
+        const joinIdentity = buildJoinIdentity(
+          session,
+          reconnectMemberId,
+          previousMemberToken,
         );
-      }
+        const previousSession =
+          reconnectMemberId !== null
+            ? (runtimeStore
+                .getRoom(joinedRoom.code)
+                ?.members.get(reconnectMemberId) ?? null)
+            : null;
+        runtimeStore.addMember(
+          joinedRoom.code,
+          joinIdentity.memberId,
+          session,
+          joinIdentity.memberToken,
+        );
+        applyJoinedSessionState({
+          session,
+          roomCode: joinedRoom.code,
+          joinedAt: now(),
+          joinIdentity,
+        });
+        disconnectReplacedSession(session, previousSession);
 
-      const joinedRoom = joined.room;
-      const reconnectMemberId = joined.joinTargetState.reconnectMemberId;
-      const joinIdentity = buildJoinIdentity(
-        session,
-        reconnectMemberId,
-        previousMemberToken,
-      );
-      const previousSession =
-        reconnectMemberId !== null
-          ? (runtimeStore
-              .getRoom(joinedRoom.code)
-              ?.members.get(reconnectMemberId) ?? null)
-          : null;
-      runtimeStore.addMember(
-        joinedRoom.code,
-        joinIdentity.memberId,
-        session,
-        joinIdentity.memberToken,
-      );
-      applyJoinedSessionState({
-        session,
-        roomCode: joinedRoom.code,
-        joinedAt: now(),
-        joinIdentity,
+        logEvent("room_restored", {
+          roomCode: joinedRoom.code,
+          version: joinedRoom.version,
+          sessionId: session.id,
+          provider: persistence.provider,
+          result: "ok",
+        });
+
+        return { room: joinedRoom, memberToken: joinIdentity.memberToken };
       });
-      disconnectReplacedSession(session, previousSession);
-
-      logEvent("room_restored", {
-        roomCode: joinedRoom.code,
-        version: joinedRoom.version,
-        sessionId: session.id,
-        provider: persistence.provider,
-        result: "ok",
-      });
-
-      return { room: joinedRoom, memberToken: joinIdentity.memberToken };
     },
 
     leaveRoomForSession: leaveCurrentRoom,
