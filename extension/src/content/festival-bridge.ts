@@ -10,6 +10,8 @@ export interface FestivalSnapshot {
   url: string;
   title: string;
   updatedAt: number;
+  pathname?: string;
+  pageUrl?: string;
 }
 
 export interface FestivalBridgeController {
@@ -158,6 +160,8 @@ export function createFestivalBridgeController(): FestivalBridgeController {
       festivalSnapshot = {
         ...nextSnapshot,
         updatedAt: Date.now(),
+        pathname,
+        pageUrl,
       };
       return nextSnapshot;
     },

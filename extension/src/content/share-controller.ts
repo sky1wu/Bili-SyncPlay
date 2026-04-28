@@ -20,6 +20,12 @@ export interface ShareController {
   refreshFestivalSnapshot(maxAgeMs?: number): Promise<SharedVideo | null>;
 }
 
+interface CachedPageSnapshot extends SharedVideo {
+  updatedAt: number;
+  pathname?: string;
+  pageUrl?: string;
+}
+
 export function shouldIncludePlaybackInSharePayload(args: {
   activeRoomCode: string | null;
   activeSharedUrl: string | null;
@@ -33,12 +39,7 @@ export function createShareController(args: {
   runtimeState: ContentRuntimeState;
   festivalSnapshotTtlMs: number;
   nextSeq: () => number;
-  getFestivalSnapshot: () => {
-    videoId: string;
-    url: string;
-    title: string;
-    updatedAt: number;
-  } | null;
+  getFestivalSnapshot: () => CachedPageSnapshot | null;
   refreshFestivalBridge: (input: {
     pathname: string;
     pageUrl: string;
@@ -58,7 +59,7 @@ export function createShareController(args: {
 
   function canUseMatchingCachedPageSnapshot(argsForMatch: {
     pathname: string;
-    snapshot: SharedVideo | null;
+    snapshot: CachedPageSnapshot | null;
     currentPartTitle: string | null;
   }): boolean {
     if (!argsForMatch.snapshot) {
@@ -67,8 +68,10 @@ export function createShareController(args: {
     if (canUseCachedPageSnapshot(argsForMatch.pathname)) {
       return true;
     }
+    const cachedPagePathname = argsForMatch.snapshot.pathname;
     return (
       argsForMatch.pathname.startsWith("/bangumi/play/") &&
+      cachedPagePathname === argsForMatch.pathname &&
       argsForMatch.currentPartTitle !== null &&
       argsForMatch.snapshot.title.trim() === argsForMatch.currentPartTitle
     );
@@ -111,9 +114,10 @@ export function createShareController(args: {
   function getSharedVideo(): SharedVideo | null {
     const festivalSnapshot = args.getFestivalSnapshot();
     const pathname = window.location.pathname;
+    const pageUrl = window.location.href.split("#")[0];
     const currentPartTitle = getCurrentPartTitle();
     return resolvePageSharedVideo({
-      pageUrl: window.location.href.split("#")[0],
+      pageUrl,
       pathname,
       documentTitle: document.title,
       headingTitle: document.querySelector("h1")?.textContent?.trim() ?? null,

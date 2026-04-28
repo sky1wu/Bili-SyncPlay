@@ -242,6 +242,9 @@ test("share controller reuses matching cached bangumi snapshot for current page 
       url: "https://www.bilibili.com/bangumi/play/ep508404",
       title: "第46话",
       updatedAt: Date.now(),
+      pathname: "/bangumi/play/ss357",
+      pageUrl:
+        "https://www.bilibili.com/bangumi/play/ss357?from_spmid=666.25.series.0",
     }),
     refreshFestivalBridge: async () => null,
     debugLog: () => undefined,
@@ -255,6 +258,51 @@ test("share controller reuses matching cached bangumi snapshot for current page 
     assert.equal(
       payload.video.url,
       "https://www.bilibili.com/bangumi/play/ep508404",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller rejects same-title cached bangumi snapshot from another page", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/bangumi/play/ss39837",
+    pathname: "/bangumi/play/ss39837",
+    title: "另一部番剧_番剧_bilibili",
+    currentPartTitle: "第1话",
+    video: {
+      currentTime: 10.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  const controller = createShareController({
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 6,
+    getFestivalSnapshot: () => ({
+      videoId: "ep-old",
+      url: "https://www.bilibili.com/bangumi/play/ep-old",
+      title: "第1话",
+      updatedAt: Date.now(),
+      pathname: "/bangumi/play/ss357",
+      pageUrl: "https://www.bilibili.com/bangumi/play/ss357",
+    }),
+    refreshFestivalBridge: async () => null,
+    debugLog: () => undefined,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.ok(payload);
+    assert.equal(payload.video.videoId, "ss39837");
+    assert.equal(
+      payload.video.url,
+      "https://www.bilibili.com/bangumi/play/ss39837",
     );
   } finally {
     dom.restore();
