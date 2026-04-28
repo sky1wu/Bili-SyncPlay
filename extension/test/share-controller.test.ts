@@ -10,6 +10,7 @@ function installDomStub(args: {
   href: string;
   pathname: string;
   title: string;
+  currentPartTitle?: string | null;
   video?: HTMLVideoElement | null;
 }): { restore: () => void } {
   const originalWindow = globalThis.window;
@@ -28,6 +29,12 @@ function installDomStub(args: {
       querySelector(selector: string) {
         if (selector === "video") {
           return args.video ?? null;
+        }
+        if (
+          args.currentPartTitle &&
+          selector.includes("bpx-state-multi-active-item")
+        ) {
+          return { textContent: args.currentPartTitle };
         }
         return null;
       },
@@ -119,6 +126,136 @@ test("share controller keeps playback snapshot while switching to another shared
     assert.equal(payload?.playback?.playbackRate, 1.08);
     assert.equal(payload?.playback?.playState, "playing");
     assert.equal(debugLogs.length, 0);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller resolves bangumi season pages through page snapshot", async () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/bangumi/play/ss357?from_spmid=666.25.series.0",
+    pathname: "/bangumi/play/ss357",
+    title: "猫和老鼠_番剧_bilibili",
+    video: {
+      currentTime: 10.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "paused";
+
+  const controller = createShareController({
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 3,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => ({
+      videoId: "ep508404",
+      url: "https://www.bilibili.com/bangumi/play/ep508404",
+      title: "第46话",
+    }),
+    debugLog: () => undefined,
+  });
+
+  try {
+    const payload = await controller.resolveCurrentSharePayload();
+
+    assert.ok(payload);
+    assert.equal(
+      payload.video.url,
+      "https://www.bilibili.com/bangumi/play/ep508404",
+    );
+    assert.equal(payload.video.videoId, "ep508404");
+    assert.equal(payload.playback?.url, payload.video.url);
+    assert.equal(payload.playback?.currentTime, 10.01);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller does not reuse cached bangumi snapshot synchronously", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/bangumi/play/ss357?from_spmid=666.25.series.0",
+    pathname: "/bangumi/play/ss357",
+    title: "猫和老鼠_番剧_bilibili",
+    video: {
+      currentTime: 10.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  const controller = createShareController({
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 4,
+    getFestivalSnapshot: () => ({
+      videoId: "ep-old",
+      url: "https://www.bilibili.com/bangumi/play/ep-old",
+      title: "上一话",
+      updatedAt: Date.now(),
+    }),
+    refreshFestivalBridge: async () => null,
+    debugLog: () => undefined,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.ok(payload);
+    assert.equal(payload.video.videoId, "ss357");
+    assert.equal(
+      payload.video.url,
+      "https://www.bilibili.com/bangumi/play/ss357",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller reuses matching cached bangumi snapshot for current page identity", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/bangumi/play/ss357?from_spmid=666.25.series.0",
+    pathname: "/bangumi/play/ss357",
+    title: "猫和老鼠_番剧_bilibili",
+    currentPartTitle: "第46话",
+    video: {
+      currentTime: 10.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  const controller = createShareController({
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 5,
+    getFestivalSnapshot: () => ({
+      videoId: "ep508404",
+      url: "https://www.bilibili.com/bangumi/play/ep508404",
+      title: "第46话",
+      updatedAt: Date.now(),
+    }),
+    refreshFestivalBridge: async () => null,
+    debugLog: () => undefined,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.ok(payload);
+    assert.equal(payload.video.videoId, "ep508404");
+    assert.equal(
+      payload.video.url,
+      "https://www.bilibili.com/bangumi/play/ep508404",
+    );
   } finally {
     dom.restore();
   }

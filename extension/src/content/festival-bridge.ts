@@ -1,5 +1,9 @@
 import type { SharedVideo } from "@bili-syncplay/protocol";
-import { buildFestivalShareUrl } from "./page-video";
+import {
+  buildBangumiEpisodeShareUrl,
+  buildBvidCidShareUrl,
+  buildFestivalShareUrl,
+} from "./page-video";
 
 export interface FestivalSnapshot {
   videoId: string;
@@ -23,6 +27,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
   let festivalSnapshot: FestivalSnapshot | null = null;
 
   async function readFestivalSnapshotFromPageContext(
+    pathname: string,
     pageUrl: string,
   ): Promise<SharedVideo | null> {
     ensureFestivalBridge();
@@ -44,6 +49,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
           type?: string;
           requestId?: string;
           detail?: {
+            epId?: string | number;
             bvid?: string;
             cid?: string | number;
             title?: string;
@@ -61,14 +67,31 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         const detail = messageEvent.data.detail;
         cleanup();
 
-        if (!detail?.bvid || detail.cid === undefined || !detail.title) {
+        if (!detail?.title) {
+          resolve(null);
+          return;
+        }
+
+        if (pathname.startsWith("/bangumi/play/") && detail.epId) {
+          const epId = String(detail.epId);
+          resolve({
+            videoId: epId.startsWith("ep") ? epId : `ep${epId}`,
+            url: buildBangumiEpisodeShareUrl(epId),
+            title: detail.title.trim(),
+          });
+          return;
+        }
+
+        if (!detail.bvid || detail.cid === undefined) {
           resolve(null);
           return;
         }
 
         resolve({
           videoId: `${detail.bvid}:${detail.cid}`,
-          url: buildFestivalShareUrl(pageUrl, detail.bvid, String(detail.cid)),
+          url: pathname.startsWith("/festival/")
+            ? buildFestivalShareUrl(pageUrl, detail.bvid, String(detail.cid))
+            : buildBvidCidShareUrl(detail.bvid, String(detail.cid)),
           title: detail.title.trim(),
         });
       };
@@ -100,12 +123,14 @@ export function createFestivalBridgeController(): FestivalBridgeController {
     },
     getSnapshot: () => festivalSnapshot,
     refreshSnapshot: async ({ pathname, pageUrl, maxAgeMs }) => {
-      if (!pathname.startsWith("/festival/")) {
+      const isBangumiPage = pathname.startsWith("/bangumi/play/");
+      if (!pathname.startsWith("/festival/") && !isBangumiPage) {
         festivalSnapshot = null;
         return null;
       }
 
       if (
+        !isBangumiPage &&
         festivalSnapshot &&
         Date.now() - festivalSnapshot.updatedAt < maxAgeMs
       ) {
@@ -116,9 +141,12 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         };
       }
 
-      const nextSnapshot = await readFestivalSnapshotFromPageContext(pageUrl);
+      const nextSnapshot = await readFestivalSnapshotFromPageContext(
+        pathname,
+        pageUrl,
+      );
       if (!nextSnapshot) {
-        return festivalSnapshot
+        return !isBangumiPage && festivalSnapshot
           ? {
               videoId: festivalSnapshot.videoId,
               url: festivalSnapshot.url,

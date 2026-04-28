@@ -10,6 +10,11 @@ export interface PageVideoSource {
   documentTitle: string;
   headingTitle: string | null;
   currentPartTitle: string | null;
+  pageSnapshot?: {
+    videoId: string;
+    url: string;
+    title: string;
+  } | null;
   festivalSnapshot: {
     videoId: string;
     url: string;
@@ -26,6 +31,14 @@ export interface VideoPlaybackSnapshot {
 export function resolvePageSharedVideo(
   source: PageVideoSource,
 ): SharedVideo | null {
+  if (source.pageSnapshot) {
+    return {
+      videoId: source.pageSnapshot.videoId,
+      url: source.pageSnapshot.url,
+      title: source.pageSnapshot.title,
+    };
+  }
+
   if (source.pathname.startsWith("/festival/") && source.festivalSnapshot) {
     return {
       videoId: source.festivalSnapshot.videoId,
@@ -99,4 +112,13 @@ export function buildFestivalShareUrl(
   parsed.searchParams.set("cid", cid);
   parsed.hash = "";
   return parsed.toString();
+}
+
+export function buildBvidCidShareUrl(bvid: string, cid: string): string {
+  return `https://www.bilibili.com/video/${bvid}?cid=${cid}`;
+}
+
+export function buildBangumiEpisodeShareUrl(epId: string): string {
+  const normalizedEpId = epId.startsWith("ep") ? epId : `ep${epId}`;
+  return `https://www.bilibili.com/bangumi/play/${normalizedEpId}`;
 }

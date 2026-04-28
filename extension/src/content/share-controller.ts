@@ -46,6 +46,34 @@ export function createShareController(args: {
   }) => Promise<SharedVideo | null>;
   debugLog: (message: string) => void;
 }): ShareController {
+  function canUsePageSnapshot(pathname: string): boolean {
+    return (
+      pathname.startsWith("/festival/") || pathname.startsWith("/bangumi/play/")
+    );
+  }
+
+  function canUseCachedPageSnapshot(pathname: string): boolean {
+    return pathname.startsWith("/festival/");
+  }
+
+  function canUseMatchingCachedPageSnapshot(argsForMatch: {
+    pathname: string;
+    snapshot: SharedVideo | null;
+    currentPartTitle: string | null;
+  }): boolean {
+    if (!argsForMatch.snapshot) {
+      return false;
+    }
+    if (canUseCachedPageSnapshot(argsForMatch.pathname)) {
+      return true;
+    }
+    return (
+      argsForMatch.pathname.startsWith("/bangumi/play/") &&
+      argsForMatch.currentPartTitle !== null &&
+      argsForMatch.snapshot.title.trim() === argsForMatch.currentPartTitle
+    );
+  }
+
   function getCurrentPartTitle(): string | null {
     return (
       document
@@ -82,12 +110,27 @@ export function createShareController(args: {
 
   function getSharedVideo(): SharedVideo | null {
     const festivalSnapshot = args.getFestivalSnapshot();
+    const pathname = window.location.pathname;
+    const currentPartTitle = getCurrentPartTitle();
     return resolvePageSharedVideo({
       pageUrl: window.location.href.split("#")[0],
-      pathname: window.location.pathname,
+      pathname,
       documentTitle: document.title,
       headingTitle: document.querySelector("h1")?.textContent?.trim() ?? null,
-      currentPartTitle: getCurrentPartTitle(),
+      currentPartTitle,
+      pageSnapshot:
+        festivalSnapshot &&
+        canUseMatchingCachedPageSnapshot({
+          pathname,
+          snapshot: festivalSnapshot,
+          currentPartTitle,
+        })
+          ? {
+              videoId: festivalSnapshot.videoId,
+              url: festivalSnapshot.url,
+              title: festivalSnapshot.title,
+            }
+          : null,
       festivalSnapshot: festivalSnapshot
         ? {
             videoId: festivalSnapshot.videoId,
@@ -110,13 +153,13 @@ export function createShareController(args: {
       return null;
     }
     args.debugLog(
-      `Festival video detected id=${nextSnapshot.videoId} title=${nextSnapshot.title} url=${nextSnapshot.url}`,
+      `Page video snapshot detected id=${nextSnapshot.videoId} title=${nextSnapshot.title} url=${nextSnapshot.url}`,
     );
     return nextSnapshot;
   }
 
   async function getCurrentPlaybackVideo(): Promise<SharedVideo | null> {
-    if (window.location.pathname.startsWith("/festival/")) {
+    if (canUsePageSnapshot(window.location.pathname)) {
       const refreshed = await refreshFestivalSnapshot(0);
       if (refreshed) {
         return refreshed;
@@ -143,21 +186,23 @@ export function createShareController(args: {
     video: SharedVideo;
     playback: PlaybackState | null;
   } | null> {
-    if (window.location.pathname.startsWith("/festival/")) {
+    if (canUsePageSnapshot(window.location.pathname)) {
       for (let attempt = 1; attempt <= 8; attempt += 1) {
         const refreshed = await refreshFestivalSnapshot(
-          attempt === 1 ? 0 : args.festivalSnapshotTtlMs,
+          window.location.pathname.startsWith("/bangumi/play/") || attempt === 1
+            ? 0
+            : args.festivalSnapshotTtlMs,
         );
         if (refreshed) {
           args.debugLog(
-            `Festival payload stabilized after retry ${attempt}: ${refreshed.videoId}`,
+            `Page video payload stabilized after retry ${attempt}: ${refreshed.videoId}`,
           );
           return createSharePayload(refreshed);
         }
         await new Promise((resolve) => window.setTimeout(resolve, 150));
       }
 
-      args.debugLog("Festival payload fell back to URL-based detection");
+      args.debugLog("Page video payload fell back to URL-based detection");
     }
 
     return getCurrentSharePayload();

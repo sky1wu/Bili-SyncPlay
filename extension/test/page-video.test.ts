@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildBangumiEpisodeShareUrl,
+  buildBvidCidShareUrl,
   buildFestivalShareUrl,
   createSharePayload,
   resolvePageSharedVideo,
@@ -39,6 +41,28 @@ test("normalizes standard video share url and strips tracking query params", () 
     videoId: "BV199W9zEEcH",
     url: "https://www.bilibili.com/video/BV199W9zEEcH",
     title: "Heading Title",
+  });
+});
+
+test("resolves page snapshot ahead of bangumi season URL fallback", () => {
+  const video = resolvePageSharedVideo({
+    pageUrl: "https://www.bilibili.com/bangumi/play/ss357",
+    pathname: "/bangumi/play/ss357",
+    documentTitle: "猫和老鼠_番剧_bilibili",
+    headingTitle: "猫和老鼠",
+    currentPartTitle: "第46话",
+    pageSnapshot: {
+      videoId: "ep508404",
+      url: "https://www.bilibili.com/bangumi/play/ep508404",
+      title: "第46话",
+    },
+    festivalSnapshot: null,
+  });
+
+  assert.deepEqual(video, {
+    videoId: "ep508404",
+    url: "https://www.bilibili.com/bangumi/play/ep508404",
+    title: "第46话",
   });
 });
 
@@ -112,5 +136,20 @@ test("builds festival share URL with bvid and cid", () => {
       "22",
     ),
     "https://www.bilibili.com/festival/demo?foo=1&bvid=BV1abc&cid=22",
+  );
+});
+
+test("builds canonical episode and cid share URLs", () => {
+  assert.equal(
+    buildBangumiEpisodeShareUrl("508404"),
+    "https://www.bilibili.com/bangumi/play/ep508404",
+  );
+  assert.equal(
+    buildBangumiEpisodeShareUrl("ep508404"),
+    "https://www.bilibili.com/bangumi/play/ep508404",
+  );
+  assert.equal(
+    buildBvidCidShareUrl("BV1abc", "22"),
+    "https://www.bilibili.com/video/BV1abc?cid=22",
   );
 });
