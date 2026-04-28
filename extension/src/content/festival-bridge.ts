@@ -117,6 +117,14 @@ export function createFestivalBridgeController(): FestivalBridgeController {
     });
   }
 
+  function canUseCachedFestivalSnapshot(pathname: string): boolean {
+    return (
+      pathname.startsWith("/festival/") &&
+      festivalSnapshot?.pathname?.startsWith("/festival/") === true &&
+      festivalSnapshot.pathname === pathname
+    );
+  }
+
   function ensureFestivalBridge(): void {
     if (festivalBridgeReady) {
       return;
@@ -145,6 +153,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
       if (
         !isBangumiPage &&
         festivalSnapshot &&
+        canUseCachedFestivalSnapshot(pathname) &&
         Date.now() - festivalSnapshot.updatedAt < maxAgeMs
       ) {
         return {
@@ -159,7 +168,9 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         pageUrl,
       );
       if (!nextSnapshot) {
-        return !isBangumiPage && festivalSnapshot
+        return !isBangumiPage &&
+          festivalSnapshot &&
+          canUseCachedFestivalSnapshot(pathname)
           ? {
               videoId: festivalSnapshot.videoId,
               url: festivalSnapshot.url,

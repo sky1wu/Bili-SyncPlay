@@ -415,3 +415,45 @@ test("share controller rejects same-title cached bangumi snapshot from another p
     dom.restore();
   }
 });
+
+test("share controller rejects cached bangumi snapshot on festival page", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/festival/demo",
+    pathname: "/festival/demo",
+    title: "Festival_哔哩哔哩",
+    video: {
+      currentTime: 10.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  const controller = createShareController({
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 8,
+    getFestivalSnapshot: () => ({
+      videoId: "ep508404",
+      url: "https://www.bilibili.com/bangumi/play/ep508404",
+      title: "第46话",
+      updatedAt: Date.now(),
+      epId: "ep508404",
+      pathname: "/bangumi/play/ss357",
+      pageUrl: "https://www.bilibili.com/bangumi/play/ss357",
+    }),
+    refreshFestivalBridge: async () => null,
+    debugLog: () => undefined,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.ok(payload);
+    assert.equal(payload.video.videoId, "/festival/demo");
+    assert.equal(payload.video.url, "https://www.bilibili.com/festival/demo");
+  } finally {
+    dom.restore();
+  }
+});

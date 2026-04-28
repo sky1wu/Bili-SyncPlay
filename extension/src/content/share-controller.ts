@@ -65,6 +65,13 @@ export function createShareController(args: {
     return pathname.startsWith("/festival/");
   }
 
+  function hasMatchingCachedPagePathname(argsForMatch: {
+    pathname: string;
+    snapshot: CachedPageSnapshot;
+  }): boolean {
+    return argsForMatch.snapshot.pathname === argsForMatch.pathname;
+  }
+
   function canUseMatchingCachedPageSnapshot(argsForMatch: {
     pathname: string;
     snapshot: CachedPageSnapshot | null;
@@ -74,9 +81,11 @@ export function createShareController(args: {
       return false;
     }
     if (canUseCachedPageSnapshot(argsForMatch.pathname)) {
-      return true;
+      return (
+        argsForMatch.snapshot.pathname?.startsWith("/festival/") === true &&
+        hasMatchingCachedPagePathname(argsForMatch)
+      );
     }
-    const cachedPagePathname = argsForMatch.snapshot.pathname;
     const snapshotEpId =
       argsForMatch.snapshot.epId ??
       (argsForMatch.snapshot.videoId.startsWith("ep")
@@ -92,7 +101,7 @@ export function createShareController(args: {
       argsForMatch.snapshot.title.trim() === argsForMatch.currentPart.title;
     return (
       argsForMatch.pathname.startsWith("/bangumi/play/") &&
-      cachedPagePathname === argsForMatch.pathname &&
+      hasMatchingCachedPagePathname(argsForMatch) &&
       ((snapshotEpId !== null &&
         snapshotEpId === argsForMatch.currentPart.epId) ||
         (snapshotCid !== null &&
@@ -159,32 +168,27 @@ export function createShareController(args: {
     const pathname = window.location.pathname;
     const pageUrl = window.location.href.split("#")[0];
     const currentPart = getCurrentPartIdentity();
+    const matchingFestivalSnapshot =
+      festivalSnapshot &&
+      canUseMatchingCachedPageSnapshot({
+        pathname,
+        snapshot: festivalSnapshot,
+        currentPart,
+      })
+        ? {
+            videoId: festivalSnapshot.videoId,
+            url: festivalSnapshot.url,
+            title: festivalSnapshot.title,
+          }
+        : null;
     return resolvePageSharedVideo({
       pageUrl,
       pathname,
       documentTitle: document.title,
       headingTitle: document.querySelector("h1")?.textContent?.trim() ?? null,
       currentPartTitle: currentPart.title,
-      pageSnapshot:
-        festivalSnapshot &&
-        canUseMatchingCachedPageSnapshot({
-          pathname,
-          snapshot: festivalSnapshot,
-          currentPart,
-        })
-          ? {
-              videoId: festivalSnapshot.videoId,
-              url: festivalSnapshot.url,
-              title: festivalSnapshot.title,
-            }
-          : null,
-      festivalSnapshot: festivalSnapshot
-        ? {
-            videoId: festivalSnapshot.videoId,
-            url: festivalSnapshot.url,
-            title: festivalSnapshot.title,
-          }
-        : null,
+      pageSnapshot: matchingFestivalSnapshot,
+      festivalSnapshot: matchingFestivalSnapshot,
     });
   }
 
