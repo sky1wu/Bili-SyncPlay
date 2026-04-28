@@ -157,6 +157,38 @@ test("festival bridge reuses cached festival snapshot for the same festival page
   }
 });
 
+test("festival bridge reuses cached festival snapshot across trailing slash path variants", async () => {
+  const dom = installBridgeDomStub([
+    {
+      bvid: "BVfestival",
+      cid: 123,
+      title: "Festival Episode",
+    },
+  ]);
+  const controller = createFestivalBridgeController();
+
+  try {
+    const firstSnapshot = await controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl: "https://www.bilibili.com/festival/demo",
+      maxAgeMs: 0,
+    });
+    const cachedSnapshot = await controller.refreshSnapshot({
+      pathname: "/festival/demo/",
+      pageUrl: "https://www.bilibili.com/festival/demo/",
+      maxAgeMs: 60_000,
+    });
+
+    assert.deepEqual(cachedSnapshot, {
+      videoId: firstSnapshot?.videoId,
+      url: firstSnapshot?.url,
+      title: firstSnapshot?.title,
+    });
+  } finally {
+    dom.restore();
+  }
+});
+
 test("festival bridge does not fall back to another festival page snapshot", async () => {
   const dom = installBridgeDomStub([
     {

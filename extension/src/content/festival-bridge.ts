@@ -117,11 +117,16 @@ export function createFestivalBridgeController(): FestivalBridgeController {
     });
   }
 
+  function normalizeCachedPagePathname(pathname: string): string {
+    return pathname.replace(/\/+$/, "");
+  }
+
   function canUseCachedFestivalSnapshot(pathname: string): boolean {
     return (
       pathname.startsWith("/festival/") &&
       festivalSnapshot?.pathname?.startsWith("/festival/") === true &&
-      festivalSnapshot.pathname === pathname
+      normalizeCachedPagePathname(festivalSnapshot.pathname) ===
+        normalizeCachedPagePathname(pathname)
     );
   }
 

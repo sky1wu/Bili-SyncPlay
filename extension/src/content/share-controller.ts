@@ -65,11 +65,19 @@ export function createShareController(args: {
     return pathname.startsWith("/festival/");
   }
 
+  function normalizeCachedPagePathname(pathname: string): string {
+    return pathname.replace(/\/+$/, "");
+  }
+
   function hasMatchingCachedPagePathname(argsForMatch: {
     pathname: string;
     snapshot: CachedPageSnapshot;
   }): boolean {
-    return argsForMatch.snapshot.pathname === argsForMatch.pathname;
+    return (
+      argsForMatch.snapshot.pathname !== undefined &&
+      normalizeCachedPagePathname(argsForMatch.snapshot.pathname) ===
+        normalizeCachedPagePathname(argsForMatch.pathname)
+    );
   }
 
   function canUseMatchingCachedPageSnapshot(argsForMatch: {
