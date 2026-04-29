@@ -2503,6 +2503,72 @@ test("join admission rejects when action exceeds the lock TTL", async () => {
   );
 });
 
+test("join admission restores previous reconnect session when rollback follows replacement", async () => {
+  let advancingNow = 1_000;
+  const baseStore = createInMemoryRuntimeStore(() => advancingNow);
+  let expireAfterNextFlush = false;
+  const runtimeStore: RuntimeStore = {
+    ...baseStore,
+    flush: async () => {
+      await baseStore.flush?.();
+      if (expireAfterNextFlush) {
+        expireAfterNextFlush = false;
+        advancingNow += 60_000;
+      }
+    },
+  };
+  const roomStore = createInMemoryRoomStore({ now: () => advancingNow });
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    runtimeStore,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => advancingNow,
+    createRoomCode: () => "ROOM21C",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const originalJoiner = createSession("joiner");
+  const joined = await service.joinRoomForSession(
+    originalJoiner,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  const originalMemberId = originalJoiner.memberId;
+
+  assert.notEqual(originalMemberId, null);
+  expireAfterNextFlush = true;
+
+  const reconnectingJoiner = createSession("joiner-reconnect");
+  await assert.rejects(
+    service.joinRoomForSession(
+      reconnectingJoiner,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+      joined.memberToken,
+    ),
+    /internal/i,
+  );
+
+  const activeRoom = baseStore.getRoom(created.room.code);
+  assert.equal(activeRoom?.members.get(originalMemberId), originalJoiner);
+  assert.equal(
+    activeRoom?.memberTokens.get(originalMemberId),
+    joined.memberToken,
+  );
+  assert.equal(reconnectingJoiner.roomCode, null);
+  assert.equal(reconnectingJoiner.memberId, null);
+  assert.equal(reconnectingJoiner.memberToken, null);
+});
+
 test("join admission does not fail after successful action when lock expires before return", async () => {
   let advancingNow = 1_000;
   const baseStore = createInMemoryRuntimeStore(() => advancingNow);

@@ -1066,6 +1066,14 @@ export function createRoomService(options: {
             joinIdentity.memberId,
             session,
           );
+          if (previousSession) {
+            runtimeStore.addMember(
+              joinedRoom.code,
+              joinIdentity.memberId,
+              previousSession,
+              joinIdentity.memberToken,
+            );
+          }
           await runtimeStore.flush?.();
           throw error;
         }
