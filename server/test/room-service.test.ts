@@ -2123,6 +2123,118 @@ test("concurrent joins respect capacity even when shared runtime store flushes a
   );
 });
 
+test("cross-node concurrent joins respect capacity via shared admission lock", async () => {
+  // Two `roomService` instances share the persistence and shared runtime store
+  // — each has its own in-process join lock (mirroring two nodes). The shared
+  // `tryClaimMessageSlot`/`releaseMessageSlot` mutex must serialize admission
+  // across both nodes; otherwise concurrent joiners would all read the same
+  // shared member count and overshoot `maxMembersPerRoom`.
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const shared = createInMemoryRuntimeStore(() => 1_000);
+
+  function buildNode(nodeId: string) {
+    const local = createInMemoryRuntimeStore(() => 1_000);
+    const pendingSharedWrites: Promise<void>[] = [];
+    const runtimeStore: RuntimeStore = {
+      ...local,
+      addMember: (code, memberId, session, memberToken) => {
+        const room = local.addMember(code, memberId, session, memberToken);
+        pendingSharedWrites.push(
+          new Promise((resolve) => {
+            setImmediate(() => {
+              shared.addMember(code, memberId, session, memberToken);
+              resolve();
+            });
+          }),
+        );
+        return room;
+      },
+      flush: async () => {
+        await Promise.allSettled(pendingSharedWrites.splice(0));
+      },
+      tryClaimMessageSlot: (roomCode, key, expiresAt) =>
+        shared.tryClaimMessageSlot(roomCode, key, expiresAt),
+      releaseMessageSlot: (roomCode, key) =>
+        shared.releaseMessageSlot(roomCode, key),
+    };
+    const service = createRoomService({
+      config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
+      persistence: getDefaultPersistenceConfig(),
+      roomStore,
+      runtimeStore,
+      resolveActiveRoom: async (roomCode) => shared.getRoom(roomCode),
+      resolveMemberIdByToken: async (roomCode, memberToken) =>
+        shared.findMemberIdByToken(roomCode, memberToken),
+      resolveBlockedMemberToken: async (roomCode, memberToken, currentTime) =>
+        shared.isMemberTokenBlocked(roomCode, memberToken, currentTime),
+      generateToken: (() => {
+        let id = 0;
+        return () => `${nodeId}-token-${++id}`.padEnd(16, "x");
+      })(),
+      logEvent: (() => undefined) satisfies LogEvent,
+      now: () => 1_000,
+      createRoomCode: () => "ROOM19",
+    });
+    return { service, runtimeStore };
+  }
+
+  const nodeA = buildNode("a");
+  const nodeB = buildNode("b");
+
+  const owner = createSession("owner");
+  const created = await nodeA.service.createRoomForSession(owner, "Alice");
+  await nodeA.runtimeStore.flush?.();
+
+  const joinPlans = [
+    { node: nodeA, session: createSession("joiner-a1") },
+    { node: nodeB, session: createSession("joiner-b1") },
+    { node: nodeA, session: createSession("joiner-a2") },
+    { node: nodeB, session: createSession("joiner-b2") },
+  ];
+
+  const results = await Promise.allSettled(
+    joinPlans.map(({ node, session }, index) =>
+      node.service.joinRoomForSession(
+        session,
+        created.room.code,
+        created.room.joinToken,
+        `User ${index}`,
+      ),
+    ),
+  );
+  await Promise.all([
+    nodeA.runtimeStore.flush?.(),
+    nodeB.runtimeStore.flush?.(),
+  ]);
+
+  const fulfilled = results.filter((r) => r.status === "fulfilled");
+  const rejected = results.filter((r) => r.status === "rejected");
+
+  assert.equal(
+    fulfilled.length,
+    2,
+    "exactly two joiners should fill the remaining slots",
+  );
+  assert.equal(
+    rejected.length,
+    2,
+    "exactly two joiners should be rejected as room_full",
+  );
+  for (const result of rejected) {
+    assert.match(
+      (result as PromiseRejectedResult).reason.message,
+      /Room is full/,
+    );
+  }
+
+  const sharedRoom = shared.getRoom(created.room.code);
+  assert.equal(
+    sharedRoom?.members.size,
+    3,
+    "shared member count must stay at maxMembersPerRoom across both nodes",
+  );
+});
+
 test("concurrent playback updates produce consistent final state without errors", async () => {
   // Two members simultaneously submit playback updates. Both calls must
   // complete (one may be ignored by authority arbitration) and the final

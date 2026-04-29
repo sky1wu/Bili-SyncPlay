@@ -38,6 +38,10 @@ import type {
 const PLAYBACK_AUTHORITY_WINDOW_MS = 1200;
 const MAX_VERSION_RETRIES = 3;
 const ROOM_LAST_ACTIVE_WRITE_INTERVAL_MS = 30_000;
+const JOIN_ADMISSION_LOCK_KEY = "join-admission";
+const JOIN_ADMISSION_LOCK_TTL_MS = 10_000;
+const JOIN_ADMISSION_LOCK_MAX_WAIT_MS = 5_000;
+const JOIN_ADMISSION_LOCK_RETRY_INTERVAL_MS = 25;
 
 type ServiceErrorReason =
   | "room_not_found"
@@ -178,6 +182,30 @@ export function createRoomService(options: {
       ));
   const roomJoinLocks = new Map<string, Promise<void>>();
 
+  async function acquireDistributedJoinLock(
+    roomCode: string,
+  ): Promise<boolean> {
+    const deadline = now() + JOIN_ADMISSION_LOCK_MAX_WAIT_MS;
+    while (true) {
+      const expiresAt = now() + JOIN_ADMISSION_LOCK_TTL_MS;
+      if (
+        await runtimeStore.tryClaimMessageSlot(
+          roomCode,
+          JOIN_ADMISSION_LOCK_KEY,
+          expiresAt,
+        )
+      ) {
+        return true;
+      }
+      if (now() >= deadline) {
+        return false;
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, JOIN_ADMISSION_LOCK_RETRY_INTERVAL_MS),
+      );
+    }
+  }
+
   async function withRoomJoinLock<T>(
     roomCode: string,
     action: () => Promise<T>,
@@ -191,9 +219,27 @@ export function createRoomService(options: {
     roomJoinLocks.set(roomCode, tail);
 
     await previous.catch(() => undefined);
+    const distributedLockHeld = await acquireDistributedJoinLock(roomCode);
+    if (!distributedLockHeld) {
+      logEvent("room_join_lock_busy", {
+        roomCode,
+        result: "rejected",
+        reason: "join_admission_lock_timeout",
+      });
+    }
     try {
       return await action();
     } finally {
+      if (distributedLockHeld) {
+        try {
+          await runtimeStore.releaseMessageSlot(
+            roomCode,
+            JOIN_ADMISSION_LOCK_KEY,
+          );
+        } catch {
+          // Lock will expire via TTL.
+        }
+      }
       releaseNext();
       if (roomJoinLocks.get(roomCode) === tail) {
         roomJoinLocks.delete(roomCode);
