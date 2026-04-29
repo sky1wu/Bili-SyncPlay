@@ -26,8 +26,32 @@ export interface PlayerInput {
   aid?: string | number;
 }
 
+export interface PagePlayInfo {
+  result?: {
+    arc?: {
+      bvid?: string;
+      cid?: string | number;
+    };
+    supplement?: {
+      ogv_episode_info?: {
+        episode_id?: string | number;
+        ep_id?: string | number;
+        index_title?: string;
+        long_title?: string;
+      };
+      play_view_business_info?: {
+        episode_info?: {
+          ep_id?: string | number;
+          cid?: string | number;
+        };
+      };
+    };
+  };
+}
+
 export function readFestivalVideoDetailFromSources(args: {
   initialState?: PageInitialState;
+  playInfo?: PagePlayInfo;
   playerInput?: PlayerInput;
   activeCid?: string | null;
   activeEpId?: string | null;
@@ -40,6 +64,7 @@ export function readFestivalVideoDetailFromSources(args: {
 } | null {
   const {
     initialState,
+    playInfo,
     playerInput,
     activeCid = null,
     activeEpId = null,
@@ -77,6 +102,7 @@ export function readFestivalVideoDetailFromSources(args: {
     matchedByEpId ??
     matchedByCid ??
     matchedByTitle ??
+    readPlayInfoCandidate(playInfo) ??
     initialState?.epInfo ??
     playerInput ??
     initialState?.videoInfo ??
@@ -112,8 +138,41 @@ export function readFestivalVideoDetailFromSources(args: {
         ? matched.long_title
         : undefined) ||
       activeTitle ||
+      getPlayInfoTitle(playInfo) ||
       initialState?.epInfo?.title ||
       initialState?.epInfo?.long_title ||
       initialState?.videoInfo?.title,
   };
+}
+
+function readPlayInfoCandidate(
+  playInfo: PagePlayInfo | undefined,
+): PageVideoCandidate | null {
+  const episodeInfo = playInfo?.result?.supplement?.ogv_episode_info;
+  const businessEpisodeInfo =
+    playInfo?.result?.supplement?.play_view_business_info?.episode_info;
+  const arc = playInfo?.result?.arc;
+  const epId =
+    episodeInfo?.episode_id ?? episodeInfo?.ep_id ?? businessEpisodeInfo?.ep_id;
+  const cid = arc?.cid ?? businessEpisodeInfo?.cid;
+
+  if (!epId && (!arc?.bvid || cid === undefined)) {
+    return null;
+  }
+
+  return {
+    ep_id: epId,
+    bvid: arc?.bvid,
+    cid,
+  };
+}
+
+function getPlayInfoTitle(
+  playInfo: PagePlayInfo | undefined,
+): string | undefined {
+  const episodeInfo = playInfo?.result?.supplement?.ogv_episode_info;
+  const parts = [episodeInfo?.index_title, episodeInfo?.long_title]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" ") : undefined;
 }
