@@ -1,6 +1,7 @@
 import {
   readFestivalVideoDetailFromSources,
   type PageInitialState,
+  type PagePlayInfo,
   type PlayerInput,
 } from "./page-bridge-detail";
 
@@ -35,6 +36,7 @@ function readFestivalVideoDetail(): {
     const initialState = (
       window as typeof window & {
         __INITIAL_STATE__?: PageInitialState;
+        __playinfo__?: PagePlayInfo;
         player?: {
           __getUserParams?: () => {
             input?: PlayerInput;
@@ -42,6 +44,11 @@ function readFestivalVideoDetail(): {
         };
       }
     ).__INITIAL_STATE__;
+    const playInfo = (
+      window as typeof window & {
+        __playinfo__?: PagePlayInfo;
+      }
+    ).__playinfo__;
 
     const active = document.querySelector<HTMLElement>(
       "li[data-cid].bpx-state-active, [data-cid].bpx-state-active, [data-cid].active, [data-cid].selected, [data-ep-id].active, [data-episode-id].active, [data-epid].active",
@@ -71,6 +78,7 @@ function readFestivalVideoDetail(): {
 
     return readFestivalVideoDetailFromSources({
       initialState,
+      playInfo,
       playerInput,
       activeCid,
       activeEpId,

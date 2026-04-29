@@ -50,3 +50,40 @@ test("page bridge preserves active cid when matched candidate lacks cid", () => 
     title: "第46话",
   });
 });
+
+test("page bridge resolves current bangumi episode from playinfo when season page has no initial state", () => {
+  const detail = readFestivalVideoDetailFromSources({
+    playInfo: {
+      result: {
+        arc: {
+          bvid: "BV17W411y74a",
+          cid: 55445162,
+        },
+        supplement: {
+          ogv_episode_info: {
+            episode_id: 508404,
+            index_title: "46",
+            long_title: "汤姆与小老鼠 Tom and Cherie",
+          },
+          play_view_business_info: {
+            episode_info: {
+              ep_id: 508404,
+              cid: 55445162,
+            },
+          },
+        },
+      },
+    },
+    playerInput: {
+      cid: undefined,
+    },
+    activeTitle: "第46话 汤姆与小老鼠 Tom and Cherie",
+  });
+
+  assert.deepEqual(detail, {
+    epId: 508404,
+    bvid: "BV17W411y74a",
+    cid: 55445162,
+    title: "第46话 汤姆与小老鼠 Tom and Cherie",
+  });
+});
