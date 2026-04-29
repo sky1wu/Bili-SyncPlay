@@ -2235,6 +2235,130 @@ test("cross-node concurrent joins respect capacity via shared admission lock", a
   );
 });
 
+test("join admission rejects with internal error when shared mutex is unavailable", async () => {
+  // The distributed `tryClaimMessageSlot` slot is permanently held by another
+  // caller. The join flow must NOT silently fall back to single-node-only
+  // serialization — it should refuse the join after the bounded wait so cross
+  // node mutex is preserved instead of degrading correctness for availability.
+  let advancingNow = 1_000;
+  const advanceTime = () => {
+    advancingNow += 200;
+    return advancingNow;
+  };
+  const baseStore = createInMemoryRuntimeStore(() => advancingNow);
+  let tryClaimCalls = 0;
+  let releaseCalls = 0;
+  const runtimeStore: RuntimeStore = {
+    ...baseStore,
+    tryClaimMessageSlot: async () => {
+      tryClaimCalls += 1;
+      return false;
+    },
+    releaseMessageSlot: async () => {
+      releaseCalls += 1;
+    },
+  };
+  const roomStore = createInMemoryRoomStore({ now: () => advancingNow });
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    runtimeStore,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: advanceTime,
+    createRoomCode: () => "ROOM20",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  const joiner = createSession("joiner");
+  await assert.rejects(
+    service.joinRoomForSession(
+      joiner,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+    ),
+    /unable|internal/i,
+  );
+
+  assert.ok(
+    tryClaimCalls >= 2,
+    "lock acquisition should poll multiple times before timing out",
+  );
+  assert.equal(
+    releaseCalls,
+    0,
+    "release must not be called when lock was never acquired",
+  );
+});
+
+test("join admission skips release when action exceeds the lock TTL", async () => {
+  // Simulate a join whose persistence write stalls past the distributed lock
+  // TTL. By the time the action returns, the slot is logically expired and
+  // could already belong to another node — so the release call must be
+  // skipped to avoid evicting the successor's lock.
+  let advancingNow = 1_000;
+  const baseStore = createInMemoryRuntimeStore(() => advancingNow);
+  let tryClaimCalls = 0;
+  let releaseCalls = 0;
+  const runtimeStore: RuntimeStore = {
+    ...baseStore,
+    tryClaimMessageSlot: async (...args) => {
+      tryClaimCalls += 1;
+      return baseStore.tryClaimMessageSlot(...args);
+    },
+    releaseMessageSlot: async (...args) => {
+      releaseCalls += 1;
+      return baseStore.releaseMessageSlot(...args);
+    },
+  };
+  const baseRoomStore = createInMemoryRoomStore({ now: () => advancingNow });
+  const roomStore = {
+    ...baseRoomStore,
+    async updateRoom(...args: Parameters<typeof baseRoomStore.updateRoom>) {
+      advancingNow += 60_000;
+      return baseRoomStore.updateRoom(...args);
+    },
+  };
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    runtimeStore,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => advancingNow,
+    createRoomCode: () => "ROOM21",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  const joiner = createSession("joiner");
+  await service.joinRoomForSession(
+    joiner,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  assert.equal(tryClaimCalls, 1, "lock should be acquired exactly once");
+  assert.equal(
+    releaseCalls,
+    0,
+    "release must be skipped when the held lock has already expired",
+  );
+});
+
 test("concurrent playback updates produce consistent final state without errors", async () => {
   // Two members simultaneously submit playback updates. Both calls must
   // complete (one may be ignored by authority arbitration) and the final

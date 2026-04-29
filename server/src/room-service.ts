@@ -39,7 +39,7 @@ const PLAYBACK_AUTHORITY_WINDOW_MS = 1200;
 const MAX_VERSION_RETRIES = 3;
 const ROOM_LAST_ACTIVE_WRITE_INTERVAL_MS = 30_000;
 const JOIN_ADMISSION_LOCK_KEY = "join-admission";
-const JOIN_ADMISSION_LOCK_TTL_MS = 10_000;
+const JOIN_ADMISSION_LOCK_TTL_MS = 30_000;
 const JOIN_ADMISSION_LOCK_MAX_WAIT_MS = 5_000;
 const JOIN_ADMISSION_LOCK_RETRY_INTERVAL_MS = 25;
 
@@ -184,7 +184,7 @@ export function createRoomService(options: {
 
   async function acquireDistributedJoinLock(
     roomCode: string,
-  ): Promise<boolean> {
+  ): Promise<{ expiresAt: number } | null> {
     const deadline = now() + JOIN_ADMISSION_LOCK_MAX_WAIT_MS;
     while (true) {
       const expiresAt = now() + JOIN_ADMISSION_LOCK_TTL_MS;
@@ -195,10 +195,10 @@ export function createRoomService(options: {
           expiresAt,
         )
       ) {
-        return true;
+        return { expiresAt };
       }
       if (now() >= deadline) {
-        return false;
+        return null;
       }
       await new Promise((resolve) =>
         setTimeout(resolve, JOIN_ADMISSION_LOCK_RETRY_INTERVAL_MS),
@@ -218,19 +218,33 @@ export function createRoomService(options: {
     const tail = previous.catch(() => undefined).then(() => next);
     roomJoinLocks.set(roomCode, tail);
 
+    function releaseInProcessLock(): void {
+      releaseNext();
+      if (roomJoinLocks.get(roomCode) === tail) {
+        roomJoinLocks.delete(roomCode);
+      }
+    }
+
     await previous.catch(() => undefined);
-    const distributedLockHeld = await acquireDistributedJoinLock(roomCode);
-    if (!distributedLockHeld) {
-      logEvent("room_join_lock_busy", {
+    const distributedLock = await acquireDistributedJoinLock(roomCode);
+    if (!distributedLock) {
+      releaseInProcessLock();
+      logEvent("room_join_admission_lock_unavailable", {
         roomCode,
         result: "rejected",
         reason: "join_admission_lock_timeout",
       });
+      throw new RoomServiceError(
+        "internal_error",
+        INTERNAL_SERVER_ERROR_MESSAGE,
+        "internal_error",
+        { roomCode, reason: "join_admission_lock_timeout" },
+      );
     }
     try {
       return await action();
     } finally {
-      if (distributedLockHeld) {
+      if (now() < distributedLock.expiresAt) {
         try {
           await runtimeStore.releaseMessageSlot(
             roomCode,
@@ -239,11 +253,15 @@ export function createRoomService(options: {
         } catch {
           // Lock will expire via TTL.
         }
+      } else {
+        logEvent("room_join_admission_lock_ttl_exceeded", {
+          roomCode,
+          result: "warning",
+          reason: "join_admission_lock_ttl_exceeded",
+          ttlMs: JOIN_ADMISSION_LOCK_TTL_MS,
+        });
       }
-      releaseNext();
-      if (roomJoinLocks.get(roomCode) === tail) {
-        roomJoinLocks.delete(roomCode);
-      }
+      releaseInProcessLock();
     }
   }
 
