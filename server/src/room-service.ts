@@ -274,9 +274,7 @@ export function createRoomService(options: {
         },
       };
 
-      const result = await action(lockGuard);
-      lockGuard.assertActive();
-      return result;
+      return await action(lockGuard);
     } finally {
       if (distributedLock) {
         if (now() < distributedLock.expiresAt) {

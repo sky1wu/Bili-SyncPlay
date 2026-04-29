@@ -2503,6 +2503,60 @@ test("join admission rejects when action exceeds the lock TTL", async () => {
   );
 });
 
+test("join admission does not fail after successful action when lock expires before return", async () => {
+  let advancingNow = 1_000;
+  const baseStore = createInMemoryRuntimeStore(() => advancingNow);
+  let releaseCalls = 0;
+  const runtimeStore: RuntimeStore = {
+    ...baseStore,
+    releaseRoomLock: async (...args) => {
+      releaseCalls += 1;
+      return baseStore.releaseRoomLock(...args);
+    },
+  };
+  const roomStore = createInMemoryRoomStore({ now: () => advancingNow });
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    runtimeStore,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (event) => {
+      if (event === "room_restored") {
+        advancingNow += 60_000;
+      }
+    },
+    now: () => advancingNow,
+    createRoomCode: () => "ROOM21B",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  const joiner = createSession("joiner");
+  const joined = await service.joinRoomForSession(
+    joiner,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  assert.equal(joined.room.code, created.room.code);
+  assert.equal(joiner.roomCode, created.room.code);
+  assert.equal(
+    baseStore.getRoom(created.room.code)?.members.get(joiner.id),
+    joiner,
+  );
+  assert.equal(
+    releaseCalls,
+    0,
+    "expired locks should not be released after the action commits",
+  );
+});
+
 test("concurrent playback updates produce consistent final state without errors", async () => {
   // Two members simultaneously submit playback updates. Both calls must
   // complete (one may be ignored by authority arbitration) and the final
