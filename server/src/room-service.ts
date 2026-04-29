@@ -1038,11 +1038,17 @@ export function createRoomService(options: {
           reconnectMemberId,
           previousMemberToken,
         );
-        const previousSession =
+        const previousLocalSession =
           reconnectMemberId !== null
             ? (runtimeStore
                 .getRoom(joinedRoom.code)
                 ?.members.get(reconnectMemberId) ?? null)
+            : null;
+        const previousRuntimeSession =
+          reconnectMemberId !== null
+            ? (joined.joinTargetState.activeRoom?.members.get(
+                reconnectMemberId,
+              ) ?? previousLocalSession)
             : null;
         lock.assertActive();
         runtimeStore.addMember(
@@ -1066,18 +1072,18 @@ export function createRoomService(options: {
             joinIdentity.memberId,
             session,
           );
-          if (previousSession) {
+          if (previousRuntimeSession) {
             runtimeStore.addMember(
               joinedRoom.code,
               joinIdentity.memberId,
-              previousSession,
+              previousRuntimeSession,
               joinIdentity.memberToken,
             );
           }
           await runtimeStore.flush?.();
           throw error;
         }
-        disconnectReplacedSession(session, previousSession);
+        disconnectReplacedSession(session, previousLocalSession);
 
         logEvent("room_restored", {
           roomCode: joinedRoom.code,

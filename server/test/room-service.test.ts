@@ -2569,6 +2569,94 @@ test("join admission restores previous reconnect session when rollback follows r
   assert.equal(reconnectingJoiner.memberToken, null);
 });
 
+test("join admission restores shared previous session when reconnect rollback happens on another node", async () => {
+  let advancingNow = 1_000;
+  const local = createInMemoryRuntimeStore(() => advancingNow);
+  const shared = createInMemoryRuntimeStore(() => advancingNow);
+  let expireAfterNextFlush = false;
+  const runtimeStore: RuntimeStore = {
+    ...local,
+    addMember: (code, memberId, session, memberToken) => {
+      const room = local.addMember(code, memberId, session, memberToken);
+      shared.addMember(code, memberId, session, memberToken);
+      return room;
+    },
+    removeMember: (code, memberId, session) => {
+      const removal = local.removeMember(code, memberId, session);
+      shared.removeMember(code, memberId, session);
+      return removal;
+    },
+    flush: async () => {
+      await local.flush?.();
+      await shared.flush?.();
+      if (expireAfterNextFlush) {
+        expireAfterNextFlush = false;
+        advancingNow += 60_000;
+      }
+    },
+  };
+  const roomStore = createInMemoryRoomStore({ now: () => advancingNow });
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    runtimeStore,
+    resolveActiveRoom: async (roomCode) => shared.getRoom(roomCode),
+    resolveMemberIdByToken: async (roomCode, memberToken) =>
+      shared.findMemberIdByToken(roomCode, memberToken),
+    resolveBlockedMemberToken: async (roomCode, memberToken, currentTime) =>
+      shared.isMemberTokenBlocked(roomCode, memberToken, currentTime),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => advancingNow,
+    createRoomCode: () => "ROOM21D",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const remoteSession = createSession("remote-joiner");
+  const remoteMemberId = "remote-member";
+  const remoteMemberToken = "remote-token".padEnd(16, "x");
+  remoteSession.memberId = remoteMemberId;
+  remoteSession.roomCode = created.room.code;
+  remoteSession.memberToken = remoteMemberToken;
+  remoteSession.joinedAt = advancingNow;
+  shared.addMember(
+    created.room.code,
+    remoteMemberId,
+    remoteSession,
+    remoteMemberToken,
+  );
+  assert.equal(
+    local.getRoom(created.room.code)?.members.has(remoteMemberId),
+    false,
+  );
+
+  expireAfterNextFlush = true;
+
+  const reconnectingJoiner = createSession("joiner-reconnect");
+  await assert.rejects(
+    service.joinRoomForSession(
+      reconnectingJoiner,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+      remoteMemberToken,
+    ),
+    /internal/i,
+  );
+
+  const sharedRoom = shared.getRoom(created.room.code);
+  assert.equal(sharedRoom?.members.get(remoteMemberId), remoteSession);
+  assert.equal(sharedRoom?.memberTokens.get(remoteMemberId), remoteMemberToken);
+  assert.equal(reconnectingJoiner.roomCode, null);
+  assert.equal(reconnectingJoiner.memberId, null);
+  assert.equal(reconnectingJoiner.memberToken, null);
+});
+
 test("join admission does not fail after successful action when lock expires before return", async () => {
   let advancingNow = 1_000;
   const baseStore = createInMemoryRuntimeStore(() => advancingNow);
