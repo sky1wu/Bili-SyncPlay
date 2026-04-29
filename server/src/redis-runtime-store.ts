@@ -45,6 +45,11 @@ type RedisClient = {
     px: "PX",
     milliseconds: number,
   ) => Promise<string | null>;
+  eval: (
+    script: string,
+    numKeys: number,
+    ...args: Array<string | number>
+  ) => Promise<unknown>;
   del: (...keys: string[]) => Promise<unknown>;
 };
 
@@ -107,6 +112,8 @@ const RUNTIME_STORE_METHOD_NAMES = [
   "blockMemberToken",
   "tryClaimMessageSlot",
   "releaseMessageSlot",
+  "acquireRoomLock",
+  "releaseRoomLock",
   "removeMember",
   "deleteRoom",
   "heartbeatNode",
@@ -166,6 +173,17 @@ function dedupSlotKey(prefix: string, roomCode: string, key: string): string {
 function dedupTrackingZsetKey(prefix: string, roomCode: string): string {
   return `${prefix}room:${roomCode}:dedup-slots`;
 }
+
+function roomLockKey(prefix: string, roomCode: string, key: string): string {
+  return `${prefix}room:${roomCode}:lock:${key}`;
+}
+
+const ROOM_LOCK_RELEASE_LUA = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
 
 function nodesKey(prefix: string): string {
   return `${prefix}nodes`;
@@ -728,6 +746,23 @@ export async function createRedisRuntimeStore(
       const slotKey = dedupSlotKey(keyPrefix, roomCode, key);
       const trackingKey = dedupTrackingZsetKey(keyPrefix, roomCode);
       await Promise.all([redis.del(slotKey), redis.zrem(trackingKey, slotKey)]);
+    },
+    async acquireRoomLock(
+      roomCode: string,
+      key: string,
+      token: string,
+      expiresAt: number,
+    ) {
+      const currentTime = now();
+      const ttlMs = Math.max(expiresAt - currentTime, 1);
+      const lockKey = roomLockKey(keyPrefix, roomCode, key);
+      const result = await redis.set(lockKey, token, "NX", "PX", ttlMs);
+      return result !== null;
+    },
+    async releaseRoomLock(roomCode: string, key: string, token: string) {
+      const lockKey = roomLockKey(keyPrefix, roomCode, key);
+      const result = await redis.eval(ROOM_LOCK_RELEASE_LUA, 1, lockKey, token);
+      return result === 1;
     },
     removeMember(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("remove_member");

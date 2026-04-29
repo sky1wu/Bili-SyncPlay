@@ -72,6 +72,17 @@ export type RuntimeStore = {
     expiresAt: number,
   ) => Promise<boolean>;
   releaseMessageSlot: (roomCode: string, key: string) => Promise<void>;
+  acquireRoomLock: (
+    roomCode: string,
+    key: string,
+    token: string,
+    expiresAt: number,
+  ) => Promise<boolean>;
+  releaseRoomLock: (
+    roomCode: string,
+    key: string,
+    token: string,
+  ) => Promise<boolean>;
 };
 
 export function createInMemoryRuntimeStore(
@@ -86,6 +97,10 @@ export function createInMemoryRuntimeStore(
   const rooms = new Map<string, ActiveRoom>();
   const blockedMemberTokensByRoom = new Map<string, KickedMemberBlock[]>();
   const claimedSlotsByRoom = new Map<string, Map<string, number>>();
+  const ownedRoomLocks = new Map<
+    string,
+    Map<string, { token: string; expiresAt: number }>
+  >();
   const nodeStatuses = new Map<string, ClusterNodeStatus>();
 
   function pruneEvents(currentTime: number): void {
@@ -268,6 +283,36 @@ export function createInMemoryRuntimeStore(
       claimedSlotsByRoom.get(roomCode)?.delete(key);
       return Promise.resolve();
     },
+    acquireRoomLock(roomCode, key, token, expiresAt) {
+      const currentTime = now();
+      const roomLocks =
+        ownedRoomLocks.get(roomCode) ??
+        new Map<string, { token: string; expiresAt: number }>();
+      for (const [k, lock] of roomLocks) {
+        if (lock.expiresAt <= currentTime) roomLocks.delete(k);
+      }
+      if (roomLocks.has(key)) {
+        return Promise.resolve(false);
+      }
+      roomLocks.set(key, { token, expiresAt });
+      ownedRoomLocks.set(roomCode, roomLocks);
+      return Promise.resolve(true);
+    },
+    releaseRoomLock(roomCode, key, token) {
+      const roomLocks = ownedRoomLocks.get(roomCode);
+      if (!roomLocks) {
+        return Promise.resolve(false);
+      }
+      const lock = roomLocks.get(key);
+      if (!lock || lock.token !== token) {
+        return Promise.resolve(false);
+      }
+      roomLocks.delete(key);
+      if (roomLocks.size === 0) {
+        ownedRoomLocks.delete(roomCode);
+      }
+      return Promise.resolve(true);
+    },
     removeMember(code, memberId, session) {
       return removeMemberFromRoom(rooms, code, memberId, session);
     },
@@ -276,6 +321,7 @@ export function createInMemoryRuntimeStore(
       roomSessionIds.delete(code);
       blockedMemberTokensByRoom.delete(code);
       claimedSlotsByRoom.delete(code);
+      ownedRoomLocks.delete(code);
     },
     async heartbeatNode(status) {
       nodeStatuses.set(status.instanceId, { ...status });

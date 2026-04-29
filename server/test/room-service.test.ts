@@ -159,6 +159,73 @@ test("room service skips lastActiveAt persistence for reconnect joins within ref
   assert.equal(persisted?.lastActiveAt, firstJoin.room.lastActiveAt);
 });
 
+test("room service rejects reconnect skip path when room was deleted concurrently", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  let validateDeletedRoom = false;
+  let validationReadCount = 0;
+  const roomStore = {
+    ...baseRoomStore,
+    async getRoom(code: string) {
+      const room = await baseRoomStore.getRoom(code);
+      if (validateDeletedRoom) {
+        validationReadCount += 1;
+        if (validationReadCount === 2) {
+          await baseRoomStore.deleteRoom(code);
+          return null;
+        }
+      }
+      return room;
+    },
+  };
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM02B",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  currentTime = 2_000;
+  const joiner = createSession("joiner");
+  const firstJoin = await service.joinRoomForSession(
+    joiner,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  currentTime = 5_000;
+  validateDeletedRoom = true;
+  const reconnect = createSession("reconnect");
+  await assert.rejects(
+    service.joinRoomForSession(
+      reconnect,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+      firstJoin.memberToken,
+    ),
+    /Room not found/,
+  );
+
+  assert.equal(reconnect.roomCode, null);
+  assert.equal(
+    activeRooms.getRoom(created.room.code)?.members.get(joiner.id),
+    joiner,
+  );
+});
+
 test("room service refreshes lastActiveAt for active room joins after refresh window", async () => {
   let currentTime = 1_000;
   const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
@@ -904,6 +971,18 @@ test("room service flushes pending runtime store writes before exposing updated 
     },
     isMemberTokenBlocked(code, memberToken, currentTime) {
       return activeRooms.isMemberTokenBlocked(code, memberToken, currentTime);
+    },
+    tryClaimMessageSlot() {
+      return Promise.resolve(true);
+    },
+    releaseMessageSlot() {
+      return Promise.resolve();
+    },
+    acquireRoomLock() {
+      return Promise.resolve(true);
+    },
+    releaseRoomLock() {
+      return Promise.resolve(true);
     },
     removeMember(code, memberId, session) {
       return activeRooms.removeMember(code, memberId, session);
@@ -2156,6 +2235,10 @@ test("cross-node concurrent joins respect capacity via shared admission lock", a
         shared.tryClaimMessageSlot(roomCode, key, expiresAt),
       releaseMessageSlot: (roomCode, key) =>
         shared.releaseMessageSlot(roomCode, key),
+      acquireRoomLock: (roomCode, key, token, expiresAt) =>
+        shared.acquireRoomLock(roomCode, key, token, expiresAt),
+      releaseRoomLock: (roomCode, key, token) =>
+        shared.releaseRoomLock(roomCode, key, token),
     };
     const service = createRoomService({
       config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
@@ -2246,16 +2329,17 @@ test("join admission rejects with internal error when shared mutex is unavailabl
     return advancingNow;
   };
   const baseStore = createInMemoryRuntimeStore(() => advancingNow);
-  let tryClaimCalls = 0;
+  let acquireCalls = 0;
   let releaseCalls = 0;
   const runtimeStore: RuntimeStore = {
     ...baseStore,
-    tryClaimMessageSlot: async () => {
-      tryClaimCalls += 1;
+    acquireRoomLock: async () => {
+      acquireCalls += 1;
       return false;
     },
-    releaseMessageSlot: async () => {
+    releaseRoomLock: async () => {
       releaseCalls += 1;
+      return true;
     },
   };
   const roomStore = createInMemoryRoomStore({ now: () => advancingNow });
@@ -2288,7 +2372,7 @@ test("join admission rejects with internal error when shared mutex is unavailabl
   );
 
   assert.ok(
-    tryClaimCalls >= 2,
+    acquireCalls >= 2,
     "lock acquisition should poll multiple times before timing out",
   );
   assert.equal(
@@ -2298,24 +2382,76 @@ test("join admission rejects with internal error when shared mutex is unavailabl
   );
 });
 
-test("join admission skips release when action exceeds the lock TTL", async () => {
+test("join admission releases local queue when shared mutex acquisition throws", async () => {
+  const currentTime = 1_000;
+  const baseStore = createInMemoryRuntimeStore(() => currentTime);
+  let acquireCalls = 0;
+  const runtimeStore: RuntimeStore = {
+    ...baseStore,
+    acquireRoomLock: async (...args) => {
+      acquireCalls += 1;
+      if (acquireCalls === 1) {
+        throw new Error("redis unavailable");
+      }
+      return baseStore.acquireRoomLock(...args);
+    },
+  };
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    runtimeStore,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM20B",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  await assert.rejects(
+    service.joinRoomForSession(
+      createSession("failing-joiner"),
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+    ),
+    /redis unavailable/,
+  );
+
+  const joined = await service.joinRoomForSession(
+    createSession("successful-joiner"),
+    created.room.code,
+    created.room.joinToken,
+    "Carol",
+  );
+
+  assert.equal(joined.room.code, created.room.code);
+});
+
+test("join admission rejects when action exceeds the lock TTL", async () => {
   // Simulate a join whose persistence write stalls past the distributed lock
-  // TTL. By the time the action returns, the slot is logically expired and
-  // could already belong to another node — so the release call must be
-  // skipped to avoid evicting the successor's lock.
+  // TTL. By the time the action returns, the lock is logically expired and
+  // could already belong to another node, so the join must be rejected instead
+  // of reporting success outside the serialization window.
   let advancingNow = 1_000;
   const baseStore = createInMemoryRuntimeStore(() => advancingNow);
-  let tryClaimCalls = 0;
+  let acquireCalls = 0;
   let releaseCalls = 0;
   const runtimeStore: RuntimeStore = {
     ...baseStore,
-    tryClaimMessageSlot: async (...args) => {
-      tryClaimCalls += 1;
-      return baseStore.tryClaimMessageSlot(...args);
+    acquireRoomLock: async (...args) => {
+      acquireCalls += 1;
+      return baseStore.acquireRoomLock(...args);
     },
-    releaseMessageSlot: async (...args) => {
+    releaseRoomLock: async (...args) => {
       releaseCalls += 1;
-      return baseStore.releaseMessageSlot(...args);
+      return baseStore.releaseRoomLock(...args);
     },
   };
   const baseRoomStore = createInMemoryRoomStore({ now: () => advancingNow });
@@ -2344,18 +2480,26 @@ test("join admission skips release when action exceeds the lock TTL", async () =
   const created = await service.createRoomForSession(owner, "Alice");
 
   const joiner = createSession("joiner");
-  await service.joinRoomForSession(
-    joiner,
-    created.room.code,
-    created.room.joinToken,
-    "Bob",
+  await assert.rejects(
+    service.joinRoomForSession(
+      joiner,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+    ),
+    /internal/i,
   );
 
-  assert.equal(tryClaimCalls, 1, "lock should be acquired exactly once");
+  assert.equal(acquireCalls, 1, "lock should be acquired exactly once");
   assert.equal(
     releaseCalls,
     0,
     "release must be skipped when the held lock has already expired",
+  );
+  assert.equal(joiner.roomCode, null);
+  assert.equal(
+    baseStore.getRoom(created.room.code)?.members.has(joiner.id),
+    false,
   );
 });
 
