@@ -589,8 +589,7 @@ export function createRoomService(options: {
         previousMemberToken: args.previousMemberToken,
       });
       const needsCapacitySerialization =
-        joinTargetState.reconnectMemberId === null &&
-        joinTargetState.activeMemberCount >= config.maxMembersPerRoom - 1;
+        joinTargetState.reconnectMemberId === null;
 
       if (
         room.expiresAt === null &&
@@ -945,6 +944,7 @@ export function createRoomService(options: {
           session,
           joinIdentity.memberToken,
         );
+        await runtimeStore.flush?.();
         applyJoinedSessionState({
           session,
           roomCode: joinedRoom.code,
