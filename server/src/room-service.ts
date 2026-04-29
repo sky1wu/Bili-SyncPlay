@@ -1072,15 +1072,25 @@ export function createRoomService(options: {
             joinIdentity.memberId,
             session,
           );
-          if (previousRuntimeSession) {
+          await runtimeStore.flush?.();
+
+          const currentRuntimeSession =
+            (await resolveActiveRoom(joinedRoom.code))?.members.get(
+              joinIdentity.memberId,
+            ) ?? null;
+          if (
+            previousRuntimeSession &&
+            (currentRuntimeSession === null ||
+              currentRuntimeSession === session)
+          ) {
             runtimeStore.addMember(
               joinedRoom.code,
               joinIdentity.memberId,
               previousRuntimeSession,
               joinIdentity.memberToken,
             );
+            await runtimeStore.flush?.();
           }
-          await runtimeStore.flush?.();
           throw error;
         }
         disconnectReplacedSession(session, previousLocalSession);

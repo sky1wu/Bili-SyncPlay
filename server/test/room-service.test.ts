@@ -2657,6 +2657,96 @@ test("join admission restores shared previous session when reconnect rollback ha
   assert.equal(reconnectingJoiner.memberToken, null);
 });
 
+test("join admission does not restore stale reconnect session over newer shared binding", async () => {
+  let advancingNow = 1_000;
+  const local = createInMemoryRuntimeStore(() => advancingNow);
+  const shared = createInMemoryRuntimeStore(() => advancingNow);
+  const newerSession = createSession("newer-reconnect");
+  let replaceSharedBindingAfterNextFlush = false;
+  const runtimeStore: RuntimeStore = {
+    ...local,
+    addMember: (code, memberId, session, memberToken) => {
+      const room = local.addMember(code, memberId, session, memberToken);
+      shared.addMember(code, memberId, session, memberToken);
+      return room;
+    },
+    removeMember: (code, memberId, session) => {
+      const removal = local.removeMember(code, memberId, session);
+      shared.removeMember(code, memberId, session);
+      return removal;
+    },
+    flush: async () => {
+      await local.flush?.();
+      await shared.flush?.();
+      if (replaceSharedBindingAfterNextFlush) {
+        replaceSharedBindingAfterNextFlush = false;
+        shared.addMember(
+          newerSession.roomCode ?? "",
+          newerSession.memberId ?? "",
+          newerSession,
+          newerSession.memberToken ?? "",
+        );
+        advancingNow += 60_000;
+      }
+    },
+  };
+  const roomStore = createInMemoryRoomStore({ now: () => advancingNow });
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 3 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    runtimeStore,
+    resolveActiveRoom: async (roomCode) => shared.getRoom(roomCode),
+    resolveMemberIdByToken: async (roomCode, memberToken) =>
+      shared.findMemberIdByToken(roomCode, memberToken),
+    resolveBlockedMemberToken: async (roomCode, memberToken, currentTime) =>
+      shared.isMemberTokenBlocked(roomCode, memberToken, currentTime),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => advancingNow,
+    createRoomCode: () => "ROOM21E",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const previousSession = createSession("previous-joiner");
+  const memberId = "remote-member";
+  const memberToken = "remote-token".padEnd(16, "x");
+  previousSession.memberId = memberId;
+  previousSession.roomCode = created.room.code;
+  previousSession.memberToken = memberToken;
+  previousSession.joinedAt = advancingNow;
+  newerSession.memberId = memberId;
+  newerSession.roomCode = created.room.code;
+  newerSession.memberToken = memberToken;
+  newerSession.joinedAt = advancingNow;
+  shared.addMember(created.room.code, memberId, previousSession, memberToken);
+
+  replaceSharedBindingAfterNextFlush = true;
+
+  const reconnectingJoiner = createSession("joiner-reconnect");
+  await assert.rejects(
+    service.joinRoomForSession(
+      reconnectingJoiner,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+      memberToken,
+    ),
+    /internal/i,
+  );
+
+  const sharedRoom = shared.getRoom(created.room.code);
+  assert.equal(sharedRoom?.members.get(memberId), newerSession);
+  assert.equal(sharedRoom?.memberTokens.get(memberId), memberToken);
+  assert.equal(reconnectingJoiner.roomCode, null);
+  assert.equal(reconnectingJoiner.memberId, null);
+  assert.equal(reconnectingJoiner.memberToken, null);
+});
+
 test("join admission does not fail after successful action when lock expires before return", async () => {
   let advancingNow = 1_000;
   const baseStore = createInMemoryRuntimeStore(() => advancingNow);
