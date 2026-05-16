@@ -31,6 +31,21 @@ if (targetBrowser === "firefox") {
     gecko: {
       id: "bili-syncplay@bilibili-tools.local",
       strict_min_version: "121.0",
+      // Firefox 新规：新扩展须声明数据收集/传输（与目的地无关，发往
+      // 用户自建服务端也算）。本扩展把同步的 B 站视频 URL
+      // （browsingActivity）与播放操作交互（websiteActivity）发往用户
+      // 配置的 WebSocket 服务端；房间码/token 为临时会话标识，昵称为
+      // 用户自填的临时假名句柄（按扩展设计意图不属 PII），故不声明
+      // personallyIdentifyingInfo；无遥测故无 technicalAndInteraction。
+      //
+      // 该键 Firefox 140（桌面）/142（Android）才识别，本扩展 min
+      // 版本为 121——旧版按"未知键忽略"处理（前向兼容、不破坏，121–139
+      // 仍正常运行，仅无数据同意 UI），140+ 强制并展示。故 web-ext lint
+      // 的 KEY_FIREFOX[_ANDROID]_UNSUPPORTED_BY_MIN_VERSION 为预期软告警，
+      // 不上调 strict_min_version（否则白丢 121–139 用户且无功能收益）。
+      data_collection_permissions: {
+        required: ["browsingActivity", "websiteActivity"],
+      },
     },
   };
   // Firefox 不支持 MV3 background.service_worker（Bugzilla 1573659），
