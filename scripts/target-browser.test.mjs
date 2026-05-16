@@ -28,6 +28,27 @@ test("CLI 参数优先于环境变量", () => {
   );
 });
 
+test("多个 --target 时后者覆盖（npm 脚本分层）", () => {
+  // 基础脚本固定 --target=chrome，调用方追加 --target=firefox 覆盖
+  assert.equal(
+    resolveTargetBrowser(["--target=chrome", "--target=firefox"], {}),
+    "firefox",
+  );
+  assert.equal(
+    resolveTargetBrowser(["--target", "chrome", "--target", "firefox"], {}),
+    "firefox",
+  );
+});
+
+test("显式 --target 不被环境变量劫持（后者覆盖时仍然 CLI 优先）", () => {
+  assert.equal(
+    resolveTargetBrowser(["--target=chrome", "--target=firefox"], {
+      TARGET_BROWSER: "chrome",
+    }),
+    "firefox",
+  );
+});
+
 test("大小写与空白被归一", () => {
   assert.equal(
     resolveTargetBrowser([], { TARGET_BROWSER: " FireFox " }),

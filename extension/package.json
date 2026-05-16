@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "prebuild": "npm --prefix ../packages/protocol run build",
-    "build": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs --target=chrome",
     "pretypecheck": "npm --prefix ../packages/protocol run build",
     "typecheck": "tsc -p tsconfig.json",
     "pretest": "npm --prefix ../packages/protocol run build",

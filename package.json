@@ -34,7 +34,7 @@
     "dev:server": "npm run dev -w @bili-syncplay/server",
     "build:extension": "npm run build -w @bili-syncplay/extension",
     "build:extension:firefox": "npm run build -w @bili-syncplay/extension -- --target=firefox",
-    "build:release:chrome": "npm run build:extension && node scripts/package-release.mjs",
+    "build:release:chrome": "npm run build:extension && node scripts/package-release.mjs --target=chrome",
     "build:release:firefox": "npm run build:extension:firefox && node scripts/package-release.mjs --target=firefox",
     "build:release": "npm run build:release:chrome && npm run build:release:firefox",
     "release:version": "node scripts/release-version.mjs"
