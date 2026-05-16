@@ -287,15 +287,20 @@ test("allowAnyFirefoxExtensionOrigin on: malformed moz-extension still rejected"
   config.allowAnyFirefoxExtensionOrigin = true;
   const security = createSecurityPolicy(config);
 
-  // 注：moz-extension 是非特殊 scheme，WHATWG URL 不归一化其 host，
-  // 故大小写 host 与配置期校验一致地被视为合法裸 origin（Firefox 的
-  // UUID 恒为小写 hex，永不会发大写），不在“畸形”之列。
   for (const bad of [
-    "moz-extension://uuid/popup.html", // 带路径
-    "moz-extension://uuid/", // 尾斜杠
-    "moz-extension://user@uuid", // userinfo
-    "moz-extension://uuid?x=1", // 查询串
+    // 非裸 origin
+    "moz-extension://2b83faf4-40af-4e98-a9aa-e63c93821add/popup.html", // 带路径
+    "moz-extension://2b83faf4-40af-4e98-a9aa-e63c93821add/", // 尾斜杠
+    "moz-extension://user@2b83faf4-40af-4e98-a9aa-e63c93821add", // userinfo
+    "moz-extension://2b83faf4-40af-4e98-a9aa-e63c93821add?x=1", // 查询串
     "moz-extension://*", // 通配
+    // 裸 origin 但 host 不是 Firefox UUID —— 真实 Firefox 永不产生，
+    // 须与文档「moz-extension://<uuid>」一致地拒绝
+    "moz-extension://not-a-uuid",
+    "moz-extension://foo:99",
+    "moz-extension://2B83FAF4-40AF-4E98-A9AA-E63C93821ADD", // 大写非 Firefox 形态
+    "moz-extension://2b83faf4-40af-4e98-a9aa-e63c93821ad", // 末段位数不足
+    "moz-extension://2b83faf440af4e98a9aae63c93821add", // 缺连字符
   ]) {
     assert.deepEqual(
       security.isOriginAllowed(bad),
