@@ -2,18 +2,18 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-Bili-SyncPlay is a Chrome extension plus a WebSocket server for synchronized Bilibili watching. Users can create or join a room, share the current video, and keep playback, pause, seek, and playback rate in sync across participants.
+Bili-SyncPlay is a browser extension (Chrome, Edge, Firefox) plus a WebSocket server for synchronized Bilibili watching. Users can create or join a room, share the current video, and keep playback, pause, seek, and playback rate in sync across participants.
 
 It supports the full local workflow:
 
-- load the unpacked extension in Chrome or Edge
+- load the unpacked extension in Chrome, Edge, or Firefox 121+
 - run the local sync server
 - create a room and share an invite string
 - keep everyone on the same shared video in sync
 
 This repository is a monorepo:
 
-- `extension/`: Chrome extension
+- `extension/`: browser extension (Chrome/Edge/Firefox)
 - `server/`: WebSocket room server and admin panel
 - `packages/protocol/`: shared protocol types
 
@@ -21,7 +21,7 @@ This repository is a monorepo:
 
 - Invite format: `roomCode:joinToken`
 - Default local server: `ws://localhost:8787`
-- Supported browsers for development: Chrome, Edge
+- Supported browsers for development: Chrome, Edge, Firefox 121+
 - Recommended production server URL: `wss://<your-domain>`
 
 ## Quick Start
@@ -40,10 +40,24 @@ npm run build
 
 ### 2. Load the extension
 
+**Chrome / Edge** (`npm run build` produces `extension/dist`):
+
 1. Open `chrome://extensions`
 2. Enable Developer mode
 3. Click `Load unpacked`
 4. Select `extension/dist`
+
+**Firefox 121+** (build the Firefox target first):
+
+```bash
+npm run build:extension:firefox   # produces extension/dist-firefox
+```
+
+1. Open `about:debugging#/runtime/this-firefox`
+2. Click `Load Temporary Add-on…`
+3. Select `extension/dist-firefox/manifest.json`
+
+The Firefox build emits an event-page background (`background.scripts`, since Firefox does not support MV3 `background.service_worker`) and overrides the extension CSP so a plain `ws://` server is not auto-upgraded to `wss://`. The temporary add-on is removed when Firefox closes; reload it after each restart.
 
 ### 3. Start the local server
 
@@ -62,6 +76,13 @@ Bash:
 ALLOWED_ORIGINS=chrome-extension://<extension-id> \
 npm run dev:server
 ```
+
+**Firefox origin note.** Firefox assigns each install a random `moz-extension://<uuid>` (it changes on reinstall and differs per user), so there is no single value that works for everyone like a fixed Chrome extension ID:
+
+- Self-hosted / few users: read the UUID from `about:debugging` (the extension's Internal UUID / Manifest URL) or from the server's rejected-handshake log, then add that exact `moz-extension://<uuid>` to `ALLOWED_ORIGINS`. You must update it after reinstalling the add-on.
+- Public / shared server: set `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=true` to accept any well-formed `moz-extension://<uuid>` without enumerating UUIDs. It still rejects web-page origins and does not replace room/member-token auth (see the environment variable reference below).
+
+Firefox treats the extension background as a secure context, so non-localhost servers must use `wss://`; the Firefox build already overrides the extension CSP so `ws://localhost` is not force-upgraded during local development.
 
 ### 4. Use it
 
@@ -108,7 +129,7 @@ Video variants:
 
 ```text
 Bili-SyncPlay/
-  extension/            Chrome extension
+  extension/            Browser extension (Chrome/Edge/Firefox)
   server/               WebSocket room server
   packages/protocol/    Shared protocol types
   scripts/              Release packaging scripts
@@ -132,6 +153,7 @@ Bili-SyncPlay/
 | Node.js       | 18                         | 22             | see `.nvmrc`; Node 20 and 22 are both supported                                                   |
 | npm           | 8                          | 10             | ship with the corresponding Node.js version                                                       |
 | Chrome / Edge | current stable             | current stable | required to load the unpacked extension                                                           |
+| Firefox       | 121                        | current stable | optional; uses the Firefox build (`dist-firefox`, event-page background)                          |
 | Redis         | 6.0                        | 7+             | optional for single-node; **required** for multi-node deployments and persistence across restarts |
 | Reverse proxy | any with WebSocket support | Nginx 1.18+    | required in production for TLS termination and `wss://`                                           |
 
@@ -141,14 +163,14 @@ Bili-SyncPlay/
 - **No built-in load balancer.** Multi-node deployments depend on an external edge layer (Nginx, HAProxy, cloud SLB/ALB) for WebSocket connection distribution. The server does not implement L4/L7 balancing.
 - **No browser session restoration after restart.** Room membership (`roomCode`, `joinToken`, `memberToken`) lives in `chrome.storage.session` and is cleared when the browser closes. Users must rejoin after a browser restart.
 - **No multi-user accounts or authentication for end users.** Room access is controlled by `roomCode:joinToken` invite strings only. There is no user registration or login system for viewers.
-- **No mobile browser or Safari support.** The extension architecture is Chrome/Edge Manifest V3 only.
+- **No mobile browser or Safari support.** The extension is Manifest V3 for Chrome/Edge (service-worker background) and Firefox 121+ (event-page background); Safari and mobile browsers are out of scope.
 
 ## Local Defaults
 
 - Default server URL: `ws://localhost:8787`
 - Empty server URL input falls back to the build-time default
 - Only `ws://` and `wss://` are accepted
-- Local unpacked extension development requires `ALLOWED_ORIGINS=chrome-extension://<extension-id>`
+- Local unpacked extension development requires `ALLOWED_ORIGINS=chrome-extension://<extension-id>` (Chrome/Edge) or the current `moz-extension://<uuid>` / `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=true` (Firefox; see "Start the local server")
 
 ### Open the Admin Control Panel
 

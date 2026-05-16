@@ -29,8 +29,11 @@ npm run build
 # Development server (watch mode)
 npm run dev:server
 
-# Build extension only
+# Build extension only (Chrome/Edge → extension/dist)
 npm run build:extension
+
+# Build the Firefox target (event-page background → extension/dist-firefox)
+npm run build:extension:firefox
 
 # Code quality checks
 npm run lint
@@ -43,8 +46,10 @@ npm test
 npm run coverage
 
 # Release
-npm run build:release    # Package extension
-npm run release:version  # Bump version numbers
+npm run build:release          # Package Chrome + Firefox (zip + xpi)
+npm run build:release:chrome   # Chrome/Edge zip only
+npm run build:release:firefox  # Firefox zip + xpi only
+npm run release:version        # Bump version numbers
 ```
 
 **Before every commit**, run in order:
