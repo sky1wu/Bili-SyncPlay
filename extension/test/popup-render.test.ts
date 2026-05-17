@@ -28,16 +28,45 @@ class FakeClassList {
   }
 }
 
-function createElement() {
-  return {
-    textContent: "",
-    hidden: false,
-    disabled: false,
-    value: "",
-    innerHTML: "",
-    classList: new FakeClassList(),
-  };
+class FakeElement {
+  private ownText = "";
+  hidden = false;
+  disabled = false;
+  value = "";
+  className = "";
+  children: FakeElement[] = [];
+  classList = new FakeClassList();
+
+  set textContent(value: string) {
+    this.ownText = value;
+    this.children = [];
+  }
+
+  get textContent(): string {
+    if (this.children.length > 0) {
+      return this.children.map((child) => child.textContent).join("");
+    }
+    return this.ownText;
+  }
+
+  append(...nodes: FakeElement[]): void {
+    this.children.push(...nodes);
+  }
+
+  replaceChildren(...nodes: FakeElement[]): void {
+    this.ownText = "";
+    this.children = nodes;
+  }
 }
+
+function createElement() {
+  return new FakeElement();
+}
+
+const fakeDocument = {
+  activeElement: null,
+  createElement: () => new FakeElement(),
+};
 
 function createPopupRefs(): PopupRefs {
   return {
@@ -102,9 +131,7 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
   const draftValues: string[] = [];
 
   Object.assign(globalThis, {
-    document: {
-      activeElement: null,
-    },
+    document: fakeDocument,
   });
 
   try {
@@ -183,9 +210,9 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
     assert.equal(refs.sharedVideoMeta.textContent, "BV1xx411c7mD");
     assert.equal(refs.sharedVideoOwner.textContent, "Shared by Bob");
     assert.equal(refs.sharedVideoOwner.hidden, false);
-    assert.equal(refs.logs.innerHTML.includes("Connected"), true);
-    assert.equal(refs.memberList.innerHTML.includes("Bob"), true);
-    assert.equal(refs.memberList.innerHTML.includes("Me (Alice)"), true);
+    assert.equal(refs.logs.textContent.includes("Connected"), true);
+    assert.equal(refs.memberList.textContent.includes("Bob"), true);
+    assert.equal(refs.memberList.textContent.includes("Me (Alice)"), true);
   } finally {
     setLocaleForTests(null);
     Object.assign(globalThis, { document: originalDocument });
@@ -200,9 +227,7 @@ test("renderPopup debug log distinguishes background pending state from local UI
   const popupLogs: string[] = [];
 
   Object.assign(globalThis, {
-    document: {
-      activeElement: null,
-    },
+    document: fakeDocument,
   });
 
   try {
@@ -258,9 +283,7 @@ test("renderPopup only logs once for repeated identical pending renders", async 
   const popupLogs: string[] = [];
 
   Object.assign(globalThis, {
-    document: {
-      activeElement: null,
-    },
+    document: fakeDocument,
   });
 
   const renderArgs = {
@@ -318,9 +341,7 @@ test("renderPopup falls back to sharedByDisplayName when the sharer is no longer
   const refs = createPopupRefs();
 
   Object.assign(globalThis, {
-    document: {
-      activeElement: null,
-    },
+    document: fakeDocument,
   });
 
   try {

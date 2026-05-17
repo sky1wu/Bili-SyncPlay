@@ -1,7 +1,6 @@
 import type { RoomMember } from "@bili-syncplay/protocol";
 import type { BackgroundPopupState } from "../shared/messages";
 import { getUiLanguage, t } from "../shared/i18n";
-import { escapeHtml } from "./helpers";
 import {
   getRenderedServerUrlValue,
   type ServerUrlDraftState,
@@ -83,16 +82,11 @@ export function renderPopup(args: {
     args.state.retryAttempt > 0
       ? `(${args.state.retryAttempt}/${args.state.retryAttemptMax})`
       : "";
-  args.refs.clockStatus.innerHTML = `
-    <span class="clock-metric">
-      <span class="clock-metric-label">${escapeHtml(t("metricClockOffset"))}</span>
-      <span class="clock-metric-value">${escapeHtml(formatClockMetricValue(args.state.clockOffsetMs))}</span>
-    </span>
-    <span class="clock-metric">
-      <span class="clock-metric-label">${escapeHtml(t("metricClockRtt"))}</span>
-      <span class="clock-metric-value">${escapeHtml(formatClockMetricValue(args.state.rttMs))}</span>
-    </span>
-  `;
+  renderClockStatus(
+    args.refs.clockStatus,
+    args.state.clockOffsetMs,
+    args.state.rttMs,
+  );
   const visibleMessage = args.localStatusMessage ?? args.state.error;
   args.refs.message.textContent = visibleMessage ?? "";
   args.refs.message.hidden = !visibleMessage;
@@ -194,6 +188,33 @@ function formatClockMetricValue(value: number | null): string {
   return value === null ? "-" : `${value}ms`;
 }
 
+function buildClockMetric(label: string, value: string): HTMLSpanElement {
+  const wrap = document.createElement("span");
+  wrap.className = "clock-metric";
+  const labelEl = document.createElement("span");
+  labelEl.className = "clock-metric-label";
+  labelEl.textContent = label;
+  const valueEl = document.createElement("span");
+  valueEl.className = "clock-metric-value";
+  valueEl.textContent = value;
+  wrap.append(labelEl, valueEl);
+  return wrap;
+}
+
+function renderClockStatus(
+  container: HTMLElement,
+  clockOffsetMs: number | null,
+  rttMs: number | null,
+): void {
+  container.replaceChildren(
+    buildClockMetric(
+      t("metricClockOffset"),
+      formatClockMetricValue(clockOffsetMs),
+    ),
+    buildClockMetric(t("metricClockRtt"), formatClockMetricValue(rttMs)),
+  );
+}
+
 function formatVideoOwner(
   members: RoomMember[],
   actorId: string | null,
@@ -211,18 +232,24 @@ function renderLogs(
   logs: BackgroundPopupState["logs"],
 ): void {
   if (logs.length === 0) {
-    container.innerHTML = `<div class="muted">${escapeHtml(t("stateNoLogs"))}</div>`;
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.textContent = t("stateNoLogs");
+    container.replaceChildren(empty);
     return;
   }
 
-  container.innerHTML = logs
-    .map((entry) => {
+  container.replaceChildren(
+    ...logs.map((entry) => {
       const time = new Date(entry.at).toLocaleTimeString(getUiLanguage(), {
         hour12: false,
       });
-      return `<div class="log-line">[${time}] [${entry.scope}] ${escapeHtml(entry.message)}</div>`;
-    })
-    .join("");
+      const line = document.createElement("div");
+      line.className = "log-line";
+      line.textContent = `[${time}] [${entry.scope}] ${entry.message}`;
+      return line;
+    }),
+  );
 }
 
 function renderMemberList(
@@ -231,17 +258,24 @@ function renderMemberList(
   currentMemberId: string | null,
 ): void {
   if (members.length === 0) {
-    container.innerHTML = `<span class="member-chip">${escapeHtml(t("stateNoMembers"))}</span>`;
+    const chip = document.createElement("span");
+    chip.className = "member-chip";
+    chip.textContent = t("stateNoMembers");
+    container.replaceChildren(chip);
     return;
   }
 
-  container.innerHTML = members
-    .map((member) => {
+  container.replaceChildren(
+    ...members.map((member) => {
       const isCurrentMember = currentMemberId === member.id;
-      const label = isCurrentMember
+      const chip = document.createElement("span");
+      chip.className = isCurrentMember
+        ? "member-chip member-chip-active"
+        : "member-chip";
+      chip.textContent = isCurrentMember
         ? t("memberSelf", { name: member.name })
         : member.name;
-      return `<span class="member-chip${isCurrentMember ? " member-chip-active" : ""}">${escapeHtml(label)}</span>`;
-    })
-    .join("");
+      return chip;
+    }),
+  );
 }

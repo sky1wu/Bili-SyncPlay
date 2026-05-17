@@ -37,7 +37,18 @@ async function init(): Promise<void> {
 
   document.documentElement.lang = getDocumentLanguage();
   document.title = t("popupTitle");
-  app.innerHTML = renderPopupTemplate();
+  // 用 DOMParser 解析静态模板再 adopt 进文档，替代 innerHTML 赋值：
+  // 模板不含任何用户输入，DOMParser 不执行脚本，且 addons-linter 不会
+  // 对其告警（innerHTML 的官方安全替代）。
+  const parsedTemplate = new DOMParser().parseFromString(
+    renderPopupTemplate(),
+    "text/html",
+  );
+  app.replaceChildren(
+    ...Array.from(parsedTemplate.body.childNodes, (node) =>
+      document.importNode(node, true),
+    ),
+  );
 
   refs = collectPopupRefs();
   bindPopupActions({
