@@ -1247,3 +1247,131 @@ test("sync controller releases post-navigation anchor and broadcasts once resolv
     "broadcast should proceed once resolved url differs from the anchor",
   );
 });
+
+test("sync controller broadcasts buffering when active pause is classified as buffer", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: true,
+    readyState: 4,
+    currentTime: 40,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.runtimeState.pauseStartedAt = 20_000;
+  harness.runtimeState.pauseClassifiedAsBuffer = true;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  harness.controller = createSyncController({
+    runtimeState: harness.runtimeState,
+    lastAppliedVersionByActor: new Map(),
+    broadcastLogState: { key: null, at: 0 },
+    ignoredSelfPlaybackLogState: { key: null, at: 0 },
+    localIntentGuardMs: 500,
+    pauseHoldMs: 1_000,
+    initialRoomStatePauseHoldMs: 1_500,
+    remoteEchoSuppressionMs: 800,
+    remotePlayTransitionGuardMs: 500,
+    remoteFollowPlayingWindowMs: 3_000,
+    programmaticApplyWindowMs: 700,
+    userGestureGraceMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    remotePauseDebounceMs: 0,
+    nextSeq: () => 1,
+    markBroadcastAt: () => {},
+    getNow: () => 20_400,
+    debugLog: (message) => harness.debugLogs.push(message),
+    shouldLogHeartbeat: () => true,
+    runtimeSendMessage: async (message) => {
+      harness.runtimeMessages.push(message);
+      return null;
+    },
+    getVideoElement: () => video,
+    getCurrentPlaybackVideo: async () => sharedVideo,
+    getSharedVideo: () => sharedVideo,
+    normalizeUrl: (url) => url?.trim() ?? null,
+    notifyRoomStateToasts: () => {},
+    maybeShowSharedVideoToast: () => {},
+  });
+
+  await harness.controller.broadcastPlayback(video, "pause");
+
+  assert.equal(harness.runtimeMessages.length, 1);
+  const payload = (
+    harness.runtimeMessages[0] as { payload: { playState: string } }
+  ).payload;
+  assert.equal(payload.playState, "buffering");
+});
+
+test("sync controller broadcasts paused once buffer-pause upgrade window elapses", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: true,
+    readyState: 4,
+    currentTime: 40,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.runtimeState.pauseStartedAt = 20_000;
+  harness.runtimeState.pauseClassifiedAsBuffer = true;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  harness.controller = createSyncController({
+    runtimeState: harness.runtimeState,
+    lastAppliedVersionByActor: new Map(),
+    broadcastLogState: { key: null, at: 0 },
+    ignoredSelfPlaybackLogState: { key: null, at: 0 },
+    localIntentGuardMs: 500,
+    pauseHoldMs: 1_000,
+    initialRoomStatePauseHoldMs: 1_500,
+    remoteEchoSuppressionMs: 800,
+    remotePlayTransitionGuardMs: 500,
+    remoteFollowPlayingWindowMs: 3_000,
+    programmaticApplyWindowMs: 700,
+    userGestureGraceMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    remotePauseDebounceMs: 0,
+    nextSeq: () => 1,
+    markBroadcastAt: () => {},
+    getNow: () => 21_700, // 1700ms after pauseStartedAt, past upgrade threshold
+    debugLog: (message) => harness.debugLogs.push(message),
+    shouldLogHeartbeat: () => true,
+    runtimeSendMessage: async (message) => {
+      harness.runtimeMessages.push(message);
+      return null;
+    },
+    getVideoElement: () => video,
+    getCurrentPlaybackVideo: async () => sharedVideo,
+    getSharedVideo: () => sharedVideo,
+    normalizeUrl: (url) => url?.trim() ?? null,
+    notifyRoomStateToasts: () => {},
+    maybeShowSharedVideoToast: () => {},
+  });
+
+  await harness.controller.broadcastPlayback(video, "pause");
+
+  assert.equal(harness.runtimeMessages.length, 1);
+  const payload = (
+    harness.runtimeMessages[0] as { payload: { playState: string } }
+  ).payload;
+  assert.equal(payload.playState, "paused");
+});

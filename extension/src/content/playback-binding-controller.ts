@@ -25,6 +25,17 @@ export function createPlaybackBindingController(args: {
   videoBindIntervalMs: number;
   userGestureGraceMs: number;
   initialRoomStatePauseHoldMs: number;
+  /**
+   * Window after a `waiting`/`stalled` event during which a subsequent
+   * `pause` event is presumed buffer-induced rather than user-initiated.
+   */
+  bufferSignalWindowMs: number;
+  /**
+   * Maximum duration to keep reporting a buffer-induced pause as
+   * `buffering` to peers before re-broadcasting it as `paused`. Bounds the
+   * worst-case desync if a buffer stall turns into a real stop.
+   */
+  bufferPauseUpgradeMs: number;
   getSharedVideo: () => SharedVideo | null;
   hasRecentRemoteStopIntent: (currentVideoUrl: string) => boolean;
   normalizeUrl: (url: string | undefined | null) => string | null;
@@ -44,7 +55,43 @@ export function createPlaybackBindingController(args: {
   getNow?: () => number;
 }): PlaybackBindingController {
   let videoBindingTimer: number | null = null;
+  let pauseBufferUpgradeTimerId: number | null = null;
   const nowOf = () => args.getNow?.() ?? Date.now();
+  const scheduleUpgradeTimer = (cb: () => void, ms: number): number | null => {
+    if (
+      typeof globalThis.window !== "undefined" &&
+      typeof globalThis.window.setTimeout === "function"
+    ) {
+      return globalThis.window.setTimeout(cb, ms) as unknown as number;
+    }
+    if (typeof globalThis.setTimeout === "function") {
+      return globalThis.setTimeout(cb, ms) as unknown as number;
+    }
+    return null;
+  };
+  const cancelUpgradeTimer = (id: number): void => {
+    if (
+      typeof globalThis.window !== "undefined" &&
+      typeof globalThis.window.clearTimeout === "function"
+    ) {
+      globalThis.window.clearTimeout(id);
+      return;
+    }
+    if (typeof globalThis.clearTimeout === "function") {
+      globalThis.clearTimeout(id);
+    }
+  };
+  const clearBufferUpgradeTimer = () => {
+    if (pauseBufferUpgradeTimerId !== null) {
+      cancelUpgradeTimer(pauseBufferUpgradeTimerId);
+      pauseBufferUpgradeTimerId = null;
+    }
+  };
+  const clearActivePauseClassification = () => {
+    args.runtimeState.pauseStartedAt = 0;
+    args.runtimeState.pauseClassifiedAsBuffer = false;
+    clearBufferUpgradeTimer();
+  };
   const hasRecentUserGesture = () =>
     nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs;
   const getRecentExplicitSeekWithoutNewGestureAt = (): number | null => {
@@ -329,6 +376,7 @@ export function createPlaybackBindingController(args: {
         if (guardUnexpectedResume()) {
           return;
         }
+        clearActivePauseClassification();
         rememberExplicitPlaybackAction("playing");
         rememberExplicitUserAction("play");
         scheduleBroadcast(video, "play", 180);
@@ -337,6 +385,32 @@ export function createPlaybackBindingController(args: {
         const currentVideo = args.getSharedVideo();
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "pause");
+        }
+        const now = nowOf();
+        const recentBufferSignal =
+          args.runtimeState.lastBufferSignalAt > 0 &&
+          now - args.runtimeState.lastBufferSignalAt <
+            args.bufferSignalWindowMs;
+        const userInitiatedPause =
+          hasRecentUserGesture() &&
+          args.runtimeState.lastUserGestureAt >
+            args.runtimeState.lastForcedPauseAt;
+        const bufferInduced = recentBufferSignal && !userInitiatedPause;
+        args.runtimeState.pauseStartedAt = now;
+        args.runtimeState.pauseClassifiedAsBuffer = bufferInduced;
+        clearBufferUpgradeTimer();
+        if (bufferInduced) {
+          pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
+            pauseBufferUpgradeTimerId = null;
+            if (!video.paused) {
+              return;
+            }
+            args.runtimeState.pauseClassifiedAsBuffer = false;
+            args.debugLog(
+              `Buffer-pause upgraded to paused after ${args.bufferPauseUpgradeMs}ms, re-broadcasting`,
+            );
+            void args.broadcastPlayback(video, "pause");
+          }, args.bufferPauseUpgradeMs);
         }
         rememberExplicitPlaybackAction("paused");
         rememberExplicitUserAction("pause");
@@ -349,8 +423,14 @@ export function createPlaybackBindingController(args: {
         }
         scheduleBroadcast(video, "pause", 120);
       },
-      onWaiting: () => scheduleBroadcast(video, "waiting"),
-      onStalled: () => scheduleBroadcast(video, "stalled"),
+      onWaiting: () => {
+        args.runtimeState.lastBufferSignalAt = nowOf();
+        scheduleBroadcast(video, "waiting");
+      },
+      onStalled: () => {
+        args.runtimeState.lastBufferSignalAt = nowOf();
+        scheduleBroadcast(video, "stalled");
+      },
       onLoadedMetadata: () => {
         if (!forcePauseWhileWaitingForInitialRoomState(video)) {
           args.applyPendingPlaybackApplication(video);
@@ -369,6 +449,7 @@ export function createPlaybackBindingController(args: {
         if (guardUnexpectedResume()) {
           return;
         }
+        clearActivePauseClassification();
         rememberExplicitPlaybackAction("playing");
         rememberExplicitUserAction("play");
         scheduleBroadcast(video, "playing", 180);
@@ -418,6 +499,7 @@ export function createPlaybackBindingController(args: {
         window.clearInterval(videoBindingTimer);
         videoBindingTimer = null;
       }
+      clearBufferUpgradeTimer();
     },
   };
 }

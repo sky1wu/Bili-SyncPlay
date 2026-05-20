@@ -70,6 +70,18 @@ export function createSyncController(args: {
   remoteFollowPlayingWindowMs: number;
   programmaticApplyWindowMs: number;
   userGestureGraceMs: number;
+  /**
+   * Window during which a buffer-induced pause is broadcast as `buffering`
+   * instead of `paused`. After this elapses the binding layer re-broadcasts
+   * as `paused`.
+   */
+  bufferPauseUpgradeMs: number;
+  /**
+   * Delay before applying a remote `paused` room state, to absorb the
+   * "pause→play within ~1s" flicker emitted by peers experiencing buffer
+   * stalls. Set to 0 to disable.
+   */
+  remotePauseDebounceMs: number;
   nextSeq: () => number;
   markBroadcastAt: (at: number) => void;
   getNow?: () => number;
@@ -596,6 +608,16 @@ export function createSyncController(args: {
         argsForBroadcast.eventSource === "stalled")
     ) {
       return "playing";
+    }
+
+    if (
+      basePlayState === "paused" &&
+      args.runtimeState.pauseClassifiedAsBuffer &&
+      args.runtimeState.pauseStartedAt > 0 &&
+      argsForBroadcast.now - args.runtimeState.pauseStartedAt <
+        args.bufferPauseUpgradeMs
+    ) {
+      return "buffering";
     }
 
     return basePlayState;
@@ -1160,6 +1182,7 @@ export function createSyncController(args: {
     pauseHoldMs: args.pauseHoldMs,
     initialRoomStatePauseHoldMs: args.initialRoomStatePauseHoldMs,
     userGestureGraceMs: args.userGestureGraceMs,
+    remotePauseDebounceMs: args.remotePauseDebounceMs,
     getNow: args.getNow,
     debugLog: args.debugLog,
     shouldLogHeartbeat: args.shouldLogHeartbeat,

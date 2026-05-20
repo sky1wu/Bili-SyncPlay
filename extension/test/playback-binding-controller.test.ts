@@ -703,3 +703,198 @@ test("playback binding controller blocks non-shared autoplay replayed after a fo
     dom.restore();
   }
 });
+
+test("playback binding controller classifies pause as buffer when waiting fired recently", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 0;
+  let now = 5_000;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    assert.equal(runtimeState.lastBufferSignalAt, 5_000);
+
+    now = 5_120;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+    assert.equal(runtimeState.pauseStartedAt, 5_120);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller treats pause as user-initiated when fresh gesture preceded it", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  let now = 5_000;
+  runtimeState.lastUserGestureAt = 4_950; // fresh gesture
+  runtimeState.lastForcedPauseAt = 0;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    // A waiting event fires shortly before the pause, but since the user
+    // also just clicked, classification should fall back to user pause.
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    now = 5_120;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+    assert.equal(runtimeState.pauseStartedAt, 5_120);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller clears buffer-pause classification on resume", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 0;
+  let now = 5_000;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    now = 5_100;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+
+    now = 5_800;
+    dom.video.paused = false;
+    dom.listeners.get("playing")?.(new Event("playing"));
+
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+    assert.equal(runtimeState.pauseStartedAt, 0);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller re-broadcasts paused after buffer-pause upgrade threshold", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 0;
+  let now = 5_000;
+  const broadcasts: string[] = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const scheduledTimers: Array<{ cb: () => void; ms: number }> = [];
+  globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
+    if (typeof callback === "function") {
+      scheduledTimers.push({ cb: callback as () => void, ms: ms ?? 0 });
+    }
+    return scheduledTimers.length;
+  }) as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    now = 5_100;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+
+    await Promise.resolve();
+    // Initial broadcasts from pause + 120ms followup (captured but not fired here)
+    assert.equal(broadcasts.includes("pause"), true);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+    const upgradeTimer = scheduledTimers.find((t) => t.ms === 1_500);
+    assert.notEqual(upgradeTimer, undefined);
+
+    // Fire the upgrade timer: video still paused, should re-broadcast and clear classification
+    now = 6_600;
+    broadcasts.length = 0;
+    upgradeTimer?.cb();
+    await Promise.resolve();
+
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+    assert.equal(broadcasts.includes("pause"), true);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.restore();
+  }
+});
