@@ -30,6 +30,13 @@ export function createRoomStateApplyController(args: {
   pauseHoldMs: number;
   initialRoomStatePauseHoldMs: number;
   userGestureGraceMs: number;
+  /**
+   * Delay before applying a remote `paused` room state, to absorb the
+   * "pause→play within ~1s" flicker emitted by peers experiencing buffer
+   * stalls. When 0 the debounce is disabled and paused is applied
+   * synchronously.
+   */
+  remotePauseDebounceMs?: number;
   getNow?: () => number;
   debugLog: (message: string) => void;
   shouldLogHeartbeat: (
@@ -104,6 +111,38 @@ export function createRoomStateApplyController(args: {
   const nowOf = () => args.getNow?.() ?? Date.now();
   let hydrateRetryTimer: number | null = null;
   let destroyed = false;
+  const remotePauseDebounceMs = args.remotePauseDebounceMs ?? 0;
+  const scheduleDeferTimer = (cb: () => void, ms: number): number | null => {
+    if (
+      typeof globalThis.window !== "undefined" &&
+      typeof globalThis.window.setTimeout === "function"
+    ) {
+      return globalThis.window.setTimeout(cb, ms) as unknown as number;
+    }
+    if (typeof globalThis.setTimeout === "function") {
+      return globalThis.setTimeout(cb, ms) as unknown as number;
+    }
+    return null;
+  };
+  const cancelDeferTimer = (id: number): void => {
+    if (
+      typeof globalThis.window !== "undefined" &&
+      typeof globalThis.window.clearTimeout === "function"
+    ) {
+      globalThis.window.clearTimeout(id);
+      return;
+    }
+    if (typeof globalThis.clearTimeout === "function") {
+      globalThis.clearTimeout(id);
+    }
+  };
+  const clearDeferredRemotePaused = (): void => {
+    if (args.runtimeState.deferredRemotePausedTimerId !== null) {
+      cancelDeferTimer(args.runtimeState.deferredRemotePausedTimerId);
+      args.runtimeState.deferredRemotePausedTimerId = null;
+    }
+    args.runtimeState.deferredRemotePausedState = null;
+  };
 
   /**
    * When hydrating an empty room, suppress autoplay only if the video was not
@@ -155,7 +194,60 @@ export function createRoomStateApplyController(args: {
   async function applyRoomState(
     state: RoomState,
     shareToast: SharedVideoToastPayload | null = null,
+    fromDebounce = false,
   ): Promise<void> {
+    if (
+      !fromDebounce &&
+      remotePauseDebounceMs > 0 &&
+      state.playback &&
+      state.playback.playState === "paused" &&
+      args.runtimeState.localMemberId !== null &&
+      state.playback.actorId !== args.runtimeState.localMemberId
+    ) {
+      if (args.runtimeState.deferredRemotePausedTimerId !== null) {
+        cancelDeferTimer(args.runtimeState.deferredRemotePausedTimerId);
+        args.runtimeState.deferredRemotePausedTimerId = null;
+      }
+      const deferredPlayback = state.playback;
+      args.runtimeState.deferredRemotePausedState = state;
+      args.runtimeState.deferredRemotePausedTimerId = scheduleDeferTimer(() => {
+        args.runtimeState.deferredRemotePausedTimerId = null;
+        const pending = args.runtimeState.deferredRemotePausedState;
+        args.runtimeState.deferredRemotePausedState = null;
+        if (!pending || destroyed) {
+          return;
+        }
+        void applyRoomState(pending, null, true);
+      }, remotePauseDebounceMs);
+      args.debugLog(
+        `Deferred remote paused url=${deferredPlayback.url} seq=${deferredPlayback.seq} for ${remotePauseDebounceMs}ms`,
+      );
+      return;
+    }
+
+    if (
+      args.runtimeState.deferredRemotePausedState &&
+      state.playback &&
+      state.playback.playState === "playing"
+    ) {
+      const deferredState = args.runtimeState.deferredRemotePausedState;
+      const deferredPlayback = deferredState.playback;
+      if (deferredPlayback) {
+        const sameUrl =
+          args.normalizeUrl(state.playback.url) ===
+          args.normalizeUrl(deferredPlayback.url);
+        const closeT =
+          Math.abs(state.playback.currentTime - deferredPlayback.currentTime) <
+          0.5;
+        if (sameUrl && closeT) {
+          clearDeferredRemotePaused();
+          args.debugLog(
+            `Dropped flicker paused seq=${deferredPlayback.seq} superseded by playing seq=${state.playback.seq}`,
+          );
+        }
+      }
+    }
+
     args.notifyRoomStateToasts(state);
     args.maybeShowSharedVideoToast(shareToast, state);
 
@@ -521,6 +613,7 @@ export function createRoomStateApplyController(args: {
       window.clearTimeout(hydrateRetryTimer);
       hydrateRetryTimer = null;
     }
+    clearDeferredRemotePaused();
   }
 
   return {

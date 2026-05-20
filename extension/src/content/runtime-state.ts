@@ -1,4 +1,4 @@
-import type { PlaybackState } from "@bili-syncplay/protocol";
+import type { PlaybackState, RoomState } from "@bili-syncplay/protocol";
 
 export interface FestivalVideoSnapshot {
   videoId: string;
@@ -107,6 +107,36 @@ export interface ContentRuntimeState {
   postNavigationAnchorSharedUrl: string | null;
   postNavigationAnchorSetAt: number;
   festivalSnapshot: FestivalVideoSnapshot | null;
+  /**
+   * Timestamp of the most recent `waiting`/`stalled` event from the local
+   * video element. Used to distinguish buffer-induced pauses (which should be
+   * reported to peers as `buffering`) from user-initiated pauses.
+   */
+  lastBufferSignalAt: number;
+  /**
+   * Timestamp when the local video most recently transitioned to `paused`.
+   * Reset to 0 once playback resumes. Together with
+   * [[pauseClassifiedAsBuffer]] this powers the "buffer-pause → buffering"
+   * remote broadcast classification and its upgrade-to-`paused` timeout.
+   */
+  pauseStartedAt: number;
+  /**
+   * Whether the active pause is currently classified as buffer-induced. Set
+   * on the `pause` event when a `waiting`/`stalled` signal occurred very
+   * recently and no fresh user gesture preceded the pause; cleared on
+   * resume. The broadcast layer reports `buffering` instead of `paused`
+   * while this flag is on and within the upgrade threshold.
+   */
+  pauseClassifiedAsBuffer: boolean;
+  /**
+   * When a remote `paused` room state arrives, we briefly hold off applying
+   * it to absorb the common "buffer hiccup" pattern where the remote sends
+   * `paused` then immediately `playing` within ~1s. While this field is set,
+   * a matching `playing` arrival (same URL, |t-delta| < 0.5s) drops the
+   * deferred paused entirely.
+   */
+  deferredRemotePausedState: RoomState | null;
+  deferredRemotePausedTimerId: number | null;
 }
 
 /**
@@ -158,5 +188,10 @@ export function createContentRuntimeState(): ContentRuntimeState {
     postNavigationAnchorSharedUrl: null,
     postNavigationAnchorSetAt: 0,
     festivalSnapshot: null,
+    lastBufferSignalAt: 0,
+    pauseStartedAt: 0,
+    pauseClassifiedAsBuffer: false,
+    deferredRemotePausedState: null,
+    deferredRemotePausedTimerId: null,
   };
 }
