@@ -11,6 +11,7 @@ export type EventStoreQuery = GlobalEventStoreQuery;
 
 const MINUTE_MS = 60_000;
 const WINDOW_RETENTION_MS = 24 * 60 * 60_000;
+const FUTURE_TIMESTAMP_PRUNE_GRACE_MS = 5 * 60_000;
 
 type TimestampCount = {
   timestampMs: number;
@@ -60,6 +61,13 @@ function countTimestampEntriesInWindow(
   return total;
 }
 
+function retentionReferenceTimestamp(timestampMs: number): number {
+  const nowMs = Date.now();
+  return timestampMs > nowMs + FUTURE_TIMESTAMP_PRUNE_GRACE_MS
+    ? nowMs
+    : timestampMs;
+}
+
 export function createEventStore(capacity = 1_000): EventStore {
   const events: RuntimeEvent[] = [];
   const cumulativeCounts = new Map<string, number>();
@@ -90,7 +98,11 @@ export function createEventStore(capacity = 1_000): EventStore {
     if (!Number.isFinite(timestampMs)) {
       return;
     }
-    latestWindowTimestampMs = Math.max(latestWindowTimestampMs, timestampMs);
+    const retentionReferenceMs = retentionReferenceTimestamp(timestampMs);
+    latestWindowTimestampMs = Math.max(
+      latestWindowTimestampMs,
+      retentionReferenceMs,
+    );
     const oldestKeptMs = latestWindowTimestampMs - WINDOW_RETENTION_MS;
     if (timestampMs < oldestKeptMs) {
       return;

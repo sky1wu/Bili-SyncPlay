@@ -212,6 +212,58 @@ test("countsByEventInWindow stays ms-accurate after boundary entries leave the s
   }
 });
 
+test("countsByEventInWindow ignores far-future timestamps when pruning the redis window index", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keys = createKeyTriplet();
+  const store = await createRedisEventStore(REDIS_URL, {
+    ...keys,
+    maxLen: 1,
+  });
+  const now = Date.now();
+
+  try {
+    await store.append({
+      event: "rate_limited",
+      timestamp: new Date(now - 30_000).toISOString(),
+      data: { result: "blocked" },
+    });
+    await store.append({
+      event: "rate_limited",
+      timestamp: new Date(now - 10_000).toISOString(),
+      data: { result: "blocked" },
+    });
+    await store.append({
+      event: "rate_limited",
+      timestamp: new Date(now + 25 * 60 * 60_000).toISOString(),
+      data: { result: "blocked" },
+    });
+    await store.append({
+      event: "rate_limited",
+      timestamp: new Date(now - 5_000).toISOString(),
+      data: { result: "blocked" },
+    });
+
+    const lastMinute = await store.countsByEventInWindow(
+      ["rate_limited"],
+      now - 60_000,
+      now + 1_000,
+    );
+    assert.equal(lastMinute.rate_limited, 3);
+
+    const streamSurvivors = await store.query({
+      page: 1,
+      pageSize: 10,
+    });
+    assert.equal(streamSurvivors.total, 1);
+  } finally {
+    await store.close();
+  }
+});
+
 test("redis event store backfills the window index without replacing existing entries", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");

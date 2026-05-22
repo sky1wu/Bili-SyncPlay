@@ -15,6 +15,7 @@ const DEFAULT_EVENT_WINDOW_INDEX_KEY_PREFIX = "bsp:event_window_index";
 const DEFAULT_EVENT_STREAM_MAX_LEN = 1_000;
 const MINUTE_MS = 60_000;
 const WINDOW_RETENTION_MS = 24 * 60 * 60_000;
+const FUTURE_TIMESTAMP_PRUNE_GRACE_MS = 5 * 60_000;
 const LEGACY_COUNTS_MIGRATION_MARKER_SUFFIX = ":legacy_migrated";
 
 const MIGRATE_LEGACY_COUNTS_LUA = `
@@ -88,6 +89,13 @@ function eventTime(event: RuntimeEvent): number {
 
 function eventWindowIndexKey(prefix: string, eventName: string): string {
   return `${prefix}:${encodeURIComponent(eventName)}`;
+}
+
+function retentionReferenceTimestamp(timestampMs: number): number {
+  const nowMs = Date.now();
+  return timestampMs > nowMs + FUTURE_TIMESTAMP_PRUNE_GRACE_MS
+    ? nowMs
+    : timestampMs;
 }
 
 function matchesQuery(
@@ -235,12 +243,14 @@ export async function createRedisEventStore(
     if (!Number.isFinite(currentTimestampMs)) {
       return;
     }
-    const currentMinute = Math.floor(currentTimestampMs / MINUTE_MS);
+    const retentionReferenceMs =
+      retentionReferenceTimestamp(currentTimestampMs);
+    const currentMinute = Math.floor(retentionReferenceMs / MINUTE_MS);
     if (lastPrunedMinuteByEvent.get(eventName) === currentMinute) {
       return;
     }
     lastPrunedMinuteByEvent.set(eventName, currentMinute);
-    const oldestKeptMs = currentTimestampMs - WINDOW_RETENTION_MS;
+    const oldestKeptMs = retentionReferenceMs - WINDOW_RETENTION_MS;
     await redis.zremrangebyscore(
       eventWindowIndexKey(windowIndexKeyPrefix, eventName),
       "-inf",

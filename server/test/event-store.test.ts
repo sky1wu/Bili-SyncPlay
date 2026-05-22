@@ -195,6 +195,46 @@ test("countsByEventInWindow stays ms-accurate after boundary entries leave the r
   assert.equal(queryResult.total, 1);
 });
 
+test("countsByEventInWindow ignores far-future timestamps when pruning the window index", async () => {
+  const store = createEventStore(1);
+  const now = Date.now();
+
+  await store.append({
+    event: "rate_limited",
+    timestamp: new Date(now - 30_000).toISOString(),
+    data: { result: "blocked" },
+  });
+  await store.append({
+    event: "rate_limited",
+    timestamp: new Date(now - 10_000).toISOString(),
+    data: { result: "blocked" },
+  });
+  await store.append({
+    event: "rate_limited",
+    timestamp: new Date(now + 25 * 60 * 60_000).toISOString(),
+    data: { result: "blocked" },
+  });
+  await store.append({
+    event: "rate_limited",
+    timestamp: new Date(now - 5_000).toISOString(),
+    data: { result: "blocked" },
+  });
+
+  const lastMinute = await store.countsByEventInWindow(
+    ["rate_limited"],
+    now - 60_000,
+    now + 1_000,
+  );
+  assert.equal(lastMinute.rate_limited, 3);
+
+  const queryResult = await store.query({
+    event: "rate_limited",
+    page: 1,
+    pageSize: 10,
+  });
+  assert.equal(queryResult.total, 1);
+});
+
 test("countsByEventInWindow keeps the 24h boundary timestamp alive", async () => {
   // The 24h ms range includes an event exactly at the start boundary.
   // Retention must keep that timestamp so an inclusive query does not
