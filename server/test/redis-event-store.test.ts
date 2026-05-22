@@ -258,6 +258,87 @@ test("redis event store backfills the window index without replacing existing en
   }
 });
 
+test("redis event store migrates legacy cumulative counts into a namespaced key once", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keys = createKeyTriplet();
+  const legacyCountsKey = `${keys.countsKey}:legacy`;
+  const migrationMarkerKey = `${keys.countsKey}:legacy_migrated`;
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  try {
+    await redis.hset(
+      legacyCountsKey,
+      "room_created",
+      "123",
+      "rate_limited",
+      "7",
+    );
+    await redis.xadd(
+      keys.streamKey,
+      "*",
+      "event",
+      "room_created",
+      "timestamp",
+      "2026-03-26T10:07:10.000Z",
+    );
+
+    const storeA = await createRedisEventStore(REDIS_URL, {
+      ...keys,
+      legacyCountsKey,
+      maxLen: 10,
+    });
+    try {
+      const migratedCounts = await storeA.totalCountsByEvent([
+        "room_created",
+        "rate_limited",
+      ]);
+      assert.equal(migratedCounts.room_created, 123);
+      assert.equal(migratedCounts.rate_limited, 7);
+
+      await storeA.append({
+        event: "room_created",
+        timestamp: "2026-03-26T10:08:10.000Z",
+        data: { roomCode: "ROOM01", result: "ok" },
+      });
+    } finally {
+      await storeA.close();
+    }
+
+    const storeB = await createRedisEventStore(REDIS_URL, {
+      ...keys,
+      legacyCountsKey,
+      maxLen: 10,
+    });
+    try {
+      const countsAfterRestart = await storeB.totalCountsByEvent([
+        "room_created",
+        "rate_limited",
+      ]);
+      assert.equal(countsAfterRestart.room_created, 124);
+      assert.equal(countsAfterRestart.rate_limited, 7);
+    } finally {
+      await storeB.close();
+    }
+  } finally {
+    await redis.del(
+      keys.streamKey,
+      keys.countsKey,
+      legacyCountsKey,
+      migrationMarkerKey,
+      `${keys.windowIndexKeyPrefix}:room_created`,
+    );
+    await redis.quit();
+  }
+});
+
 test("countsByEventInWindow keeps the 24h boundary timestamp alive", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");

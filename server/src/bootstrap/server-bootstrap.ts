@@ -320,6 +320,9 @@ export async function createServerBootstrapContext(
       ? await createRedisEventStore(persistenceConfig.redisUrl, {
           streamKey: getRedisEventStreamKey(persistenceConfig.redisNamespace),
           countsKey: getRedisEventCountsKey(persistenceConfig.redisNamespace),
+          legacyCountsKey: persistenceConfig.redisNamespace
+            ? getRedisEventCountsKey()
+            : undefined,
           windowIndexKeyPrefix: getRedisEventWindowIndexKeyPrefix(
             persistenceConfig.redisNamespace,
           ),

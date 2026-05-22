@@ -15,6 +15,28 @@ const DEFAULT_EVENT_WINDOW_INDEX_KEY_PREFIX = "bsp:event_window_index";
 const DEFAULT_EVENT_STREAM_MAX_LEN = 1_000;
 const MINUTE_MS = 60_000;
 const WINDOW_RETENTION_MS = 24 * 60 * 60_000;
+const LEGACY_COUNTS_MIGRATION_MARKER_SUFFIX = ":legacy_migrated";
+
+const MIGRATE_LEGACY_COUNTS_LUA = `
+if KEYS[1] == KEYS[2] then
+  return 0
+end
+if redis.call("EXISTS", KEYS[3]) == 1 then
+  return 0
+end
+local fields = redis.call("HGETALL", KEYS[1])
+if #fields == 0 then
+  return 0
+end
+for index = 1, #fields, 2 do
+  local value = tonumber(fields[index + 1])
+  if value ~= nil and value ~= 0 then
+    redis.call("HINCRBY", KEYS[2], fields[index], value)
+  end
+end
+redis.call("SET", KEYS[3], "1")
+return #fields / 2
+`;
 
 function normalizeNullable(value: string | undefined): string | null {
   return value && value.length > 0 ? value : null;
@@ -108,6 +130,7 @@ export async function createRedisEventStore(
   options: {
     streamKey?: string;
     countsKey?: string;
+    legacyCountsKey?: string;
     windowIndexKeyPrefix?: string;
     maxLen?: number;
   } = {},
@@ -118,6 +141,10 @@ export async function createRedisEventStore(
   });
   const streamKey = options.streamKey ?? DEFAULT_EVENT_STREAM_KEY;
   const countsKey = options.countsKey ?? DEFAULT_EVENT_COUNTS_KEY;
+  const legacyCountsKey =
+    options.legacyCountsKey && options.legacyCountsKey !== countsKey
+      ? options.legacyCountsKey
+      : undefined;
   const windowIndexKeyPrefix =
     options.windowIndexKeyPrefix ?? DEFAULT_EVENT_WINDOW_INDEX_KEY_PREFIX;
   const maxLen = options.maxLen ?? DEFAULT_EVENT_STREAM_MAX_LEN;
@@ -126,6 +153,16 @@ export async function createRedisEventStore(
   const lastPrunedMinuteByEvent = new Map<string, number>();
 
   await redis.connect();
+
+  if (legacyCountsKey) {
+    await redis.eval(
+      MIGRATE_LEGACY_COUNTS_LUA,
+      3,
+      legacyCountsKey,
+      countsKey,
+      `${countsKey}${LEGACY_COUNTS_MIGRATION_MARKER_SUFFIX}`,
+    );
+  }
 
   // Backfill cumulative counts from existing stream entries if the hash
   // does not exist yet (first startup after upgrade).
