@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Redis } from "ioredis";
 import { createRedisEventStore } from "../src/admin/redis-event-store.js";
 
 const REDIS_URL = process.env.REDIS_URL;
@@ -11,13 +12,13 @@ function createStreamKey(): string {
 function createKeyTriplet(): {
   streamKey: string;
   countsKey: string;
-  minuteCountsKey: string;
+  windowIndexKeyPrefix: string;
 } {
   const suffix = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
   return {
     streamKey: `bsp:test:events:${suffix}`,
     countsKey: `bsp:test:event_counts:${suffix}`,
-    minuteCountsKey: `bsp:test:event_minute_counts:${suffix}`,
+    windowIndexKeyPrefix: `bsp:test:event_window_index:${suffix}`,
   };
 }
 
@@ -123,7 +124,7 @@ test("countsByEventInWindow returns accurate windowed counts even after the stre
       data: { result: "blocked" },
     });
     // These appends evict the earlier stream entries thanks to maxLen=2,
-    // but the per-minute counter must still remember both rate_limited
+    // but the timestamp index must still remember both rate_limited
     // events from 13:00.
     await store.append({
       event: "room_joined",
@@ -164,7 +165,100 @@ test("countsByEventInWindow returns accurate windowed counts even after the stre
   }
 });
 
-test("countsByEventInWindow keeps the 24h boundary minute bucket alive", async (t) => {
+test("countsByEventInWindow stays ms-accurate after boundary entries leave the stream", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keys = createKeyTriplet();
+  const store = await createRedisEventStore(REDIS_URL, {
+    ...keys,
+    maxLen: 1,
+  });
+
+  try {
+    await store.append({
+      event: "rate_limited",
+      timestamp: "2026-03-26T10:06:15.000Z",
+      data: { result: "blocked" },
+    });
+    await store.append({
+      event: "rate_limited",
+      timestamp: "2026-03-26T10:06:45.000Z",
+      data: { result: "blocked" },
+    });
+    await store.append({
+      event: "rate_limited",
+      timestamp: "2026-03-26T10:07:10.000Z",
+      data: { result: "blocked" },
+    });
+
+    const now = Date.parse("2026-03-26T10:07:30.000Z");
+    const lastMinute = await store.countsByEventInWindow(
+      ["rate_limited"],
+      now - 60_000,
+      now,
+    );
+    assert.equal(lastMinute.rate_limited, 2);
+
+    const streamSurvivors = await store.query({
+      page: 1,
+      pageSize: 10,
+    });
+    assert.equal(streamSurvivors.total, 1);
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis event store backfills the window index without replacing existing entries", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keys = createKeyTriplet();
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  const existingTimestamp = Date.parse("2026-03-26T10:06:45.000Z");
+  const indexKey = `${keys.windowIndexKeyPrefix}:rate_limited`;
+  await redis.connect();
+
+  try {
+    await redis.zadd(indexKey, String(existingTimestamp), "concurrent-entry");
+    await redis.xadd(
+      keys.streamKey,
+      "*",
+      "event",
+      "rate_limited",
+      "timestamp",
+      "2026-03-26T10:07:10.000Z",
+    );
+
+    const store = await createRedisEventStore(REDIS_URL, {
+      ...keys,
+      maxLen: 10,
+    });
+    try {
+      const counts = await store.countsByEventInWindow(
+        ["rate_limited"],
+        Date.parse("2026-03-26T10:06:30.000Z"),
+        Date.parse("2026-03-26T10:07:30.000Z"),
+      );
+      assert.equal(counts.rate_limited, 2);
+    } finally {
+      await store.close();
+    }
+  } finally {
+    await redis.del(keys.streamKey, keys.countsKey, indexKey);
+    await redis.quit();
+  }
+});
+
+test("countsByEventInWindow keeps the 24h boundary timestamp alive", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
@@ -182,8 +276,8 @@ test("countsByEventInWindow keeps the 24h boundary minute bucket alive", async (
       timestamp: "2026-03-26T10:00:00.000Z",
       data: { result: "blocked" },
     });
-    // Exactly 1440 minutes later: retention must keep the boundary bucket
-    // so the 24h ms query (covering 1441 minute indices) still includes it.
+    // Exactly 24 hours later: retention must keep the event sitting on the
+    // inclusive lower boundary.
     await store.append({
       event: "rate_limited",
       timestamp: "2026-03-27T10:00:00.000Z",
@@ -202,7 +296,7 @@ test("countsByEventInWindow keeps the 24h boundary minute bucket alive", async (
   }
 });
 
-test("countsByEventInWindow drops minute buckets older than the retention window", async (t) => {
+test("countsByEventInWindow drops timestamps older than the retention window", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
@@ -220,7 +314,7 @@ test("countsByEventInWindow drops minute buckets older than the retention window
       timestamp: "2026-03-26T10:00:00.000Z",
       data: { result: "blocked" },
     });
-    // 24h+ later should trigger pruning of the 10:00 bucket from the
+    // 24h+ later should trigger pruning of the 10:00 event from the
     // previous day.
     await store.append({
       event: "rate_limited",

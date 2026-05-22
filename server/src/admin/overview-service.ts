@@ -90,12 +90,9 @@ export function createAdminOverviewService(options: {
   return {
     async getOverview() {
       const currentTime = now();
-      // Use the literal ms window [now - windowMs, now]. The event store
-      // scans its recent-event buffer for ms-precise counts when it covers
-      // the window, and only falls back to the minute-bucket sum (with
-      // overlap semantic) when the buffer has been outpaced by heavy
-      // traffic. That keeps lastMinute exact for the typical low/medium
-      // volume case while still working for high-volume deployments.
+      // Use the literal ms window [now - windowMs, now]. Event stores keep a
+      // timestamp index for recent events, so these counters stay precise even
+      // after the query buffer or Redis stream has trimmed older entries.
       const [
         lastMinuteEventCounts,
         lastHourEventCounts,

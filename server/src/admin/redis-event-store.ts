@@ -11,10 +11,10 @@ import type { RuntimeEvent } from "./types.js";
 
 const DEFAULT_EVENT_STREAM_KEY = "bsp:events";
 const DEFAULT_EVENT_COUNTS_KEY = "bsp:event_counts";
-const DEFAULT_EVENT_MINUTE_COUNTS_KEY = "bsp:event_minute_counts";
+const DEFAULT_EVENT_WINDOW_INDEX_KEY_PREFIX = "bsp:event_window_index";
 const DEFAULT_EVENT_STREAM_MAX_LEN = 1_000;
 const MINUTE_MS = 60_000;
-const MINUTE_BUCKET_RETENTION = 24 * 60;
+const WINDOW_RETENTION_MS = 24 * 60 * 60_000;
 
 function normalizeNullable(value: string | undefined): string | null {
   return value && value.length > 0 ? value : null;
@@ -64,6 +64,10 @@ function eventTime(event: RuntimeEvent): number {
   return Date.parse(event.timestamp);
 }
 
+function eventWindowIndexKey(prefix: string, eventName: string): string {
+  return `${prefix}:${encodeURIComponent(eventName)}`;
+}
+
 function matchesQuery(
   event: RuntimeEvent,
   query: GlobalEventStoreQuery,
@@ -104,7 +108,7 @@ export async function createRedisEventStore(
   options: {
     streamKey?: string;
     countsKey?: string;
-    minuteCountsKey?: string;
+    windowIndexKeyPrefix?: string;
     maxLen?: number;
   } = {},
 ): Promise<GlobalEventStore & { close: () => Promise<void> }> {
@@ -114,12 +118,12 @@ export async function createRedisEventStore(
   });
   const streamKey = options.streamKey ?? DEFAULT_EVENT_STREAM_KEY;
   const countsKey = options.countsKey ?? DEFAULT_EVENT_COUNTS_KEY;
-  const minuteCountsKey =
-    options.minuteCountsKey ?? DEFAULT_EVENT_MINUTE_COUNTS_KEY;
+  const windowIndexKeyPrefix =
+    options.windowIndexKeyPrefix ?? DEFAULT_EVENT_WINDOW_INDEX_KEY_PREFIX;
   const maxLen = options.maxLen ?? DEFAULT_EVENT_STREAM_MAX_LEN;
   let closing = false;
   let pendingAppend = Promise.resolve();
-  let lastPrunedMinute: number | null = null;
+  const lastPrunedMinuteByEvent = new Map<string, number>();
 
   await redis.connect();
 
@@ -148,66 +152,63 @@ export async function createRedisEventStore(
     }
   }
 
-  // Backfill minute buckets from existing stream entries if the hash does
-  // not exist yet. Stream only retains up to maxLen recent entries, but
-  // seeding gives the windowed counters something to start from instead of
-  // showing zero until new traffic arrives.
-  const minuteHashExists = await redis.exists(minuteCountsKey);
-  if (!minuteHashExists) {
+  // Backfill the window indexes from retained stream entries on every startup.
+  // ZADD by stream id is idempotent, so this cannot overwrite or double-count
+  // entries written concurrently by another node during a rolling restart.
+  {
     const allEntries = await redis.xrange(streamKey, "-", "+");
     if (allEntries.length > 0) {
-      const buckets = new Map<string, number>();
-      for (const [, fieldValues] of allEntries) {
-        let eventName: string | undefined;
-        let timestamp: string | undefined;
-        for (let i = 0; i < fieldValues.length; i += 2) {
-          const key = fieldValues[i];
-          const value = fieldValues[i + 1];
-          if (key === "event") {
-            eventName = value;
-          } else if (key === "timestamp") {
-            timestamp = value;
-          }
-        }
+      const touchedEvents = new Map<string, number>();
+      const transaction = redis.multi();
+      for (const [id, fieldValues] of allEntries) {
+        const fields = parseStreamFields(fieldValues);
+        const eventName = fields.event;
+        const timestamp = fields.timestamp;
         if (!eventName || !timestamp) continue;
         const ts = Date.parse(timestamp);
         if (!Number.isFinite(ts)) continue;
-        const minute = Math.floor(ts / MINUTE_MS);
-        const field = `${eventName}:${minute}`;
-        buckets.set(field, (buckets.get(field) ?? 0) + 1);
+        transaction.zadd(
+          eventWindowIndexKey(windowIndexKeyPrefix, eventName),
+          String(ts),
+          id,
+        );
+        touchedEvents.set(
+          eventName,
+          Math.max(
+            touchedEvents.get(eventName) ?? Number.NEGATIVE_INFINITY,
+            ts,
+          ),
+        );
       }
-      if (buckets.size > 0) {
-        const args: string[] = [];
-        for (const [field, count] of buckets) {
-          args.push(field, String(count));
-        }
-        await redis.hset(minuteCountsKey, ...args);
+      if (touchedEvents.size > 0) {
+        await transaction.exec();
+        await Promise.all(
+          Array.from(touchedEvents, ([eventName, timestampMs]) =>
+            pruneEventWindowIndexIfNeeded(eventName, timestampMs),
+          ),
+        );
       }
     }
   }
 
-  async function pruneMinuteBucketsIfNeeded(currentMinute: number) {
-    if (lastPrunedMinute === currentMinute) {
+  async function pruneEventWindowIndexIfNeeded(
+    eventName: string,
+    currentTimestampMs: number,
+  ) {
+    if (!Number.isFinite(currentTimestampMs)) {
       return;
     }
-    lastPrunedMinute = currentMinute;
-    // Keep MINUTE_BUCKET_RETENTION + 1 buckets (current minute plus the
-    // retention window of past minutes) so callers that pass a 24h ms range
-    // covering up to 1441 minute indices still see the boundary bucket.
-    const oldestKept = currentMinute - MINUTE_BUCKET_RETENTION;
-    const fields = await redis.hkeys(minuteCountsKey);
-    const stale: string[] = [];
-    for (const field of fields) {
-      const colon = field.lastIndexOf(":");
-      if (colon < 0) continue;
-      const minute = Number(field.slice(colon + 1));
-      if (Number.isFinite(minute) && minute < oldestKept) {
-        stale.push(field);
-      }
+    const currentMinute = Math.floor(currentTimestampMs / MINUTE_MS);
+    if (lastPrunedMinuteByEvent.get(eventName) === currentMinute) {
+      return;
     }
-    if (stale.length > 0) {
-      await redis.hdel(minuteCountsKey, ...stale);
-    }
+    lastPrunedMinuteByEvent.set(eventName, currentMinute);
+    const oldestKeptMs = currentTimestampMs - WINDOW_RETENTION_MS;
+    await redis.zremrangebyscore(
+      eventWindowIndexKey(windowIndexKeyPrefix, eventName),
+      "-inf",
+      `(${oldestKeptMs}`,
+    );
   }
 
   async function queryEvents(
@@ -308,14 +309,22 @@ export async function createRedisEventStore(
             "Redis did not return a stream id for appended event.",
           );
         }
-        const minute = Math.floor(Date.parse(timestamp) / MINUTE_MS);
-        const minuteField = `${input.event}:${minute}`;
-        await Promise.all([
+        const timestampMs = Date.parse(timestamp);
+        const writeOperations: Promise<unknown>[] = [
           redis.xtrim(streamKey, "MAXLEN", "=", maxLen),
           redis.hincrby(countsKey, input.event, 1),
-          redis.hincrby(minuteCountsKey, minuteField, 1),
-        ]);
-        await pruneMinuteBucketsIfNeeded(minute);
+        ];
+        if (Number.isFinite(timestampMs)) {
+          writeOperations.push(
+            redis.zadd(
+              eventWindowIndexKey(windowIndexKeyPrefix, input.event),
+              String(timestampMs),
+              streamId,
+            ),
+          );
+        }
+        await Promise.all(writeOperations);
+        await pruneEventWindowIndexIfNeeded(input.event, timestampMs);
 
         return {
           ...runtimeEvent,
@@ -355,56 +364,23 @@ export async function createRedisEventStore(
         return {};
       }
       await pendingAppend;
-      const wanted = new Set(eventNames);
-      const totals = Object.fromEntries(
-        eventNames.map((name) => [name, 0]),
-      ) as Record<string, number>;
-
-      // Preferred path: scan the recent-event stream. If the oldest entry
-      // still in the stream reaches back to (or before) fromMs, the stream
-      // holds every event in the window and we can count by literal ms
-      // timestamp — exact, free of minute-bucket boundary fuzziness.
-      const streamEntries = await redis.xrange(streamKey, "-", "+");
-      if (streamEntries.length > 0) {
-        const oldestFields = parseStreamFields(streamEntries[0][1]);
-        const oldestTs = oldestFields.timestamp
-          ? Date.parse(oldestFields.timestamp)
-          : Number.NaN;
-        if (Number.isFinite(oldestTs) && oldestTs <= fromMs) {
-          for (const [, fieldValues] of streamEntries) {
-            const fields = parseStreamFields(fieldValues);
-            const name = fields.event;
-            if (!name || !wanted.has(name)) continue;
-            const ts = fields.timestamp ? Date.parse(fields.timestamp) : NaN;
-            if (!Number.isFinite(ts)) continue;
-            if (ts < fromMs || ts > toMs) continue;
-            totals[name] += 1;
-          }
-          return totals;
-        }
+      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
+        return Object.fromEntries(eventNames.map((name) => [name, 0]));
       }
 
-      // Fallback: high-volume case where the stream has rolled past fromMs.
-      // Sum minute buckets that overlap [fromMs, toMs] — slight over-count
-      // bounded by the events in the leading partial bucket (at most one
-      // minute's worth), but never under-counts.
-      const fromMinute = Math.floor(fromMs / MINUTE_MS);
-      const toMinute = Math.floor(toMs / MINUTE_MS);
-      const fields = await redis.hgetall(minuteCountsKey);
-      for (const [field, raw] of Object.entries(fields)) {
-        const colon = field.lastIndexOf(":");
-        if (colon < 0) continue;
-        const name = field.slice(0, colon);
-        if (!wanted.has(name)) continue;
-        const minute = Number(field.slice(colon + 1));
-        if (!Number.isFinite(minute)) continue;
-        if (minute < fromMinute || minute > toMinute) continue;
-        const value = Number.parseInt(raw, 10);
-        if (Number.isFinite(value)) {
-          totals[name] += value;
-        }
-      }
-      return totals;
+      return Object.fromEntries(
+        await Promise.all(
+          eventNames.map(async (name) => {
+            await pruneEventWindowIndexIfNeeded(name, toMs);
+            const total = await redis.zcount(
+              eventWindowIndexKey(windowIndexKeyPrefix, name),
+              fromMs,
+              toMs,
+            );
+            return [name, total];
+          }),
+        ),
+      );
     },
     async close() {
       closing = true;

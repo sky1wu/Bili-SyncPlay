@@ -188,7 +188,7 @@ test("overview falls back to heartbeat room count when node workload is unavaila
 
 test("overview aggregates event statistics from the event store", async () => {
   // Pick a mid-minute "now" so the windowed counters exercise a non-aligned
-  // current time and only events inside the current minute bucket count for
+  // current time and only events inside the literal ms range count for
   // lastMinute.
   const now = Date.parse("2026-04-05T12:00:30.000Z");
   const roomStore = createInMemoryRoomStore({ now: () => now });

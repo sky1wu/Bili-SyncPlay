@@ -121,7 +121,7 @@ test("countsByEventInWindow keeps accurate counts after the ring buffer evicts o
     timestamp: "2026-03-26T10:00:45.000Z",
     data: { result: "blocked" },
   });
-  // These two evict the earlier ring-buffer entries, but the minute bucket
+  // These two evict the earlier ring-buffer entries, but the timestamp index
   // must still remember both rate_limited events from 10:00.
   await store.append({
     event: "room_joined",
@@ -160,10 +160,45 @@ test("countsByEventInWindow keeps accurate counts after the ring buffer evicts o
   assert.equal(queryResult.total, 1);
 });
 
-test("countsByEventInWindow keeps the 24h boundary minute bucket alive", async () => {
-  // The 24h ms range covers up to 1441 minute indices (start minute through
-  // end minute, inclusive). Retention must keep that boundary bucket so a
-  // direct, unaligned query at the boundary does not under-count.
+test("countsByEventInWindow stays ms-accurate after boundary entries leave the ring buffer", async () => {
+  const store = createEventStore(1);
+
+  await store.append({
+    event: "rate_limited",
+    timestamp: "2026-03-26T10:06:15.000Z",
+    data: { result: "blocked" },
+  });
+  await store.append({
+    event: "rate_limited",
+    timestamp: "2026-03-26T10:06:45.000Z",
+    data: { result: "blocked" },
+  });
+  await store.append({
+    event: "rate_limited",
+    timestamp: "2026-03-26T10:07:10.000Z",
+    data: { result: "blocked" },
+  });
+
+  const now = Date.parse("2026-03-26T10:07:30.000Z");
+  const lastMinute = await store.countsByEventInWindow(
+    ["rate_limited"],
+    now - 60_000,
+    now,
+  );
+  assert.equal(lastMinute.rate_limited, 2);
+
+  const queryResult = await store.query({
+    event: "rate_limited",
+    page: 1,
+    pageSize: 10,
+  });
+  assert.equal(queryResult.total, 1);
+});
+
+test("countsByEventInWindow keeps the 24h boundary timestamp alive", async () => {
+  // The 24h ms range includes an event exactly at the start boundary.
+  // Retention must keep that timestamp so an inclusive query does not
+  // under-count.
   const store = createEventStore();
 
   await store.append({
@@ -171,10 +206,8 @@ test("countsByEventInWindow keeps the 24h boundary minute bucket alive", async (
     timestamp: "2026-03-26T10:00:00.000Z",
     data: { result: "blocked" },
   });
-  // Exactly 1440 minutes later: triggers pruning of minute buckets older
-  // than (currentMinute - 1440). With 1440-bucket retention the 03-26
-  // 10:00 bucket would be pruned (it sits at the boundary); with 1441 it
-  // survives.
+  // Exactly 24 hours later: pruning must keep the 03-26 10:00 event because
+  // it sits on the inclusive lower boundary.
   await store.append({
     event: "rate_limited",
     timestamp: "2026-03-27T10:00:00.000Z",
@@ -190,7 +223,7 @@ test("countsByEventInWindow keeps the 24h boundary minute bucket alive", async (
   assert.equal(lastDay.rate_limited, 2);
 });
 
-test("countsByEventInWindow drops buckets older than the 24-hour retention", async () => {
+test("countsByEventInWindow drops timestamps older than the 24-hour retention", async () => {
   const store = createEventStore();
 
   await store.append({
@@ -199,7 +232,7 @@ test("countsByEventInWindow drops buckets older than the 24-hour retention", asy
     data: { result: "blocked" },
   });
   // Append something more than 24 hours later, which triggers pruning of the
-  // 10:00 bucket from the previous day.
+  // 10:00 event from the previous day.
   await store.append({
     event: "rate_limited",
     timestamp: "2026-03-27T10:01:00.000Z",

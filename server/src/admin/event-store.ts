@@ -10,40 +10,104 @@ export type EventStore = GlobalEventStore;
 export type EventStoreQuery = GlobalEventStoreQuery;
 
 const MINUTE_MS = 60_000;
-const MINUTE_BUCKET_RETENTION = 24 * 60;
+const WINDOW_RETENTION_MS = 24 * 60 * 60_000;
+
+type TimestampCount = {
+  timestampMs: number;
+  count: number;
+};
+
+function lowerBoundTimestamp(
+  entries: readonly TimestampCount[],
+  timestampMs: number,
+): number {
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (entries[mid].timestampMs < timestampMs) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+
+function pruneTimestampEntries(
+  entries: TimestampCount[],
+  oldestKeptMs: number,
+): void {
+  const firstKeptIndex = lowerBoundTimestamp(entries, oldestKeptMs);
+  if (firstKeptIndex > 0) {
+    entries.splice(0, firstKeptIndex);
+  }
+}
+
+function countTimestampEntriesInWindow(
+  entries: readonly TimestampCount[],
+  fromMs: number,
+  toMs: number,
+): number {
+  let total = 0;
+  for (
+    let index = lowerBoundTimestamp(entries, fromMs);
+    index < entries.length && entries[index].timestampMs <= toMs;
+    index += 1
+  ) {
+    total += entries[index].count;
+  }
+  return total;
+}
 
 export function createEventStore(capacity = 1_000): EventStore {
   const events: RuntimeEvent[] = [];
   const cumulativeCounts = new Map<string, number>();
-  const minuteBuckets = new Map<string, Map<number, number>>();
+  const windowEventTimes = new Map<string, TimestampCount[]>();
+  let latestWindowTimestampMs = Number.NEGATIVE_INFINITY;
+  let lastPrunedMinute: number | null = null;
 
   function eventTime(event: RuntimeEvent): number {
     return Date.parse(event.timestamp);
   }
 
-  function pruneMinuteBuckets(currentMinute: number): void {
-    // Keep MINUTE_BUCKET_RETENTION + 1 buckets (current minute plus the
-    // retention window of past minutes) so callers that pass a 24h ms range
-    // covering up to 1441 minute indices still see the boundary bucket.
-    const oldestKept = currentMinute - MINUTE_BUCKET_RETENTION;
-    for (const buckets of minuteBuckets.values()) {
-      for (const minute of buckets.keys()) {
-        if (minute < oldestKept) {
-          buckets.delete(minute);
-        }
+  function pruneWindowEventTimesIfNeeded(currentTimestampMs: number): void {
+    const currentMinute = Math.floor(currentTimestampMs / MINUTE_MS);
+    if (lastPrunedMinute === currentMinute) {
+      return;
+    }
+    lastPrunedMinute = currentMinute;
+    const oldestKeptMs = currentTimestampMs - WINDOW_RETENTION_MS;
+    for (const [eventName, entries] of windowEventTimes) {
+      pruneTimestampEntries(entries, oldestKeptMs);
+      if (entries.length === 0) {
+        windowEventTimes.delete(eventName);
       }
     }
   }
 
-  function recordMinuteBucket(eventName: string, timestampMs: number): void {
-    const minute = Math.floor(timestampMs / MINUTE_MS);
-    let buckets = minuteBuckets.get(eventName);
-    if (!buckets) {
-      buckets = new Map();
-      minuteBuckets.set(eventName, buckets);
+  function recordWindowEventTime(eventName: string, timestampMs: number): void {
+    if (!Number.isFinite(timestampMs)) {
+      return;
     }
-    buckets.set(minute, (buckets.get(minute) ?? 0) + 1);
-    pruneMinuteBuckets(minute);
+    latestWindowTimestampMs = Math.max(latestWindowTimestampMs, timestampMs);
+    const oldestKeptMs = latestWindowTimestampMs - WINDOW_RETENTION_MS;
+    if (timestampMs < oldestKeptMs) {
+      return;
+    }
+
+    let entries = windowEventTimes.get(eventName);
+    if (!entries) {
+      entries = [];
+      windowEventTimes.set(eventName, entries);
+    }
+    const index = lowerBoundTimestamp(entries, timestampMs);
+    if (entries[index]?.timestampMs === timestampMs) {
+      entries[index].count += 1;
+    } else {
+      entries.splice(index, 0, { timestampMs, count: 1 });
+    }
+    pruneWindowEventTimesIfNeeded(latestWindowTimestampMs);
   }
 
   return {
@@ -74,7 +138,7 @@ export function createEventStore(capacity = 1_000): EventStore {
         event.event,
         (cumulativeCounts.get(event.event) ?? 0) + 1,
       );
-      recordMinuteBucket(event.event, eventTime(event));
+      recordWindowEventTime(event.event, eventTime(event));
       if (events.length > capacity) {
         events.shift();
       }
@@ -131,46 +195,17 @@ export function createEventStore(capacity = 1_000): EventStore {
       );
     },
     countsByEventInWindow(eventNames, fromMs, toMs) {
-      // Preferred path: when the in-memory ring buffer reaches back to (or
-      // before) fromMs, every event in the window is still present, so we
-      // can count by literal ms timestamp and avoid the minute-bucket
-      // boundary fuzziness entirely.
-      const bufferCoversWindow =
-        events.length === 0 || eventTime(events[0]) <= fromMs;
-      const wanted = new Set(eventNames);
-      if (bufferCoversWindow) {
-        const counts = Object.fromEntries(
-          eventNames.map((name) => [name, 0]),
-        ) as Record<string, number>;
-        for (const event of events) {
-          if (!wanted.has(event.event)) continue;
-          const ts = eventTime(event);
-          if (ts >= fromMs && ts <= toMs) {
-            counts[event.event] += 1;
-          }
-        }
-        return counts;
+      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
+        return Object.fromEntries(eventNames.map((name) => [name, 0]));
       }
 
-      // Fallback: high-volume case where the buffer has rolled past fromMs.
-      // Sum minute buckets that overlap [fromMs, toMs] — slight over-count
-      // bounded by the events in the leading partial bucket (at most one
-      // minute's worth), but never under-counts.
-      const fromMinute = Math.floor(fromMs / MINUTE_MS);
-      const toMinute = Math.floor(toMs / MINUTE_MS);
       return Object.fromEntries(
         eventNames.map((name) => {
-          const buckets = minuteBuckets.get(name);
-          if (!buckets) {
+          const entries = windowEventTimes.get(name);
+          if (!entries) {
             return [name, 0];
           }
-          let total = 0;
-          for (const [minute, count] of buckets) {
-            if (minute >= fromMinute && minute <= toMinute) {
-              total += count;
-            }
-          }
-          return [name, total];
+          return [name, countTimestampEntriesInWindow(entries, fromMs, toMs)];
         }),
       );
     },
