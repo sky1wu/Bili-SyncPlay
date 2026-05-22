@@ -346,12 +346,25 @@ export function createMockApiRequest() {
       const page = params.get("page") || "1";
       const pageSize = params.get("pageSize") || "20";
 
-      if (keyword) {
-        items = items.filter(
-          (item) =>
-            includesText(item.roomCode, keyword) ||
-            includesText(item.sharedVideo?.title, keyword),
-        );
+      const keywordTokens = keyword
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((token) => token.length > 0);
+      if (keywordTokens.length > 0) {
+        items = items.filter((item) => {
+          const members = demoData.roomMembers[item.roomCode] || [];
+          const haystacks = [
+            item.roomCode,
+            item.ownerDisplayName,
+            item.sharedVideo?.title,
+            item.sharedVideo?.url,
+            item.sharedVideo?.sharedByDisplayName,
+            ...members.map((member) => member.displayName),
+          ];
+          return keywordTokens.every((token) =>
+            haystacks.some((value) => includesText(value, token)),
+          );
+        });
       }
       if (status === "active") {
         items = items.filter((item) => item.isActive);

@@ -805,11 +805,14 @@ export function getRoomOwnerSummary(item) {
   return { primary, secondary };
 }
 
-export function textField(name, label, value, type = "text") {
+export function textField(name, label, value, type = "text", options = {}) {
+  const placeholder = options.placeholder
+    ? ` placeholder="${escapeHtml(options.placeholder)}"`
+    : "";
   return `
     <div class="field">
       <label for="${escapeHtml(name)}">${escapeHtml(label)}</label>
-      <input id="${escapeHtml(name)}" name="${escapeHtml(name)}" type="${escapeHtml(type)}" value="${escapeHtml(value || "")}" />
+      <input id="${escapeHtml(name)}" name="${escapeHtml(name)}" type="${escapeHtml(type)}" value="${escapeHtml(value || "")}"${placeholder} />
     </div>
   `;
 }

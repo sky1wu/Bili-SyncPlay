@@ -42,76 +42,135 @@ function toSummary(
   };
 }
 
+function tokenizeKeyword(raw: string | undefined): string[] {
+  if (!raw) {
+    return [];
+  }
+  return raw
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+}
+
+function collectHaystacks(room: PersistedRoom, sessions: Session[]): string[] {
+  const values: Array<string | null | undefined> = [
+    room.code,
+    room.ownerDisplayName,
+    room.sharedVideo?.title,
+    room.sharedVideo?.url,
+    room.sharedVideo?.sharedByDisplayName,
+    ...sessions.map((session) => session.displayName),
+  ];
+  return values
+    .filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    )
+    .map((value) => value.toLowerCase());
+}
+
+function matchesAllTokens(
+  room: PersistedRoom,
+  sessions: Session[],
+  tokens: string[],
+): boolean {
+  if (tokens.length === 0) {
+    return true;
+  }
+  const haystacks = collectHaystacks(room, sessions);
+  return tokens.every((token) =>
+    haystacks.some((haystack) => haystack.includes(token)),
+  );
+}
+
 export function createAdminRoomQueryService(options: {
   instanceId: string;
   roomStore: RoomStore;
   runtimeStore: RuntimeStore;
   eventStore: GlobalEventStore;
 }) {
-  async function filterByStatus(
-    items: PersistedRoom[],
-    status: RoomListQuery["status"],
-  ): Promise<PersistedRoom[]> {
-    if (status === "all") {
-      return items;
-    }
-
-    const roomsWithState = await Promise.all(
-      items.map(async (room) => ({
+  async function enrichWithSessions(rooms: PersistedRoom[]) {
+    return Promise.all(
+      rooms.map(async (room) => ({
         room,
-        isActive:
-          (await options.runtimeStore.listClusterSessionsByRoom(room.code))
-            .length > 0,
+        sessions: await options.runtimeStore.listClusterSessionsByRoom(
+          room.code,
+        ),
       })),
     );
-
-    return roomsWithState
-      .filter(({ isActive }) => (status === "active" ? isActive : !isActive))
-      .map(({ room }) => room);
   }
 
   return {
     async listRooms(query: RoomListQuery) {
-      const baseRooms =
-        query.status === "all"
-          ? await options.roomStore.listRooms(query)
-          : await filterByStatus(
-              await options.roomStore.listRooms({
-                ...query,
-                page: 1,
-                pageSize: Number.MAX_SAFE_INTEGER,
-              }),
-              query.status,
-            );
+      const tokens = tokenizeKeyword(query.keyword);
+      const needsRuntime = query.status !== "all" || tokens.length > 0;
+      const normalizedQuery: RoomListQuery = {
+        ...query,
+        keyword: tokens.length > 0 ? query.keyword : undefined,
+      };
 
-      const total =
-        query.status === "all"
-          ? await options.roomStore.countRooms(query)
-          : baseRooms.length;
-      const start =
-        query.status === "all" ? 0 : (query.page - 1) * query.pageSize;
-      const selected =
-        query.status === "all"
-          ? baseRooms
-          : baseRooms.slice(start, start + query.pageSize);
+      if (!needsRuntime) {
+        const baseRooms = await options.roomStore.listRooms(normalizedQuery);
+        const total = await options.roomStore.countRooms(normalizedQuery);
+        const roomItems = await Promise.all(
+          baseRooms.map(async (room) => {
+            const activeSessions =
+              await options.runtimeStore.listClusterSessionsByRoom(room.code);
+            const summary = toSummary(room, activeSessions);
+            return {
+              ...summary,
+              instanceId: summary.instanceId ?? options.instanceId,
+            };
+          }),
+        );
+        return {
+          items: roomItems,
+          pagination: {
+            page: normalizedQuery.page,
+            pageSize: normalizedQuery.pageSize,
+            total,
+          },
+        };
+      }
 
-      const roomItems = await Promise.all(
-        selected.map(async (room) => {
-          const activeSessions =
-            await options.runtimeStore.listClusterSessionsByRoom(room.code);
-          const summary = toSummary(room, activeSessions);
-          return {
-            ...summary,
-            instanceId: summary.instanceId ?? options.instanceId,
-          };
-        }),
-      );
+      const allRooms = await options.roomStore.listRooms({
+        ...normalizedQuery,
+        keyword: undefined,
+        page: 1,
+        pageSize: Number.MAX_SAFE_INTEGER,
+      });
+
+      const enriched = await enrichWithSessions(allRooms);
+
+      const filtered = enriched.filter(({ room, sessions }) => {
+        if (!matchesAllTokens(room, sessions, tokens)) {
+          return false;
+        }
+        if (normalizedQuery.status === "active") {
+          return sessions.length > 0;
+        }
+        if (normalizedQuery.status === "idle") {
+          return sessions.length === 0;
+        }
+        return true;
+      });
+
+      const total = filtered.length;
+      const start = (normalizedQuery.page - 1) * normalizedQuery.pageSize;
+      const selected = filtered.slice(start, start + normalizedQuery.pageSize);
+
+      const roomItems = selected.map(({ room, sessions }) => {
+        const summary = toSummary(room, sessions);
+        return {
+          ...summary,
+          instanceId: summary.instanceId ?? options.instanceId,
+        };
+      });
 
       return {
         items: roomItems,
         pagination: {
-          page: query.page,
-          pageSize: query.pageSize,
+          page: normalizedQuery.page,
+          pageSize: normalizedQuery.pageSize,
           total,
         },
       };

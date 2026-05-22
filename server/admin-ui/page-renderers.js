@@ -522,7 +522,10 @@ export function createPageLoaders(options) {
           <div class="section">
             <section class="panel panel-filter">
               <form id="rooms-filter" class="form-grid">
-                ${textField("keyword", "关键字", query.keyword)}
+                ${textField("keyword", "关键字", query.keyword, "text", {
+                  placeholder:
+                    "房间号 / 成员 / 视频标题 / URL，空格分隔多关键字",
+                })}
                 ${selectField("status", "状态", query.status, [
                   ["all", "全部"],
                   ["active", "活跃"],
