@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SyncRoom Microphone</title>
+    <link rel="stylesheet" href="voice-permission.css" />
+  </head>
+  <body>
+    <main class="permission-shell">
+      <div class="permission-mark" aria-hidden="true">
+        <span class="permission-mic"></span>
+      </div>
+      <h1 id="title">允许麦克风</h1>
+      <p id="description">
+        SyncRoom 需要麦克风权限，才能在当前房间里开麦说话。
+      </p>
+      <p id="status" class="status" role="status">正在请求麦克风权限...</p>
+      <button id="requestButton" type="button">允许麦克风</button>
+    </main>
+    <script type="module" src="./voice-permission.js"></script>
+  </body>
+</html>

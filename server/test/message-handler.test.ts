@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { CURRENT_PROTOCOL_VERSION } from "../src/messages.js";
 import { createMessageHandler } from "../src/message-handler.js";
 import { createSessionRateLimitState } from "../src/rate-limit.js";
 import type { Session } from "../src/types.js";
@@ -784,7 +785,7 @@ test("message handler accepts room:create without protocolVersion (legacy client
   assert.ok(events.includes("room_created"));
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:created");
-  assert.equal(sent[0].serverProtocolVersion, 2);
+  assert.equal(sent[0].serverProtocolVersion, CURRENT_PROTOCOL_VERSION);
   assert.equal(sent[1].type, "room:state");
 });
 
@@ -983,7 +984,7 @@ test("message handler accepts room:join with matching protocolVersion and return
 
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 2);
+  assert.equal(sent[0].serverProtocolVersion, CURRENT_PROTOCOL_VERSION);
   assert.equal(sent[1].type, "room:state");
 });
 

@@ -13,7 +13,16 @@ export function renderPopupTemplate(): string {
       </header>
 
       <section class="popup-section">
-        <div class="section-heading">${escapeHtml(t("sectionRoom"))}</div>
+        <div class="section-heading section-heading-room">
+          <span class="room-heading-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16" focusable="false">
+              <path d="M3.5 13.5V3.5H12.5V13.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path>
+              <path d="M6.2 13.5V5.8H10.4V13.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path>
+              <circle cx="9.1" cy="9.5" r="0.45" fill="currentColor"></circle>
+            </svg>
+          </span>
+          <span>${escapeHtml(t("sectionRoom"))}</span>
+        </div>
 
         <div class="room-panel room-panel-joined" id="room-panel-joined">
           <div class="room-joined-header">
@@ -62,6 +71,30 @@ export function renderPopupTemplate(): string {
         </button>
 
         <button class="secondary compact-button full-width-button share-button" id="share-current-video" type="button">${escapeHtml(t("actionShareCurrentVideo"))}</button>
+      </section>
+
+      <section class="popup-section">
+        <div class="section-heading section-heading-inline">
+          <span>${escapeHtml(t("sectionVoiceChat"))}</span>
+          <span class="section-meta" id="voice-status">-</span>
+        </div>
+
+        <div class="voice-panel">
+          <div class="voice-state-line">
+            <span class="voice-dot" id="voice-dot" aria-hidden="true"></span>
+            <span id="voice-mic-state">${escapeHtml(t("voiceMicMuted"))}</span>
+          </div>
+          <button class="secondary compact-button voice-mic-button" id="voice-mic-toggle" type="button" aria-pressed="false">
+            <span class="button-icon-wrap" aria-hidden="true">
+              <svg class="button-icon" viewBox="0 0 16 16">
+                <path d="M8 2.5A2.2 2.2 0 0 0 5.8 4.7V8A2.2 2.2 0 0 0 10.2 8V4.7A2.2 2.2 0 0 0 8 2.5Z" fill="none" stroke="currentColor" stroke-width="1.5"></path>
+                <path d="M4.2 7.7V8A3.8 3.8 0 0 0 8 11.8M11.8 7.7V8A3.8 3.8 0 0 1 8 11.8M8 11.8V14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path>
+              </svg>
+            </span>
+            <span class="button-label" id="voice-mic-label">${escapeHtml(t("voiceActionUnmute"))}</span>
+          </button>
+        </div>
+        <div class="voice-error" id="voice-error" hidden></div>
       </section>
 
       <section class="popup-section">

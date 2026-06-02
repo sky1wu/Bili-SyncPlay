@@ -61,6 +61,11 @@ function readRuntimeValue(
         config.adminUiConfig as Record<string, unknown>,
         path.slice(1),
       );
+    case "voice":
+      return getConfigValue(
+        config.voiceConfig as Record<string, unknown>,
+        path.slice(1),
+      );
   }
 }
 
@@ -174,6 +179,12 @@ test("runtime config maps JSON file values through existing loaders", async () =
           apiBaseUrl: "https://admin.example.com",
           enabled: false,
         },
+        voice: {
+          enabled: true,
+          livekitUrl: "wss://voice.example.com",
+          tokenTtlSeconds: 600,
+          maxMembers: 6,
+        },
       }),
       "utf8",
     );
@@ -208,6 +219,49 @@ test("runtime config maps JSON file values through existing loaders", async () =
       demoEnabled: true,
       apiBaseUrl: "https://admin.example.com",
       enabled: false,
+    });
+    assert.deepEqual(config.voiceConfig, {
+      enabled: true,
+      livekitUrl: "wss://voice.example.com",
+      apiKey: undefined,
+      apiSecret: undefined,
+      tokenTtlSeconds: 600,
+      maxMembers: 4,
+    });
+  });
+});
+
+test("runtime config keeps LiveKit secrets env-only while file controls voice settings", async () => {
+  await withTempDir(async (tempDir) => {
+    await writeFile(
+      join(tempDir, "server.config.json"),
+      JSON.stringify({
+        voice: {
+          enabled: true,
+          livekitUrl: "wss://voice.from-file.example.com",
+          tokenTtlSeconds: 300,
+          maxMembers: 4,
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadRuntimeConfig(
+      {
+        LIVEKIT_API_KEY: " livekit-key ",
+        LIVEKIT_API_SECRET: " livekit-secret ",
+        ALLOW_MISSING_ORIGIN_IN_DEV: "true",
+      },
+      { cwd: tempDir },
+    );
+
+    assert.deepEqual(config.voiceConfig, {
+      enabled: true,
+      livekitUrl: "wss://voice.from-file.example.com",
+      apiKey: "livekit-key",
+      apiSecret: "livekit-secret",
+      tokenTtlSeconds: 300,
+      maxMembers: 4,
     });
   });
 });

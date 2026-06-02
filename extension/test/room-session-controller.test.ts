@@ -114,7 +114,7 @@ test("room session controller sends create request with protocolVersion", async 
     type: "room:create",
     payload: {
       displayName: "Bob",
-      protocolVersion: 2,
+      protocolVersion: 3,
     },
   });
 });
@@ -168,7 +168,7 @@ test("room session controller clears stored room on unsupported_protocol_version
   assert.equal(harness.runtimeState.room.roomState, null);
   assert.equal(
     harness.runtimeState.connection.lastError,
-    "Your extension version is too old. Please update Bili-SyncPlay to the latest version.",
+    "Your extension version is too old. Please update SyncRoom to the latest version.",
   );
 });
 
@@ -190,7 +190,7 @@ test("room session controller sends join request after connect and normalizes pe
       roomCode: "ROOM01",
       joinToken: "token-1",
       displayName: "Alice",
-      protocolVersion: 2,
+      protocolVersion: 3,
     },
   });
   assert.equal(harness.persistReasons.length, 1);

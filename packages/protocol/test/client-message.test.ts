@@ -704,3 +704,67 @@ test("rejects room:join when protocolVersion is a float", () => {
     false,
   );
 });
+
+test("accepts a valid voice:access message", () => {
+  assert.equal(
+    isClientMessage({
+      type: "voice:access",
+      payload: {
+        memberToken: VALID_TOKEN,
+      },
+    }),
+    true,
+  );
+});
+
+test("rejects voice:access without a valid member token", () => {
+  assert.equal(
+    isClientMessage({
+      type: "voice:access",
+      payload: {
+        memberToken: "short-token",
+      },
+    }),
+    false,
+  );
+});
+
+test("accepts a valid voice:state message", () => {
+  assert.equal(
+    isClientMessage({
+      type: "voice:state",
+      payload: {
+        memberToken: VALID_TOKEN,
+        connected: true,
+        muted: false,
+        speaking: true,
+      },
+    }),
+    true,
+  );
+});
+
+test("rejects voice:state when status flags are invalid", () => {
+  assert.equal(
+    isClientMessage({
+      type: "voice:state",
+      payload: {
+        memberToken: VALID_TOKEN,
+        connected: "yes",
+        muted: false,
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    isClientMessage({
+      type: "voice:state",
+      payload: {
+        memberToken: VALID_TOKEN,
+        connected: true,
+        muted: "no",
+      },
+    }),
+    false,
+  );
+});

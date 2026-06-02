@@ -14,6 +14,7 @@ import {
   INVALID_CLIENT_MESSAGE_MESSAGE,
   INVALID_JSON_MESSAGE,
 } from "../src/app.js";
+import { getDefaultVoiceConfig } from "../src/config/voice-config.js";
 import { createInMemoryRoomStore, type RoomStore } from "../src/room-store.js";
 import { PROTOCOL_VERSION, type ServerMessage } from "@bili-syncplay/protocol";
 
@@ -241,6 +242,24 @@ async function closeClient(socket: WebSocket): Promise<void> {
   }
 
   socket.terminate();
+}
+
+async function createRoomFromSocket(
+  socket: WebSocket,
+  displayName = "Alice",
+): Promise<{
+  collector: ReturnType<typeof createMessageCollector>;
+  created: Extract<ServerMessage, { type: "room:created" }>;
+}> {
+  const collector = createMessageCollector(socket);
+  socket.send(
+    JSON.stringify({
+      type: "room:create",
+      payload: { displayName, protocolVersion: PROTOCOL_VERSION },
+    }),
+  );
+  const created = await collector.next("room:created");
+  return { collector, created };
 }
 
 async function captureStructuredLogs<T>(
@@ -532,6 +551,234 @@ test("rejects room:join with an invalid joinToken", async () => {
     } finally {
       await closeClient(owner);
       await closeClient(joiner);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("voice-enabled servers cap room joins at four members", async () => {
+  const server = await startTestServer({
+    security: {
+      maxMembersPerRoom: 8,
+    },
+    dependencies: {
+      voiceConfig: {
+        ...getDefaultVoiceConfig(),
+        enabled: true,
+        livekitUrl: "wss://voice.example.com",
+        apiKey: "livekit-key",
+        apiSecret: "livekit-secret",
+        maxMembers: 4,
+      },
+    },
+  });
+  const sockets: WebSocket[] = [];
+  try {
+    const owner = await connectClient(server.url);
+    sockets.push(owner);
+    const ownerCollector = createMessageCollector(owner);
+    owner.send(
+      JSON.stringify({
+        type: "room:create",
+        payload: { displayName: "Alice", protocolVersion: PROTOCOL_VERSION },
+      }),
+    );
+    const created = await ownerCollector.next("room:created");
+    assert.equal(created.type, "room:created");
+
+    for (let index = 0; index < 3; index += 1) {
+      const joiner = await connectClient(server.url);
+      sockets.push(joiner);
+      const collector = createMessageCollector(joiner);
+      joiner.send(
+        JSON.stringify({
+          type: "room:join",
+          payload: {
+            roomCode: created.payload.roomCode,
+            joinToken: created.payload.joinToken,
+            displayName: `Member ${index + 2}`,
+            protocolVersion: PROTOCOL_VERSION,
+          },
+        }),
+      );
+      await collector.next("room:joined");
+    }
+
+    const overflowJoiner = await connectClient(server.url);
+    sockets.push(overflowJoiner);
+    const overflowCollector = createMessageCollector(overflowJoiner);
+    overflowJoiner.send(
+      JSON.stringify({
+        type: "room:join",
+        payload: {
+          roomCode: created.payload.roomCode,
+          joinToken: created.payload.joinToken,
+          displayName: "Overflow",
+          protocolVersion: PROTOCOL_VERSION,
+        },
+      }),
+    );
+    const error = await overflowCollector.next("error");
+
+    assert.deepEqual(error, {
+      type: "error",
+      payload: {
+        code: "room_full",
+        message: "Room is full.",
+      },
+    });
+  } finally {
+    await Promise.all(sockets.map((socket) => closeClient(socket)));
+    await server.close();
+  }
+});
+
+test("voice access reports unavailable when voice is disabled", async () => {
+  const server = await startTestServer();
+  try {
+    const socket = await connectClient(server.url);
+    try {
+      const { collector, created } = await createRoomFromSocket(socket);
+      socket.send(
+        JSON.stringify({
+          type: "voice:access",
+          payload: { memberToken: created.payload.memberToken },
+        }),
+      );
+      const error = await collector.next("error");
+
+      assert.deepEqual(error, {
+        type: "error",
+        payload: {
+          code: "voice_unavailable",
+          message: "Voice chat is unavailable.",
+        },
+      });
+    } finally {
+      await closeClient(socket);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("voice access reports unavailable when LiveKit secrets are incomplete", async () => {
+  const server = await startTestServer({
+    dependencies: {
+      voiceConfig: {
+        ...getDefaultVoiceConfig(),
+        enabled: true,
+        livekitUrl: "wss://voice.example.com",
+        apiKey: "livekit-key",
+      },
+    },
+  });
+  try {
+    const socket = await connectClient(server.url);
+    try {
+      const { collector, created } = await createRoomFromSocket(socket);
+      socket.send(
+        JSON.stringify({
+          type: "voice:access",
+          payload: { memberToken: created.payload.memberToken },
+        }),
+      );
+      const error = await collector.next("error");
+
+      assert.equal(error.payload.code, "voice_unavailable");
+    } finally {
+      await closeClient(socket);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("voice access rejects invalid member tokens without issuing LiveKit access", async () => {
+  const server = await startTestServer({
+    dependencies: {
+      voiceConfig: {
+        ...getDefaultVoiceConfig(),
+        enabled: true,
+        livekitUrl: "wss://voice.example.com",
+        apiKey: "livekit-key",
+        apiSecret: "livekit-secret",
+      },
+    },
+  });
+  try {
+    const socket = await connectClient(server.url);
+    try {
+      const { collector } = await createRoomFromSocket(socket);
+      socket.send(
+        JSON.stringify({
+          type: "voice:access",
+          payload: { memberToken: "wrong-member-token".padEnd(16, "x") },
+        }),
+      );
+      const error = await collector.next("error");
+
+      assert.deepEqual(error, {
+        type: "error",
+        payload: {
+          code: "member_token_invalid",
+          message: "Member token is invalid.",
+        },
+      });
+    } finally {
+      await closeClient(socket);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("voice access issues scoped LiveKit details for a valid room member", async () => {
+  const server = await startTestServer({
+    dependencies: {
+      voiceConfig: {
+        ...getDefaultVoiceConfig(),
+        enabled: true,
+        livekitUrl: "wss://voice.example.com",
+        apiKey: "livekit-key",
+        apiSecret: "livekit-secret",
+      },
+    },
+  });
+  try {
+    const socket = await connectClient(server.url);
+    try {
+      const { collector, created } = await createRoomFromSocket(socket);
+      socket.send(
+        JSON.stringify({
+          type: "voice:access",
+          payload: { memberToken: created.payload.memberToken },
+        }),
+      );
+      const access = await collector.next("voice:access-granted");
+
+      assert.equal(access.payload.livekitUrl, "wss://voice.example.com");
+      assert.equal(
+        access.payload.roomName,
+        `bili-syncplay:${created.payload.roomCode}`,
+      );
+      assert.equal(
+        access.payload.participantIdentity,
+        created.payload.memberId,
+      );
+      assert.ok(access.payload.token.length > 16);
+      assert.ok(access.payload.expiresAt > Date.now());
+      assert.equal(
+        "apiSecret" in (access.payload as Record<string, unknown>),
+        false,
+      );
+      assert.equal(
+        "apiKey" in (access.payload as Record<string, unknown>),
+        false,
+      );
+    } finally {
+      await closeClient(socket);
     }
   } finally {
     await server.close();

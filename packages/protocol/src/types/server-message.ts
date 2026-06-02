@@ -60,6 +60,28 @@ export interface SyncPongMessage {
   };
 }
 
+export interface VoiceAccessGrantedMessage {
+  type: "voice:access-granted";
+  payload: {
+    livekitUrl: string;
+    token: string;
+    roomName: string;
+    participantIdentity: string;
+    expiresAt: number;
+  };
+}
+
+export interface ServerVoiceStateMessage {
+  type: "voice:state";
+  payload: {
+    roomCode: RoomCode;
+    memberId: string;
+    connected: boolean;
+    muted: boolean;
+    speaking?: boolean;
+  };
+}
+
 export type ServerMessage =
   | RoomCreatedMessage
   | RoomJoinedMessage
@@ -67,4 +89,6 @@ export type ServerMessage =
   | RoomMemberJoinedMessage
   | RoomMemberLeftMessage
   | ErrorMessage
-  | SyncPongMessage;
+  | SyncPongMessage
+  | VoiceAccessGrantedMessage
+  | ServerVoiceStateMessage;

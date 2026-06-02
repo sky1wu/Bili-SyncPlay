@@ -12,6 +12,12 @@ export interface PopupRefs {
   sharedVideoTitle: HTMLElement;
   sharedVideoMeta: HTMLElement;
   sharedVideoOwner: HTMLElement;
+  voiceStatus: HTMLElement;
+  voiceDot: HTMLElement;
+  voiceMicState: HTMLElement;
+  voiceMicButton: HTMLButtonElement;
+  voiceMicLabel: HTMLElement;
+  voiceError: HTMLElement;
   logs: HTMLElement;
   memberList: HTMLElement;
   copyLogsButton: HTMLButtonElement;
@@ -43,6 +49,12 @@ export function collectPopupRefs(): PopupRefs {
     sharedVideoTitle: getById("shared-video-title"),
     sharedVideoMeta: getById("shared-video-meta"),
     sharedVideoOwner: getById("shared-video-owner"),
+    voiceStatus: getById("voice-status"),
+    voiceDot: getById("voice-dot"),
+    voiceMicState: getById("voice-mic-state"),
+    voiceMicButton: getById("voice-mic-toggle") as HTMLButtonElement,
+    voiceMicLabel: getById("voice-mic-label"),
+    voiceError: getById("voice-error"),
     logs: getById("debug-logs"),
     memberList: getById("member-list"),
     copyLogsButton: getById("copy-logs") as HTMLButtonElement,

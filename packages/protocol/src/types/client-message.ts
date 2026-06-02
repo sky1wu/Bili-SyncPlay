@@ -68,6 +68,23 @@ export interface SyncPingMessage {
   };
 }
 
+export interface VoiceAccessMessage {
+  type: "voice:access";
+  payload: {
+    memberToken: string;
+  };
+}
+
+export interface ClientVoiceStateMessage {
+  type: "voice:state";
+  payload: {
+    memberToken: string;
+    connected: boolean;
+    muted: boolean;
+    speaking?: boolean;
+  };
+}
+
 export type ClientMessage =
   | CreateRoomMessage
   | JoinRoomMessage
@@ -76,4 +93,6 @@ export type ClientMessage =
   | ShareVideoMessage
   | PlaybackUpdateMessage
   | SyncRequestMessage
-  | SyncPingMessage;
+  | SyncPingMessage
+  | VoiceAccessMessage
+  | ClientVoiceStateMessage;

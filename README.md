@@ -104,6 +104,10 @@ If a member later browses to a different non-shared video while still in the roo
   - share the current page video from the popup
   - sync play, pause, seek, and playback rate
   - automatically open the currently shared video for room members
+- Optional LiveKit voice chat
+  - room members can hear voice by default when LiveKit is enabled
+  - microphones stay muted until the user clicks the mic button
+  - voice-enabled rooms are capped at 4 members
 - In-page feedback
   - member join and leave toasts
   - shared video change toasts
@@ -140,6 +144,7 @@ Bili-SyncPlay/
 ## Documentation
 
 - [Documentation index](./docs/README.md)
+- [LiveKit voice chat operations](./docs/operations/livekit-voice-chat.md)
 - [Multi-node operations runbook](./docs/runbook/multi-node-operations.zh-CN.md)
 - [Multi-node global admin migration](./docs/operations/multi-node-global-admin-migration.md)
 - [Privacy policy](./docs/legal/privacy.md)
@@ -171,6 +176,7 @@ Bili-SyncPlay/
 - Empty server URL input falls back to the build-time default
 - Only `ws://` and `wss://` are accepted
 - Local unpacked extension development requires `ALLOWED_ORIGINS=chrome-extension://<extension-id>` (Chrome/Edge) or the current `moz-extension://<uuid>` / `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=true` (Firefox; see "Start the local server")
+- Voice chat is disabled by default and requires a self-hosted LiveKit server. See [LiveKit voice chat operations](./docs/operations/livekit-voice-chat.md).
 
 ### Open the Admin Control Panel
 
@@ -573,6 +579,12 @@ Example `server.config.json`:
     "nodeHeartbeatEnabled": true,
     "redisUrl": "redis://127.0.0.1:6379"
   },
+  "voice": {
+    "enabled": true,
+    "livekitUrl": "wss://voice.example.com",
+    "tokenTtlSeconds": 900,
+    "maxMembers": 4
+  },
   "adminUi": {
     "enabled": false
   }
@@ -584,6 +596,11 @@ Sensitive admin secrets remain env-only:
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD_HASH`
 - `ADMIN_SESSION_SECRET`
+
+LiveKit signing secrets are also env-only:
+
+- `LIVEKIT_API_KEY`
+- `LIVEKIT_API_SECRET`
 
 The current server implementation:
 
@@ -597,6 +614,7 @@ The current server implementation:
 - reissues `memberToken` after reconnect or server restart
 - keeps empty rooms until `EMPTY_ROOM_TTL_MS` expires instead of deleting them immediately
 - supports origin allowlists, connection throttling, message throttling, and structured security logs
+- optionally issues room-scoped LiveKit voice tokens when `VOICE_ENABLED=true` and LiveKit config is complete
 
 ### Multi-Node Deployment and Global Admin
 
@@ -809,6 +827,12 @@ The server accepts the following environment variables. Safe defaults are built 
 - `MAX_CONNECTIONS_PER_IP`: max concurrent WebSocket connections per IP
 - `CONNECTION_ATTEMPTS_PER_MINUTE`: max handshake attempts per IP per minute
 - `MAX_MEMBERS_PER_ROOM`: room member cap
+- `VOICE_ENABLED`: enable server-side LiveKit voice token issuance
+- `LIVEKIT_URL`: browser-reachable LiveKit WebSocket URL, normally `wss://voice.example.com` in production
+- `LIVEKIT_API_KEY`: LiveKit API key, env-only
+- `LIVEKIT_API_SECRET`: LiveKit API secret, env-only
+- `VOICE_TOKEN_TTL_SECONDS`: voice token lifetime, default `900`
+- `VOICE_MAX_MEMBERS`: voice-enabled room cap, capped to `4`
 - `MAX_MESSAGE_BYTES`: WebSocket message size cap in bytes
 - `INVALID_MESSAGE_CLOSE_THRESHOLD`: number of invalid messages before disconnect
 - `ROOM_STORE_PROVIDER`: `memory` or `redis`
@@ -855,6 +879,11 @@ ROOM_CLEANUP_INTERVAL_MS=60000 \
 MAX_CONNECTIONS_PER_IP=10 \
 CONNECTION_ATTEMPTS_PER_MINUTE=20 \
 MAX_MEMBERS_PER_ROOM=8 \
+VOICE_ENABLED=true \
+LIVEKIT_URL=wss://voice.example.com \
+LIVEKIT_API_KEY=$LIVEKIT_API_KEY \
+LIVEKIT_API_SECRET=$LIVEKIT_API_SECRET \
+VOICE_MAX_MEMBERS=4 \
 MAX_MESSAGE_BYTES=8192 \
 ADMIN_USERNAME=admin \
 ADMIN_PASSWORD_HASH=sha256:<hex-password-hash> \

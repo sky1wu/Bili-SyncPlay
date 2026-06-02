@@ -9,7 +9,7 @@ import {
 } from "../src/app.js";
 import { createSessionRateLimitState } from "../src/rate-limit.js";
 import { createInMemoryRoomStore } from "../src/room-store.js";
-import { createRoomService } from "../src/room-service.js";
+import { createRoomService, RoomServiceError } from "../src/room-service.js";
 import {
   createInMemoryRuntimeStore,
   type RuntimeStore,
@@ -103,6 +103,57 @@ test("room service keeps empty rooms for TTL and allows rejoin before expiry", a
   );
   assert.equal(joined.room.expiresAt, null);
   assert.ok(joiner.memberToken);
+});
+
+test("room service validates voice access with existing room member tokens", async () => {
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: createInMemoryRoomStore(),
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    createRoomCode: () => "VOICE1",
+  });
+
+  const owner = createSession("owner");
+  const { room, memberToken } = await service.createRoomForSession(
+    owner,
+    "Alice",
+  );
+
+  assert.deepEqual(
+    await service.getVoiceMemberAccessForSession(owner, memberToken),
+    {
+      roomCode: room.code,
+      memberId: owner.memberId,
+      displayName: "Alice",
+    },
+  );
+
+  await assert.rejects(
+    () =>
+      service.getVoiceMemberAccessForSession(
+        owner,
+        "wrong-member-token".padEnd(16, "x"),
+      ),
+    (error) =>
+      error instanceof RoomServiceError &&
+      error.code === "member_token_invalid",
+  );
+
+  await assert.rejects(
+    () =>
+      service.getVoiceMemberAccessForSession(
+        createSession("outsider"),
+        memberToken,
+      ),
+    (error) =>
+      error instanceof RoomServiceError && error.code === "not_in_room",
+  );
 });
 
 test("room service skips lastActiveAt persistence for reconnect joins within refresh window", async () => {

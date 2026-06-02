@@ -1,6 +1,10 @@
 import type { RoomMember } from "@bili-syncplay/protocol";
 import type { BackgroundPopupState } from "../shared/messages";
 import { getUiLanguage, t } from "../shared/i18n";
+import type {
+  VoiceConnectionStatus,
+  VoiceRuntimeState,
+} from "../shared/voice-state";
 import {
   getRenderedServerUrlValue,
   type ServerUrlDraftState,
@@ -147,10 +151,12 @@ export function renderPopup(args: {
     !args.state.roomState?.sharedVideo?.url,
   );
 
+  renderVoiceState(args.refs, args.state.voice, Boolean(args.state.roomCode));
   renderMemberList(
     args.refs.memberList,
     args.state.roomState?.members ?? [],
     args.state.memberId,
+    args.state.voice,
   );
   renderLogs(args.refs.logs, args.state.logs);
 
@@ -256,6 +262,7 @@ function renderMemberList(
   container: HTMLElement,
   members: RoomMember[],
   currentMemberId: string | null,
+  voiceState: VoiceRuntimeState,
 ): void {
   if (members.length === 0) {
     const chip = document.createElement("span");
@@ -272,10 +279,92 @@ function renderMemberList(
       chip.className = isCurrentMember
         ? "member-chip member-chip-active"
         : "member-chip";
-      chip.textContent = isCurrentMember
+      const name = document.createElement("span");
+      name.className = "member-name";
+      name.textContent = isCurrentMember
         ? t("memberSelf", { name: member.name })
         : member.name;
+      chip.append(name, createVoiceIndicator(voiceState, member.id));
       return chip;
     }),
   );
+}
+
+function renderVoiceState(
+  refs: PopupRefs,
+  voiceState: VoiceRuntimeState,
+  hasRoom: boolean,
+): void {
+  refs.voiceStatus.textContent = formatVoiceStatus(voiceState.status);
+  refs.voiceMicState.textContent = voiceState.muted
+    ? t("voiceMicMuted")
+    : t("voiceMicUnmuted");
+  const canRetryVoice = hasRoom && isVoiceRetryStatus(voiceState.status);
+  refs.voiceMicLabel.textContent = canRetryVoice
+    ? t("voiceActionRetry")
+    : voiceState.muted
+      ? t("voiceActionUnmute")
+      : t("voiceActionMute");
+  refs.voiceMicButton.disabled =
+    !hasRoom || (voiceState.status !== "connected" && !canRetryVoice);
+  refs.voiceMicButton.setAttribute(
+    "aria-pressed",
+    String(voiceState.status === "connected" && !voiceState.muted),
+  );
+  refs.voiceMicButton.classList.toggle("is-live", !voiceState.muted);
+  refs.voiceMicButton.classList.toggle("is-retry", canRetryVoice);
+  refs.voiceDot.classList.toggle(
+    "is-connected",
+    voiceState.status === "connected",
+  );
+  refs.voiceDot.classList.toggle("is-live", !voiceState.muted);
+  refs.voiceDot.classList.toggle(
+    "is-unavailable",
+    voiceState.status === "unavailable" || voiceState.status === "failed",
+  );
+  refs.voiceError.textContent = voiceState.error ?? "";
+  refs.voiceError.hidden = !voiceState.error;
+}
+
+function isVoiceRetryStatus(status: VoiceConnectionStatus): boolean {
+  return status === "failed" || status === "unavailable";
+}
+
+function formatVoiceStatus(status: VoiceConnectionStatus): string {
+  switch (status) {
+    case "requesting":
+      return t("voiceStatusRequesting");
+    case "connecting":
+      return t("voiceStatusConnecting");
+    case "connected":
+      return t("voiceStatusConnected");
+    case "unavailable":
+      return t("voiceStatusUnavailable");
+    case "failed":
+      return t("voiceStatusFailed");
+    case "idle":
+    default:
+      return t("voiceStatusIdle");
+  }
+}
+
+function createVoiceIndicator(
+  voiceState: VoiceRuntimeState,
+  memberId: string,
+): HTMLSpanElement {
+  const indicator = document.createElement("span");
+  const participant = voiceState.participants[memberId];
+  indicator.className = "member-voice-indicator";
+  if (!participant?.connected) {
+    indicator.classList.toggle("is-offline", true);
+    return indicator;
+  }
+  indicator.classList.toggle("is-muted", participant.muted);
+  indicator.classList.toggle("is-speaking", participant.speaking);
+  indicator.title = participant.speaking
+    ? t("voiceMemberSpeaking")
+    : participant.muted
+      ? t("voiceMemberMuted")
+      : t("voiceMicUnmuted");
+  return indicator;
 }

@@ -13,6 +13,7 @@ const {
   persistenceConfig,
   adminConfig,
   adminUiConfig,
+  voiceConfig,
 } = await loadRuntimeConfig();
 
 assertMetricsPortDoesNotCollide(metricsPort, port, "PORT");
@@ -26,6 +27,7 @@ const { httpServer, metricsHttpServer } = await createSyncServer(
     adminUiConfig,
     logLevel,
     metricsPort,
+    voiceConfig,
   },
 );
 httpServer.listen(port, () => {

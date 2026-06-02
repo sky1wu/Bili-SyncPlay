@@ -175,6 +175,68 @@ test("room event consumer sends member join deltas to other local room sessions"
   ]);
 });
 
+test("room event consumer broadcasts voice state to local room sessions", async () => {
+  const bus = createInMemoryRoomEventBus();
+  const roomSession = createSession("member-a", "ROOM01");
+  const otherRoomSession = createSession("member-b", "ROOM02");
+  const sent: Array<{
+    sessionId: string;
+    roomCode: string;
+    memberId: string;
+    muted: boolean;
+    speaking?: boolean;
+  }> = [];
+
+  const consumer = await createRoomEventConsumer({
+    roomEventBus: bus,
+    async getRoomStateByCode() {
+      throw new Error("voice state should not reload room state");
+    },
+    listLocalSessionsByRoom(roomCode) {
+      return roomCode === "ROOM01" ? [roomSession] : [otherRoomSession];
+    },
+    send(socket, message) {
+      if (message.type !== "voice:state") {
+        return;
+      }
+      const session =
+        socket === roomSession.socket ? roomSession : otherRoomSession;
+      sent.push({
+        sessionId: session.id,
+        roomCode: message.payload.roomCode,
+        memberId: message.payload.memberId,
+        muted: message.payload.muted,
+        speaking: message.payload.speaking,
+      });
+    },
+  });
+
+  try {
+    await bus.publish({
+      type: "voice_state_updated",
+      roomCode: "ROOM01",
+      sourceInstanceId: "instance-b",
+      emittedAt: 1_100,
+      memberId: "member-a",
+      connected: true,
+      muted: false,
+      speaking: true,
+    });
+  } finally {
+    await consumer.close();
+  }
+
+  assert.deepEqual(sent, [
+    {
+      sessionId: "member-a",
+      roomCode: "ROOM01",
+      memberId: "member-a",
+      muted: false,
+      speaking: true,
+    },
+  ]);
+});
+
 test("room event consumer sends full room state for legacy member event sessions", async () => {
   const bus = createInMemoryRoomEventBus();
   const joiningSession = createSession("member-a", "ROOM01", 2);

@@ -28,10 +28,12 @@ export const ROOM_ACTIVE_MESSAGE =
 export const MEMBER_NOT_FOUND_MESSAGE = "Member not found.";
 export const SESSION_NOT_FOUND_MESSAGE = "Session not found.";
 export const UNSUPPORTED_PROTOCOL_VERSION_MESSAGE =
-  "Your extension version is too old. Please update Bili-SyncPlay to the latest version.";
+  "Your extension version is too old. Please update SyncRoom to the latest version.";
+export const VOICE_UNAVAILABLE_MESSAGE = "Voice chat is unavailable.";
+export const VOICE_TOKEN_FAILED_MESSAGE = "Voice token issuance failed.";
 
 /** Minimum protocol version this server accepts. */
 export const MIN_PROTOCOL_VERSION = 1;
 
 /** Current protocol version this server implements. */
-export const CURRENT_PROTOCOL_VERSION = 2;
+export const CURRENT_PROTOCOL_VERSION = 3;

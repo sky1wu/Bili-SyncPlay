@@ -104,6 +104,10 @@ Firefox 把扩展后台视为安全上下文，非 localhost 服务端必须用 
   - 在扩展弹窗中分享当前页面视频
   - 同步播放、暂停、跳转和播放速率
   - 房间成员自动打开当前共享的视频
+- 可选 LiveKit 语音
+  - 服务端启用 LiveKit 后，房间成员默认可听语音
+  - 麦克风默认静音，只有用户点击开麦按钮后才会请求权限
+  - 启用语音后房间人数上限为 4 人
 - 页面内反馈
   - 成员加入和离开提示
   - 共享视频变更提示
@@ -140,6 +144,7 @@ Bili-SyncPlay/
 ## 文档入口
 
 - [文档索引](./docs/README.md)
+- [LiveKit 语音聊天运维说明](./docs/operations/livekit-voice-chat.md)
 - [多节点运维 Runbook](./docs/runbook/multi-node-operations.zh-CN.md)
 - [多节点全局管理面迁移说明](./docs/operations/multi-node-global-admin-migration.zh-CN.md)
 - [隐私权政策](./docs/legal/privacy.zh-CN.md)
@@ -171,6 +176,7 @@ Bili-SyncPlay/
 - 服务器地址输入为空时，会回退到构建时默认值
 - 仅接受 `ws://` 和 `wss://`
 - 本地未打包扩展开发要求 `ALLOWED_ORIGINS=chrome-extension://<extension-id>`（Chrome/Edge）或当前 `moz-extension://<uuid>` / `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=true`（Firefox；见“启动本地服务器”）
+- 语音聊天默认关闭，需要自建 LiveKit 服务；配置方式见 [LiveKit 语音聊天运维说明](./docs/operations/livekit-voice-chat.md)。
 
 ### 打开管理控制面板
 
@@ -573,6 +579,12 @@ npm run build:release
     "nodeHeartbeatEnabled": true,
     "redisUrl": "redis://127.0.0.1:6379"
   },
+  "voice": {
+    "enabled": true,
+    "livekitUrl": "wss://voice.example.com",
+    "tokenTtlSeconds": 900,
+    "maxMembers": 4
+  },
   "adminUi": {
     "enabled": false
   }
@@ -584,6 +596,11 @@ npm run build:release
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD_HASH`
 - `ADMIN_SESSION_SECRET`
+
+以下 LiveKit 签名密钥也只支持环境变量：
+
+- `LIVEKIT_API_KEY`
+- `LIVEKIT_API_SECRET`
 
 当前服务器实现：
 
@@ -597,6 +614,7 @@ npm run build:release
 - 服务重连或服务端重启后会重新签发 `memberToken`
 - 最后一名成员离开后，房间不会立即删除，而是保留到 `EMPTY_ROOM_TTL_MS` 到期
 - 支持 Origin 白名单、连接限流、消息限流和结构化安全日志
+- 当 `VOICE_ENABLED=true` 且 LiveKit 配置完整时，可签发房间级 LiveKit 语音令牌
 
 ### 多节点部署与全局管理面
 
@@ -809,6 +827,12 @@ node server/dist/global-admin-index.js
 - `MAX_CONNECTIONS_PER_IP`：每个 IP 允许的最大并发 WebSocket 连接数
 - `CONNECTION_ATTEMPTS_PER_MINUTE`：每个 IP 每分钟最大握手尝试次数
 - `MAX_MEMBERS_PER_ROOM`：房间成员上限
+- `VOICE_ENABLED`：启用服务端 LiveKit 语音令牌签发
+- `LIVEKIT_URL`：浏览器可访问的 LiveKit WebSocket 地址，生产环境通常为 `wss://voice.example.com`
+- `LIVEKIT_API_KEY`：LiveKit API key，仅通过环境变量提供
+- `LIVEKIT_API_SECRET`：LiveKit API secret，仅通过环境变量提供
+- `VOICE_TOKEN_TTL_SECONDS`：语音令牌有效期，默认 `900`
+- `VOICE_MAX_MEMBERS`：启用语音后的房间人数上限，最大为 `4`
 - `MAX_MESSAGE_BYTES`：WebSocket 消息字节上限
 - `INVALID_MESSAGE_CLOSE_THRESHOLD`：在断开连接前允许的无效消息次数
 - `ROOM_STORE_PROVIDER`：`memory` 或 `redis`
@@ -855,6 +879,11 @@ ROOM_CLEANUP_INTERVAL_MS=60000 \
 MAX_CONNECTIONS_PER_IP=10 \
 CONNECTION_ATTEMPTS_PER_MINUTE=20 \
 MAX_MEMBERS_PER_ROOM=8 \
+VOICE_ENABLED=true \
+LIVEKIT_URL=wss://voice.example.com \
+LIVEKIT_API_KEY=$LIVEKIT_API_KEY \
+LIVEKIT_API_SECRET=$LIVEKIT_API_SECRET \
+VOICE_MAX_MEMBERS=4 \
 MAX_MESSAGE_BYTES=8192 \
 ADMIN_USERNAME=admin \
 ADMIN_PASSWORD_HASH=sha256:<hex-password-hash> \

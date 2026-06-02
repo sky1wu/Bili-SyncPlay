@@ -1,15 +1,25 @@
 import type {
   ContentToBackgroundMessage,
   PopupToBackgroundMessage,
+  RuntimeHostToBackgroundMessage,
+  VoicePermissionToBackgroundMessage,
 } from "../shared/messages";
 import { t } from "../shared/i18n";
+import type {
+  MicrophonePermissionController,
+  MicrophonePermissionResult,
+} from "./microphone-permission-controller";
 import type {
   PlaybackState,
   RoomState,
   SharedVideo,
 } from "@bili-syncplay/protocol";
 
-type RuntimeMessage = PopupToBackgroundMessage | ContentToBackgroundMessage;
+type RuntimeMessage =
+  | PopupToBackgroundMessage
+  | ContentToBackgroundMessage
+  | RuntimeHostToBackgroundMessage
+  | VoicePermissionToBackgroundMessage;
 
 export interface MessageController {
   handleRuntimeMessage(
@@ -45,6 +55,14 @@ export function createMessageController(args: {
     waitForJoinAttemptResult(timeoutMs?: number): Promise<unknown>;
     requestLeaveRoom(): Promise<void>;
   };
+  voiceController?: {
+    syncRoomLifecycle(options?: { forceRefresh?: boolean }): Promise<void>;
+    setMicrophoneEnabled(enabled: boolean): Promise<void>;
+    reportMicrophonePermissionDenied(reason?: string): void;
+    disconnect(reason: string): Promise<void>;
+    handleRuntimeEvent(event: RuntimeHostToBackgroundMessage["event"]): void;
+  };
+  microphonePermissionController?: MicrophonePermissionController;
   shareController: {
     getActiveVideoPayload(): Promise<{
       ok: boolean;
@@ -80,10 +98,12 @@ export function createMessageController(args: {
   ): Promise<void> {
     switch (message.type) {
       case "popup:create-room":
+        await args.voiceController?.disconnect("create room requested");
         await args.roomSessionController.requestCreateRoom();
         sendResponse(args.popupStateController.popupState());
         return;
       case "popup:join-room":
+        await args.voiceController?.disconnect("join room requested");
         await args.roomSessionController.requestJoinRoom(
           message.roomCode,
           message.joinToken,
@@ -96,8 +116,39 @@ export function createMessageController(args: {
         sendResponse(args.popupStateController.popupState());
         return;
       case "popup:leave-room":
+        await args.voiceController?.disconnect("leave room requested");
         await args.roomSessionController.requestLeaveRoom();
         sendResponse(args.popupStateController.popupState());
+        return;
+      case "popup:voice-toggle-mic":
+        if (message.enabled) {
+          const permission = await ensureMicrophonePermission();
+          if (!permission.granted) {
+            args.voiceController?.reportMicrophonePermissionDenied(
+              permission.error,
+            );
+            sendResponse(args.popupStateController.popupState());
+            return;
+          }
+        }
+        await args.voiceController?.setMicrophoneEnabled(message.enabled);
+        sendResponse(args.popupStateController.popupState());
+        return;
+      case "popup:voice-retry":
+        await args.voiceController?.syncRoomLifecycle({ forceRefresh: true });
+        sendResponse(args.popupStateController.popupState());
+        return;
+      case "voice-host:event":
+        args.voiceController?.handleRuntimeEvent(message.event);
+        sendResponse({ ok: true });
+        return;
+      case "voice-permission:result":
+        sendResponse({
+          ok:
+            args.microphonePermissionController?.handlePermissionResult(
+              message,
+            ) ?? false,
+        });
         return;
       case "popup:debug-log":
         args.diagnosticsController.log("popup", message.message);
@@ -233,6 +284,13 @@ export function createMessageController(args: {
       default:
         sendResponse({ ok: false });
     }
+  }
+
+  async function ensureMicrophonePermission(): Promise<MicrophonePermissionResult> {
+    if (!args.microphonePermissionController) {
+      return { granted: true };
+    }
+    return args.microphonePermissionController.ensurePermission();
   }
 
   return {

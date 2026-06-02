@@ -1,9 +1,15 @@
 import type {
   ContentToBackgroundMessage,
   PopupToBackgroundMessage,
+  RuntimeHostToBackgroundMessage,
+  VoicePermissionToBackgroundMessage,
 } from "../shared/messages";
 
-type RuntimeMessage = PopupToBackgroundMessage | ContentToBackgroundMessage;
+type RuntimeMessage =
+  | PopupToBackgroundMessage
+  | ContentToBackgroundMessage
+  | RuntimeHostToBackgroundMessage
+  | VoicePermissionToBackgroundMessage;
 
 export function registerBackgroundListeners(args: {
   getBootstrapStatus: () => "pending" | "ready" | "failed";

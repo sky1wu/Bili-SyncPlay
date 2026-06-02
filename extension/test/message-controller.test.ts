@@ -14,6 +14,7 @@ function createControllerHarness(
       roomState: RoomState | null;
     };
     isActiveSharedTab?: boolean;
+    microphonePermissionResult?: { granted: boolean; error?: string };
   } = {},
 ) {
   const calls = {
@@ -28,6 +29,13 @@ function createControllerHarness(
     persistState: 0,
     persistProfileState: 0,
     notifyAll: 0,
+    voiceRetry: [] as Array<{ forceRefresh?: boolean } | undefined>,
+    voiceMic: [] as boolean[],
+    voicePermissionDenied: [] as Array<string | undefined>,
+    microphonePermissionEnsures: 0,
+    microphonePermissionResults: [] as unknown[],
+    voiceDisconnect: [] as string[],
+    voiceEvents: [] as unknown[],
     queueOrSendSharedVideo: [] as Array<{
       payload: unknown;
       tabId: number | null;
@@ -87,6 +95,33 @@ function createControllerHarness(
       },
       async requestLeaveRoom() {
         calls.leaveRoom += 1;
+      },
+    },
+    voiceController: {
+      async syncRoomLifecycle(options) {
+        calls.voiceRetry.push(options);
+      },
+      async setMicrophoneEnabled(enabled) {
+        calls.voiceMic.push(enabled);
+      },
+      reportMicrophonePermissionDenied(reason) {
+        calls.voicePermissionDenied.push(reason);
+      },
+      async disconnect(reason) {
+        calls.voiceDisconnect.push(reason);
+      },
+      handleRuntimeEvent(event) {
+        calls.voiceEvents.push(event);
+      },
+    },
+    microphonePermissionController: {
+      async ensurePermission() {
+        calls.microphonePermissionEnsures += 1;
+        return overrides.microphonePermissionResult ?? { granted: true };
+      },
+      handlePermissionResult(message) {
+        calls.microphonePermissionResults.push(message);
+        return true;
       },
     },
     shareController: {
@@ -211,6 +246,104 @@ test("message controller reconnects on popup:get-state when room context exists 
 
   assert.equal(harness.calls.connect, 1);
   assert.deepEqual(response, harness.popupState);
+});
+
+test("message controller retries voice access from popup", async () => {
+  const harness = createControllerHarness();
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "popup:voice-retry" },
+    {},
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.deepEqual(harness.calls.voiceRetry, [{ forceRefresh: true }]);
+  assert.deepEqual(response, harness.popupState);
+});
+
+test("message controller requests microphone permission before unmuting", async () => {
+  const harness = createControllerHarness();
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "popup:voice-toggle-mic", enabled: true },
+    {},
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.equal(harness.calls.microphonePermissionEnsures, 1);
+  assert.deepEqual(harness.calls.voiceMic, [true]);
+  assert.deepEqual(harness.calls.voicePermissionDenied, []);
+  assert.deepEqual(response, harness.popupState);
+});
+
+test("message controller does not request microphone permission while muting", async () => {
+  const harness = createControllerHarness();
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "popup:voice-toggle-mic", enabled: false },
+    {},
+    () => undefined,
+  );
+
+  assert.equal(harness.calls.microphonePermissionEnsures, 0);
+  assert.deepEqual(harness.calls.voiceMic, [false]);
+});
+
+test("message controller reports microphone permission denial without toggling LiveKit", async () => {
+  const harness = createControllerHarness({
+    microphonePermissionResult: {
+      granted: false,
+      error: "NotAllowedError: Permission dismissed",
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "popup:voice-toggle-mic", enabled: true },
+    {},
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.equal(harness.calls.microphonePermissionEnsures, 1);
+  assert.deepEqual(harness.calls.voiceMic, []);
+  assert.deepEqual(harness.calls.voicePermissionDenied, [
+    "NotAllowedError: Permission dismissed",
+  ]);
+  assert.deepEqual(response, harness.popupState);
+});
+
+test("message controller routes microphone permission page results", async () => {
+  const harness = createControllerHarness();
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "voice-permission:result",
+      requestId: "permission-1",
+      granted: true,
+    },
+    {},
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.deepEqual(harness.calls.microphonePermissionResults, [
+    {
+      type: "voice-permission:result",
+      requestId: "permission-1",
+      granted: true,
+    },
+  ]);
+  assert.deepEqual(response, { ok: true });
 });
 
 test("message controller persists content:report-user and forwards profile update for active room members", async () => {

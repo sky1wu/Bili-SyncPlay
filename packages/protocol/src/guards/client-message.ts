@@ -9,6 +9,8 @@ import type {
   ShareVideoMessage,
   SyncPingMessage,
   SyncRequestMessage,
+  VoiceAccessMessage,
+  ClientVoiceStateMessage,
 } from "../types/client-message.js";
 import type { PlaybackState, SharedVideo } from "../types/domain.js";
 import { isPlaybackSyncIntent } from "../types/domain.js";
@@ -214,6 +216,40 @@ function isSyncPingMessage(value: unknown): value is SyncPingMessage {
   );
 }
 
+function isVoiceAccessPayload(
+  value: unknown,
+): value is VoiceAccessMessage["payload"] {
+  return isRecord(value) && isToken(value.memberToken);
+}
+
+function isVoiceAccessMessage(value: unknown): value is VoiceAccessMessage {
+  return (
+    isRecord(value) &&
+    value.type === "voice:access" &&
+    isVoiceAccessPayload(value.payload)
+  );
+}
+
+function isVoiceStatePayload(
+  value: unknown,
+): value is ClientVoiceStateMessage["payload"] {
+  return (
+    isRecord(value) &&
+    isToken(value.memberToken) &&
+    typeof value.connected === "boolean" &&
+    typeof value.muted === "boolean" &&
+    (value.speaking === undefined || typeof value.speaking === "boolean")
+  );
+}
+
+function isVoiceStateMessage(value: unknown): value is ClientVoiceStateMessage {
+  return (
+    isRecord(value) &&
+    value.type === "voice:state" &&
+    isVoiceStatePayload(value.payload)
+  );
+}
+
 export function isClientMessage(value: unknown): value is ClientMessage {
   if (!isRecord(value) || !isString(value.type)) {
     return false;
@@ -236,6 +272,10 @@ export function isClientMessage(value: unknown): value is ClientMessage {
       return isSyncRequestMessage(value);
     case "sync:ping":
       return isSyncPingMessage(value);
+    case "voice:access":
+      return isVoiceAccessMessage(value);
+    case "voice:state":
+      return isVoiceStateMessage(value);
     default:
       return false;
   }

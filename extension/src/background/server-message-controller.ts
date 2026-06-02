@@ -9,6 +9,8 @@ export function createServerMessageController(args: {
   shouldLogIncomingMessage: (messageType: ServerMessage["type"]) => boolean;
   consumeRoomState: (roomState: RoomState) => void;
   handleRoomSessionServerMessage: (message: ServerMessage) => Promise<void>;
+  handleVoiceServerMessage?: (message: ServerMessage) => Promise<boolean>;
+  syncVoiceLifecycle?: (options?: { forceRefresh?: boolean }) => Promise<void>;
   updateClockOffset: (
     clientSendTime: number,
     serverReceiveTime: number,
@@ -23,8 +25,20 @@ export function createServerMessageController(args: {
       args.log(`<- ${message.type}`);
     }
 
+    const handledByVoice =
+      (await args.handleVoiceServerMessage?.(message)) ?? false;
+    if (handledByVoice) {
+      return;
+    }
+
     if (message.type !== "sync:pong") {
       await args.handleRoomSessionServerMessage(message);
+      if (isRoomLifecycleMessage(message)) {
+        await args.syncVoiceLifecycle?.({
+          forceRefresh:
+            message.type === "room:created" || message.type === "room:joined",
+        });
+      }
       return;
     }
 
@@ -39,4 +53,13 @@ export function createServerMessageController(args: {
   return {
     handleServerMessage,
   };
+}
+
+function isRoomLifecycleMessage(message: ServerMessage): boolean {
+  return (
+    message.type === "room:created" ||
+    message.type === "room:joined" ||
+    message.type === "room:state" ||
+    message.type === "room:member-left"
+  );
 }

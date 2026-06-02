@@ -29,6 +29,7 @@
   --danger-border: #f2b7c7;
   --danger-text: #c0344e;
   --success: #22c55e;
+  --voice-muted-dot: #8b93a7;
   --status-offline: #aaaaaa;
   --status-offline-text: #9aa0b0;
   --status-online-text: #22c55e;
@@ -69,6 +70,7 @@
     --danger-border: #a34c68;
     --danger-text: #ff8cab;
     --success: #4ade80;
+    --voice-muted-dot: #97a0b3;
     --status-offline: #6e7688;
     --status-offline-text: #8b93a7;
     --status-online-text: #4ade80;
@@ -197,6 +199,28 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.section-heading-room {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.room-heading-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 14px;
+  color: currentColor;
+}
+
+.room-heading-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 .section-heading-small {
@@ -509,6 +533,71 @@ button.secondary.success-button .button-icon-check {
   width: 100%;
 }
 
+.voice-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 34px;
+}
+
+.voice-state-line {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.voice-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 999px;
+  background: var(--status-offline);
+}
+
+.voice-dot.is-connected {
+  background: var(--voice-muted-dot);
+}
+
+.voice-dot.is-live {
+  background: var(--success);
+}
+
+.voice-dot.is-unavailable {
+  background: var(--danger-text);
+}
+
+.voice-mic-button {
+  min-width: 76px;
+}
+
+.voice-mic-button.is-live {
+  color: var(--primary-text);
+  border-color: var(--primary-bg);
+  background: var(--primary-bg);
+}
+
+.voice-mic-button.is-retry {
+  color: var(--danger-text);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.voice-error {
+  margin-top: 8px;
+  color: var(--danger-text);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.voice-error[hidden] {
+  display: none;
+}
+
 .member-list {
   display: flex;
   flex-wrap: wrap;
@@ -518,6 +607,7 @@ button.secondary.success-button .button-icon-check {
 .member-chip {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   min-height: 24px;
   padding: 5px 10px;
   border-radius: 999px;
@@ -528,6 +618,28 @@ button.secondary.success-button .button-icon-check {
   line-height: 1;
   font-weight: 650;
   box-shadow: var(--surface-shadow);
+}
+
+.member-name {
+  min-width: 0;
+}
+
+.member-voice-indicator {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 999px;
+  background: var(--success);
+}
+
+.member-voice-indicator.is-muted,
+.member-voice-indicator.is-offline {
+  background: var(--status-offline);
+}
+
+.member-voice-indicator.is-speaking {
+  background: var(--primary-bg);
+  box-shadow: 0 0 0 3px rgba(255, 90, 138, 0.14);
 }
 
 .member-chip-active {

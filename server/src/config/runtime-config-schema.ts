@@ -2,6 +2,7 @@ import type {
   AdminUiConfig,
   PersistenceConfig,
   SecurityConfig,
+  VoiceConfig,
 } from "../types.js";
 import type { EnvSource } from "./env.js";
 import {
@@ -197,6 +198,14 @@ export const SERVER_CONFIG_FIELDS = [
   createField(["adminUi", "demoEnabled"], "ADMIN_UI_DEMO_ENABLED", "boolean"),
   createField(["adminUi", "apiBaseUrl"], "GLOBAL_ADMIN_API_BASE_URL", "string"),
   createField(["adminUi", "enabled"], "GLOBAL_ADMIN_ENABLED", "boolean"),
+  createField(["voice", "enabled"], "VOICE_ENABLED", "boolean"),
+  createField(["voice", "livekitUrl"], "LIVEKIT_URL", "string"),
+  createField(
+    ["voice", "tokenTtlSeconds"],
+    "VOICE_TOKEN_TTL_SECONDS",
+    "positiveInteger",
+  ),
+  createField(["voice", "maxMembers"], "VOICE_MAX_MEMBERS", "positiveInteger"),
 ] as const satisfies readonly ConfigField[];
 
 export const SECURITY_CONFIG_FIELDS = SERVER_CONFIG_FIELDS.filter(
@@ -207,6 +216,9 @@ export const PERSISTENCE_CONFIG_FIELDS = SERVER_CONFIG_FIELDS.filter(
 );
 export const ADMIN_UI_CONFIG_FIELDS = SERVER_CONFIG_FIELDS.filter(
   (field) => field.path[0] === "adminUi",
+);
+export const VOICE_CONFIG_FIELDS = SERVER_CONFIG_FIELDS.filter(
+  (field) => field.path[0] === "voice",
 );
 
 export const PERSISTENCE_PROVIDER_FIELD = PERSISTENCE_CONFIG_FIELDS.find(
@@ -402,7 +414,7 @@ export function loadSectionConfigFromEnv<T extends ConfigObject>(
 }
 
 export function getSectionFields(
-  sectionName: "security" | "persistence" | "adminUi",
+  sectionName: "security" | "persistence" | "adminUi" | "voice",
 ): readonly ConfigField[] {
   switch (sectionName) {
     case "security":
@@ -411,6 +423,8 @@ export function getSectionFields(
       return PERSISTENCE_CONFIG_FIELDS;
     case "adminUi":
       return ADMIN_UI_CONFIG_FIELDS;
+    case "voice":
+      return VOICE_CONFIG_FIELDS;
   }
 }
 
@@ -419,10 +433,16 @@ export function getDefaultConfigSampleValue(field: ConfigField): unknown {
     case "integer":
       return field.path[0] === "port" ? 9001 : 9002;
     case "positiveInteger":
+      if (field.envName === "VOICE_MAX_MEMBERS") {
+        return 4;
+      }
       return 7;
     case "boolean":
       return true;
     case "string":
+      if (field.envName === "LIVEKIT_URL") {
+        return "wss://voice.example.com";
+      }
       return `${field.envName.toLowerCase()}-sample`;
     case "stringArray":
       return [
@@ -437,3 +457,4 @@ export function getDefaultConfigSampleValue(field: ConfigField): unknown {
 export type SecurityConfigShape = SecurityConfig;
 export type PersistenceConfigShape = PersistenceConfig;
 export type AdminUiConfigShape = AdminUiConfig;
+export type VoiceConfigShape = VoiceConfig;

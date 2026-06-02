@@ -129,6 +129,36 @@ export async function createRoomEventConsumer(options: {
         return;
       }
 
+      if (message.type === "voice_state_updated") {
+        for (const session of localSessions) {
+          if (!isRoomEventRecipient(session, message.roomCode)) {
+            continue;
+          }
+          options.send(session.socket, {
+            type: "voice:state",
+            payload: {
+              roomCode: message.roomCode,
+              memberId: message.memberId,
+              connected: message.connected,
+              muted: message.muted,
+              ...(message.speaking === undefined
+                ? {}
+                : { speaking: message.speaking }),
+            },
+          });
+        }
+
+        options.logEvent?.("room_event_consumed", {
+          roomCode: message.roomCode,
+          eventType: message.type,
+          sourceInstanceId: message.sourceInstanceId,
+          instanceId: options.instanceId ?? null,
+          localSessionCount: localSessions.length,
+          result: "ok",
+        });
+        return;
+      }
+
       const state =
         message.type === "room_deleted"
           ? {

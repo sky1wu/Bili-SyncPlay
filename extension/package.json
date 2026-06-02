@@ -1,6 +1,6 @@
 {
   "name": "@bili-syncplay/extension",
-  "version": "1.1.2",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,8 @@
     "coverage": "tsx --test --experimental-test-coverage test/**/*.test.ts"
   },
   "dependencies": {
-    "@bili-syncplay/protocol": "1.1.2"
+    "@bili-syncplay/protocol": "0.2.0",
+    "livekit-client": "^2.19.1"
   },
   "devDependencies": {
     "@types/chrome": "^0.1.40",

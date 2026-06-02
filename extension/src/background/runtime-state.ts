@@ -7,6 +7,10 @@ import type {
   DebugLogEntry,
   SharedVideoToastPayload,
 } from "../shared/messages";
+import {
+  createInitialVoiceRuntimeState,
+  type VoiceRuntimeState,
+} from "../shared/voice-state";
 
 declare const __BILI_SYNCPLAY_DEFAULT_SERVER_URL__: string | undefined;
 
@@ -81,6 +85,7 @@ export interface BackgroundRuntimeState {
   share: ShareState;
   clock: ClockState;
   diagnostics: DiagnosticsState;
+  voice: VoiceRuntimeState;
 }
 
 export function createBackgroundRuntimeState(): BackgroundRuntimeState {
@@ -127,5 +132,6 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       logs: [],
       lastPopupStateLogKey: null,
     },
+    voice: createInitialVoiceRuntimeState(),
   };
 }

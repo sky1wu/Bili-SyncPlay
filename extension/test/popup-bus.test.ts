@@ -35,6 +35,7 @@ test("popup snapshot includes connection, room, retry, clock, and logs state", (
   assert.equal(snapshot.payload.retryAttemptMax, 5);
   assert.equal(snapshot.payload.clockOffsetMs, 120);
   assert.equal(snapshot.payload.rttMs, 45);
+  assert.equal(snapshot.payload.voice.status, "idle");
   assert.deepEqual(snapshot.payload.logs, [
     { at: 1, scope: "background", message: "hello" },
   ]);

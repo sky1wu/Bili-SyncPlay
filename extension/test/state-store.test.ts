@@ -24,6 +24,7 @@ test("background state store exposes stable mutable state and patch semantics", 
   assert.equal(nextState.room.roomCode, "ROOM01");
   assert.equal(nextState.room.pendingJoinRequestSent, true);
   assert.equal(nextState.share.sharedTabId, null);
+  assert.equal(nextState.voice.status, "idle");
 });
 
 test("background state store replace and reset restore runtime defaults", () => {
@@ -46,4 +47,5 @@ test("background state store replace and reset restore runtime defaults", () => 
   const resetState = store.reset();
   assert.equal(resetState.connection.connected, false);
   assert.equal(resetState.room.roomCode, null);
+  assert.equal(resetState.voice.status, "idle");
 });

@@ -32,6 +32,16 @@ export type RoomEventBusMessage =
       roomCode: string;
       sourceInstanceId: string;
       emittedAt: number;
+    }
+  | {
+      type: "voice_state_updated";
+      roomCode: string;
+      sourceInstanceId: string;
+      emittedAt: number;
+      memberId: string;
+      connected: boolean;
+      muted: boolean;
+      speaking?: boolean;
     };
 
 export type RoomEventBus = {

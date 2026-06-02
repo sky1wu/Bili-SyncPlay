@@ -6,6 +6,7 @@ import {
   getNextPopupRoomTrackingState,
 } from "../src/popup/state-sync";
 import type { BackgroundPopupState } from "../src/shared/messages";
+import { createInitialVoiceRuntimeState } from "../src/shared/voice-state";
 
 function createPopupState(
   roomCode: string | null,
@@ -34,6 +35,7 @@ function createPopupState(
     retryAttemptMax: 5,
     clockOffsetMs: null,
     rttMs: null,
+    voice: createInitialVoiceRuntimeState(),
     logs: [],
     ...overrides,
   };

@@ -1,6 +1,6 @@
 {
   "name": "@bili-syncplay/server",
-  "version": "1.1.2",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,8 +16,9 @@
     "test:redis": "node scripts/run-redis-test.mjs"
   },
   "dependencies": {
-    "@bili-syncplay/protocol": "1.1.2",
+    "@bili-syncplay/protocol": "0.2.0",
     "ioredis": "^5.10.0",
+    "livekit-server-sdk": "^2.15.4",
     "ws": "^8.18.3"
   },
   "devDependencies": {

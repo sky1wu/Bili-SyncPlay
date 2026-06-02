@@ -5,6 +5,8 @@ import {
   type RoomState,
   type SharedVideo,
 } from "@bili-syncplay/protocol";
+import type { VoiceHostEventMessage } from "./voice-host-messages";
+import type { VoiceRuntimeState } from "./voice-state";
 
 export interface SharedVideoToastPayload {
   key: string;
@@ -22,13 +24,24 @@ export type PopupToBackgroundMessage =
   | { type: "popup:get-active-video" }
   | { type: "popup:share-current-video" }
   | { type: "popup:set-server-url"; serverUrl: string }
-  | { type: "popup:open-shared-video" };
+  | { type: "popup:open-shared-video" }
+  | { type: "popup:voice-retry" }
+  | { type: "popup:voice-toggle-mic"; enabled: boolean };
 
 export type ContentToBackgroundMessage =
   | { type: "content:playback-update"; payload: PlaybackState }
   | { type: "content:report-user"; payload: { displayName: string } }
   | { type: "content:get-room-state" }
   | { type: "content:debug-log"; payload: { message: string } };
+
+export type RuntimeHostToBackgroundMessage = VoiceHostEventMessage;
+
+export type VoicePermissionToBackgroundMessage = {
+  type: "voice-permission:result";
+  requestId: string;
+  granted: boolean;
+  error?: string;
+};
 
 export interface DebugLogEntry {
   at: number;
@@ -55,6 +68,7 @@ export type BackgroundToPopupMessage =
         retryAttemptMax: number;
         clockOffsetMs: number | null;
         rttMs: number | null;
+        voice: VoiceRuntimeState;
         logs: DebugLogEntry[];
       };
     }

@@ -7,6 +7,8 @@ import type {
   RoomStateMessage,
   ServerMessage,
   SyncPongMessage,
+  VoiceAccessGrantedMessage,
+  ServerVoiceStateMessage,
 } from "../types/server-message.js";
 import type {
   PlaybackState,
@@ -32,9 +34,32 @@ import {
 const DISPLAY_NAME_MAX_LENGTH = 32;
 const TITLE_MAX_LENGTH = 128;
 const URL_MAX_LENGTH = 512;
+const LIVEKIT_TOKEN_MIN_LENGTH = 16;
+const LIVEKIT_TOKEN_MAX_LENGTH = 4096;
+const LIVEKIT_ROOM_NAME_MAX_LENGTH = 128;
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
   return isString(value) && value.length <= maxLength;
+}
+
+function isLiveKitUrl(value: unknown): value is string {
+  if (!isBoundedString(value, URL_MAX_LENGTH)) {
+    return false;
+  }
+  try {
+    const parsedUrl = new URL(value);
+    return parsedUrl.protocol === "ws:" || parsedUrl.protocol === "wss:";
+  } catch {
+    return false;
+  }
+}
+
+function isLiveKitToken(value: unknown): value is string {
+  return (
+    isString(value) &&
+    value.length >= LIVEKIT_TOKEN_MIN_LENGTH &&
+    value.length <= LIVEKIT_TOKEN_MAX_LENGTH
+  );
 }
 
 function isSharedVideo(value: unknown): value is SharedVideo {
@@ -166,6 +191,35 @@ function isSyncPongMessage(value: unknown): value is SyncPongMessage {
   );
 }
 
+function isVoiceAccessGrantedMessage(
+  value: unknown,
+): value is VoiceAccessGrantedMessage {
+  return (
+    isRecord(value) &&
+    value.type === "voice:access-granted" &&
+    isRecord(value.payload) &&
+    isLiveKitUrl(value.payload.livekitUrl) &&
+    isLiveKitToken(value.payload.token) &&
+    isBoundedString(value.payload.roomName, LIVEKIT_ROOM_NAME_MAX_LENGTH) &&
+    isActorId(value.payload.participantIdentity) &&
+    isFiniteNumber(value.payload.expiresAt)
+  );
+}
+
+function isVoiceStateMessage(value: unknown): value is ServerVoiceStateMessage {
+  return (
+    isRecord(value) &&
+    value.type === "voice:state" &&
+    isRecord(value.payload) &&
+    isRoomCode(value.payload.roomCode) &&
+    isActorId(value.payload.memberId) &&
+    typeof value.payload.connected === "boolean" &&
+    typeof value.payload.muted === "boolean" &&
+    (value.payload.speaking === undefined ||
+      typeof value.payload.speaking === "boolean")
+  );
+}
+
 export function isServerMessage(value: unknown): value is ServerMessage {
   if (!isRecord(value) || !isString(value.type)) {
     return false;
@@ -186,6 +240,10 @@ export function isServerMessage(value: unknown): value is ServerMessage {
       return isErrorMessage(value);
     case "sync:pong":
       return isSyncPongMessage(value);
+    case "voice:access-granted":
+      return isVoiceAccessGrantedMessage(value);
+    case "voice:state":
+      return isVoiceStateMessage(value);
     default:
       return false;
   }

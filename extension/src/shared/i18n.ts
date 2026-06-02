@@ -6,7 +6,7 @@ type MessageCatalog = Record<string, string>;
 
 const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
   zh: {
-    popupTitle: "Bili SyncPlay",
+    popupTitle: "SyncRoom",
     metricConnectionStatus: "连接状态",
     metricRoomMembers: "房间人数",
     metricCurrentRoomCode: "当前房间码",
@@ -38,6 +38,26 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     statusDisconnected: "未连接",
     membersOnline: "{count} 人在线",
     membersCount: "{count}人",
+    sectionVoiceChat: "语音",
+    voiceStatusIdle: "未启用",
+    voiceStatusRequesting: "正在获取语音权限",
+    voiceStatusConnecting: "正在连接语音",
+    voiceStatusConnected: "语音已连接",
+    voiceStatusUnavailable: "语音不可用",
+    voiceStatusFailed: "语音连接失败",
+    voiceMicMuted: "麦克风关",
+    voiceMicUnmuted: "麦克风开",
+    voiceActionUnmute: "开麦",
+    voiceActionMute: "静音",
+    voiceActionRetry: "重试",
+    voiceMemberMuted: "已静音",
+    voiceMemberSpeaking: "正在说话",
+    voiceErrorPermissionDenied: "麦克风权限被拒绝。",
+    voiceErrorUnavailable: "语音服务未启用或配置不完整。",
+    voiceErrorConnectionFailed: "语音连接失败。",
+    voiceErrorMicrophoneFailed: "无法开启麦克风。",
+    voiceErrorAudioPlayback: "语音播放需要浏览器交互。",
+    voiceErrorNotConnected: "语音还未连接。",
     retrySeconds: "{seconds} 秒",
     clockStatus: "偏移 {offset}ms / RTT {rtt}ms",
     stateNoMembers: "暂无成员",
@@ -76,7 +96,10 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     serverErrorInvalidMessage: "当前请求无效。",
     serverErrorInternal: "服务器内部错误。",
     serverErrorUnsupportedProtocolVersion:
-      "扩展版本过低，请升级 Bili-SyncPlay 到最新版本。",
+      "扩展版本过低，请升级 SyncRoom 到最新版本。",
+    serverErrorVoiceUnavailable: "语音服务不可用。",
+    serverErrorVoiceCapacityReached: "语音房间已达到 4 人上限。",
+    serverErrorVoiceTokenFailed: "语音令牌签发失败。",
     toastMemberJoined: "{name} 加入了房间",
     toastMemberLeft: "{name} 离开了房间",
     toastStartedPlaying: "{name} 开始播放",
@@ -86,7 +109,7 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     toastSharedNewVideo: "{name} 共享了新视频：{title}",
   },
   en: {
-    popupTitle: "Bili SyncPlay",
+    popupTitle: "SyncRoom",
     metricConnectionStatus: "Connection",
     metricRoomMembers: "Members",
     metricCurrentRoomCode: "Room code",
@@ -119,6 +142,28 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     statusDisconnected: "Disconnected",
     membersOnline: "{count} online",
     membersCount: "{count} members",
+    sectionVoiceChat: "Voice",
+    voiceStatusIdle: "Voice idle",
+    voiceStatusRequesting: "Requesting voice access",
+    voiceStatusConnecting: "Connecting voice",
+    voiceStatusConnected: "Voice connected",
+    voiceStatusUnavailable: "Voice unavailable",
+    voiceStatusFailed: "Voice failed",
+    voiceMicMuted: "Microphone muted",
+    voiceMicUnmuted: "Microphone on",
+    voiceActionUnmute: "Unmute",
+    voiceActionMute: "Mute",
+    voiceActionRetry: "Retry",
+    voiceMemberMuted: "Muted",
+    voiceMemberSpeaking: "Speaking",
+    voiceErrorPermissionDenied: "Microphone permission was denied.",
+    voiceErrorUnavailable:
+      "Voice service is disabled or not configured on the server.",
+    voiceErrorConnectionFailed: "Voice connection failed.",
+    voiceErrorMicrophoneFailed: "Unable to enable the microphone.",
+    voiceErrorAudioPlayback:
+      "Voice playback needs browser interaction before audio can start.",
+    voiceErrorNotConnected: "Voice is not connected yet.",
     retrySeconds: "{seconds}s",
     clockStatus: "Offset {offset}ms / RTT {rtt}ms",
     stateNoMembers: "No members yet",
@@ -161,7 +206,11 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     serverErrorInvalidMessage: "The request was rejected as invalid.",
     serverErrorInternal: "Internal server error.",
     serverErrorUnsupportedProtocolVersion:
-      "Your extension version is too old. Please update Bili-SyncPlay to the latest version.",
+      "Your extension version is too old. Please update SyncRoom to the latest version.",
+    serverErrorVoiceUnavailable: "Voice service is unavailable.",
+    serverErrorVoiceCapacityReached:
+      "This voice room has reached the 4 member limit.",
+    serverErrorVoiceTokenFailed: "Unable to issue a voice token.",
     toastMemberJoined: "{name} joined the room",
     toastMemberLeft: "{name} left the room",
     toastStartedPlaying: "{name} started playback",
@@ -240,6 +289,12 @@ export function localizeServerError(
       return t("serverErrorInvalidMessage");
     case "unsupported_protocol_version":
       return t("serverErrorUnsupportedProtocolVersion");
+    case "voice_unavailable":
+      return t("serverErrorVoiceUnavailable");
+    case "voice_capacity_reached":
+      return t("serverErrorVoiceCapacityReached");
+    case "voice_token_failed":
+      return t("serverErrorVoiceTokenFailed");
     case "internal_error":
       return t("serverErrorInternal");
     default:

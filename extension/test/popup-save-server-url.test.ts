@@ -10,6 +10,7 @@ import {
 import type { PopupRefs } from "../src/popup/popup-view";
 import type { BackgroundPopupState } from "../src/shared/messages";
 import { setLocaleForTests } from "../src/shared/i18n";
+import { createInitialVoiceRuntimeState } from "../src/shared/voice-state";
 
 const REF_KEYS = [
   "serverStatus",
@@ -25,6 +26,12 @@ const REF_KEYS = [
   "sharedVideoTitle",
   "sharedVideoMeta",
   "sharedVideoOwner",
+  "voiceStatus",
+  "voiceDot",
+  "voiceMicState",
+  "voiceMicButton",
+  "voiceMicLabel",
+  "voiceError",
   "logs",
   "memberList",
   "copyLogsButton",
@@ -83,6 +90,7 @@ function createState(
     retryAttemptMax: 5,
     clockOffsetMs: null,
     rttMs: null,
+    voice: createInitialVoiceRuntimeState(),
     logs: [],
     ...overrides,
   };
@@ -269,6 +277,130 @@ test("saveServerUrl clears a previous localStatusMessage on a successful save", 
     await flushMicrotasks();
 
     assert.equal(uiStateStore.getState().localStatusMessage, null);
+  } finally {
+    setLocaleForTests(null);
+  }
+});
+
+test("voice mic button sends a toggle request from current muted state", async () => {
+  setLocaleForTests("en-US");
+  const callOrder: string[] = [];
+  try {
+    const refs = createRefs();
+    const requests: unknown[] = [];
+    const voice = createInitialVoiceRuntimeState();
+    voice.status = "connected";
+    voice.muted = true;
+    const currentState = createState({
+      roomCode: "ROOM01",
+      voice,
+    });
+
+    installChromeRuntimeStub((message) => {
+      callOrder.push((message as { type?: string }).type ?? "unknown");
+      requests.push(message);
+      return currentState;
+    });
+
+    bindPopupActions(
+      buildBindings({
+        refs,
+        queryState: async () => currentState,
+        getPopupState: () => currentState,
+      }),
+    );
+
+    (refs.voiceMicButton as unknown as EventTarget).dispatchEvent(
+      new Event("click"),
+    );
+    await flushMicrotasks();
+
+    assert.deepEqual(requests, [
+      {
+        type: "popup:voice-toggle-mic",
+        enabled: true,
+      },
+    ]);
+    assert.deepEqual(callOrder, ["popup:voice-toggle-mic"]);
+  } finally {
+    setLocaleForTests(null);
+  }
+});
+
+test("voice mic button sends a mute request from current unmuted state", async () => {
+  setLocaleForTests("en-US");
+  try {
+    const refs = createRefs();
+    const requests: unknown[] = [];
+    const voice = createInitialVoiceRuntimeState();
+    voice.status = "connected";
+    voice.muted = false;
+    const currentState = createState({
+      roomCode: "ROOM01",
+      voice,
+    });
+
+    installChromeRuntimeStub((message) => {
+      requests.push(message);
+      return currentState;
+    });
+
+    bindPopupActions(
+      buildBindings({
+        refs,
+        queryState: async () => currentState,
+        getPopupState: () => currentState,
+      }),
+    );
+
+    (refs.voiceMicButton as unknown as EventTarget).dispatchEvent(
+      new Event("click"),
+    );
+    await flushMicrotasks();
+
+    assert.deepEqual(requests, [
+      {
+        type: "popup:voice-toggle-mic",
+        enabled: false,
+      },
+    ]);
+  } finally {
+    setLocaleForTests(null);
+  }
+});
+
+test("voice mic button sends retry request when voice failed", async () => {
+  setLocaleForTests("en-US");
+  try {
+    const refs = createRefs();
+    const requests: unknown[] = [];
+    const voice = createInitialVoiceRuntimeState();
+    voice.status = "failed";
+    voice.muted = true;
+    const currentState = createState({
+      roomCode: "ROOM01",
+      voice,
+    });
+
+    installChromeRuntimeStub((message) => {
+      requests.push(message);
+      return currentState;
+    });
+
+    bindPopupActions(
+      buildBindings({
+        refs,
+        queryState: async () => currentState,
+        getPopupState: () => currentState,
+      }),
+    );
+
+    (refs.voiceMicButton as unknown as EventTarget).dispatchEvent(
+      new Event("click"),
+    );
+    await flushMicrotasks();
+
+    assert.deepEqual(requests, [{ type: "popup:voice-retry" }]);
   } finally {
     setLocaleForTests(null);
   }

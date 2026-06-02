@@ -18,6 +18,13 @@ import { createRoomEventConsumer } from "./room-event-consumer.js";
 import { type RoomStore } from "./room-store.js";
 import { createRoomReaper } from "./room-reaper.js";
 import { createRoomService } from "./room-service.js";
+import { getDefaultVoiceConfig } from "./config/voice-config.js";
+import { createLiveKitTokenSigner } from "./livekit-token.js";
+import { applyVoiceRoomCapacity } from "./voice-capacity.js";
+import {
+  createVoiceAccessService,
+  type LiveKitTokenSigner,
+} from "./voice-service.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
 import { type RuntimeStore } from "./runtime-store.js";
 import { hasAttachedSocket } from "./types.js";
@@ -35,12 +42,14 @@ import type {
   LogLevel,
   PersistenceConfig,
   SecurityConfig,
+  VoiceConfig,
 } from "./types.js";
 export type {
   AdminConfig,
   AdminUiConfig,
   PersistenceConfig,
   SecurityConfig,
+  VoiceConfig,
 } from "./types.js";
 export {
   INTERNAL_SERVER_ERROR_MESSAGE,
@@ -75,6 +84,8 @@ export type SyncServerDependencies = {
   logSampling?: Record<string, number>;
   metricsPort?: number;
   adminSessionStoreOverride?: AdminSessionStore;
+  voiceConfig?: VoiceConfig;
+  voiceTokenSigner?: LiveKitTokenSigner;
 };
 
 export async function createSyncServer(
@@ -83,6 +94,11 @@ export async function createSyncServer(
   dependencies: SyncServerDependencies = {},
 ): Promise<SyncServer> {
   const { now, generateToken } = resolveServerRuntimeDependencies(dependencies);
+  const voiceConfig = dependencies.voiceConfig ?? getDefaultVoiceConfig();
+  const roomSecurityConfig = applyVoiceRoomCapacity(
+    securityConfig,
+    voiceConfig,
+  );
   const {
     serviceVersion,
     roomStore,
@@ -140,7 +156,7 @@ export async function createSyncServer(
   });
 
   const roomService = createRoomService({
-    config: securityConfig,
+    config: roomSecurityConfig,
     persistence: persistenceConfig,
     roomStore,
     runtimeStore,
@@ -160,6 +176,13 @@ export async function createSyncServer(
       ),
     generateToken,
     logEvent,
+    now,
+  });
+  const voiceService = createVoiceAccessService({
+    config: voiceConfig,
+    validateMemberAccess: (session, memberToken) =>
+      roomService.getVoiceMemberAccessForSession(session, memberToken),
+    signToken: dependencies.voiceTokenSigner ?? createLiveKitTokenSigner(),
     now,
   });
 
@@ -218,8 +241,9 @@ export async function createSyncServer(
   });
 
   const messageHandler = createMessageHandler({
-    config: securityConfig,
+    config: roomSecurityConfig,
     roomService,
+    voiceService,
     logEvent,
     send,
     sendError,

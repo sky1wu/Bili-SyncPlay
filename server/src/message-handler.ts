@@ -17,11 +17,13 @@ import {
   UNSUPPORTED_PROTOCOL_VERSION_MESSAGE,
   MIN_PROTOCOL_VERSION,
   CURRENT_PROTOCOL_VERSION,
+  VOICE_UNAVAILABLE_MESSAGE,
 } from "./messages.js";
 import { RoomServiceError } from "./room-service.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
 import { hasAttachedSocket } from "./types.js";
 import type { LogEvent, SendError, SendMessage, Session } from "./types.js";
+import { VoiceServiceError, type VoiceAccessDetails } from "./voice-service.js";
 
 type RoomEventBusPublishInput<T> = T extends unknown
   ? Omit<T, "sourceInstanceId" | "emittedAt">
@@ -92,6 +94,16 @@ export function createMessageHandler(options: {
       memberToken: string,
       messageType: ClientMessage["type"],
     ) => Promise<import("./types.js").RoomStoreRoomState>;
+    getVoiceMemberAccessForSession?: (
+      session: Session,
+      memberToken: string,
+    ) => Promise<{ roomCode: string; memberId: string; displayName: string }>;
+  };
+  voiceService?: {
+    issueAccess: (
+      session: Session,
+      memberToken: string,
+    ) => Promise<VoiceAccessDetails>;
   };
   logEvent: LogEvent;
   send: SendMessage;
@@ -755,12 +767,87 @@ export function createMessageHandler(options: {
           });
           return;
         }
+        case "voice:access": {
+          if (!options.voiceService) {
+            sendError(socket, "voice_unavailable", VOICE_UNAVAILABLE_MESSAGE);
+            logEvent("voice_access_rejected", {
+              sessionId: session.id,
+              roomCode: session.roomCode,
+              remoteAddress: session.remoteAddress,
+              origin: session.origin,
+              result: "rejected",
+              reason: "voice_unavailable",
+            });
+            return;
+          }
+
+          const access = await options.voiceService.issueAccess(
+            session,
+            message.payload.memberToken,
+          );
+          send(socket, {
+            type: "voice:access-granted",
+            payload: access,
+          });
+          logEvent("voice_access_granted", {
+            sessionId: session.id,
+            roomCode: session.roomCode,
+            memberId: session.memberId ?? session.id,
+            remoteAddress: session.remoteAddress,
+            origin: session.origin,
+            result: "ok",
+          });
+          return;
+        }
+        case "voice:state": {
+          if (!roomService.getVoiceMemberAccessForSession) {
+            sendError(socket, "voice_unavailable", VOICE_UNAVAILABLE_MESSAGE);
+            return;
+          }
+
+          const memberAccess = await roomService.getVoiceMemberAccessForSession(
+            session,
+            message.payload.memberToken,
+          );
+          await firePublishRoomEvent(
+            {
+              type: "voice_state_updated",
+              roomCode: memberAccess.roomCode,
+              memberId: memberAccess.memberId,
+              connected: message.payload.connected,
+              muted: message.payload.muted,
+              ...(message.payload.speaking === undefined
+                ? {}
+                : { speaking: message.payload.speaking }),
+            },
+            {
+              reason: "voice_state_broadcast_failed",
+              sessionId: session.id,
+              remoteAddress: session.remoteAddress,
+              origin: session.origin,
+            },
+          );
+          return;
+        }
         default: {
           const exhaustiveCheck: never = message;
           return exhaustiveCheck;
         }
       }
     } catch (error) {
+      if (error instanceof VoiceServiceError) {
+        sendError(socket, error.code, error.message);
+        logEvent("voice_access_rejected", {
+          sessionId: session.id,
+          roomCode: session.roomCode,
+          remoteAddress: session.remoteAddress,
+          origin: session.origin,
+          result: "rejected",
+          reason: error.reason,
+        });
+        return;
+      }
+
       if (error instanceof RoomServiceError) {
         sendError(socket, error.code, error.message);
         if (error.reason === "internal_error") {

@@ -11,6 +11,7 @@ import {
   logEffectiveOriginPolicy,
   loadSecurityConfig,
 } from "../src/config/security-config.js";
+import { loadVoiceConfig } from "../src/config/voice-config.js";
 
 test("security config reads overrides and keeps defaults for missing values", () => {
   const config = loadSecurityConfig({
@@ -98,6 +99,44 @@ test("admin ui config parses demo flag", () => {
       apiBaseUrl: "https://admin.example.com",
       enabled: false,
     },
+  );
+});
+
+test("voice config stays disabled by default", () => {
+  assert.deepEqual(loadVoiceConfig({}), {
+    enabled: false,
+    livekitUrl: undefined,
+    apiKey: undefined,
+    apiSecret: undefined,
+    tokenTtlSeconds: 900,
+    maxMembers: 4,
+  });
+});
+
+test("voice config parses LiveKit settings and caps max members", () => {
+  const config = loadVoiceConfig({
+    VOICE_ENABLED: "true",
+    LIVEKIT_URL: " wss://voice.example.com ",
+    LIVEKIT_API_KEY: " livekit-key ",
+    LIVEKIT_API_SECRET: " livekit-secret ",
+    VOICE_TOKEN_TTL_SECONDS: "600",
+    VOICE_MAX_MEMBERS: "8",
+  });
+
+  assert.deepEqual(config, {
+    enabled: true,
+    livekitUrl: "wss://voice.example.com",
+    apiKey: "livekit-key",
+    apiSecret: "livekit-secret",
+    tokenTtlSeconds: 600,
+    maxMembers: 4,
+  });
+});
+
+test("voice config rejects non-WebSocket LiveKit URLs", () => {
+  assert.throws(
+    () => loadVoiceConfig({ LIVEKIT_URL: "https://voice.example.com" }),
+    /LIVEKIT_URL must use ws:\/\/ or wss:\/\//,
   );
 });
 

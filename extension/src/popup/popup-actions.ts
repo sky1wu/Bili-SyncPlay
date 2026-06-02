@@ -142,6 +142,24 @@ export function bindPopupActions(args: {
     void handleShareCurrentVideo();
   });
 
+  refs.voiceMicButton.addEventListener("click", async () => {
+    const state = args.getPopupState() ?? (await args.queryState());
+    if (isVoiceRetryStatus(state.voice.status)) {
+      const nextState = await sendPopupAction({ type: "popup:voice-retry" });
+      args.applyActionState(nextState);
+      return;
+    }
+    if (state.voice.status !== "connected") {
+      return;
+    }
+    const shouldEnableMicrophone = state.voice.muted;
+    const nextState = await sendPopupAction({
+      type: "popup:voice-toggle-mic",
+      enabled: shouldEnableMicrophone,
+    });
+    args.applyActionState(nextState);
+  });
+
   refs.sharedVideoCard.addEventListener("click", async () => {
     await chrome.runtime.sendMessage({ type: "popup:open-shared-video" });
     window.close();
@@ -346,6 +364,12 @@ export function bindPopupActions(args: {
     }, 1400);
     copyResetTimers.set(field, timer);
   }
+}
+
+function isVoiceRetryStatus(
+  status: BackgroundPopupState["voice"]["status"],
+): boolean {
+  return status === "failed" || status === "unavailable";
 }
 
 const copyResetTimers = new Map<

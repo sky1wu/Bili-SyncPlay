@@ -11,5 +11,9 @@ release/
 !/.claude/skills/
 !/.claude/agents/
 !/.claude/commands/
-.codex/
+/.codex/*
+!/.codex/skills/
+!/.codex/skills/**
+!/.codex/commands/
+!/.codex/commands/**
 .tmp/

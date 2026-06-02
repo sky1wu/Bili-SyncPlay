@@ -7,6 +7,7 @@ import {
 } from "../src/popup/popup-render";
 import type { PopupRefs } from "../src/popup/popup-view";
 import { setLocaleForTests } from "../src/shared/i18n";
+import { createInitialVoiceRuntimeState } from "../src/shared/voice-state";
 
 class FakeClassList {
   private readonly classes = new Set<string>();
@@ -34,6 +35,7 @@ class FakeElement {
   disabled = false;
   value = "";
   className = "";
+  title = "";
   children: FakeElement[] = [];
   classList = new FakeClassList();
 
@@ -56,6 +58,10 @@ class FakeElement {
   replaceChildren(...nodes: FakeElement[]): void {
     this.ownText = "";
     this.children = nodes;
+  }
+
+  setAttribute(name: string, value: string): void {
+    (this as unknown as Record<string, string>)[name] = value;
   }
 }
 
@@ -83,6 +89,12 @@ function createPopupRefs(): PopupRefs {
     sharedVideoTitle: createElement() as unknown as HTMLElement,
     sharedVideoMeta: createElement() as unknown as HTMLElement,
     sharedVideoOwner: createElement() as unknown as HTMLElement,
+    voiceStatus: createElement() as unknown as HTMLElement,
+    voiceDot: createElement() as unknown as HTMLElement,
+    voiceMicState: createElement() as unknown as HTMLElement,
+    voiceMicButton: createElement() as unknown as HTMLButtonElement,
+    voiceMicLabel: createElement() as unknown as HTMLElement,
+    voiceError: createElement() as unknown as HTMLElement,
     logs: createElement() as unknown as HTMLElement,
     memberList: createElement() as unknown as HTMLElement,
     copyLogsButton: createElement() as unknown as HTMLButtonElement,
@@ -166,6 +178,7 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
         retryAttemptMax: 5,
         clockOffsetMs: 25,
         rttMs: 60,
+        voice: createInitialVoiceRuntimeState(),
         logs: [
           {
             at: 1_710_000_000_000,
@@ -249,6 +262,7 @@ test("renderPopup debug log distinguishes background pending state from local UI
         retryAttemptMax: 5,
         clockOffsetMs: null,
         rttMs: null,
+        voice: createInitialVoiceRuntimeState(),
         logs: [],
       },
       serverUrlDraft: { value: "", dirty: false },
@@ -304,6 +318,7 @@ test("renderPopup only logs once for repeated identical pending renders", async 
       retryAttemptMax: 5,
       clockOffsetMs: null,
       rttMs: null,
+      voice: createInitialVoiceRuntimeState(),
       logs: [],
     },
     serverUrlDraft: { value: "", dirty: false },
@@ -374,6 +389,7 @@ test("renderPopup falls back to sharedByDisplayName when the sharer is no longer
         retryAttemptMax: 5,
         clockOffsetMs: null,
         rttMs: null,
+        voice: createInitialVoiceRuntimeState(),
         logs: [],
       },
       serverUrlDraft: { value: "", dirty: false },
@@ -391,6 +407,168 @@ test("renderPopup falls back to sharedByDisplayName when the sharer is no longer
 
     assert.equal(refs.sharedVideoOwner.textContent, "Shared by Bob");
     assert.equal(refs.sharedVideoOwner.hidden, false);
+  } finally {
+    setLocaleForTests(null);
+    Object.assign(globalThis, { document: originalDocument });
+  }
+});
+
+test("renderPopup renders voice status, mic toggle, and member voice indicators", async () => {
+  resetPopupRenderDebugStateForTests();
+  setLocaleForTests("en-US");
+  const originalDocument = globalThis.document;
+  const refs = createPopupRefs();
+  const voice = createInitialVoiceRuntimeState();
+  voice.status = "connected";
+  voice.muted = false;
+  voice.error = "Microphone permission was denied.";
+  voice.participants = {
+    "member-1": {
+      memberId: "member-1",
+      connected: true,
+      muted: false,
+      speaking: false,
+    },
+    "member-2": {
+      memberId: "member-2",
+      connected: true,
+      muted: false,
+      speaking: true,
+    },
+  };
+
+  Object.assign(globalThis, {
+    document: fakeDocument,
+  });
+
+  try {
+    renderPopup({
+      refs,
+      state: {
+        connected: true,
+        serverUrl: "ws://localhost:8787",
+        error: null,
+        roomCode: "ROOM01",
+        joinToken: "join-token-1",
+        memberId: "member-1",
+        displayName: "Alice",
+        roomState: {
+          roomCode: "ROOM01",
+          sharedVideo: null,
+          playback: null,
+          members: [
+            { id: "member-1", name: "Alice" },
+            { id: "member-2", name: "Bob" },
+          ],
+        },
+        pendingCreateRoom: false,
+        pendingJoinRoomCode: null,
+        retryInMs: null,
+        retryAttempt: 0,
+        retryAttemptMax: 5,
+        clockOffsetMs: null,
+        rttMs: null,
+        voice,
+        logs: [],
+      },
+      serverUrlDraft: { value: "", dirty: false },
+      roomCodeDraft: "",
+      setRoomCodeDraft: () => {},
+      localStatusMessage: null,
+      roomActionPending: false,
+      lastKnownPendingCreateRoom: false,
+      lastKnownPendingJoinRoomCode: null,
+      lastKnownRoomCode: "ROOM01",
+      copyRoomSuccess: false,
+      copyLogsSuccess: false,
+      sendPopupLog: async () => {},
+    });
+
+    assert.equal(refs.voiceStatus.textContent, "Voice connected");
+    assert.equal(refs.voiceMicState.textContent, "Microphone on");
+    assert.equal(refs.voiceMicLabel.textContent, "Mute");
+    assert.equal(refs.voiceMicButton.disabled, false);
+    assert.equal(refs.voiceMicButton.classList.contains("is-live"), true);
+    assert.equal(
+      refs.voiceError.textContent,
+      "Microphone permission was denied.",
+    );
+    assert.equal(refs.voiceError.hidden, false);
+
+    const bobChip = (refs.memberList as unknown as FakeElement).children[1];
+    const bobIndicator = bobChip.children[1];
+    assert.equal(bobIndicator.classList.contains("is-speaking"), true);
+  } finally {
+    setLocaleForTests(null);
+    Object.assign(globalThis, { document: originalDocument });
+  }
+});
+
+test("renderPopup enables voice retry when voice connection failed", async () => {
+  resetPopupRenderDebugStateForTests();
+  setLocaleForTests("en-US");
+  const originalDocument = globalThis.document;
+  const refs = createPopupRefs();
+  const voice = createInitialVoiceRuntimeState();
+  voice.status = "failed";
+  voice.muted = true;
+  voice.error = "Voice connection failed.";
+
+  Object.assign(globalThis, {
+    document: fakeDocument,
+  });
+
+  try {
+    renderPopup({
+      refs,
+      state: {
+        connected: true,
+        serverUrl: "ws://localhost:8787",
+        error: null,
+        roomCode: "ROOM01",
+        joinToken: "join-token-1",
+        memberId: "member-1",
+        displayName: "Alice",
+        roomState: {
+          roomCode: "ROOM01",
+          sharedVideo: null,
+          playback: null,
+          members: [{ id: "member-1", name: "Alice" }],
+        },
+        pendingCreateRoom: false,
+        pendingJoinRoomCode: null,
+        retryInMs: null,
+        retryAttempt: 0,
+        retryAttemptMax: 5,
+        clockOffsetMs: null,
+        rttMs: null,
+        voice,
+        logs: [],
+      },
+      serverUrlDraft: { value: "", dirty: false },
+      roomCodeDraft: "",
+      setRoomCodeDraft: () => {},
+      localStatusMessage: null,
+      roomActionPending: false,
+      lastKnownPendingCreateRoom: false,
+      lastKnownPendingJoinRoomCode: null,
+      lastKnownRoomCode: "ROOM01",
+      copyRoomSuccess: false,
+      copyLogsSuccess: false,
+      sendPopupLog: async () => {},
+    });
+
+    assert.equal(refs.voiceStatus.textContent, "Voice failed");
+    assert.equal(refs.voiceMicLabel.textContent, "Retry");
+    assert.equal(refs.voiceMicButton.disabled, false);
+    assert.equal(refs.voiceMicButton.classList.contains("is-retry"), true);
+    assert.equal(refs.voiceMicButton.classList.contains("is-live"), false);
+    assert.equal(
+      (refs.voiceMicButton as unknown as Record<string, string>)[
+        "aria-pressed"
+      ],
+      "false",
+    );
   } finally {
     setLocaleForTests(null);
     Object.assign(globalThis, { document: originalDocument });

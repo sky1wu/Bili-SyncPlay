@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export type RoomCode = string;
 export type PlaybackPlayState = "playing" | "paused" | "buffering";
@@ -13,4 +13,7 @@ export type ErrorCode =
   | "payload_too_large"
   | "room_full"
   | "unsupported_protocol_version"
+  | "voice_unavailable"
+  | "voice_capacity_reached"
+  | "voice_token_failed"
   | "internal_error";

@@ -6,6 +6,7 @@ This directory keeps project documentation that is useful after the first README
 ## Operations / 运维
 
 - [Multi-node operations runbook](./runbook/multi-node-operations.zh-CN.md)
+- [LiveKit voice chat operations](./operations/livekit-voice-chat.md)
 - [Multi-node global admin migration](./operations/multi-node-global-admin-migration.md)
 - [多节点全局管理面迁移说明](./operations/multi-node-global-admin-migration.zh-CN.md)
 

@@ -25,6 +25,9 @@ const rootPackage = JSON.parse(await readFile(packageJsonPath, "utf8"));
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 manifest.version = rootPackage.version;
 if (targetBrowser === "firefox") {
+  manifest.permissions = (manifest.permissions ?? []).filter(
+    (permission) => permission !== "offscreen",
+  );
   // Firefox 必需 add-on ID；manifest.key 是 Chrome 专属，对 Firefox 无意义。
   delete manifest.key;
   manifest.browser_specific_settings = {
@@ -85,6 +88,8 @@ await Promise.all([
       content: path.join(rootDir, "src/content/index.ts"),
       "page-bridge": path.join(rootDir, "src/content/page-bridge.ts"),
       popup: path.join(rootDir, "src/popup/index.ts"),
+      offscreen: path.join(rootDir, "src/offscreen/voice-host.ts"),
+      "voice-permission": path.join(rootDir, "src/voice-permission/index.ts"),
     },
     bundle: true,
     format: "esm",
@@ -104,8 +109,20 @@ await Promise.all([
     path.join(distDir, "popup.html"),
   ),
   cp(
+    path.join(rootDir, "public", "offscreen.html"),
+    path.join(distDir, "offscreen.html"),
+  ),
+  cp(
+    path.join(rootDir, "public", "voice-permission.html"),
+    path.join(distDir, "voice-permission.html"),
+  ),
+  cp(
     path.join(rootDir, "public", "popup.css"),
     path.join(distDir, "popup.css"),
+  ),
+  cp(
+    path.join(rootDir, "public", "voice-permission.css"),
+    path.join(distDir, "voice-permission.css"),
   ),
   cp(path.join(rootDir, "public", "_locales"), path.join(distDir, "_locales"), {
     recursive: true,

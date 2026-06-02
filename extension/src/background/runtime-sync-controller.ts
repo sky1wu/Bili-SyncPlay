@@ -14,6 +14,7 @@ export function createRuntimeSyncController(args: {
   shareState: BackgroundRuntimeState["share"];
   clockState: BackgroundRuntimeState["clock"];
   diagnosticsState: BackgroundRuntimeState["diagnostics"];
+  voiceState: BackgroundRuntimeState["voice"];
   persistBackgroundState: (state: BackgroundRuntimeState) => Promise<void>;
 }): RuntimeSyncController {
   function syncRuntimeStateStore(): BackgroundRuntimeState {
@@ -59,6 +60,18 @@ export function createRuntimeSyncController(args: {
       diagnostics: {
         logs: args.diagnosticsState.logs,
         lastPopupStateLogKey: args.diagnosticsState.lastPopupStateLogKey,
+      },
+      voice: {
+        status: args.voiceState.status,
+        muted: args.voiceState.muted,
+        speaking: args.voiceState.speaking,
+        error: args.voiceState.error,
+        roomCode: args.voiceState.roomCode,
+        roomName: args.voiceState.roomName,
+        participantIdentity: args.voiceState.participantIdentity,
+        expiresAt: args.voiceState.expiresAt,
+        accessRequestedFor: args.voiceState.accessRequestedFor,
+        participants: args.voiceState.participants,
       },
     });
   }

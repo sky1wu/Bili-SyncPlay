@@ -6,6 +6,7 @@ import type {
   LogLevel,
   PersistenceConfig,
   SecurityConfig,
+  VoiceConfig,
 } from "../types.js";
 import { loadAdminConfig, loadAdminUiConfig } from "./admin-config.js";
 import type { EnvSource } from "./env.js";
@@ -22,6 +23,7 @@ import {
   assertAllowedOriginsStartupPolicy,
   loadSecurityConfig,
 } from "./security-config.js";
+import { loadVoiceConfig } from "./voice-config.js";
 
 const LOG_LEVEL_FIELD = SERVER_CONFIG_FIELDS.find(
   (field) => field.path[0] === "logLevel",
@@ -72,6 +74,13 @@ type AdminUiConfigFile = {
   enabled?: boolean;
 };
 
+type VoiceConfigFile = {
+  enabled?: boolean;
+  livekitUrl?: string;
+  tokenTtlSeconds?: number;
+  maxMembers?: number;
+};
+
 export type ServerConfigFile = {
   port?: number;
   globalAdminPort?: number;
@@ -80,6 +89,7 @@ export type ServerConfigFile = {
   security?: SecurityConfigFile;
   persistence?: PersistenceConfigFile;
   adminUi?: AdminUiConfigFile;
+  voice?: VoiceConfigFile;
 };
 
 export type RuntimeConfig = {
@@ -91,6 +101,7 @@ export type RuntimeConfig = {
   persistenceConfig: PersistenceConfig;
   adminConfig: AdminConfig;
   adminUiConfig: AdminUiConfig;
+  voiceConfig: VoiceConfig;
 };
 
 const DEFAULT_CONFIG_FILE = "server.config.json";
@@ -287,6 +298,7 @@ export async function loadRuntimeConfig(
     persistenceConfig: loadPersistenceConfig(mergedEnv),
     adminConfig: loadAdminConfig(env),
     adminUiConfig: loadAdminUiConfig(mergedEnv),
+    voiceConfig: loadVoiceConfig(mergedEnv),
   };
 
   assertAllowedOriginsStartupPolicy(runtimeConfig.securityConfig);
