@@ -1474,6 +1474,7 @@ test("publish backpressure caps in-flight publishes under concurrent load", asyn
 
 test("publish backpressure drops new events when wait deadline elapses", async () => {
   const dropped: Array<{ event: string; reason: unknown }> = [];
+  const droppedMetricTypes: string[] = [];
   const release: Array<() => void> = [];
 
   const handler = createMessageHandler({
@@ -1499,6 +1500,12 @@ test("publish backpressure drops new events when wait deadline elapses", async (
     maxPendingPublishes: 1,
     // Tight deadline so the test does not sleep 5s.
     backpressureWaitMs: 30,
+    metricsCollector: {
+      observeMessageHandlerDuration() {},
+      recordRoomEventPublishDropped(eventType) {
+        droppedMetricTypes.push(eventType);
+      },
+    },
   });
 
   // Caller 1 occupies the only slot; its publish stays in-flight.
@@ -1521,6 +1528,9 @@ test("publish backpressure drops new events when wait deadline elapses", async (
   // Drop must be recorded with the right reason context.
   assert.equal(dropped.length, 1);
   assert.equal(dropped[0].reason, "profile_update_broadcast_failed");
+  // The drop must also surface on the per-event-type metric so member-affecting
+  // drops can be observed independently of high-frequency state updates.
+  assert.deepEqual(droppedMetricTypes, ["room_state_updated"]);
 
   // Caller 1 should still complete cleanly once we release its publish.
   release[0]();

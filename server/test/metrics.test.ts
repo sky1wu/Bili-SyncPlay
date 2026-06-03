@@ -44,6 +44,8 @@ test("metrics collector renders event counters, histograms, and redis failure co
   metrics.observeRedisRuntimeStoreFailure("register_session");
   metrics.observeRedisRoomEventBusPublishDuration(5);
   metrics.observeRedisRoomEventBusPublishFailure();
+  metrics.recordRoomEventPublishDropped("room_member_changed");
+  metrics.recordRoomEventPublishDropped("room_member_changed");
 
   const rendered = await metrics.render();
 
@@ -81,6 +83,22 @@ test("metrics collector renders event counters, histograms, and redis failure co
   assert.equal(
     rendered.includes(
       'bili_syncplay_redis_operation_failures_total{component="runtime_store",operation="register_session"} 1',
+    ),
+    true,
+  );
+  // Member-affecting drops are counted under their own event_type label so a
+  // critical room_member_changed drop is never hidden behind high-frequency
+  // room_state_updated drops.
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_room_event_publish_dropped_total{event_type="room_member_changed"} 2',
+    ),
+    true,
+  );
+  // Pre-seeded to 0 so "no drops" is distinguishable from "metric absent".
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_room_event_publish_dropped_total{event_type="room_state_updated"} 0',
     ),
     true,
   );

@@ -98,7 +98,10 @@ export function createMessageHandler(options: {
   sendError: SendError;
   publishRoomEvent: (message: RoomEventBusMessage) => Promise<void>;
   instanceId: string;
-  metricsCollector?: Pick<MetricsCollector, "observeMessageHandlerDuration">;
+  metricsCollector?: Pick<
+    MetricsCollector,
+    "observeMessageHandlerDuration" | "recordRoomEventPublishDropped"
+  >;
   maxPendingPublishes?: number;
   backpressureWaitMs?: number;
   publishTimeoutMs?: number;
@@ -241,6 +244,7 @@ export function createMessageHandler(options: {
             maxPending: maxPendingPublishes,
             waitMs: backpressureWaitMs,
           });
+          metricsCollector?.recordRoomEventPublishDropped(type);
           return;
         }
         let waitTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -267,6 +271,7 @@ export function createMessageHandler(options: {
             maxPending: maxPendingPublishes,
             waitMs: backpressureWaitMs,
           });
+          metricsCollector?.recordRoomEventPublishDropped(type);
           return;
         }
       }

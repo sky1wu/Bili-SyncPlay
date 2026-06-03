@@ -34,6 +34,28 @@ export type RoomEventBusMessage =
       emittedAt: number;
     };
 
+export type RoomEventType = RoomEventBusMessage["type"];
+
+// Single source of truth for the set of room event types, used both for
+// runtime iteration (e.g. pre-seeding per-type metrics to 0) and as a
+// type-level exhaustiveness guard. The `satisfies` clause rejects invalid
+// entries; the assertion below fails to compile if a new RoomEventBusMessage
+// variant is added without being listed here.
+export const ROOM_EVENT_TYPES = [
+  "room_state_updated",
+  "room_member_changed",
+  "room_member_joined",
+  "room_member_left",
+  "room_deleted",
+] as const satisfies readonly RoomEventType[];
+
+type _EnsureAllRoomEventTypesCovered =
+  Exclude<RoomEventType, (typeof ROOM_EVENT_TYPES)[number]> extends never
+    ? true
+    : never;
+const _roomEventTypesAreExhaustive: _EnsureAllRoomEventTypesCovered = true;
+void _roomEventTypesAreExhaustive;
+
 export type RoomEventBus = {
   publish: (message: RoomEventBusMessage) => Promise<void>;
   subscribe: (

@@ -1,5 +1,6 @@
 import type { RuntimeStore } from "../runtime-store.js";
 import type { RoomStore } from "../room-store.js";
+import { ROOM_EVENT_TYPES, type RoomEventType } from "../room-event-bus.js";
 
 const DEFAULT_HISTOGRAM_BUCKETS_SECONDS = [
   0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
@@ -57,6 +58,7 @@ export type MetricsCollector = {
   observeRedisRuntimeStoreFailure: (operation: string) => void;
   observeRedisRoomEventBusPublishDuration: (durationMs: number) => void;
   observeRedisRoomEventBusPublishFailure: () => void;
+  recordRoomEventPublishDropped: (eventType: RoomEventType) => void;
   render: () => Promise<string>;
 };
 
@@ -145,6 +147,10 @@ export function createMetricsCollector(options: {
     help: "Total Redis metric-instrumented operation failures",
     samples: new Map(),
   };
+  const roomEventPublishDroppedCounter: CounterMetric = {
+    help: "Total room event publishes dropped after backpressure timeout, grouped by event type",
+    samples: new Map(),
+  };
   const messageDurationHistogram: HistogramMetric = {
     help: "Duration of monitored message handler paths in seconds",
     buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
@@ -163,6 +169,15 @@ export function createMetricsCollector(options: {
 
   for (const eventName of CORE_EVENT_NAMES) {
     ensureCounterSample(eventCounter, { event: eventName });
+  }
+
+  // Pre-seed every room event type to 0 so dashboards can distinguish
+  // "no drops" from "metric never emitted" — drops are rare but the
+  // critical room_member_* types must be observable the moment they occur.
+  for (const eventType of ROOM_EVENT_TYPES) {
+    ensureCounterSample(roomEventPublishDroppedCounter, {
+      event_type: eventType,
+    });
   }
 
   function incrementCounter(
@@ -204,6 +219,11 @@ export function createMetricsCollector(options: {
       const right = `${b.labels.component}:${b.labels.operation}`;
       return left.localeCompare(right);
     });
+    const roomEventPublishDroppedSamples = Array.from(
+      roomEventPublishDroppedCounter.samples.values(),
+    ).sort((a, b) =>
+      (a.labels.event_type ?? "").localeCompare(b.labels.event_type ?? ""),
+    );
     const histogramMetrics = [
       {
         name: "bili_syncplay_message_handler_duration_seconds",
@@ -275,6 +295,15 @@ export function createMetricsCollector(options: {
       ...redisFailureSamples.map((sample) =>
         formatMetricLine(
           "bili_syncplay_redis_operation_failures_total",
+          sample.value,
+          sample.labels,
+        ),
+      ),
+      "# HELP bili_syncplay_room_event_publish_dropped_total Total room event publishes dropped after backpressure timeout, grouped by event type",
+      "# TYPE bili_syncplay_room_event_publish_dropped_total counter",
+      ...roomEventPublishDroppedSamples.map((sample) =>
+        formatMetricLine(
+          "bili_syncplay_room_event_publish_dropped_total",
           sample.value,
           sample.labels,
         ),
@@ -354,6 +383,11 @@ export function createMetricsCollector(options: {
       incrementCounter(redisFailureCounter, {
         component: "room_event_bus",
         operation: "publish",
+      });
+    },
+    recordRoomEventPublishDropped(eventType) {
+      incrementCounter(roomEventPublishDroppedCounter, {
+        event_type: eventType,
       });
     },
     render,
