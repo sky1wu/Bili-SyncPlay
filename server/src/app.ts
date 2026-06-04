@@ -290,6 +290,7 @@ export async function createSyncServer(
     httpServer,
     metricsHttpServer,
     runtimeIndexReaper,
+    ipBlockStore,
     closeAdminServices,
   } = await createSharedAdminHttpBootstrap({
     securityConfig,
@@ -320,7 +321,7 @@ export async function createSyncServer(
 
   httpServer.on(
     "upgrade",
-    createWsUpgradeHandler({ securityPolicy, wss, logEvent }),
+    createWsUpgradeHandler({ securityPolicy, ipBlockStore, wss, logEvent }),
   );
 
   wss.on(

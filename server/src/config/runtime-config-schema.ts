@@ -66,6 +66,11 @@ export const SERVER_CONFIG_FIELDS = [
     "boolean",
   ),
   createField(
+    ["security", "allowAnyOriginInDev"],
+    "ALLOW_ANY_ORIGIN_IN_DEV",
+    "boolean",
+  ),
+  createField(
     ["security", "trustedProxyAddresses"],
     "TRUSTED_PROXY_ADDRESSES",
     "stringArray",

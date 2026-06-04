@@ -332,3 +332,19 @@ test("allowAnyFirefoxExtensionOrigin on: non-extension origins still gated", () 
     reason: "origin_missing",
   });
 });
+
+test("allowAnyOriginInDev on: skips origin checks for explicit and missing origins", () => {
+  const config = getDefaultSecurityConfig();
+  config.allowedOrigins = [];
+  config.allowAnyOriginInDev = true;
+  const security = createSecurityPolicy(config);
+
+  assert.deepEqual(
+    security.isOriginAllowed("chrome-extension://some-extension"),
+    { ok: true },
+  );
+  assert.deepEqual(security.isOriginAllowed("https://web.example"), {
+    ok: true,
+  });
+  assert.deepEqual(security.isOriginAllowed(null), { ok: true });
+});

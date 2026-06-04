@@ -44,6 +44,10 @@ export function getRedisAuditStreamKey(namespace?: string): string {
   return `${normalizeNamespaceBase(namespace)}audit-logs`;
 }
 
+export function getRedisIpBlockKeyPrefix(namespace?: string): string {
+  return `${normalizeNamespaceBase(namespace)}ip-blocks:`;
+}
+
 export function getRedisRoomEventChannel(namespace?: string): string {
   return `${normalizeNamespaceBase(namespace)}room-events`;
 }

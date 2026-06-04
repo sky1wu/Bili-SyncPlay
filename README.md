@@ -548,7 +548,7 @@ npm run build:release
 
 When the environment variable is unset, the build output still uses `ws://localhost:8787`. When it is set, clearing the server URL in the popup and saving also falls back to that injected value.
 
-For local unpacked-extension development, `ALLOWED_ORIGINS` must include the current `chrome-extension://<extension-id>` or the server will reject the WebSocket handshake with `origin_not_allowed`.
+For local unpacked-extension development, `ALLOWED_ORIGINS` should include the current `chrome-extension://<extension-id>` or the server will reject the WebSocket handshake with `origin_not_allowed`. For short-lived diagnostics, `ALLOW_ANY_ORIGIN_IN_DEV=true` skips this Origin gate.
 
 The server now also supports an optional JSON config file. Resolution order is:
 
@@ -823,6 +823,7 @@ The server accepts the following environment variables. Safe defaults are built 
 - if `ALLOWED_ORIGINS` is empty, the server rejects all explicit `Origin` values by default
 - `ALLOW_MISSING_ORIGIN_IN_DEV`: allow missing `Origin` headers when set to `true`
 - `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN`: when `true`, accept any well-formed `moz-extension://<uuid>` origin; Firefox assigns a random per-install UUID that a public/shared server cannot enumerate in `ALLOWED_ORIGINS`. Still rejects web-page origins (a page can never present a `moz-extension://` origin) and does not replace room/member-token auth; default `false`
+- `ALLOW_ANY_ORIGIN_IN_DEV`: when `true`, skip WebSocket Origin checks for both explicit and missing Origin values. Use only for local development or short-lived diagnostics; default `false`
 - `TRUSTED_PROXY_ADDRESSES`: comma-separated proxy socket IP allowlist; only requests arriving from these proxies can use `X-Forwarded-For`
 - `MAX_CONNECTIONS_PER_IP`: max concurrent WebSocket connections per IP
 - `CONNECTION_ATTEMPTS_PER_MINUTE`: max handshake attempts per IP per minute
@@ -906,7 +907,7 @@ Admin control panel:
 
 - open `http://localhost:8787/admin`
 - authenticate with the account configured by `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH`, `ADMIN_SESSION_SECRET`, and `ADMIN_ROLE`
-- the UI covers login, overview, rooms, room detail, events, audit logs, config summary, and the existing admin actions
+- the UI covers login, overview, rooms, room detail, events, IP blacklist, audit logs, config summary, and the existing admin actions
 
 Role model:
 
@@ -918,6 +919,8 @@ Action behavior notes:
 
 - `kick member` disconnects the current member session and temporarily blocks immediate auto rejoin attempts that reuse the old `memberToken`
 - `disconnect session` only closes the specified socket; if the client still holds valid room context, it may join again normally
+- `add to blacklist` stores the IP, immediately disconnects current sessions from the same IP, and rejects future WebSocket upgrades from that IP
+- the IP blacklist is process-local in memory mode; when Redis persistence providers are enabled, Redis stores and shares it across nodes, while disk durability depends on Redis AOF / RDB settings
 
 Implemented endpoints:
 
@@ -931,8 +934,11 @@ Implemented endpoints:
 - `GET /api/admin/config`
 - `GET /api/admin/rooms`
 - `GET /api/admin/rooms/:roomCode`
+- `GET /api/admin/ip-blocks`
 - `GET /api/admin/events`
 - `GET /api/admin/audit-logs`
+- `POST /api/admin/ip-blocks`
+- `DELETE /api/admin/ip-blocks/:ip`
 - `POST /api/admin/rooms/:roomCode/close`
 - `POST /api/admin/rooms/:roomCode/expire`
 - `POST /api/admin/rooms/:roomCode/clear-video`
@@ -1365,7 +1371,7 @@ If you run multiple room nodes, prefer a rolling restart instead of restarting e
 - Rooms are not deleted immediately when the last member leaves; the server writes `expiresAt` and retains the room until `EMPTY_ROOM_TTL_MS` elapses.
 - Room join requires both `roomCode` and `joinToken`; room messages require a valid `memberToken`.
 - `memberToken` is session-bound, never restored from persistence, and is re-issued after reconnect or restart.
-- Handshake origin checks are deny-by-default unless you explicitly allow missing `Origin` in development.
+- Handshake origin checks are deny-by-default unless you configure `ALLOWED_ORIGINS`, explicitly allow missing `Origin` in development, or temporarily set `ALLOW_ANY_ORIGIN_IN_DEV=true`.
 - `X-Forwarded-For` is ignored unless the socket peer matches `TRUSTED_PROXY_ADDRESSES`.
 - Health checks are available on both `GET /` and `GET /healthz`; readiness is `GET /readyz`.
 - If you use a cloud firewall, allow inbound `80` and `443`, but keep `8787` private to localhost.
@@ -1386,7 +1392,7 @@ Common developer-facing failure cases:
 - `Join token is invalid.`: the invite string is wrong, stale, or from another room.
 - `Member token is invalid.`: the current session lost its room binding, the server restarted, or the client must rejoin to obtain a fresh token.
 - `Too many requests.`: a room action or sync message hit the configured rate limit.
-- handshake rejected with `403`: the request `Origin` is not in `ALLOWED_ORIGINS`, or `Origin` is missing while `ALLOW_MISSING_ORIGIN_IN_DEV` is disabled.
+- handshake rejected with `403`: the request `Origin` is not in `ALLOWED_ORIGINS`, or `Origin` is missing while `ALLOW_MISSING_ORIGIN_IN_DEV` is disabled. For temporary diagnostics, `ALLOW_ANY_ORIGIN_IN_DEV=true` disables this Origin gate.
 - connection-level IP limits appear ineffective: verify whether the reverse proxy socket IP is included in `TRUSTED_PROXY_ADDRESSES`; by default the server uses the real socket address only.
 - `Please open a Bilibili video page first.`: the active tab URL does not match the extension content-script targets.
 - `Current page does not have a playable video.`: the content script loaded, but the page did not expose a usable video payload.

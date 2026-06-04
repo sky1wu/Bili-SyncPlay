@@ -27,6 +27,7 @@ export const ROOM_ACTIVE_MESSAGE =
   "Room still has active members. Close the room instead of expiring it early.";
 export const MEMBER_NOT_FOUND_MESSAGE = "Member not found.";
 export const SESSION_NOT_FOUND_MESSAGE = "Session not found.";
+export const INVALID_IP_ADDRESS_MESSAGE = "Invalid IP address.";
 export const UNSUPPORTED_PROTOCOL_VERSION_MESSAGE =
   "Your extension version is too old. Please update SyncRoom to the latest version.";
 export const VOICE_UNAVAILABLE_MESSAGE = "Voice chat is unavailable.";

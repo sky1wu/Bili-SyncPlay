@@ -67,10 +67,11 @@ export function assertAllowedOriginsStartupPolicy(
   if (
     config.allowedOrigins.length === 0 &&
     !config.allowMissingOriginInDev &&
-    !config.allowAnyFirefoxExtensionOrigin
+    !config.allowAnyFirefoxExtensionOrigin &&
+    !config.allowAnyOriginInDev
   ) {
     throw new SecurityConfigError(
-      "ALLOWED_ORIGINS is empty; set ALLOW_MISSING_ORIGIN_IN_DEV=true to run without origin restrictions in development, set ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=true to accept any Firefox extension origin, or configure ALLOWED_ORIGINS for production.",
+      "ALLOWED_ORIGINS is empty; set ALLOW_ANY_ORIGIN_IN_DEV=true to disable Origin checks in development, set ALLOW_MISSING_ORIGIN_IN_DEV=true to allow missing Origin headers in development, set ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=true to accept any Firefox extension origin, or configure ALLOWED_ORIGINS for production.",
     );
   }
 }
@@ -88,7 +89,7 @@ export function logEffectiveOriginPolicy(
       ? "<none>"
       : config.allowedOrigins.join(", ");
   log(
-    `[security] ALLOWED_ORIGINS=${origins}; ALLOW_MISSING_ORIGIN_IN_DEV=${String(config.allowMissingOriginInDev)}; ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=${String(config.allowAnyFirefoxExtensionOrigin)}`,
+    `[security] ALLOWED_ORIGINS=${origins}; ALLOW_MISSING_ORIGIN_IN_DEV=${String(config.allowMissingOriginInDev)}; ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=${String(config.allowAnyFirefoxExtensionOrigin)}; ALLOW_ANY_ORIGIN_IN_DEV=${String(config.allowAnyOriginInDev)}`,
   );
 }
 

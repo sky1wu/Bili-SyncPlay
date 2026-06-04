@@ -8,6 +8,7 @@ import { createInMemoryAdminSessionStore } from "../admin/auth-store.js";
 import { createAdminAuthService } from "../admin/auth-service.js";
 import { createAdminConfigService } from "../admin/config-service.js";
 import { createAdminLoginRateLimiter } from "../admin/login-rate-limit.js";
+import type { IpBlockStore } from "../admin/ip-block-store.js";
 import type { GlobalAuditStore } from "../admin/global-audit-store.js";
 import type { GlobalEventStore } from "../admin/global-event-store.js";
 import type { MetricsCollector } from "../admin/metrics.js";
@@ -47,6 +48,7 @@ export function createAdminServices(args: {
   metricsCollector: MetricsCollector;
   now: () => number;
   adminConfig?: AdminConfig;
+  ipBlockStore: IpBlockStore;
   serviceVersion: string;
   serviceName?: string;
   createOverviewService?: typeof createAdminOverviewService;
@@ -156,6 +158,7 @@ export function createAdminServices(args: {
         args.runtimeStore.listClusterSessionsByRoom(roomCode),
       requestAdminCommand: args.requestAdminCommand,
       auditLogService,
+      ipBlockStore: args.ipBlockStore,
       getRoomStateByCode: (roomCode) =>
         args.roomService.getRoomStateByCode(roomCode),
       publishRoomStateUpdate,
@@ -181,8 +184,13 @@ export function createAdminServices(args: {
         roomQueryService.listRooms(query),
       getRoomDetail: (roomCode: string) =>
         roomQueryService.getRoomDetail(roomCode),
+      listIpBlocks: () => actionService.listIpBlocks(),
       listAuditLogs: (query: import("../admin/types.js").AuditLogQuery) =>
         Promise.resolve(auditLogService.query(query)),
+      blockIp: (actor: AdminSession, ip: string, reason?: string) =>
+        actionService.blockIp(actor, ip, reason),
+      unblockIp: (actor: AdminSession, ip: string, reason?: string) =>
+        actionService.unblockIp(actor, ip, reason),
       closeRoom: (actor: AdminSession, roomCode: string, reason?: string) =>
         actionService.closeRoom(actor, roomCode, reason),
       expireRoom: (actor: AdminSession, roomCode: string, reason?: string) =>

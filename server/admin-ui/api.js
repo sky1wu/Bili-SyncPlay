@@ -69,6 +69,21 @@ export function createAdminApi({
     getRoomDetail(roomCode) {
       return this.request(`/api/admin/rooms/${encodeURIComponent(roomCode)}`);
     },
+    listIpBlocks() {
+      return this.request("/api/admin/ip-blocks");
+    },
+    blockIp(ip, reason) {
+      return this.request("/api/admin/ip-blocks", {
+        method: "POST",
+        body: { ip, reason },
+      });
+    },
+    unblockIp(ip, reason) {
+      return this.request(`/api/admin/ip-blocks/${encodeURIComponent(ip)}`, {
+        method: "DELETE",
+        body: { reason },
+      });
+    },
     closeRoom(roomCode, reason) {
       return this.request(
         `/api/admin/rooms/${encodeURIComponent(roomCode)}/close`,

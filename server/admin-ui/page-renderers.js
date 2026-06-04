@@ -91,10 +91,15 @@ export function memberActionButtons(roomCode, member, canManage = false) {
     return "—";
   }
 
+  const blockIpButton = member.remoteAddress
+    ? `<button class="button link" type="button" data-member-action="block-ip" data-room-code="${escapeHtml(roomCode)}" data-remote-address="${escapeHtml(member.remoteAddress)}">加入黑名单</button>`
+    : "";
+
   return `
     <div class="table-actions">
       <button class="button link" type="button" data-member-action="kick" data-room-code="${escapeHtml(roomCode)}" data-member-id="${escapeHtml(member.memberId)}">踢出成员</button>
       <button class="button link" type="button" data-member-action="disconnect" data-room-code="${escapeHtml(roomCode)}" data-session-id="${escapeHtml(member.sessionId)}">断开会话</button>
+      ${blockIpButton}
     </div>
   `;
 }
@@ -368,7 +373,7 @@ function bindMemberActionButtons({
           successMessage: `成员 ${memberId} 已被踢出。`,
           onConfirm: (reason) => api.kickMember(roomCode, memberId, reason),
         });
-      } else {
+      } else if (action === "disconnect") {
         const sessionId = button.getAttribute("data-session-id");
         await confirmAction({
           title: `断开会话 ${sessionId}`,
@@ -376,6 +381,16 @@ function bindMemberActionButtons({
           confirmLabel: "确认断开",
           successMessage: `会话 ${sessionId} 已断开。`,
           onConfirm: (reason) => api.disconnectSession(sessionId, reason),
+        });
+      } else if (action === "block-ip") {
+        const ip = button.getAttribute("data-remote-address");
+        await confirmAction({
+          title: `加入黑名单 ${ip}`,
+          description:
+            "这会禁止该 IP 后续建立语音同步服务连接，并立即断开当前同 IP 在线连接。",
+          confirmLabel: "确认加入",
+          successMessage: `IP ${ip} 已加入黑名单。`,
+          onConfirm: (reason) => api.blockIp(ip, reason),
         });
       }
       rerender();
@@ -632,6 +647,110 @@ export function createPageLoaders(options) {
             },
             query,
           );
+        },
+      };
+    },
+
+    async renderIpBlocksPage() {
+      const data = await api.listIpBlocks();
+      return {
+        instanceId: state.lastOverviewData?.instanceId,
+        html: `
+          <div class="section">
+            <section class="panel panel-filter">
+              <form class="form-grid" data-ip-block-form>
+                ${textField("ip", "IP 地址", "", "text", {
+                  placeholder: "例如 203.0.113.4 或 2001:db8::1",
+                })}
+                <div class="filter-footer full-width">
+                  <strong>共 ${escapeHtml(data.total)} 个 IP</strong>
+                  <div class="actions">
+                    <button class="button primary" type="submit">加入黑名单</button>
+                    <button class="button ghost" type="button" data-refresh-ip-blocks>刷新</button>
+                  </div>
+                </div>
+              </form>
+            </section>
+            <section class="table-card">
+              <div class="toolbar table-toolbar">
+                <div class="table-title">小黑屋</div>
+              </div>
+              ${
+                data.items.length === 0
+                  ? `<div class="empty-state">当前没有被拉黑的 IP。</div>`
+                  : `
+                <div class="table-scroll">
+                  <table class="logs-table ip-blocks-table">
+                    <thead>
+                      <tr>
+                        <th>IP</th>
+                        <th>加入时间</th>
+                        <th>操作人</th>
+                        <th>原因</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${data.items
+                        .map(
+                          (record) => `
+                        <tr>
+                          <td><span class="primary-code">${escapeHtml(record.ip)}</span></td>
+                          <td>${formatDateTime(record.createdAt)}</td>
+                          <td>${record.actor ? renderDataPair(escapeHtml(record.actor.username), escapeHtml(record.actor.role)) : renderEmptyValue()}</td>
+                          <td>${record.reason ? escapeHtml(record.reason) : renderEmptyValue()}</td>
+                          <td>
+                            <div class="table-actions">
+                              <button class="button link" type="button" data-ip-block-action="delete" data-ip="${escapeHtml(record.ip)}">移出小黑屋</button>
+                            </div>
+                          </td>
+                        </tr>
+                      `,
+                        )
+                        .join("")}
+                    </tbody>
+                  </table>
+                </div>
+              `
+              }
+            </section>
+          </div>
+        `,
+        bind() {
+          document
+            .querySelector("[data-refresh-ip-blocks]")
+            ?.addEventListener("click", () => rerender());
+          document
+            .querySelector("[data-ip-block-form]")
+            ?.addEventListener("submit", async (event) => {
+              event.preventDefault();
+              const formData = new FormData(event.currentTarget);
+              const ip = formData.get("ip")?.toString().trim() || "";
+              await confirmAction({
+                title: `加入黑名单 ${ip}`,
+                description:
+                  "这会禁止该 IP 后续建立连接，并立即断开当前同 IP 在线连接。",
+                confirmLabel: "确认加入",
+                successMessage: `IP ${ip} 已加入黑名单。`,
+                onConfirm: (reason) => api.blockIp(ip, reason),
+              });
+              rerender();
+            });
+          document
+            .querySelectorAll("[data-ip-block-action]")
+            .forEach((button) => {
+              button.addEventListener("click", async () => {
+                const ip = button.getAttribute("data-ip");
+                await confirmAction({
+                  title: `移出小黑屋 ${ip}`,
+                  description: "移出后该 IP 可以重新建立连接。",
+                  confirmLabel: "确认移出",
+                  successMessage: `IP ${ip} 已移出小黑屋。`,
+                  onConfirm: (reason) => api.unblockIp(ip, reason),
+                });
+                rerender();
+              });
+            });
         },
       };
     },
@@ -1058,6 +1177,7 @@ export function createPageLoaders(options) {
                   }
                 </dd>
                 <dt>开发环境允许缺省 Origin</dt><dd>${renderStatus(config.security.allowMissingOriginInDev ? "warning" : "neutral", config.security.allowMissingOriginInDev ? "是" : "否")}</dd>
+                <dt>开发环境放行任意 Origin</dt><dd>${renderStatus(config.security.allowAnyOriginInDev ? "warning" : "neutral", config.security.allowAnyOriginInDev ? "是" : "否")}</dd>
                 <dt>受信代理地址</dt><dd>${
                   (config.security.trustedProxyAddresses ?? []).length > 0
                     ? `<div class="config-origin-list">${(

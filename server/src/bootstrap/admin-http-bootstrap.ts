@@ -7,9 +7,15 @@ import { createAdminOverviewService } from "../admin/overview-service.js";
 import { createAdminRoomQueryService } from "../admin/room-query-service.js";
 import type { MetricsCollector } from "../admin/metrics.js";
 import type { AdminCommandBus } from "../admin-command-bus.js";
+import {
+  createInMemoryIpBlockStore,
+  type IpBlockStore,
+} from "../admin/ip-block-store.js";
+import { createRedisIpBlockStore } from "../admin/redis-ip-block-store.js";
 import type { AdminSessionStore } from "../admin-session-store.js";
 import type { RoomEventBusMessage } from "../room-event-bus.js";
 import type { RoomStore } from "../room-store.js";
+import { getRedisIpBlockKeyPrefix } from "../redis-namespace.js";
 import { createRoomService } from "../room-service.js";
 import { createRuntimeIndexReaper } from "../runtime-index-reaper.js";
 import { createSecurityPolicy } from "../security.js";
@@ -62,13 +68,34 @@ export async function createSharedAdminHttpBootstrap(args: {
   createRoomQueryService?: typeof createAdminRoomQueryService;
   metricsPort?: number;
   adminSessionStoreOverride?: AdminSessionStore;
+  ipBlockStoreOverride?: IpBlockStore;
 }): Promise<{
   securityPolicy: ReturnType<typeof createSecurityPolicy>;
   httpServer: HttpServer;
   metricsHttpServer: HttpServer | undefined;
   runtimeIndexReaper: ReturnType<typeof createRuntimeIndexReaper>;
+  ipBlockStore: IpBlockStore;
   closeAdminServices: () => Promise<void>;
 }> {
+  let closeIpBlockStore: (() => Promise<void>) | undefined;
+  const ipBlockStore =
+    args.ipBlockStoreOverride ??
+    (args.persistenceConfig.provider === "redis" ||
+    args.persistenceConfig.runtimeStoreProvider === "redis" ||
+    args.persistenceConfig.adminCommandBusProvider === "redis"
+      ? await createRedisIpBlockStore(args.persistenceConfig.redisUrl, {
+          keyPrefix: getRedisIpBlockKeyPrefix(
+            args.persistenceConfig.redisNamespace,
+          ),
+        })
+      : createInMemoryIpBlockStore());
+  const maybeCloseIpBlockStore = (
+    ipBlockStore as IpBlockStore & { close?: () => Promise<void> }
+  ).close;
+  if (!args.ipBlockStoreOverride && maybeCloseIpBlockStore) {
+    closeIpBlockStore = maybeCloseIpBlockStore;
+  }
+
   const securityPolicy = createSecurityPolicy(args.securityConfig);
   const runtimeIndexReaper = createRuntimeIndexReaper({
     enabled:
@@ -94,6 +121,7 @@ export async function createSharedAdminHttpBootstrap(args: {
     metricsCollector: args.metricsCollector,
     now: args.now,
     adminConfig: args.adminConfig,
+    ipBlockStore,
     serviceVersion: args.serviceVersion,
     serviceName: args.serviceName,
     createOverviewService: args.createOverviewService,
@@ -126,7 +154,11 @@ export async function createSharedAdminHttpBootstrap(args: {
     httpServer,
     metricsHttpServer,
     runtimeIndexReaper,
-    closeAdminServices,
+    ipBlockStore,
+    closeAdminServices: async () => {
+      await closeAdminServices();
+      await closeIpBlockStore?.();
+    },
   };
 }
 

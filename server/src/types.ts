@@ -152,6 +152,7 @@ export type SecurityConfig = {
   allowedOrigins: string[];
   allowMissingOriginInDev: boolean;
   allowAnyFirefoxExtensionOrigin: boolean;
+  allowAnyOriginInDev: boolean;
   trustedProxyAddresses: string[];
   maxConnectionsPerIp: number;
   connectionAttemptsPerMinute: number;

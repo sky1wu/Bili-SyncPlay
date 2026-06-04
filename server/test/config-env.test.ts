@@ -267,6 +267,14 @@ test("startup policy allows empty origins when dev override is enabled", () => {
   assert.doesNotThrow(() => assertAllowedOriginsStartupPolicy(config));
 });
 
+test("startup policy allows empty origins when any-origin dev override is enabled", () => {
+  const config = loadSecurityConfig({ ALLOW_ANY_ORIGIN_IN_DEV: "true" });
+  assert.deepEqual(config.allowedOrigins, []);
+  assert.equal(config.allowMissingOriginInDev, false);
+  assert.equal(config.allowAnyOriginInDev, true);
+  assert.doesNotThrow(() => assertAllowedOriginsStartupPolicy(config));
+});
+
 test("logEffectiveOriginPolicy prints final origins and dev override once", () => {
   const entries: string[] = [];
   const log = (message: string): void => {
@@ -278,6 +286,7 @@ test("logEffectiveOriginPolicy prints final origins and dev override once", () =
       allowedOrigins: ["https://a.example", "https://b.example"],
       allowMissingOriginInDev: false,
       allowAnyFirefoxExtensionOrigin: false,
+      allowAnyOriginInDev: false,
     } as ReturnType<typeof loadSecurityConfig>,
     log,
   );
@@ -286,13 +295,14 @@ test("logEffectiveOriginPolicy prints final origins and dev override once", () =
       allowedOrigins: [],
       allowMissingOriginInDev: true,
       allowAnyFirefoxExtensionOrigin: true,
+      allowAnyOriginInDev: true,
     } as ReturnType<typeof loadSecurityConfig>,
     log,
   );
 
   assert.deepEqual(entries, [
-    "[security] ALLOWED_ORIGINS=https://a.example, https://b.example; ALLOW_MISSING_ORIGIN_IN_DEV=false; ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=false",
-    "[security] ALLOWED_ORIGINS=<none>; ALLOW_MISSING_ORIGIN_IN_DEV=true; ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=true",
+    "[security] ALLOWED_ORIGINS=https://a.example, https://b.example; ALLOW_MISSING_ORIGIN_IN_DEV=false; ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=false; ALLOW_ANY_ORIGIN_IN_DEV=false",
+    "[security] ALLOWED_ORIGINS=<none>; ALLOW_MISSING_ORIGIN_IN_DEV=true; ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN=true; ALLOW_ANY_ORIGIN_IN_DEV=true",
   ]);
 });
 
@@ -301,6 +311,14 @@ test("security config parses ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN", () => {
   assert.equal(
     loadSecurityConfig({ ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN: "true" })
       .allowAnyFirefoxExtensionOrigin,
+    true,
+  );
+});
+
+test("security config parses ALLOW_ANY_ORIGIN_IN_DEV", () => {
+  assert.equal(loadSecurityConfig({}).allowAnyOriginInDev, false);
+  assert.equal(
+    loadSecurityConfig({ ALLOW_ANY_ORIGIN_IN_DEV: "true" }).allowAnyOriginInDev,
     true,
   );
 });

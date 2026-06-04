@@ -673,6 +673,18 @@ export function getAuditActionPresentation(action) {
       tone: "warning",
       summary: "强制断开指定会话。",
     },
+    block_ip: {
+      label: "加入黑名单",
+      category: "小黑屋",
+      tone: "danger",
+      summary: "禁止指定 IP 建立连接。",
+    },
+    unblock_ip: {
+      label: "移出小黑屋",
+      category: "小黑屋",
+      tone: "warning",
+      summary: "允许指定 IP 重新建立连接。",
+    },
   };
 
   return (

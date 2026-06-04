@@ -187,6 +187,15 @@ export function createDemoData() {
     },
   ];
 
+  const ipBlocks = [
+    {
+      ip: "203.0.113.10",
+      createdAt: now - 1000 * 60 * 45,
+      actor: { adminId: "admin-demo", username: "demo-admin", role: "admin" },
+      reason: "demo suspicious traffic",
+    },
+  ];
+
   const auditLogs = [
     {
       timestamp: now - 1000 * 60 * 5,
@@ -223,16 +232,17 @@ export function createDemoData() {
     },
   ];
 
-  return { now, rooms, roomMembers, events, auditLogs };
+  return { now, rooms, roomMembers, events, auditLogs, ipBlocks };
 }
 
 export function createMockApiRequest() {
   const demoData = createDemoData();
 
-  return async function mockApiRequest(path) {
+  return async function mockApiRequest(path, options = {}) {
     const url = new URL(path, location.origin);
     const pathname = url.pathname;
     const params = url.searchParams;
+    const method = options.method || "GET";
 
     if (pathname === "/api/admin/auth/login") {
       return {
@@ -401,6 +411,52 @@ export function createMockApiRequest() {
           .slice(0, 20),
       };
     }
+    if (pathname === "/api/admin/ip-blocks") {
+      if (method === "GET") {
+        return {
+          items: demoData.ipBlocks.slice(),
+          total: demoData.ipBlocks.length,
+        };
+      }
+      if (method === "POST") {
+        const ip = options.body?.ip || "203.0.113.99";
+        const existing = demoData.ipBlocks.find((record) => record.ip === ip);
+        if (existing) {
+          return {
+            record: existing,
+            created: false,
+            disconnectedSessionCount: 0,
+          };
+        }
+        const record = {
+          ip,
+          createdAt: Date.now(),
+          actor: {
+            adminId: "admin-demo",
+            username: "demo-admin",
+            role: "admin",
+          },
+          reason: options.body?.reason || "",
+        };
+        demoData.ipBlocks.unshift(record);
+        return {
+          record,
+          created: true,
+          disconnectedSessionCount: 1,
+        };
+      }
+    }
+    if (pathname.startsWith("/api/admin/ip-blocks/") && method === "DELETE") {
+      const ip = decodeURIComponent(pathname.split("/")[4] || "");
+      const before = demoData.ipBlocks.length;
+      demoData.ipBlocks = demoData.ipBlocks.filter(
+        (record) => record.ip !== ip,
+      );
+      return {
+        ip,
+        removed: demoData.ipBlocks.length < before,
+      };
+    }
     if (pathname === "/api/admin/events") {
       let items = demoData.events.slice();
       const filters = [
@@ -480,6 +536,7 @@ export function createMockApiRequest() {
             "chrome-extension://demo-extension",
           ],
           allowMissingOriginInDev: false,
+          allowAnyOriginInDev: false,
           trustedProxyAddresses: ["127.0.0.1", "10.0.0.10"],
           maxConnectionsPerIp: 24,
           connectionAttemptsPerMinute: 120,

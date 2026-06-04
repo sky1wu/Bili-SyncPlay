@@ -31,6 +31,10 @@ export const routeMeta = {
     description: "筛选房间、查看详情并执行治理动作。",
   },
   "/events": { title: "运行事件", description: "按条件检索近期运行事件。" },
+  "/ip-blocks": {
+    title: "小黑屋",
+    description: "维护禁止连接的 IP 黑名单。",
+  },
   "/audit-logs": {
     title: "审计日志",
     description: "查看管理员操作留痕和请求参数。",

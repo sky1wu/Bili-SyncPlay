@@ -204,6 +204,7 @@ export function getDefaultSecurityConfig(): SecurityConfig {
     allowedOrigins: [],
     allowMissingOriginInDev: false,
     allowAnyFirefoxExtensionOrigin: false,
+    allowAnyOriginInDev: false,
     trustedProxyAddresses: [],
     maxConnectionsPerIp: 10,
     connectionAttemptsPerMinute: 20,

@@ -8,6 +8,7 @@ import type {
   AdminRole,
   AdminSession,
   AuditLogQuery,
+  IpBlockListResult,
   RoomListQuery,
 } from "./types.js";
 
@@ -19,7 +20,18 @@ export type AdminRouterOptions = {
   getOverview: () => Promise<unknown>;
   listRooms: (query: RoomListQuery) => Promise<unknown>;
   getRoomDetail: (roomCode: string) => Promise<unknown | null>;
+  listIpBlocks: () => Promise<IpBlockListResult>;
   listAuditLogs: (query: AuditLogQuery) => Promise<GlobalAuditQueryResult>;
+  blockIp: (
+    actor: AdminSession,
+    ip: string,
+    reason?: string,
+  ) => Promise<unknown>;
+  unblockIp: (
+    actor: AdminSession,
+    ip: string,
+    reason?: string,
+  ) => Promise<unknown>;
   closeRoom: (
     actor: AdminSession,
     roomCode: string,

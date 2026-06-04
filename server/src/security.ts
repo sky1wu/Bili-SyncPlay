@@ -1,11 +1,11 @@
 import type { IncomingMessage } from "node:http";
-import { isIP } from "node:net";
 import {
   consumeFixedWindow,
   createWindowCounter,
   WINDOW_MINUTE_MS,
 } from "./rate-limit.js";
 import { isBareMozExtensionOrigin } from "./origin.js";
+import { normalizeIpAddress } from "./ip-address.js";
 import type { SecurityConfig, UpgradeDecision } from "./types.js";
 
 type AttemptWindowEntry = {
@@ -48,28 +48,6 @@ export function createSecurityPolicy(config: SecurityConfig): {
     return addresses.filter((address): address is string => address !== null);
   }
 
-  function normalizeIpAddress(value: string): string | null {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return null;
-    }
-
-    const unwrapped =
-      trimmed.startsWith("[") && trimmed.endsWith("]")
-        ? trimmed.slice(1, -1)
-        : trimmed;
-    if (isIP(unwrapped) === 0) {
-      return null;
-    }
-
-    const mappedIpv4Match = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(unwrapped);
-    if (mappedIpv4Match && isIP(mappedIpv4Match[1]) === 4) {
-      return mappedIpv4Match[1];
-    }
-
-    return unwrapped;
-  }
-
   function getTrustedForwardedAddress(forwarded: string): string | null {
     const chain = parseForwardedChain(forwarded);
     if (!chain) {
@@ -105,6 +83,10 @@ export function createSecurityPolicy(config: SecurityConfig): {
   function isOriginAllowed(
     origin: string | null,
   ): { ok: true } | { ok: false; reason: string } {
+    if (config.allowAnyOriginInDev) {
+      return { ok: true };
+    }
+
     if (!origin) {
       if (config.allowMissingOriginInDev) {
         return { ok: true };

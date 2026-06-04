@@ -59,6 +59,15 @@ export const handleReadRoutes: AdminRouteHandler = async ({
     return true;
   }
 
+  if (request.method === "GET" && pathname === "/api/admin/ip-blocks") {
+    const session = await helpers.requireAdmin(request, response);
+    if (!session) {
+      return true;
+    }
+    sendOk(response, await options.listIpBlocks());
+    return true;
+  }
+
   if (
     request.method === "GET" &&
     segments.length === 4 &&

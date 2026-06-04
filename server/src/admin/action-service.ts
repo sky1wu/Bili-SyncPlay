@@ -2,9 +2,11 @@ import type {
   AdminCommandBus,
   AdminCommandResult,
 } from "../admin-command-bus.js";
+import { normalizeIpAddress } from "../ip-address.js";
 import type { GlobalAuditStore } from "./global-audit-store.js";
 import type { AdminSession } from "./types.js";
 import {
+  INVALID_IP_ADDRESS_MESSAGE,
   MEMBER_NOT_FOUND_MESSAGE,
   ROOM_ACTIVE_MESSAGE,
   ROOM_NOT_FOUND_MESSAGE,
@@ -12,6 +14,7 @@ import {
   SESSION_NOT_FOUND_MESSAGE,
 } from "../messages.js";
 import type { LogEvent, PersistedRoom } from "../types.js";
+import type { IpBlockStore } from "./ip-block-store.js";
 import type { RoomStore, RoomUpdateResult } from "../room-store.js";
 import type { RuntimeStore } from "../runtime-store.js";
 
@@ -41,6 +44,7 @@ export function createAdminActionService(options: {
   ) => Promise<Awaited<ReturnType<RuntimeStore["listClusterSessionsByRoom"]>>>;
   requestAdminCommand: AdminCommandBus["request"];
   auditLogService: GlobalAuditStore;
+  ipBlockStore: IpBlockStore;
   getRoomStateByCode: (roomCode: string) => Promise<unknown | null>;
   publishRoomStateUpdate: (roomCode: string) => Promise<void>;
   publishRoomDeleted: (roomCode: string) => Promise<void>;
@@ -85,7 +89,7 @@ export function createAdminActionService(options: {
   function writeAudit(
     actor: AdminSession,
     action: string,
-    targetType: "room" | "session" | "member",
+    targetType: "room" | "session" | "member" | "block",
     targetId: string,
     request: Record<string, unknown>,
     result: "ok" | "rejected" | "error",
@@ -127,6 +131,28 @@ export function createAdminActionService(options: {
     });
   }
 
+  async function disconnectSessionsByIp(
+    ip: string,
+    reason?: string,
+  ): Promise<number> {
+    const sessions = (await options.listClusterSessions()).filter(
+      (session) => session.remoteAddress === ip,
+    );
+    const results = await Promise.all(
+      sessions.map((session) =>
+        options.requestAdminCommand({
+          kind: "disconnect_session",
+          requestId: `block-ip:${ip}:${session.id}:${now()}`,
+          targetInstanceId: session.instanceId ?? options.instanceId,
+          sessionId: session.id,
+          reason,
+          requestedAt: now(),
+        }),
+      ),
+    );
+    return results.filter((result) => result.status === "ok").length;
+  }
+
   function throwCommandFailure(
     result: Exclude<AdminCommandResult, { status: "ok" }>,
   ): never {
@@ -140,6 +166,89 @@ export function createAdminActionService(options: {
   }
 
   return {
+    async listIpBlocks() {
+      const items = await options.ipBlockStore.list();
+      return {
+        items,
+        total: items.length,
+      };
+    },
+
+    async blockIp(actor: AdminSession, ip: string, reason?: string) {
+      const normalizedIp = normalizeIpAddress(ip);
+      if (!normalizedIp) {
+        throw new AdminActionError(
+          400,
+          "invalid_ip_address",
+          INVALID_IP_ADDRESS_MESSAGE,
+        );
+      }
+      const result = await options.ipBlockStore.add({
+        ip: normalizedIp,
+        createdAt: now(),
+        actor: {
+          adminId: actor.adminId,
+          username: actor.username,
+          role: actor.role,
+        },
+        reason,
+      });
+      const disconnectedSessionCount = await disconnectSessionsByIp(
+        normalizedIp,
+        reason,
+      );
+
+      options.logEvent("admin_ip_blocked", {
+        ip: normalizedIp,
+        created: result.created,
+        disconnectedSessionCount,
+        result: "ok",
+        actor: actor.username,
+      });
+      writeAudit(
+        actor,
+        "block_ip",
+        "block",
+        normalizedIp,
+        { reason, created: result.created, disconnectedSessionCount },
+        "ok",
+      );
+      return {
+        ...result,
+        disconnectedSessionCount,
+      };
+    },
+
+    async unblockIp(actor: AdminSession, ip: string, reason?: string) {
+      const normalizedIp = normalizeIpAddress(ip);
+      if (!normalizedIp) {
+        throw new AdminActionError(
+          400,
+          "invalid_ip_address",
+          INVALID_IP_ADDRESS_MESSAGE,
+        );
+      }
+      const removed = await options.ipBlockStore.delete(normalizedIp);
+      options.logEvent("admin_ip_unblocked", {
+        ip: normalizedIp,
+        removed,
+        result: "ok",
+        actor: actor.username,
+      });
+      writeAudit(
+        actor,
+        "unblock_ip",
+        "block",
+        normalizedIp,
+        { reason, removed },
+        "ok",
+      );
+      return {
+        ip: normalizedIp,
+        removed,
+      };
+    },
+
     async closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
       await getRoomOrThrow(roomCode);
       const sessions = await options.listClusterSessionsByRoom(roomCode);

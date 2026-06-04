@@ -548,7 +548,7 @@ npm run build:release
 
 不设置该环境变量时，构建产物仍然使用 `ws://localhost:8787`；设置后，用户在弹窗里清空服务器地址并保存，也会回退到这个构建时注入的地址。
 
-本地开发时，`ALLOWED_ORIGINS` 必须包含当前 `chrome-extension://<extension-id>`，否则服务端会以 `origin_not_allowed` 拒绝 WebSocket 握手。
+本地开发时，`ALLOWED_ORIGINS` 应包含当前 `chrome-extension://<extension-id>`，否则服务端会以 `origin_not_allowed` 拒绝 WebSocket 握手。短期排障时可用 `ALLOW_ANY_ORIGIN_IN_DEV=true` 跳过这一 Origin 闸门。
 
 服务端现在也支持可选的 JSON 配置文件。加载优先级为：
 
@@ -823,6 +823,7 @@ node server/dist/global-admin-index.js
 - 如果 `ALLOWED_ORIGINS` 为空，服务器默认拒绝所有显式 `Origin`
 - `ALLOW_MISSING_ORIGIN_IN_DEV`：设为 `true` 时允许缺失 `Origin` 头
 - `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN`：设为 `true` 时接受任意格式正确的 `moz-extension://<uuid>` Origin；Firefox 每个安装随机分配 UUID，公共/共享服务端无法逐一枚举进 `ALLOWED_ORIGINS`。仍会拒绝网页 Origin（网页永远无法呈现 `moz-extension://` Origin），且不替代房间/成员 token 鉴权；默认 `false`
+- `ALLOW_ANY_ORIGIN_IN_DEV`：设为 `true` 时跳过 WebSocket Origin 检查，显式 Origin 和缺失 Origin 都会放行。仅用于本地开发或短期排障；默认 `false`
 - `TRUSTED_PROXY_ADDRESSES`：逗号分隔的受信代理 socket IP 列表；只有来自这些代理的请求才会使用 `X-Forwarded-For`
 - `MAX_CONNECTIONS_PER_IP`：每个 IP 允许的最大并发 WebSocket 连接数
 - `CONNECTION_ATTEMPTS_PER_MINUTE`：每个 IP 每分钟最大握手尝试次数
@@ -906,7 +907,7 @@ node -e "const { createHash } = require('node:crypto'); console.log('sha256:' + 
 
 - 打开 `http://localhost:8787/admin`
 - 使用 `ADMIN_USERNAME`、`ADMIN_PASSWORD_HASH`、`ADMIN_SESSION_SECRET`、`ADMIN_ROLE` 配置的账号登录
-- 页面已覆盖登录、概览、房间列表、房间详情、运行事件、审计日志、配置摘要，以及现有管理动作
+- 页面已覆盖登录、概览、房间列表、房间详情、运行事件、小黑屋、审计日志、配置摘要，以及现有管理动作
 
 角色模型：
 
@@ -918,6 +919,8 @@ node -e "const { createHash } = require('node:crypto'); console.log('sha256:' + 
 
 - `踢出成员` 会断开当前成员会话，并临时阻止客户端拿旧 `memberToken` 立即自动重连
 - `断开会话` 只关闭指定 socket；如果客户端仍持有有效房间上下文，后续仍可正常重新加入
+- `加入黑名单` 会把 IP 写入小黑屋，立即断开当前同 IP 在线连接，并在后续 WebSocket 握手阶段拒绝该 IP
+- 小黑屋在内存模式下仅适合本地开发；启用 Redis 相关持久化 provider 后由 Redis 保存并跨节点共享，是否落盘取决于 Redis 自身 AOF / RDB 配置
 
 当前已实现接口：
 
@@ -931,8 +934,11 @@ node -e "const { createHash } = require('node:crypto'); console.log('sha256:' + 
 - `GET /api/admin/config`
 - `GET /api/admin/rooms`
 - `GET /api/admin/rooms/:roomCode`
+- `GET /api/admin/ip-blocks`
 - `GET /api/admin/events`
 - `GET /api/admin/audit-logs`
+- `POST /api/admin/ip-blocks`
+- `DELETE /api/admin/ip-blocks/:ip`
 - `POST /api/admin/rooms/:roomCode/close`
 - `POST /api/admin/rooms/:roomCode/expire`
 - `POST /api/admin/rooms/:roomCode/clear-video`
@@ -1365,7 +1371,7 @@ sudo systemctl restart bili-syncplay-global-admin
 - 最后一名成员离开后，房间不会立刻删除；服务端会写入 `expiresAt`，并在 `EMPTY_ROOM_TTL_MS` 到期后清理。
 - 加入房间需要同时提供 `roomCode` 和 `joinToken`；发送房间消息需要有效的 `memberToken`。
 - `memberToken` 是会话态，不会从持久层恢复；重连或重启后都需要重新加入并重新签发。
-- 握手阶段的 Origin 检查默认拒绝，除非你在开发环境中显式允许缺失 `Origin`。
+- 握手阶段的 Origin 检查默认拒绝，除非你配置了 `ALLOWED_ORIGINS`、在开发环境中显式允许缺失 `Origin`，或临时设置 `ALLOW_ANY_ORIGIN_IN_DEV=true`。
 - 只有当 socket 对端命中 `TRUSTED_PROXY_ADDRESSES` 时才会读取 `X-Forwarded-For`。
 - 健康检查同时提供 `GET /` 与 `GET /healthz`；就绪检查为 `GET /readyz`。
 - 如果你使用云防火墙，请放行入站 `80` 和 `443`，并将 `8787` 仅暴露给 localhost。
@@ -1386,7 +1392,7 @@ sudo systemctl restart bili-syncplay-global-admin
 - `加入码无效。`：邀请串错误、已失效，或来自其他房间。
 - `成员令牌无效。`：当前会话丢失了房间绑定、服务端已经重启，或客户端需要重新加入以获取新 token。
 - `请求过于频繁。`：某个房间操作或同步消息触发了配置的限流。
-- 握手阶段返回 `403`：请求的 `Origin` 不在 `ALLOWED_ORIGINS` 中，或者在 `ALLOW_MISSING_ORIGIN_IN_DEV` 关闭时缺少 `Origin`。
+- 握手阶段返回 `403`：请求的 `Origin` 不在 `ALLOWED_ORIGINS` 中，或者在 `ALLOW_MISSING_ORIGIN_IN_DEV` 关闭时缺少 `Origin`。临时排障时可用 `ALLOW_ANY_ORIGIN_IN_DEV=true` 关闭这一 Origin 闸门。
 - 连接级 IP 限制看起来未生效：检查反向代理的 socket IP 是否已加入 `TRUSTED_PROXY_ADDRESSES`；默认情况下服务器只使用真实 socket 地址。
 - `请先打开一个哔哩哔哩视频页面。`：当前活动标签页 URL 不匹配扩展内容脚本的目标页面。
 - `当前页面没有可播放的视频。`：内容脚本已加载，但页面没有暴露可用的视频载荷。

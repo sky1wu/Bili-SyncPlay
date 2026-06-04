@@ -12,6 +12,56 @@ export const handleActionRoutes: AdminRouteHandler = async ({
 }) => {
   if (
     request.method === "POST" &&
+    segments.length === 3 &&
+    segments[0] === "api" &&
+    segments[1] === "admin" &&
+    segments[2] === "ip-blocks"
+  ) {
+    if (!helpers.requireWriteOrigin(request, response)) {
+      return true;
+    }
+    const session = await helpers.requireAdmin(request, response);
+    if (!session) {
+      return true;
+    }
+    if (!helpers.requireRole(session, "operator", response)) {
+      return true;
+    }
+    const body = await readJsonBody<{ ip?: string; reason?: string }>(request);
+    sendOk(
+      response,
+      await options.blockIp(session, body.ip ?? "", body.reason),
+    );
+    return true;
+  }
+
+  if (
+    request.method === "DELETE" &&
+    segments.length === 4 &&
+    segments[0] === "api" &&
+    segments[1] === "admin" &&
+    segments[2] === "ip-blocks"
+  ) {
+    if (!helpers.requireWriteOrigin(request, response)) {
+      return true;
+    }
+    const ip = decodeURIComponent(
+      requireNonEmptyString(requireSegment(segments, 3, "ip"), "ip"),
+    );
+    const session = await helpers.requireAdmin(request, response);
+    if (!session) {
+      return true;
+    }
+    if (!helpers.requireRole(session, "operator", response)) {
+      return true;
+    }
+    const body = await readJsonBody<{ reason?: string }>(request);
+    sendOk(response, await options.unblockIp(session, ip, body.reason));
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
     segments.length === 5 &&
     segments[0] === "api" &&
     segments[1] === "admin" &&

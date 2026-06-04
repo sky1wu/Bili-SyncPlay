@@ -11,6 +11,7 @@ import {
 import { createSessionRateLimitState } from "./rate-limit.js";
 import { hasAttachedSocket } from "./types.js";
 import type { LogEvent, SecurityConfig, Session } from "./types.js";
+import type { IpBlockStore } from "./admin/ip-block-store.js";
 import {
   INTERNAL_SERVER_ERROR_MESSAGE,
   INVALID_CLIENT_MESSAGE_MESSAGE,
@@ -139,33 +140,67 @@ export function createWsUpgradeHandler(args: {
       reason?: string;
     };
   };
+  ipBlockStore?: Pick<IpBlockStore, "has">;
   wss: WebSocketServer;
   logEvent: LogEvent;
 }): (request: IncomingMessage, socket: Duplex, head: Buffer) => void {
   return (request, socket, head) => {
-    const decision = args.securityPolicy.evaluateUpgrade(request);
-    if (!decision.ok) {
+    void (async () => {
+      const decision = args.securityPolicy.evaluateUpgrade(request);
+      if (!decision.ok) {
+        rejectUpgrade(
+          socket,
+          decision.statusCode!,
+          decision.statusText!,
+          {
+            remoteAddress: decision.context.remoteAddress,
+            origin: decision.context.origin,
+            result: "rejected",
+            reason: decision.reason,
+          },
+          args.logEvent,
+        );
+        return;
+      }
+
+      if (
+        decision.context.remoteAddress &&
+        (await args.ipBlockStore?.has(decision.context.remoteAddress))
+      ) {
+        rejectUpgrade(
+          socket,
+          403,
+          "Forbidden",
+          {
+            remoteAddress: decision.context.remoteAddress,
+            origin: decision.context.origin,
+            result: "rejected",
+            reason: "ip_blocked",
+          },
+          args.logEvent,
+        );
+        return;
+      }
+
+      request.biliSyncPlayContext = decision.context as {
+        remoteAddress: string | null;
+        origin: string | null;
+      };
+      args.wss.handleUpgrade(request, socket, head, (ws) => {
+        args.wss.emit("connection", ws, request);
+      });
+    })().catch((error: unknown) => {
       rejectUpgrade(
         socket,
-        decision.statusCode!,
-        decision.statusText!,
+        500,
+        "Internal Server Error",
         {
-          remoteAddress: decision.context.remoteAddress,
-          origin: decision.context.origin,
-          result: "rejected",
-          reason: decision.reason,
+          result: "error",
+          reason: "upgrade_check_failed",
+          error: error instanceof Error ? error.message : String(error),
         },
         args.logEvent,
       );
-      return;
-    }
-
-    request.biliSyncPlayContext = decision.context as {
-      remoteAddress: string | null;
-      origin: string | null;
-    };
-    args.wss.handleUpgrade(request, socket, head, (ws) => {
-      args.wss.emit("connection", ws, request);
     });
   };
 }

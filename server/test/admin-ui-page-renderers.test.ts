@@ -4,6 +4,7 @@ import {
   bindRoomActionButtons,
   createPageLoaders,
   createRoomActionConfig,
+  memberActionButtons,
 } from "../admin-ui/page-renderers.js";
 
 function createButton(attributes: Record<string, string> = {}) {
@@ -269,6 +270,84 @@ test("rooms and events pages render direct admin ui tables", async () => {
   assert.equal(eventsPage.html.includes("查看详情 JSON 获取完整上下文"), false);
   assert.equal(eventsPage.html.includes("room_joined"), true);
   assert.equal(eventsPage.html.includes("data-view-json"), true);
+});
+
+test("ip block page renders add form and blacklist rows", async () => {
+  const pageLoaders = createPageLoaders({
+    document: createDocumentStub(),
+    location: { search: "" },
+    history: { replaceState() {} },
+    state: {
+      overviewAutoRefresh: true,
+      lastOverviewData: { instanceId: "instance-1" },
+    },
+    api: {
+      async listIpBlocks() {
+        return {
+          items: [
+            {
+              ip: "203.0.113.4",
+              createdAt: 1_000,
+              actor: { username: "admin", role: "admin" },
+              reason: "spam",
+            },
+          ],
+          total: 1,
+        };
+      },
+    },
+    routeHref(path: string) {
+      return `/admin${path}`;
+    },
+    withDemoQuery(url: string) {
+      return url;
+    },
+    serializeQuery() {
+      return "";
+    },
+    navigate() {},
+    navigateToUrl() {},
+    rerender() {},
+    canManage() {
+      return true;
+    },
+    confirmAction() {},
+    openReasonDialog() {},
+  });
+
+  const page = await pageLoaders.renderIpBlocksPage();
+
+  assert.equal(page.html.includes("小黑屋"), true);
+  assert.equal(page.html.includes("203.0.113.4"), true);
+  assert.equal(page.html.includes("spam"), true);
+  assert.equal(page.html.includes("data-ip-block-form"), true);
+  assert.equal(page.html.includes('data-ip-block-action="delete"'), true);
+});
+
+test("member action buttons include blacklist action only when member has an IP", () => {
+  const withIp = memberActionButtons(
+    "ROOM8A",
+    {
+      memberId: "member-1",
+      sessionId: "session-1",
+      remoteAddress: "203.0.113.4",
+    },
+    true,
+  );
+  assert.equal(withIp.includes("加入黑名单"), true);
+  assert.equal(withIp.includes('data-member-action="block-ip"'), true);
+  assert.equal(withIp.includes('data-remote-address="203.0.113.4"'), true);
+
+  const withoutIp = memberActionButtons(
+    "ROOM8A",
+    {
+      memberId: "member-1",
+      sessionId: "session-1",
+      remoteAddress: null,
+    },
+    true,
+  );
+  assert.equal(withoutIp.includes("加入黑名单"), false);
 });
 
 test("room detail renders playback position as media timestamp", async () => {

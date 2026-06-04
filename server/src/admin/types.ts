@@ -100,6 +100,22 @@ export type AuditLogQuery = {
   pageSize: number;
 };
 
+export type IpBlockRecord = {
+  ip: string;
+  createdAt: number;
+  actor?: {
+    adminId: string;
+    username: string;
+    role: AdminRole;
+  };
+  reason?: string;
+};
+
+export type IpBlockListResult = {
+  items: IpBlockRecord[];
+  total: number;
+};
+
 export type RoomSummary = {
   instanceId?: string;
   instanceIds?: string[];
