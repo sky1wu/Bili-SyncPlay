@@ -301,6 +301,25 @@ test("message controller returns the page share button setting to content", asyn
   assert.deepEqual(response, { ok: true, enabled: false });
 });
 
+test("message controller updates the page share button setting from content", async () => {
+  const harness = createControllerHarness();
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "content:set-page-share-button-enabled", enabled: false },
+    {},
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.equal(harness.settingsState.pageShareButtonEnabled, false);
+  assert.equal(harness.calls.persistProfileState, 1);
+  assert.equal(harness.calls.notifyAll, 1);
+  assert.equal(harness.calls.notifyPageShareButtonSettings, 1);
+  assert.deepEqual(response, { ok: true, enabled: false });
+});
+
 test("message controller returns share context for content page actions", async () => {
   const sharedVideo = {
     videoId: "BV199W9zEEcH",
@@ -319,7 +338,10 @@ test("message controller returns share context for content page actions", async 
         roomCode: "ROOM88",
         sharedVideo,
         playback: null,
-        members: [],
+        members: [
+          { id: "member-88", name: "Alice" },
+          { id: "member-99", name: "Bob" },
+        ],
       },
     },
   });
@@ -336,6 +358,7 @@ test("message controller returns share context for content page actions", async 
   assert.deepEqual(response, {
     ok: true,
     roomCode: "ROOM88",
+    memberCount: 2,
     sharedVideo: {
       videoId: "BV199W9zEEcH",
       url: "https://www.bilibili.com/video/BV199W9zEEcH",

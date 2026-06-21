@@ -6,7 +6,9 @@ import type {
 } from "../src/shared/messages";
 import {
   clampPageShareButtonPosition,
+  createPageSharePopoverViewModel,
   getDefaultPageShareButtonPosition,
+  getPageSharePopoverPosition,
   hasPageShareButtonDragMoved,
   shareCurrentPageVideoFromContent,
 } from "../src/content/page-share-button";
@@ -66,6 +68,7 @@ test("page share action confirms room creation before sharing outside a room", a
     contextResponse: {
       ok: true,
       roomCode: null,
+      memberCount: null,
       sharedVideo: null,
     },
     confirmResult: true,
@@ -93,6 +96,7 @@ test("page share action stops when room creation is cancelled", async () => {
     contextResponse: {
       ok: true,
       roomCode: null,
+      memberCount: null,
       sharedVideo: null,
     },
     confirmResult: false,
@@ -117,6 +121,7 @@ test("page share action confirms replacement when the room shares another video"
     contextResponse: {
       ok: true,
       roomCode: "ROOM01",
+      memberCount: 2,
       sharedVideo: {
         videoId: "BV1xx411c7mD",
         url: "https://www.bilibili.com/video/BV1xx411c7mD",
@@ -143,6 +148,7 @@ test("page share action skips replacement confirmation for the current shared vi
     contextResponse: {
       ok: true,
       roomCode: "ROOM01",
+      memberCount: 1,
       sharedVideo: currentPayload.video,
     },
   });
@@ -164,6 +170,7 @@ test("page share action reports when no playable video is available", async () =
     contextResponse: {
       ok: true,
       roomCode: "ROOM01",
+      memberCount: 1,
       sharedVideo: null,
     },
   });
@@ -182,6 +189,7 @@ test("page share action reports background share failures", async () => {
     contextResponse: {
       ok: true,
       roomCode: "ROOM01",
+      memberCount: 1,
       sharedVideo: currentPayload.video,
     },
     shareResponse: {
@@ -258,4 +266,81 @@ test("page share button position rounds to whole pixels", () => {
 test("page share button drag threshold distinguishes click from drag", () => {
   assert.equal(hasPageShareButtonDragMoved(2, 3), false);
   assert.equal(hasPageShareButtonDragMoved(3, 3), true);
+});
+
+test("page share popover view model displays current room info", () => {
+  setLocaleForTests("zh-CN");
+
+  assert.deepEqual(
+    createPageSharePopoverViewModel({
+      loading: false,
+      error: null,
+      context: {
+        ok: true,
+        roomCode: "ROOM01",
+        memberCount: 2,
+        sharedVideo: currentPayload.video,
+      },
+    }),
+    {
+      status: null,
+      rows: [
+        { label: "房间码", value: "ROOM01" },
+        { label: "成员", value: "2人" },
+        { label: "共享视频", value: "New Video" },
+      ],
+    },
+  );
+});
+
+test("page share popover view model reports loading and no room states", () => {
+  setLocaleForTests("zh-CN");
+
+  assert.deepEqual(
+    createPageSharePopoverViewModel({
+      loading: true,
+      error: null,
+      context: null,
+    }),
+    {
+      status: "读取房间信息...",
+      rows: [],
+    },
+  );
+  assert.deepEqual(
+    createPageSharePopoverViewModel({
+      loading: false,
+      error: null,
+      context: {
+        ok: true,
+        roomCode: null,
+        memberCount: null,
+        sharedVideo: null,
+      },
+    }),
+    {
+      status: "未加入房间",
+      rows: [],
+    },
+  );
+});
+
+test("page share popover position stays inside the viewport", () => {
+  assert.deepEqual(
+    getPageSharePopoverPosition(
+      { x: 1144, y: 684 },
+      { width: 1200, height: 800 },
+    ),
+    {
+      x: 906,
+      y: 629,
+    },
+  );
+  assert.deepEqual(
+    getPageSharePopoverPosition({ x: 12, y: 12 }, { width: 1200, height: 800 }),
+    {
+      x: 58,
+      y: 12,
+    },
+  );
 });

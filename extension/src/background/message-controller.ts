@@ -88,6 +88,13 @@ export function createMessageController(args: {
   notifyPageShareButtonSettings: () => Promise<void>;
   notifyAll: () => void;
 }): MessageController {
+  async function updatePageShareButtonEnabled(enabled: boolean): Promise<void> {
+    args.settingsState.pageShareButtonEnabled = enabled;
+    await args.persistProfileState();
+    args.notifyAll();
+    await args.notifyPageShareButtonSettings();
+  }
+
   async function handleRuntimeMessage(
     message: RuntimeMessage,
     sender: chrome.runtime.MessageSender,
@@ -164,10 +171,7 @@ export function createMessageController(args: {
         sendResponse(args.popupStateController.popupState());
         return;
       case "popup:set-page-share-button-enabled":
-        args.settingsState.pageShareButtonEnabled = message.enabled;
-        await args.persistProfileState();
-        args.notifyAll();
-        await args.notifyPageShareButtonSettings();
+        await updatePageShareButtonEnabled(message.enabled);
         sendResponse(args.popupStateController.popupState());
         return;
       case "content:get-share-context": {
@@ -176,6 +180,7 @@ export function createMessageController(args: {
         sendResponse({
           ok: true,
           roomCode: args.roomSessionState.roomCode,
+          memberCount: args.roomSessionState.roomState?.members.length ?? null,
           sharedVideo: sharedVideo
             ? {
                 videoId: sharedVideo.videoId,
@@ -212,6 +217,13 @@ export function createMessageController(args: {
         return;
       }
       case "content:get-page-share-button-settings":
+        sendResponse({
+          ok: true,
+          enabled: args.settingsState.pageShareButtonEnabled,
+        } satisfies PageShareButtonSettingsResponse);
+        return;
+      case "content:set-page-share-button-enabled":
+        await updatePageShareButtonEnabled(message.enabled);
         sendResponse({
           ok: true,
           enabled: args.settingsState.pageShareButtonEnabled,

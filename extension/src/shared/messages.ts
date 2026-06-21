@@ -37,6 +37,7 @@ export type ContentToBackgroundMessage =
   | { type: "content:get-share-context" }
   | { type: "content:share-current-video" }
   | { type: "content:get-page-share-button-settings" }
+  | { type: "content:set-page-share-button-enabled"; enabled: boolean }
   | { type: "content:debug-log"; payload: { message: string } };
 
 export interface DebugLogEntry {
@@ -121,6 +122,7 @@ export interface ActiveVideoResponse {
 export interface ShareContextResponse {
   ok: boolean;
   roomCode: string | null;
+  memberCount: number | null;
   sharedVideo: SharedVideo | null;
   error?: string;
 }
@@ -185,6 +187,7 @@ export function isShareContextResponse(
   const record = value as {
     ok?: unknown;
     roomCode?: unknown;
+    memberCount?: unknown;
     sharedVideo?: unknown;
     error?: unknown;
   };
@@ -192,6 +195,14 @@ export function isShareContextResponse(
     return false;
   }
   if (record.roomCode !== null && typeof record.roomCode !== "string") {
+    return false;
+  }
+  if (
+    record.memberCount !== null &&
+    (typeof record.memberCount !== "number" ||
+      !Number.isInteger(record.memberCount) ||
+      record.memberCount < 0)
+  ) {
     return false;
   }
   if (record.sharedVideo !== null && !isSharedVideo(record.sharedVideo)) {

@@ -1,8 +1,10 @@
 import type {
   ActiveVideoResponsePayload,
   ContentToBackgroundMessage,
+  ShareContextResponse,
 } from "../shared/messages";
 import {
+  isPageShareButtonSettingsResponse,
   isShareContextResponse,
   isShareCurrentVideoResponse,
 } from "../shared/messages";
@@ -24,6 +26,57 @@ export type PageShareActionResult =
   | "no-video"
   | "context-error"
   | "share-error";
+
+export interface PageSharePopoverViewModel {
+  status: string | null;
+  rows: Array<{ label: string; value: string }>;
+}
+
+export function createPageSharePopoverViewModel(args: {
+  loading: boolean;
+  error: string | null;
+  context: ShareContextResponse | null;
+}): PageSharePopoverViewModel {
+  if (args.loading) {
+    return {
+      status: t("pageSharePopoverLoading"),
+      rows: [],
+    };
+  }
+  if (args.error) {
+    return {
+      status: args.error,
+      rows: [],
+    };
+  }
+  if (!args.context?.roomCode) {
+    return {
+      status: t("pageShareRoomNotJoined"),
+      rows: [],
+    };
+  }
+
+  const rows = [
+    {
+      label: t("pageShareRoomCode"),
+      value: args.context.roomCode,
+    },
+  ];
+  if (args.context.memberCount !== null) {
+    rows.push({
+      label: t("pageShareMemberCount"),
+      value: t("membersCount", { count: args.context.memberCount }),
+    });
+  }
+  rows.push({
+    label: t("pageShareSharedVideo"),
+    value: args.context.sharedVideo?.title ?? t("pageShareNoSharedVideo"),
+  });
+  return {
+    status: null,
+    rows,
+  };
+}
 
 export async function shareCurrentPageVideoFromContent(args: {
   resolveCurrentSharePayload: () => Promise<ActiveVideoResponsePayload | null>;
@@ -115,6 +168,10 @@ const EDGE_MARGIN = 12;
 const DEFAULT_RIGHT_OFFSET = 20;
 const DEFAULT_BOTTOM_OFFSET = 80;
 const DRAG_THRESHOLD_PX = 4;
+const POPOVER_WIDTH = 228;
+const POPOVER_ESTIMATED_HEIGHT = 146;
+const POPOVER_GAP = 10;
+const POPOVER_HIDE_DELAY_MS = 140;
 const WEB_FULLSCREEN_SELECTORS = [
   ".bilibili-player.mode-fullscreen",
   ".bilibili-player.mode-webfullscreen",
@@ -160,6 +217,39 @@ export function getDefaultPageShareButtonPosition(
   );
 }
 
+export function getPageSharePopoverPosition(
+  buttonPosition: PageShareButtonPosition,
+  viewport: { width: number; height: number },
+  buttonSize = BUTTON_SIZE,
+  popoverWidth = POPOVER_WIDTH,
+  popoverHeight = POPOVER_ESTIMATED_HEIGHT,
+  edgeMargin = EDGE_MARGIN,
+): PageShareButtonPosition {
+  const fitsRight =
+    buttonPosition.x + buttonSize + POPOVER_GAP + popoverWidth <=
+    viewport.width - edgeMargin;
+  const preferredX = fitsRight
+    ? buttonPosition.x + buttonSize + POPOVER_GAP
+    : buttonPosition.x - popoverWidth - POPOVER_GAP;
+  const maxX = Math.max(edgeMargin, viewport.width - popoverWidth - edgeMargin);
+  const maxY = Math.max(
+    edgeMargin,
+    viewport.height - popoverHeight - edgeMargin,
+  );
+  return {
+    x: Math.round(Math.min(Math.max(preferredX, edgeMargin), maxX)),
+    y: Math.round(
+      Math.min(
+        Math.max(
+          buttonPosition.y + buttonSize / 2 - popoverHeight / 2,
+          edgeMargin,
+        ),
+        maxY,
+      ),
+    ),
+  };
+}
+
 export function hasPageShareButtonDragMoved(
   deltaX: number,
   deltaY: number,
@@ -198,11 +288,22 @@ export function createPageShareButtonController(args: {
 }): PageShareButtonController {
   let host: HTMLDivElement | null = null;
   let button: HTMLButtonElement | null = null;
+  let popover: HTMLDivElement | null = null;
+  let popoverStatus: HTMLParagraphElement | null = null;
+  let popoverRows: HTMLDListElement | null = null;
+  let popoverToggle: HTMLInputElement | null = null;
   let enabled = true;
   let pending = false;
+  let settingsPending = false;
   let started = false;
   let position: PageShareButtonPosition | null = null;
   let animationFrame = 0;
+  let hidePopoverTimer = 0;
+  let popoverRequestSeq = 0;
+  let popoverVisible = false;
+  let popoverLoading = false;
+  let popoverError: string | null = null;
+  let popoverContext: ShareContextResponse | null = null;
   let fullscreenObserver: MutationObserver | null = null;
   let suppressNextClick = false;
   let dragState: {
@@ -228,6 +329,49 @@ export function createPageShareButtonController(args: {
     );
   }
 
+  function clearPopoverHideTimer(): void {
+    if (!hidePopoverTimer) {
+      return;
+    }
+    window.clearTimeout(hidePopoverTimer);
+    hidePopoverTimer = 0;
+  }
+
+  function renderPopover(buttonPosition: PageShareButtonPosition): void {
+    if (!popover || !popoverStatus || !popoverRows || !popoverToggle) {
+      return;
+    }
+
+    const popoverPosition = getPageSharePopoverPosition(
+      buttonPosition,
+      getViewport(),
+    );
+    popover.style.left = `${popoverPosition.x}px`;
+    popover.style.top = `${popoverPosition.y}px`;
+    popover.hidden = !popoverVisible;
+    popover.classList.toggle("is-visible", popoverVisible);
+    popoverToggle.checked = enabled;
+    popoverToggle.disabled = settingsPending;
+
+    const viewModel = createPageSharePopoverViewModel({
+      loading: popoverLoading,
+      error: popoverError,
+      context: popoverContext,
+    });
+    popoverStatus.hidden = !viewModel.status;
+    popoverStatus.textContent = viewModel.status ?? "";
+    popoverRows.replaceChildren(
+      ...viewModel.rows.flatMap((row) => {
+        const label = document.createElement("dt");
+        label.textContent = row.label;
+        const value = document.createElement("dd");
+        value.textContent = row.value;
+        value.title = row.value;
+        return [label, value];
+      }),
+    );
+  }
+
   function render(): void {
     if (!button) {
       return;
@@ -239,12 +383,22 @@ export function createPageShareButtonController(args: {
     button.title = t("actionShareCurrentVideo");
     button.setAttribute("aria-label", t("actionShareCurrentVideo"));
     button.setAttribute("aria-busy", pending ? "true" : "false");
+    renderPopover(nextPosition);
   }
 
   function removeHost(): void {
+    clearPopoverHideTimer();
+    popoverRequestSeq += 1;
+    popoverVisible = false;
+    popoverLoading = false;
+    settingsPending = false;
     host?.remove();
     host = null;
     button = null;
+    popover = null;
+    popoverStatus = null;
+    popoverRows = null;
+    popoverToggle = null;
     dragState = null;
   }
 
@@ -260,6 +414,109 @@ export function createPageShareButtonController(args: {
 
   function isFullscreenActive(): boolean {
     return args.isFullscreenActive?.() ?? isBilibiliVideoFullscreenActive();
+  }
+
+  async function refreshPopoverContext(): Promise<void> {
+    const requestSeq = popoverRequestSeq + 1;
+    popoverRequestSeq = requestSeq;
+    popoverLoading = true;
+    popoverError = null;
+    render();
+    try {
+      const response = await args.runtimeSendMessage<unknown>({
+        type: "content:get-share-context",
+      });
+      if (requestSeq !== popoverRequestSeq) {
+        return;
+      }
+      popoverLoading = false;
+      if (!isShareContextResponse(response) || !response.ok) {
+        popoverContext = null;
+        const error = isShareContextResponse(response)
+          ? response.error
+          : undefined;
+        popoverError = error ?? t("pageSharePopoverError");
+        render();
+        return;
+      }
+      popoverContext = response;
+      render();
+    } catch (error) {
+      if (requestSeq !== popoverRequestSeq) {
+        return;
+      }
+      popoverLoading = false;
+      popoverContext = null;
+      popoverError =
+        error instanceof Error ? error.message : t("pageSharePopoverError");
+      render();
+    }
+  }
+
+  function showPopover(options: { refresh?: boolean } = {}): void {
+    if (!enabled || !started || isFullscreenActive()) {
+      return;
+    }
+    clearPopoverHideTimer();
+    popoverVisible = true;
+    render();
+    if (options.refresh !== false) {
+      void refreshPopoverContext();
+    }
+  }
+
+  function hidePopover(): void {
+    clearPopoverHideTimer();
+    popoverVisible = false;
+    render();
+  }
+
+  function hidePopoverSoon(): void {
+    clearPopoverHideTimer();
+    hidePopoverTimer = window.setTimeout(() => {
+      hidePopoverTimer = 0;
+      hidePopover();
+    }, POPOVER_HIDE_DELAY_MS);
+  }
+
+  async function handleQuickToggleChange(event: Event): Promise<void> {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLInputElement) || settingsPending) {
+      return;
+    }
+    const nextEnabled = target.checked;
+    settingsPending = true;
+    render();
+    try {
+      const response = await args.runtimeSendMessage<unknown>({
+        type: "content:set-page-share-button-enabled",
+        enabled: nextEnabled,
+      });
+      if (!isPageShareButtonSettingsResponse(response) || !response.ok) {
+        const error = isPageShareButtonSettingsResponse(response)
+          ? response.error
+          : undefined;
+        args.toastPresenter.show(
+          t("pageShareFailed", {
+            error: error ?? t("pageSharePopoverError"),
+          }),
+        );
+        return;
+      }
+      enabled = response.enabled;
+      if (!enabled) {
+        args.toastPresenter.show(t("pageShareButtonDisabled"));
+      }
+    } catch (error) {
+      args.toastPresenter.show(
+        t("pageShareFailed", {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    } finally {
+      settingsPending = false;
+      ensureMounted();
+    }
   }
 
   async function handleClick(): Promise<void> {
@@ -279,6 +536,9 @@ export function createPageShareButtonController(args: {
           }),
         showToast: (message) => args.toastPresenter.show(message),
       });
+      if (popoverVisible) {
+        void refreshPopoverContext();
+      }
     } finally {
       pending = false;
       render();
@@ -359,6 +619,127 @@ export function createPageShareButtonController(args: {
         .share-button[aria-busy="true"] svg {
           animation: spin 0.8s linear infinite;
         }
+        .share-popover {
+          position: absolute;
+          width: ${POPOVER_WIDTH}px;
+          padding: 10px;
+          border: 1px solid rgba(255, 90, 138, 0.22);
+          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.98);
+          color: #242631;
+          box-shadow: 0 10px 24px rgba(27, 31, 45, 0.14), 0 2px 8px rgba(27, 31, 45, 0.08);
+          box-sizing: border-box;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          pointer-events: auto;
+          opacity: 0;
+          transform: translateY(2px);
+          transition: opacity 0.12s ease, transform 0.12s ease;
+        }
+        .share-popover[hidden] {
+          display: none;
+        }
+        .share-popover.is-visible {
+          opacity: 1;
+          transform: translateY(0);
+        }
+        .popover-heading {
+          margin: 0 0 8px;
+          font-size: 13px;
+          font-weight: 650;
+          line-height: 18px;
+        }
+        .popover-status {
+          margin: 0;
+          color: #5b6070;
+          font-size: 12px;
+          line-height: 18px;
+        }
+        .popover-rows {
+          display: grid;
+          grid-template-columns: 58px minmax(0, 1fr);
+          gap: 6px 8px;
+          margin: 0;
+          font-size: 12px;
+          line-height: 17px;
+        }
+        .popover-rows:empty {
+          display: none;
+        }
+        .popover-rows dt {
+          margin: 0;
+          color: #767b8c;
+          font-weight: 500;
+        }
+        .popover-rows dd {
+          min-width: 0;
+          margin: 0;
+          overflow: hidden;
+          color: #242631;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .quick-toggle {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          margin-top: 10px;
+          padding-top: 9px;
+          border-top: 1px solid rgba(27, 31, 45, 0.08);
+          color: #4a4f5d;
+          cursor: pointer;
+          font-size: 12px;
+          line-height: 18px;
+        }
+        .quick-toggle-switch {
+          position: relative;
+          display: inline-flex;
+          flex: 0 0 auto;
+          width: 32px;
+          height: 18px;
+          align-items: center;
+        }
+        .quick-toggle-input {
+          position: absolute;
+          inset: 0;
+          margin: 0;
+          cursor: pointer;
+          opacity: 0;
+        }
+        .quick-toggle-track {
+          position: absolute;
+          inset: 0;
+          border-radius: 999px;
+          background: #d6dae3;
+          transition: background 0.16s ease;
+        }
+        .quick-toggle-thumb {
+          position: absolute;
+          top: 2px;
+          left: 2px;
+          width: 14px;
+          height: 14px;
+          border-radius: 999px;
+          background: #ffffff;
+          box-shadow: 0 1px 3px rgba(27, 31, 45, 0.18);
+          transition: transform 0.16s ease;
+        }
+        .quick-toggle-input:checked + .quick-toggle-track {
+          background: #ff5a8a;
+        }
+        .quick-toggle-input:checked + .quick-toggle-track .quick-toggle-thumb {
+          transform: translateX(14px);
+        }
+        .quick-toggle-input:focus-visible + .quick-toggle-track {
+          outline: 2px solid rgba(255, 90, 138, 0.26);
+          outline-offset: 2px;
+        }
+        .quick-toggle-input:disabled {
+          cursor: wait;
+        }
+        .quick-toggle-input:disabled + .quick-toggle-track {
+          opacity: 0.72;
+        }
         @keyframes spin {
           to {
             transform: rotate(360deg);
@@ -372,6 +753,26 @@ export function createPageShareButtonController(args: {
           .share-button:hover {
             background: #ff7aa1;
           }
+          .share-popover {
+            border-color: rgba(255, 107, 150, 0.22);
+            background: rgba(31, 34, 43, 0.98);
+            color: #f4f5f8;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28), 0 2px 8px rgba(0, 0, 0, 0.2);
+          }
+          .popover-status,
+          .popover-rows dt,
+          .quick-toggle {
+            color: #b8becd;
+          }
+          .popover-rows dd {
+            color: #f4f5f8;
+          }
+          .quick-toggle {
+            border-top-color: rgba(255, 255, 255, 0.1);
+          }
+          .quick-toggle-track {
+            background: #5b6070;
+          }
         }
       </style>
       <button class="share-button" type="button">
@@ -380,12 +781,47 @@ export function createPageShareButtonController(args: {
           <path fill="currentColor" d="M9.54 3.79a.37.37 0 0 0-.41 0a.6.6 0 0 0-.19.45v6.42a.6.6 0 0 0 .19.45a.37.37 0 0 0 .41.05l5.58-2.94a.88.88 0 0 0 0-1.53ZM4.5 18a3 3 0 0 0-3 3v2.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V21a3 3 0 0 0-3-3m7.5 0a3 3 0 0 0-3 3v2.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V21a3 3 0 0 0-3-3m7.5 0a3 3 0 0 0-3 3v2.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V21a3 3 0 0 0-3-3"></path>
         </svg>
       </button>
+      <div class="share-popover" hidden role="dialog" aria-label="${t("pageSharePopoverTitle")}">
+        <div class="popover-heading">${t("pageSharePopoverTitle")}</div>
+        <p class="popover-status"></p>
+        <dl class="popover-rows"></dl>
+        <label class="quick-toggle">
+          <span>${t("pageShareButtonQuickDisable")}</span>
+          <span class="quick-toggle-switch">
+            <input class="quick-toggle-input" type="checkbox" checked aria-label="${t("pageShareButtonQuickDisable")}">
+            <span class="quick-toggle-track" aria-hidden="true">
+              <span class="quick-toggle-thumb"></span>
+            </span>
+          </span>
+        </label>
+      </div>
     `;
     button = shadowRoot.querySelector("button");
+    popover = shadowRoot.querySelector(".share-popover");
+    popoverStatus = shadowRoot.querySelector(".popover-status");
+    popoverRows = shadowRoot.querySelector(".popover-rows");
+    popoverToggle = shadowRoot.querySelector(".quick-toggle-input");
     button?.addEventListener("pointerdown", handlePointerDown);
     button?.addEventListener("pointermove", handlePointerMove);
     button?.addEventListener("pointerup", handlePointerUp);
     button?.addEventListener("pointercancel", handlePointerCancel);
+    button?.addEventListener("pointerenter", () => showPopover());
+    button?.addEventListener("pointerleave", hidePopoverSoon);
+    button?.addEventListener("focus", () => showPopover());
+    popover?.addEventListener("pointerenter", () =>
+      showPopover({ refresh: false }),
+    );
+    popover?.addEventListener("pointerleave", hidePopoverSoon);
+    popoverToggle?.addEventListener("change", (event) => {
+      void handleQuickToggleChange(event);
+    });
+    shadowRoot.addEventListener("focusout", (event) => {
+      const relatedTarget = (event as FocusEvent).relatedTarget;
+      if (relatedTarget instanceof Node && shadowRoot.contains(relatedTarget)) {
+        return;
+      }
+      hidePopoverSoon();
+    });
     button?.addEventListener("click", (event) => {
       if (suppressNextClick) {
         suppressNextClick = false;
@@ -402,6 +838,7 @@ export function createPageShareButtonController(args: {
     if (!button || pending || event.button !== 0) {
       return;
     }
+    hidePopover();
     dragState = {
       pointerId: event.pointerId,
       startClientX: event.clientX,

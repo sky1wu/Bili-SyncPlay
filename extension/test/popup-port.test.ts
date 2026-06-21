@@ -191,6 +191,7 @@ test("isShareContextResponse accepts valid context responses", () => {
     isShareContextResponse({
       ok: true,
       roomCode: "ROOM01",
+      memberCount: 3,
       sharedVideo: validSharedVideo,
     }),
   );
@@ -198,6 +199,7 @@ test("isShareContextResponse accepts valid context responses", () => {
     isShareContextResponse({
       ok: true,
       roomCode: null,
+      memberCount: null,
       sharedVideo: null,
     }),
   );
@@ -209,6 +211,7 @@ test("isShareContextResponse rejects malformed context responses", () => {
     isShareContextResponse({
       ok: true,
       roomCode: 42,
+      memberCount: 1,
       sharedVideo: null,
     }),
     false,
@@ -217,7 +220,25 @@ test("isShareContextResponse rejects malformed context responses", () => {
     isShareContextResponse({
       ok: true,
       roomCode: "ROOM01",
+      memberCount: 1,
       sharedVideo: { title: "missing id" },
+    }),
+    false,
+  );
+  assert.equal(
+    isShareContextResponse({
+      ok: true,
+      roomCode: "ROOM01",
+      memberCount: -1,
+      sharedVideo: null,
+    }),
+    false,
+  );
+  assert.equal(
+    isShareContextResponse({
+      ok: true,
+      roomCode: "ROOM01",
+      sharedVideo: null,
     }),
     false,
   );
