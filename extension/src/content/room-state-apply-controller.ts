@@ -196,6 +196,30 @@ export function createRoomStateApplyController(args: {
     shareToast: SharedVideoToastPayload | null = null,
     fromDebounce = false,
   ): Promise<void> {
+    const currentVideo = args.getSharedVideo();
+    const normalizedSharedUrl = args.normalizeUrl(state.sharedVideo?.url);
+    const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
+    const normalizedPlaybackUrl = args.normalizeUrl(state.playback?.url);
+    const decision = decidePlaybackApplication({
+      roomState: state,
+      currentVideo,
+      normalizedSharedUrl,
+      normalizedCurrentUrl,
+      normalizedPlaybackUrl,
+      pendingRoomStateHydration: args.runtimeState.pendingRoomStateHydration,
+      explicitNonSharedPlaybackUrl:
+        args.runtimeState.explicitNonSharedPlaybackUrl,
+      now: nowOf(),
+      lastLocalIntentAt: args.runtimeState.lastLocalIntentAt,
+      lastLocalIntentPlayState: args.runtimeState.lastLocalIntentPlayState,
+      localIntentGuardMs: args.localIntentGuardMs,
+      lastAppliedVersion: state.playback
+        ? (args.lastAppliedVersionByActor.get(state.playback.actorId) ?? null)
+        : null,
+      lastLocalPlaybackVersion: args.runtimeState.lastLocalPlaybackVersion,
+      localMemberId: args.runtimeState.localMemberId,
+    });
+
     // Before any other handling, decide whether an existing deferred paused
     // should be dropped because a newer room state has just arrived. We must
     // do this BEFORE deferring a new paused so that paused→paused chains
@@ -274,6 +298,7 @@ export function createRoomStateApplyController(args: {
       remotePauseDebounceMs > 0 &&
       state.playback &&
       state.playback.playState === "paused" &&
+      decision.kind === "apply" &&
       args.runtimeState.localMemberId !== null &&
       state.playback.actorId !== args.runtimeState.localMemberId
     ) {
@@ -347,11 +372,6 @@ export function createRoomStateApplyController(args: {
     args.notifyRoomStateToasts(state);
     args.maybeShowSharedVideoToast(shareToast, state);
 
-    const currentVideo = args.getSharedVideo();
-    const normalizedSharedUrl = args.normalizeUrl(state.sharedVideo?.url);
-    const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
-    const normalizedPlaybackUrl = args.normalizeUrl(state.playback?.url);
-
     // Lift the post-navigation settle anchor as soon as the room reports a
     // shared video that differs from what we recorded before navigation. This
     // covers the cases where the local user (or another member) successfully
@@ -368,26 +388,6 @@ export function createRoomStateApplyController(args: {
       args.runtimeState.postNavigationAnchorSharedUrl = null;
       args.runtimeState.postNavigationAnchorSetAt = 0;
     }
-
-    const decision = decidePlaybackApplication({
-      roomState: state,
-      currentVideo,
-      normalizedSharedUrl,
-      normalizedCurrentUrl,
-      normalizedPlaybackUrl,
-      pendingRoomStateHydration: args.runtimeState.pendingRoomStateHydration,
-      explicitNonSharedPlaybackUrl:
-        args.runtimeState.explicitNonSharedPlaybackUrl,
-      now: nowOf(),
-      lastLocalIntentAt: args.runtimeState.lastLocalIntentAt,
-      lastLocalIntentPlayState: args.runtimeState.lastLocalIntentPlayState,
-      localIntentGuardMs: args.localIntentGuardMs,
-      lastAppliedVersion: state.playback
-        ? (args.lastAppliedVersionByActor.get(state.playback.actorId) ?? null)
-        : null,
-      lastLocalPlaybackVersion: args.runtimeState.lastLocalPlaybackVersion,
-      localMemberId: args.runtimeState.localMemberId,
-    });
 
     if (decision.kind === "empty-room") {
       args.cancelActiveSoftApply(args.getVideoElement(), "room-empty");
@@ -432,14 +432,6 @@ export function createRoomStateApplyController(args: {
       }
       if (decision.acceptedHydration) {
         args.acceptInitialRoomStateHydration();
-        args.runtimeState.intendedPlayState = "paused";
-        args.runtimeState.intendedPlaybackRate = 1;
-        args.activatePauseHold(args.initialRoomStatePauseHoldMs);
-        const video = args.getVideoElement();
-        if (video && !video.paused && decision.shouldPauseNonSharedVideo) {
-          args.runtimeState.lastForcedPauseAt = Date.now();
-          pauseVideo(video);
-        }
       }
       return;
     }
@@ -663,14 +655,41 @@ export function createRoomStateApplyController(args: {
         response.roomState.playback?.playState === "paused" ||
         response.roomState.playback?.playState === "buffering"
       ) {
-        args.runtimeState.intendedPlayState =
-          response.roomState.playback.playState;
-        args.activatePauseHold(args.initialRoomStatePauseHoldMs);
+        const currentVideo = args.getSharedVideo();
+        const normalizedSharedUrl = args.normalizeUrl(
+          response.roomState.sharedVideo?.url,
+        );
+        const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
+        const normalizedPlaybackUrl = args.normalizeUrl(
+          response.roomState.playback.url,
+        );
+        const isCurrentSharedVideo =
+          normalizedSharedUrl !== null &&
+          normalizedCurrentUrl === normalizedSharedUrl &&
+          normalizedPlaybackUrl === normalizedSharedUrl;
+        if (isCurrentSharedVideo) {
+          args.runtimeState.intendedPlayState =
+            response.roomState.playback.playState;
+          args.activatePauseHold(args.initialRoomStatePauseHoldMs);
+        }
       }
       const video = args.getVideoElement();
+      const currentVideo = args.getSharedVideo();
+      const normalizedSharedUrl = args.normalizeUrl(
+        response.roomState.sharedVideo?.url,
+      );
+      const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
+      const normalizedPlaybackUrl = args.normalizeUrl(
+        response.roomState.playback?.url,
+      );
+      const isCurrentSharedVideo =
+        normalizedSharedUrl !== null &&
+        normalizedCurrentUrl === normalizedSharedUrl &&
+        normalizedPlaybackUrl === normalizedSharedUrl;
       if (
         video &&
         !video.paused &&
+        isCurrentSharedVideo &&
         (response.roomState.playback?.playState === "paused" ||
           response.roomState.playback?.playState === "buffering") &&
         nowOf() - args.runtimeState.lastUserGestureAt >= args.userGestureGraceMs

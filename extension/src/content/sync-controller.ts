@@ -824,14 +824,9 @@ export function createSyncController(args: {
           userGestureGraceMs: args.userGestureGraceMs,
         })
       ) {
-        args.runtimeState.intendedPlayState = "paused";
-        args.runtimeState.lastForcedPauseAt = now;
-        activatePauseHold(args.initialRoomStatePauseHoldMs);
-        window.setTimeout(() => {
-          if (!video.paused) {
-            pauseVideo(video);
-          }
-        }, 0);
+        args.debugLog(
+          `Suppressed non-shared playback broadcast for ${currentVideo.url}`,
+        );
       }
       logBroadcastTrace(
         "non-shared-page",

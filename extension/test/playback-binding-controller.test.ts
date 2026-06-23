@@ -483,7 +483,7 @@ test("playback binding controller allows explicit play on a non-shared page", as
   }
 });
 
-test("playback binding controller blocks auto-resumed non-shared video after browser seek", async () => {
+test("playback binding controller suppresses auto-resumed non-shared broadcast after browser seek", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
@@ -543,9 +543,9 @@ test("playback binding controller blocks auto-resumed non-shared video after bro
 
     await Promise.resolve();
 
-    // The auto-played non-shared video should be force-paused
-    assert.equal(pausedByGuard, 1);
-    // The seeking event is broadcast (non-shared page), but play should be blocked
+    // The auto-played non-shared video should keep playing locally.
+    assert.equal(pausedByGuard, 0);
+    // The seeking event is broadcast (non-shared page), but play should be blocked.
     assert.deepEqual(events, ["seeking"]);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
@@ -554,7 +554,7 @@ test("playback binding controller blocks auto-resumed non-shared video after bro
   }
 });
 
-test("playback binding controller allows manual play on non-shared page after auto-resume was blocked", async () => {
+test("playback binding controller allows manual play on non-shared page after auto-resume was suppressed", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
@@ -607,15 +607,15 @@ test("playback binding controller allows manual play on non-shared page after au
     controller.attachPlaybackListeners();
     // Browser auto-seeks to resume point after user click
     dom.listeners.get("seeking")?.(new Event("seeking"));
-    // Browser auto-plays after seek — should be force-paused
+    // Browser auto-plays after seek — should be suppressed from sync only.
     now = 1_080;
     dom.video.paused = false;
     dom.listeners.get("play")?.(new Event("play"));
 
     await Promise.resolve();
-    assert.equal(pausedByGuard, 1);
+    assert.equal(pausedByGuard, 0);
 
-    // User manually clicks play after the force-pause
+    // User manually clicks play after the suppressed auto-resume.
     runtimeState.lastUserGestureAt = 1_500;
     now = 1_550;
     dom.video.paused = false;
@@ -623,8 +623,8 @@ test("playback binding controller allows manual play on non-shared page after au
 
     await Promise.resolve();
 
-    // Manual play should NOT be blocked — it's a new gesture after the auto-resume
-    assert.equal(pausedByGuard, 1);
+    // Manual play should NOT be blocked — it's a new gesture after the auto-resume.
+    assert.equal(pausedByGuard, 0);
     assert.ok(events.includes("play"));
     // The first play event should come from the manual click, not the auto-resume
     const playIndex = events.indexOf("play");
@@ -637,7 +637,7 @@ test("playback binding controller allows manual play on non-shared page after au
   }
 });
 
-test("playback binding controller blocks non-shared autoplay replayed after a forced pause from the same gesture", async () => {
+test("playback binding controller suppresses non-shared autoplay replayed after a forced pause from the same gesture", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
@@ -696,7 +696,7 @@ test("playback binding controller blocks non-shared autoplay replayed after a fo
     await Promise.resolve();
 
     assert.deepEqual(events, []);
-    assert.equal(pausedByGuard, 1);
+    assert.equal(pausedByGuard, 0);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;

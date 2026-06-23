@@ -49,7 +49,7 @@ test("forces pause during initial hydration regardless of user gesture", () => {
   );
 });
 
-test("protects non-shared pages from remote autoplay unless the user explicitly started playback", () => {
+test("flags non-shared playback unless the user explicitly started playback", () => {
   const blocked = evaluateNonSharedPageGuard({
     activeRoomCode: "ROOM01",
     activeSharedUrl: "https://www.bilibili.com/video/BV1shared?p=1",

@@ -224,6 +224,11 @@ export function createPlaybackBindingController(args: {
   function forcePauseWhileWaitingForInitialRoomState(
     video: HTMLVideoElement,
   ): boolean {
+    const currentVideo = args.getSharedVideo();
+    if (currentVideo && !isCurrentVideoShared(currentVideo)) {
+      return false;
+    }
+
     if (
       !shouldForcePauseWhileWaitingForInitialRoomState({
         activeRoomCode: args.runtimeState.activeRoomCode,
@@ -298,19 +303,12 @@ export function createPlaybackBindingController(args: {
 
     args.runtimeState.explicitNonSharedPlaybackUrl =
       decision.nextExplicitNonSharedPlaybackUrl;
-    if (!decision.shouldPause) {
-      return false;
+    if (decision.shouldPause) {
+      args.debugLog(
+        `Ignored non-shared playback guard for ${currentVideo.url}`,
+      );
     }
-
-    args.runtimeState.intendedPlayState = "paused";
-    args.runtimeState.lastForcedPauseAt = nowOf();
-    args.activatePauseHold(args.initialRoomStatePauseHoldMs);
-    window.setTimeout(() => {
-      if (!video.paused) {
-        pauseVideo(video);
-      }
-    }, 0);
-    return true;
+    return decision.shouldPause;
   }
 
   function attachPlaybackListeners(): void {

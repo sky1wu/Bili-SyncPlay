@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RoomState } from "@bili-syncplay/protocol";
+import type { RoomState, SharedVideo } from "@bili-syncplay/protocol";
 import { createContentRuntimeState } from "../src/content/runtime-state";
 import { createRoomStateApplyController } from "../src/content/room-state-apply-controller";
 
@@ -31,6 +31,8 @@ function createController(overrides: {
   userGestureGraceMs?: number;
   remotePauseDebounceMs?: number;
   normalizeUrl?: (url: string | undefined | null) => string | null;
+  currentVideo?: SharedVideo | null;
+  runtimeSendMessage?: <T>(message: unknown) => Promise<T | null>;
   rememberRemotePlaybackForSuppression?: (
     playback: import("@bili-syncplay/protocol").PlaybackState,
   ) => void;
@@ -38,6 +40,11 @@ function createController(overrides: {
 }) {
   const runtimeState = overrides.runtimeState ?? createContentRuntimeState();
   const video = overrides.video ?? null;
+  const defaultCurrentVideo: SharedVideo = {
+    videoId: "BV1xx411c7mD:p1",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
   let _pauseHoldActivated = false;
   let _acceptedHydration = false;
   const logs: string[] = [];
@@ -58,11 +65,14 @@ function createController(overrides: {
     getNow: () => overrides.now ?? 10_000,
     debugLog: (msg) => logs.push(msg),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async () => null,
+    runtimeSendMessage: overrides.runtimeSendMessage ?? (async () => null),
     getHydrateRetryTimer: () => null,
     setHydrateRetryTimer: () => {},
     getVideoElement: () => video,
-    getSharedVideo: () => null,
+    getSharedVideo: () =>
+      overrides.currentVideo === undefined
+        ? defaultCurrentVideo
+        : overrides.currentVideo,
     normalizeUrl: overrides.normalizeUrl ?? ((url) => url ?? null),
     notifyRoomStateToasts: () => {},
     maybeShowSharedVideoToast: () => {},
@@ -317,6 +327,86 @@ function createRoomStateWithPlayback(playback: {
     members: [],
   } as const;
 }
+
+test("ignores non-shared paused room state without debouncing or pausing", async () => {
+  const win = installWindowTimerStub();
+  try {
+    const video = createStubVideo(false);
+    const harness = createController({
+      video,
+      now: 30_000,
+      remotePauseDebounceMs: 250,
+      currentVideo: {
+        videoId: "BVother:p1",
+        url: "https://www.bilibili.com/video/BVother?p=1",
+        title: "Other Video",
+      },
+    });
+    harness.runtimeState.localMemberId = "local-member";
+    harness.runtimeState.pendingRoomStateHydration = true;
+
+    await harness.controller.applyRoomState(
+      createRoomStateWithPlayback({
+        url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+        currentTime: 42,
+        playState: "paused",
+        actorId: "remote-member",
+        seq: 5,
+      }) as never,
+    );
+
+    assert.equal(harness.runtimeState.deferredRemotePausedState, null);
+    assert.equal(win.scheduled.length, 0);
+    assert.equal(video.paused, false);
+    assert.equal(harness.acceptedHydration, true);
+    assert.equal(
+      harness.logs.some((m) => m.includes("Ignored room state")),
+      true,
+    );
+  } finally {
+    win.restore();
+  }
+});
+
+test("does not pre-pause non-shared video during paused room hydration", async () => {
+  const win = installWindowTimerStub();
+  try {
+    const video = createStubVideo(false);
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    }) as RoomState;
+    const harness = createController({
+      video,
+      now: 30_000,
+      remotePauseDebounceMs: 250,
+      currentVideo: {
+        videoId: "BVother:p1",
+        url: "https://www.bilibili.com/video/BVother?p=1",
+        title: "Other Video",
+      },
+      runtimeSendMessage: async () =>
+        ({
+          ok: true,
+          roomState,
+          memberId: "local-member",
+          roomCode: "ROOM01",
+        }) as never,
+    });
+
+    await harness.controller.hydrateRoomState();
+
+    assert.equal(video.paused, false);
+    assert.equal(harness.runtimeState.deferredRemotePausedState, null);
+    assert.equal(win.scheduled.length, 0);
+    assert.equal(harness.runtimeState.hydrationReady, true);
+  } finally {
+    win.restore();
+  }
+});
 
 test("defers remote paused room state when remotePauseDebounceMs > 0", async () => {
   const win = installWindowTimerStub();

@@ -85,6 +85,7 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
   runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
 
   let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
   let hydrateCalls = 0;
@@ -121,6 +122,55 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
 
     assert.equal(hydrateCalls, 1);
     assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.pendingRoomStateHydration, true);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller hydrates without pausing when switching to a non-shared video", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let hydrateCalls = 0;
+  let pauseCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {},
+    debugLog: () => {},
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(hydrateCalls, 1);
+    assert.equal(pauseCalls, 0);
     assert.equal(runtimeState.pendingRoomStateHydration, true);
     assert.equal(runtimeState.intendedPlayState, "paused");
   } finally {

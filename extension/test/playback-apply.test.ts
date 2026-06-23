@@ -58,7 +58,7 @@ test("accepts empty room state during hydration", () => {
   );
 });
 
-test("protects non-shared page during hydration", () => {
+test("ignores non-shared page during hydration without pausing it", () => {
   assert.deepEqual(
     decidePlaybackApplication({
       roomState: createRoomState("https://www.bilibili.com/video/BVshared?p=1"),
@@ -83,7 +83,7 @@ test("protects non-shared page during hydration", () => {
     {
       kind: "ignore-non-shared",
       acceptedHydration: true,
-      shouldPauseNonSharedVideo: true,
+      shouldPauseNonSharedVideo: false,
     },
   );
 });

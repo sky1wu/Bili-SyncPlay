@@ -60,9 +60,7 @@ export function decidePlaybackApplication(
     return {
       kind: "ignore-non-shared",
       acceptedHydration: input.pendingRoomStateHydration,
-      shouldPauseNonSharedVideo:
-        input.pendingRoomStateHydration &&
-        input.explicitNonSharedPlaybackUrl !== input.normalizedCurrentUrl,
+      shouldPauseNonSharedVideo: false,
     };
   }
 

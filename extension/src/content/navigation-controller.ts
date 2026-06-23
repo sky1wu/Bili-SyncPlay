@@ -90,7 +90,11 @@ export function createNavigationController(args: {
     );
     args.attachPlaybackListeners();
     const video = args.getVideoElement();
-    if (video && !video.paused) {
+    if (
+      video &&
+      !video.paused &&
+      nextNormalizedPageUrl === args.runtimeState.activeSharedUrl
+    ) {
       args.debugLog(
         `Suppressed autoplay immediately after in-room navigation to ${nextPageUrl}`,
       );
