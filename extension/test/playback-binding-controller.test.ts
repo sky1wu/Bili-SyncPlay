@@ -317,6 +317,65 @@ test("playback binding controller re-pauses seek-triggered autoplay when intende
   }
 });
 
+test("playback binding controller keeps hydration pause guard when shared url is unknown", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.pendingRoomStateHydration = true;
+  runtimeState.activeSharedUrl = null;
+  runtimeState.lastUserGestureAt = 1_000;
+  let pausedByGuard = 0;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => ({
+      videoId: "BV1xx411c7mD:p1",
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      title: "Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+
+  dom.video.pause = () => {
+    pausedByGuard += 1;
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+
+    assert.equal(pausedByGuard, 1);
+    assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
 test("playback binding controller clears explicit seek intent after seek-triggered autoplay is blocked", () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();

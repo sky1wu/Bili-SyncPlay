@@ -181,14 +181,21 @@ export function createPlaybackBindingController(args: {
     );
   }
 
+  function isKnownNonSharedVideo(currentVideo: SharedVideo | null): boolean {
+    return Boolean(
+      currentVideo &&
+      args.runtimeState.activeSharedUrl &&
+      !isCurrentVideoShared(currentVideo),
+    );
+  }
+
   function shouldPreRecordNonSharedExplicitPlay(): boolean {
     const currentVideo = args.getSharedVideo();
     if (
       !hasRecentUserGesture() ||
       args.runtimeState.lastUserGestureAt <=
         args.runtimeState.lastForcedPauseAt ||
-      !currentVideo ||
-      isCurrentVideoShared(currentVideo)
+      !isKnownNonSharedVideo(currentVideo)
     ) {
       return false;
     }
@@ -213,7 +220,7 @@ export function createPlaybackBindingController(args: {
   function preAuthorizeExplicitNonSharedPlay(): void {
     const currentVideo = args.getSharedVideo();
     const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
-    if (!normalizedCurrentUrl || isCurrentVideoShared(currentVideo)) {
+    if (!normalizedCurrentUrl || !isKnownNonSharedVideo(currentVideo)) {
       return;
     }
 
@@ -225,7 +232,7 @@ export function createPlaybackBindingController(args: {
     video: HTMLVideoElement,
   ): boolean {
     const currentVideo = args.getSharedVideo();
-    if (currentVideo && !isCurrentVideoShared(currentVideo)) {
+    if (isKnownNonSharedVideo(currentVideo)) {
       return false;
     }
 
