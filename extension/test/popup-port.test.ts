@@ -3,6 +3,9 @@ import test from "node:test";
 import {
   isActiveVideoResponse,
   isBackgroundPopupStateMessage,
+  isPageShareButtonSettingsResponse,
+  isShareContextResponse,
+  isShareCurrentVideoResponse,
 } from "../src/shared/messages";
 import { sendPopupActiveVideoQuery } from "../src/popup/popup-port";
 
@@ -24,6 +27,7 @@ const validStateMessage = {
     retryAttemptMax: 5,
     clockOffsetMs: null,
     rttMs: null,
+    pageShareButtonEnabled: true,
     logs: [],
   },
 };
@@ -86,6 +90,17 @@ test("isBackgroundPopupStateMessage returns false when payload lacks required fi
     isBackgroundPopupStateMessage({
       type: "background:state",
       payload: { serverUrl: "ws://localhost" },
+    }),
+    false,
+  );
+  assert.equal(
+    isBackgroundPopupStateMessage({
+      type: "background:state",
+      payload: {
+        connected: true,
+        serverUrl: "ws://localhost",
+        pageShareButtonEnabled: "yes",
+      },
     }),
     false,
   );
@@ -167,6 +182,92 @@ test("isActiveVideoResponse rejects payload with malformed playback", () => {
       payload: { video: validSharedVideo, playback: { foo: 1 } },
       tabId: 1,
     }),
+    false,
+  );
+});
+
+test("isShareContextResponse accepts valid context responses", () => {
+  assert.ok(
+    isShareContextResponse({
+      ok: true,
+      roomCode: "ROOM01",
+      memberCount: 3,
+      sharedVideo: validSharedVideo,
+    }),
+  );
+  assert.ok(
+    isShareContextResponse({
+      ok: true,
+      roomCode: null,
+      memberCount: null,
+      sharedVideo: null,
+    }),
+  );
+});
+
+test("isShareContextResponse rejects malformed context responses", () => {
+  assert.equal(isShareContextResponse(null), false);
+  assert.equal(
+    isShareContextResponse({
+      ok: true,
+      roomCode: 42,
+      memberCount: 1,
+      sharedVideo: null,
+    }),
+    false,
+  );
+  assert.equal(
+    isShareContextResponse({
+      ok: true,
+      roomCode: "ROOM01",
+      memberCount: 1,
+      sharedVideo: { title: "missing id" },
+    }),
+    false,
+  );
+  assert.equal(
+    isShareContextResponse({
+      ok: true,
+      roomCode: "ROOM01",
+      memberCount: -1,
+      sharedVideo: null,
+    }),
+    false,
+  );
+  assert.equal(
+    isShareContextResponse({
+      ok: true,
+      roomCode: "ROOM01",
+      sharedVideo: null,
+    }),
+    false,
+  );
+});
+
+test("isShareCurrentVideoResponse validates share result responses", () => {
+  assert.ok(isShareCurrentVideoResponse({ ok: true }));
+  assert.ok(isShareCurrentVideoResponse({ ok: false, error: "failed" }));
+  assert.equal(isShareCurrentVideoResponse(null), false);
+  assert.equal(isShareCurrentVideoResponse({ ok: "yes" }), false);
+  assert.equal(isShareCurrentVideoResponse({ ok: false, error: 42 }), false);
+});
+
+test("isPageShareButtonSettingsResponse validates settings responses", () => {
+  assert.ok(isPageShareButtonSettingsResponse({ ok: true, enabled: true }));
+  assert.ok(
+    isPageShareButtonSettingsResponse({
+      ok: false,
+      enabled: false,
+      error: "failed",
+    }),
+  );
+  assert.equal(isPageShareButtonSettingsResponse(null), false);
+  assert.equal(
+    isPageShareButtonSettingsResponse({ ok: true, enabled: "yes" }),
+    false,
+  );
+  assert.equal(
+    isPageShareButtonSettingsResponse({ ok: false, enabled: false, error: 1 }),
     false,
   );
 });

@@ -37,6 +37,9 @@ export function createBackgroundStateStore(): BackgroundStateStore {
       if (patch.diagnostics) {
         Object.assign(state.diagnostics, patch.diagnostics);
       }
+      if (patch.settings) {
+        Object.assign(state.settings, patch.settings);
+      }
       return state;
     },
     replace(nextState) {
@@ -45,6 +48,7 @@ export function createBackgroundStateStore(): BackgroundStateStore {
       Object.assign(state.share, nextState.share);
       Object.assign(state.clock, nextState.clock);
       Object.assign(state.diagnostics, nextState.diagnostics);
+      Object.assign(state.settings, nextState.settings);
       return state;
     },
     reset() {
@@ -54,6 +58,7 @@ export function createBackgroundStateStore(): BackgroundStateStore {
       Object.assign(state.share, resetState.share);
       Object.assign(state.clock, resetState.clock);
       Object.assign(state.diagnostics, resetState.diagnostics);
+      Object.assign(state.settings, resetState.settings);
       return state;
     },
   };

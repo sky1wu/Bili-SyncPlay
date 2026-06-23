@@ -1,4 +1,4 @@
-import type { BackgroundToContentMessage } from "../shared/messages";
+import { type BackgroundToContentMessage } from "../shared/messages";
 import { normalizeSharedVideoUrl } from "../shared/url";
 import { runtimeSendMessage } from "./content-messaging";
 import { createFestivalBridgeController } from "./festival-bridge";
@@ -6,6 +6,8 @@ import { startUserGestureTracking } from "./gesture-tracker";
 import { getVideoElement, pauseVideo } from "./player-binding";
 import { createContentStateStore } from "./content-store";
 import { createNavigationController } from "./navigation-controller";
+import { createPageShareButtonController } from "./page-share-button";
+import { resolvePageShareButtonSettingsHydration } from "./page-share-button-settings";
 import { createPlaybackBindingController } from "./playback-binding-controller";
 import { createRoomStateController } from "./room-state-controller";
 import { createShareController } from "./share-controller";
@@ -40,9 +42,12 @@ const FESTIVAL_SNAPSHOT_TTL_MS = 1200;
 const NAVIGATION_WATCH_INTERVAL_MS = 400;
 const VIDEO_BIND_INTERVAL_MS = 250;
 const HEARTBEAT_LOG_INTERVAL_MS = 10000;
+const PAGE_SHARE_BUTTON_SETTINGS_RETRY_DELAY_MS = 400;
+const PAGE_SHARE_BUTTON_SETTINGS_MAX_ATTEMPTS = 6;
 const festivalBridge = createFestivalBridgeController();
 const broadcastLogState = { key: null as string | null, at: 0 };
 const ignoredSelfPlaybackLogState = { key: null as string | null, at: 0 };
+let pageShareButtonSettingsHydrationTimer: number | null = null;
 const shareController = createShareController({
   runtimeState,
   festivalSnapshotTtlMs: FESTIVAL_SNAPSHOT_TTL_MS,
@@ -136,6 +141,12 @@ const navigationController = createNavigationController({
   activatePauseHold,
   debugLog,
 });
+const pageShareButtonController = createPageShareButtonController({
+  resolveCurrentSharePayload: () =>
+    shareController.resolveCurrentSharePayload(),
+  runtimeSendMessage,
+  toastPresenter,
+});
 
 void init();
 
@@ -167,10 +178,14 @@ async function init(): Promise<void> {
   startUserGestureTracking(() => {
     runtimeState.lastUserGestureAt = Date.now();
   });
+  pageShareButtonController.start();
+  void hydratePageShareButtonSettings();
   playbackBindingController.start();
   navigationController.start();
   window.addEventListener("pagehide", (event) => {
     if (!event.persisted) {
+      clearPageShareButtonSettingsHydrationTimer();
+      pageShareButtonController.destroy();
       syncController.destroy();
       playbackBindingController.destroy();
       navigationController.destroy();
@@ -178,6 +193,7 @@ async function init(): Promise<void> {
   });
   document.addEventListener("fullscreenchange", () => {
     toastPresenter.resetMountTarget();
+    pageShareButtonController.resetMountTarget();
   });
   void reportCurrentUser((msg) => runtimeSendMessage(msg));
 
@@ -196,6 +212,12 @@ async function init(): Promise<void> {
         return false;
       }
 
+      if (message.type === "background:page-share-button-settings") {
+        clearPageShareButtonSettingsHydrationTimer();
+        pageShareButtonController.setEnabled(message.payload.enabled);
+        return false;
+      }
+
       if (message.type === "background:get-current-video") {
         void (async () => {
           sendResponse({
@@ -211,4 +233,47 @@ async function init(): Promise<void> {
   );
 
   await syncController.hydrateRoomState();
+}
+
+function clearPageShareButtonSettingsHydrationTimer(): void {
+  if (pageShareButtonSettingsHydrationTimer === null) {
+    return;
+  }
+  window.clearTimeout(pageShareButtonSettingsHydrationTimer);
+  pageShareButtonSettingsHydrationTimer = null;
+}
+
+function schedulePageShareButtonSettingsHydrationRetry(
+  nextAttempt: number,
+): void {
+  clearPageShareButtonSettingsHydrationTimer();
+  pageShareButtonSettingsHydrationTimer = window.setTimeout(() => {
+    pageShareButtonSettingsHydrationTimer = null;
+    void hydratePageShareButtonSettings(nextAttempt);
+  }, PAGE_SHARE_BUTTON_SETTINGS_RETRY_DELAY_MS);
+}
+
+async function hydratePageShareButtonSettings(attempt = 1): Promise<void> {
+  let response: unknown = null;
+  try {
+    response = await runtimeSendMessage<unknown>({
+      type: "content:get-page-share-button-settings",
+    });
+  } catch {
+    response = null;
+  }
+
+  const result = resolvePageShareButtonSettingsHydration(
+    response,
+    attempt,
+    PAGE_SHARE_BUTTON_SETTINGS_MAX_ATTEMPTS,
+  );
+  if (result.action === "apply") {
+    clearPageShareButtonSettingsHydrationTimer();
+    pageShareButtonController.setEnabled(result.enabled);
+    return;
+  }
+  if (result.action === "retry") {
+    schedulePageShareButtonSettingsHydrationRetry(attempt + 1);
+  }
 }

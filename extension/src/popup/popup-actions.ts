@@ -147,6 +147,14 @@ export function bindPopupActions(args: {
     window.close();
   });
 
+  refs.pageShareButtonEnabledInput.addEventListener("change", async () => {
+    const state = await sendPopupAction({
+      type: "popup:set-page-share-button-enabled",
+      enabled: refs.pageShareButtonEnabledInput.checked,
+    });
+    args.applyActionState(state);
+  });
+
   refs.roomCodeInput.addEventListener("keydown", async (event) => {
     if (event.key !== "Enter") {
       return;

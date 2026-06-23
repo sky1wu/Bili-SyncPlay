@@ -1,6 +1,9 @@
 import type {
   ContentToBackgroundMessage,
+  PageShareButtonSettingsResponse,
   PopupToBackgroundMessage,
+  ShareContextResponse,
+  ShareCurrentVideoResponse,
 } from "../shared/messages";
 import { t } from "../shared/i18n";
 import type {
@@ -10,6 +13,7 @@ import type {
 } from "@bili-syncplay/protocol";
 
 type RuntimeMessage = PopupToBackgroundMessage | ContentToBackgroundMessage;
+type QueueSharedVideoResult = { ok: true } | { ok: false; error: string };
 
 export interface MessageController {
   handleRuntimeMessage(
@@ -30,6 +34,9 @@ export function createMessageController(args: {
     memberId: string | null;
     displayName: string | null;
     roomState: RoomState | null;
+  };
+  settingsState: {
+    pageShareButtonEnabled: boolean;
   };
   diagnosticsController: {
     log: (scope: "popup" | "content", message: string) => void;
@@ -52,10 +59,18 @@ export function createMessageController(args: {
       tabId: number | null;
       error?: string;
     }>;
+    getVideoPayloadFromTab(
+      tab: Pick<chrome.tabs.Tab, "id" | "url"> | null | undefined,
+    ): Promise<{
+      ok: boolean;
+      payload: { video: SharedVideo; playback: PlaybackState | null } | null;
+      tabId: number | null;
+      error?: string;
+    }>;
     queueOrSendSharedVideo(
       payload: { video: SharedVideo; playback: PlaybackState | null },
       tabId: number | null,
-    ): Promise<void>;
+    ): Promise<QueueSharedVideoResult>;
   };
   tabController: {
     openSharedVideoFromPopup(): Promise<void>;
@@ -71,8 +86,16 @@ export function createMessageController(args: {
   updateServerUrl: (serverUrl: string) => Promise<void>;
   persistState: () => Promise<void>;
   persistProfileState: () => Promise<void>;
+  notifyPageShareButtonSettings: () => Promise<void>;
   notifyAll: () => void;
 }): MessageController {
+  async function updatePageShareButtonEnabled(enabled: boolean): Promise<void> {
+    args.settingsState.pageShareButtonEnabled = enabled;
+    await args.persistProfileState();
+    args.notifyAll();
+    await args.notifyPageShareButtonSettings();
+  }
+
   async function handleRuntimeMessage(
     message: RuntimeMessage,
     sender: chrome.runtime.MessageSender,
@@ -131,10 +154,16 @@ export function createMessageController(args: {
           return;
         }
         args.connectionState.lastError = null;
-        await args.shareController.queueOrSendSharedVideo(
+        const shareResult = await args.shareController.queueOrSendSharedVideo(
           response.payload,
           response.tabId,
         );
+        if (shareResult.ok === false) {
+          args.connectionState.lastError = shareResult.error;
+          args.notifyAll();
+          sendResponse({ ok: false, error: shareResult.error });
+          return;
+        }
         await args.persistState();
         args.notifyAll();
         sendResponse({ ok: true });
@@ -147,6 +176,74 @@ export function createMessageController(args: {
       case "popup:set-server-url":
         await args.updateServerUrl(message.serverUrl);
         sendResponse(args.popupStateController.popupState());
+        return;
+      case "popup:set-page-share-button-enabled":
+        await updatePageShareButtonEnabled(message.enabled);
+        sendResponse(args.popupStateController.popupState());
+        return;
+      case "content:get-share-context": {
+        const sharedVideo =
+          args.roomSessionState.roomState?.sharedVideo ?? null;
+        sendResponse({
+          ok: true,
+          roomCode: args.roomSessionState.roomCode,
+          memberCount: args.roomSessionState.roomState?.members.length ?? null,
+          sharedVideo: sharedVideo
+            ? {
+                videoId: sharedVideo.videoId,
+                url: sharedVideo.url,
+                title: sharedVideo.title,
+              }
+            : null,
+        } satisfies ShareContextResponse);
+        return;
+      }
+      case "content:share-current-video": {
+        const response = await args.shareController.getVideoPayloadFromTab(
+          sender.tab,
+        );
+        if (!response.ok || !response.payload) {
+          args.connectionState.lastError =
+            response.error ?? t("popupErrorCannotReadCurrentVideo");
+          args.notifyAll();
+          sendResponse({
+            ok: false,
+            error: args.connectionState.lastError,
+          } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
+        args.connectionState.lastError = null;
+        const shareResult = await args.shareController.queueOrSendSharedVideo(
+          response.payload,
+          response.tabId,
+        );
+        if (shareResult.ok === false) {
+          args.connectionState.lastError = shareResult.error;
+          args.notifyAll();
+          sendResponse({
+            ok: false,
+            error: shareResult.error,
+          } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+        await args.persistState();
+        args.notifyAll();
+        sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
+        return;
+      }
+      case "content:get-page-share-button-settings":
+        sendResponse({
+          ok: true,
+          enabled: args.settingsState.pageShareButtonEnabled,
+        } satisfies PageShareButtonSettingsResponse);
+        return;
+      case "content:set-page-share-button-enabled":
+        await updatePageShareButtonEnabled(message.enabled);
+        sendResponse({
+          ok: true,
+          enabled: args.settingsState.pageShareButtonEnabled,
+        } satisfies PageShareButtonSettingsResponse);
         return;
       case "content:report-user":
         if (args.roomSessionState.displayName !== message.payload.displayName) {

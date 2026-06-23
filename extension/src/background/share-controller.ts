@@ -24,12 +24,17 @@ export interface ActiveVideoPayloadResult {
   error?: string;
 }
 
+export type ShareVideoResult = { ok: true } | { ok: false; error: string };
+
 export interface ShareController {
   getActiveVideoPayload(): Promise<ActiveVideoPayloadResult>;
+  getVideoPayloadFromTab(
+    tab: Pick<chrome.tabs.Tab, "id" | "url"> | null | undefined,
+  ): Promise<ActiveVideoPayloadResult>;
   queueOrSendSharedVideo(
     payload: { video: SharedVideo; playback: PlaybackState | null },
     tabId: number | null,
-  ): Promise<void>;
+  ): Promise<ShareVideoResult>;
   clearPendingLocalShare(reason: string): void;
   expirePendingLocalShareIfNeeded(): void;
   setPendingLocalShare(url: string): void;
@@ -72,9 +77,10 @@ export function createShareController(args: {
     return tab ?? null;
   }
 
-  async function getActiveVideoPayload(): Promise<ActiveVideoPayloadResult> {
-    const activeTab = await getActiveTab();
-    if (!activeTab?.id) {
+  async function getVideoPayloadFromTab(
+    tab: Pick<chrome.tabs.Tab, "id" | "url"> | null | undefined,
+  ): Promise<ActiveVideoPayloadResult> {
+    if (!tab?.id) {
       return {
         ok: false,
         payload: null,
@@ -83,55 +89,59 @@ export function createShareController(args: {
       };
     }
 
-    if (!activeTab.url || !parseBilibiliVideoRef(activeTab.url)) {
+    if (!tab.url || !parseBilibiliVideoRef(tab.url)) {
       return {
         ok: false,
         payload: null,
-        tabId: activeTab.id,
+        tabId: tab.id,
         error: t("popupErrorOpenBilibiliVideo"),
       };
     }
 
     try {
-      const response = await chrome.tabs.sendMessage(activeTab.id, {
+      const response = await chrome.tabs.sendMessage(tab.id, {
         type: "background:get-current-video",
       });
       if (!response?.ok || !response.payload?.video) {
         return {
           ok: false,
           payload: null,
-          tabId: activeTab.id,
+          tabId: tab.id,
           error: t("popupErrorNoPlayableVideo"),
         };
       }
       return {
         ok: true,
         payload: response.payload,
-        tabId: activeTab.id,
+        tabId: tab.id,
       };
     } catch {
       return {
         ok: false,
         payload: null,
-        tabId: activeTab.id,
+        tabId: tab.id,
         error: t("popupErrorCannotAccessPage"),
       };
     }
   }
 
+  async function getActiveVideoPayload(): Promise<ActiveVideoPayloadResult> {
+    return getVideoPayloadFromTab(await getActiveTab());
+  }
+
   async function queueOrSendSharedVideo(
     payload: { video: SharedVideo; playback: PlaybackState | null },
     tabId: number | null,
-  ): Promise<void> {
+  ): Promise<ShareVideoResult> {
     args.rememberSharedSourceTab(tabId ?? undefined, payload.video.url);
-    setPendingLocalShare(payload.video.url);
 
     if (args.connectionState.connected && args.roomSessionState.roomCode) {
       if (!args.roomSessionState.memberToken) {
-        args.connectionState.lastError = t("popupErrorMemberTokenMissing");
-        args.notifyAll();
-        return;
+        const error = t("popupErrorMemberTokenMissing");
+        args.connectionState.lastError = error;
+        return { ok: false, error };
       }
+      setPendingLocalShare(payload.video.url);
       args.sendToServer({
         type: "video:share",
         payload: {
@@ -149,9 +159,10 @@ export function createShareController(args: {
             : {}),
         },
       });
-      return;
+      return { ok: true };
     }
 
+    setPendingLocalShare(payload.video.url);
     args.roomSessionState.pendingSharedVideo = payload.video;
     args.roomSessionState.pendingSharedPlayback = payload.playback
       ? {
@@ -164,7 +175,7 @@ export function createShareController(args: {
     if (args.roomSessionState.roomCode) {
       args.roomSessionState.memberToken = null;
       await args.connect();
-      return;
+      return { ok: true };
     }
 
     args.roomSessionState.roomCode = null;
@@ -187,6 +198,7 @@ export function createShareController(args: {
     } else {
       args.roomSessionState.pendingCreateRoom = true;
     }
+    return { ok: true };
   }
 
   function clearPendingLocalShare(reason: string): void {
@@ -240,6 +252,7 @@ export function createShareController(args: {
 
   return {
     getActiveVideoPayload,
+    getVideoPayloadFromTab,
     queueOrSendSharedVideo,
     clearPendingLocalShare,
     expirePendingLocalShareIfNeeded,

@@ -75,12 +75,17 @@ export interface DiagnosticsState {
   lastPopupStateLogKey: string | null;
 }
 
+export interface SettingsState {
+  pageShareButtonEnabled: boolean;
+}
+
 export interface BackgroundRuntimeState {
   connection: ConnectionState;
   room: RoomSessionState;
   share: ShareState;
   clock: ClockState;
   diagnostics: DiagnosticsState;
+  settings: SettingsState;
 }
 
 export function createBackgroundRuntimeState(): BackgroundRuntimeState {
@@ -126,6 +131,9 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
     diagnostics: {
       logs: [],
       lastPopupStateLogKey: null,
+    },
+    settings: {
+      pageShareButtonEnabled: true,
     },
   };
 }

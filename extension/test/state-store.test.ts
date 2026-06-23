@@ -15,6 +15,9 @@ test("background state store exposes stable mutable state and patch semantics", 
       roomCode: "ROOM01",
       pendingJoinRequestSent: true,
     },
+    settings: {
+      pageShareButtonEnabled: false,
+    },
   });
 
   const nextState = store.getState();
@@ -24,6 +27,7 @@ test("background state store exposes stable mutable state and patch semantics", 
   assert.equal(nextState.room.roomCode, "ROOM01");
   assert.equal(nextState.room.pendingJoinRequestSent, true);
   assert.equal(nextState.share.sharedTabId, null);
+  assert.equal(nextState.settings.pageShareButtonEnabled, false);
 });
 
 test("background state store replace and reset restore runtime defaults", () => {
@@ -38,12 +42,18 @@ test("background state store replace and reset restore runtime defaults", () => 
       ...store.getState().room,
       roomCode: "ROOM02",
     },
+    settings: {
+      ...store.getState().settings,
+      pageShareButtonEnabled: false,
+    },
   });
 
   assert.equal(replaced.connection.connected, true);
   assert.equal(replaced.room.roomCode, "ROOM02");
+  assert.equal(replaced.settings.pageShareButtonEnabled, false);
 
   const resetState = store.reset();
   assert.equal(resetState.connection.connected, false);
   assert.equal(resetState.room.roomCode, null);
+  assert.equal(resetState.settings.pageShareButtonEnabled, true);
 });

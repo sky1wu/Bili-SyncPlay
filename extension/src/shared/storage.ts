@@ -8,6 +8,7 @@ export interface PersistedState {
   displayName: string | null;
   roomState: RoomState | null;
   serverUrl: string | null;
+  pageShareButtonEnabled: boolean;
 }
 
 interface StoredSession {
@@ -21,6 +22,12 @@ interface StoredSession {
 interface StoredProfile {
   displayName: string | null;
   serverUrl: string | null;
+  pageShareButtonEnabled?: boolean;
+}
+
+export interface PageShareButtonPosition {
+  x: number;
+  y: number;
 }
 
 export interface PersistedSessionState {
@@ -34,10 +41,13 @@ export interface PersistedSessionState {
 export interface PersistedProfileState {
   displayName: string | null;
   serverUrl: string | null;
+  pageShareButtonEnabled: boolean;
 }
 
 const SESSION_KEY = "bili-syncplay-session";
 const PROFILE_KEY = "bili-syncplay-profile";
+const PAGE_SHARE_BUTTON_POSITION_KEY =
+  "bili-syncplay-page-share-button-position";
 
 export async function loadState(): Promise<PersistedState> {
   const [session, profile] = await Promise.all([
@@ -53,6 +63,7 @@ export async function loadState(): Promise<PersistedState> {
     roomState: session.roomState,
     displayName: profile.displayName,
     serverUrl: profile.serverUrl,
+    pageShareButtonEnabled: profile.pageShareButtonEnabled,
   };
 }
 
@@ -80,6 +91,8 @@ export async function loadProfileState(): Promise<PersistedProfileState> {
   return {
     displayName: profileResult[PROFILE_KEY]?.displayName ?? null,
     serverUrl: profileResult[PROFILE_KEY]?.serverUrl ?? null,
+    pageShareButtonEnabled:
+      profileResult[PROFILE_KEY]?.pageShareButtonEnabled ?? true,
   };
 }
 
@@ -104,6 +117,35 @@ export async function saveProfileState(
     [PROFILE_KEY]: {
       displayName: value.displayName,
       serverUrl: value.serverUrl,
+      pageShareButtonEnabled: value.pageShareButtonEnabled,
+    },
+  });
+}
+
+export async function loadPageShareButtonPosition(): Promise<PageShareButtonPosition | null> {
+  const result = await chrome.storage.local.get<
+    Record<string, PageShareButtonPosition | undefined>
+  >(PAGE_SHARE_BUTTON_POSITION_KEY);
+  const value = result[PAGE_SHARE_BUTTON_POSITION_KEY];
+  if (
+    !value ||
+    !Number.isFinite(value.x) ||
+    !Number.isFinite(value.y) ||
+    value.x < 0 ||
+    value.y < 0
+  ) {
+    return null;
+  }
+  return value;
+}
+
+export async function savePageShareButtonPosition(
+  value: PageShareButtonPosition,
+): Promise<void> {
+  await chrome.storage.local.set({
+    [PAGE_SHARE_BUTTON_POSITION_KEY]: {
+      x: value.x,
+      y: value.y,
     },
   });
 }

@@ -18,6 +18,7 @@ function createState(): BootstrapMutableState {
     displayName: null,
     roomState: null,
     serverUrl: DEFAULT_SERVER_URL,
+    pageShareButtonEnabled: true,
     lastError: null,
     sharedTabId: null,
   };
@@ -34,6 +35,7 @@ function createPersistedSnapshot(
     displayName: null,
     roomState: null,
     serverUrl: null,
+    pageShareButtonEnabled: true,
     ...overrides,
   };
 }
@@ -72,6 +74,7 @@ test("bootstrap skips auto reconnect when persisted serverUrl is invalid", async
   assert.equal(state.roomCode, "ROOM01");
   assert.equal(state.joinToken, "join-token");
   assert.equal(state.serverUrl, "http://localhost:8787");
+  assert.equal(state.pageShareButtonEnabled, true);
   assert.equal(state.lastError, INVALID_SERVER_URL_MESSAGE);
   assert.equal(typeof tabRemovedListener, "function");
   assert.equal(
@@ -108,5 +111,24 @@ test("bootstrap reconnects when persisted serverUrl is valid", async () => {
 
   assert.equal(connectCalls, 1);
   assert.equal(state.serverUrl, "ws://localhost:8787");
+  assert.equal(state.pageShareButtonEnabled, true);
   assert.equal(state.lastError, null);
+});
+
+test("bootstrap restores the persisted page share button setting", async () => {
+  const state = createState();
+
+  await bootstrapBackground({
+    state,
+    loadPersistedBackgroundSnapshot: async () =>
+      createPersistedSnapshot({
+        pageShareButtonEnabled: false,
+      }),
+    connect: () => {},
+    log: () => {},
+    broadcastPopupState: () => {},
+    addTabRemovedListener: () => {},
+  });
+
+  assert.equal(state.pageShareButtonEnabled, false);
 });

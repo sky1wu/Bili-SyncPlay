@@ -90,6 +90,8 @@ export function renderPopup(args: {
   const visibleMessage = args.localStatusMessage ?? args.state.error;
   args.refs.message.textContent = visibleMessage ?? "";
   args.refs.message.hidden = !visibleMessage;
+  args.refs.pageShareButtonEnabledInput.checked =
+    args.state.pageShareButtonEnabled;
 
   if (!roomCodeFocused) {
     if (args.state.roomCode) {

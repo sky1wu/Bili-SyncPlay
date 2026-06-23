@@ -14,6 +14,7 @@ export interface PersistedBackgroundSnapshot {
   displayName: string | null;
   roomState: RoomState | null;
   serverUrl: string | null;
+  pageShareButtonEnabled: boolean;
 }
 
 export async function loadPersistedBackgroundSnapshot(): Promise<PersistedBackgroundSnapshot> {
@@ -26,6 +27,7 @@ export async function loadPersistedBackgroundSnapshot(): Promise<PersistedBackgr
     displayName: persisted.displayName,
     roomState: persisted.roomState,
     serverUrl: persisted.serverUrl ?? null,
+    pageShareButtonEnabled: persisted.pageShareButtonEnabled,
   };
 }
 
@@ -47,5 +49,6 @@ export async function persistBackgroundProfile(
   await saveProfileState({
     displayName: state.room.displayName,
     serverUrl: state.connection.serverUrl,
+    pageShareButtonEnabled: state.settings.pageShareButtonEnabled,
   });
 }

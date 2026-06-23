@@ -11,6 +11,7 @@ export interface BootstrapMutableState {
   displayName: string | null;
   roomState: RoomState | null;
   serverUrl: string;
+  pageShareButtonEnabled: boolean;
   lastError: string | null;
   sharedTabId: number | null;
 }
@@ -30,6 +31,7 @@ export async function bootstrapBackground(args: {
   args.state.memberId = persisted.memberId;
   args.state.displayName = persisted.displayName;
   args.state.roomState = persisted.roomState;
+  args.state.pageShareButtonEnabled = persisted.pageShareButtonEnabled;
 
   const persistedServerUrl = resolvePersistedServerUrl(persisted.serverUrl);
   args.state.serverUrl = persistedServerUrl.serverUrl;

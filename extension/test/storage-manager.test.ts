@@ -6,6 +6,10 @@ import {
   persistBackgroundState,
 } from "../src/background/storage-manager";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
+import {
+  loadPageShareButtonPosition,
+  savePageShareButtonPosition,
+} from "../src/shared/storage";
 
 function createStorageArea<T>(
   bucket: Record<string, T | undefined>,
@@ -72,6 +76,7 @@ test("loadPersistedBackgroundSnapshot combines session room state and local prof
   assert.equal(snapshot.memberId, "member-1");
   assert.equal(snapshot.displayName, "Alice");
   assert.equal(snapshot.serverUrl, "ws://localhost:8787");
+  assert.equal(snapshot.pageShareButtonEnabled, true);
   assert.equal(snapshot.roomState?.roomCode, "ROOM01");
 });
 
@@ -116,6 +121,7 @@ test("persistBackgroundProfile only writes local storage", async () => {
   const state = createBackgroundRuntimeState();
   state.room.displayName = "Bob";
   state.connection.serverUrl = "wss://sync.example.com";
+  state.settings.pageShareButtonEnabled = false;
 
   await persistBackgroundProfile(state);
 
@@ -129,6 +135,7 @@ test("persistBackgroundProfile only writes local storage", async () => {
   assert.deepEqual(localBucket["bili-syncplay-profile"], {
     displayName: "Bob",
     serverUrl: "wss://sync.example.com",
+    pageShareButtonEnabled: false,
   });
 });
 
@@ -150,4 +157,26 @@ test("persistBackgroundState failure does not mutate local profile storage", asy
     displayName: "Carol",
     serverUrl: "ws://localhost:9000",
   });
+});
+
+test("page share button position storage round-trips valid coordinates", async () => {
+  const { localBucket } = installChromeStorage();
+
+  await savePageShareButtonPosition({ x: 120, y: 220 });
+
+  assert.deepEqual(localBucket["bili-syncplay-page-share-button-position"], {
+    x: 120,
+    y: 220,
+  });
+  assert.deepEqual(await loadPageShareButtonPosition(), { x: 120, y: 220 });
+});
+
+test("page share button position storage ignores malformed coordinates", async () => {
+  const { localBucket } = installChromeStorage();
+  localBucket["bili-syncplay-page-share-button-position"] = {
+    x: Number.NaN,
+    y: 20,
+  };
+
+  assert.equal(await loadPageShareButtonPosition(), null);
 });

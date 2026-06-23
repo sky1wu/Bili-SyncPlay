@@ -46,6 +46,7 @@ const roomSessionState = stateStore.getState().room;
 const shareState = stateStore.getState().share;
 const clockState = stateStore.getState().clock;
 const diagnosticsState = stateStore.getState().diagnostics;
+const settingsState = stateStore.getState().settings;
 const diagnosticsController = createDiagnosticsController({
   diagnosticsState,
   roomSessionState,
@@ -204,6 +205,7 @@ const popupStateController = createPopupStateController({
 const messageController = createMessageController({
   connectionState,
   roomSessionState,
+  settingsState,
   diagnosticsController,
   popupStateController,
   roomSessionController,
@@ -215,6 +217,7 @@ const messageController = createMessageController({
   updateServerUrl,
   persistState,
   persistProfileState,
+  notifyPageShareButtonSettings,
   notifyAll,
 });
 
@@ -280,6 +283,12 @@ async function bootstrap(): Promise<void> {
       },
       set serverUrl(value) {
         connectionState.serverUrl = value;
+      },
+      get pageShareButtonEnabled() {
+        return settingsState.pageShareButtonEnabled;
+      },
+      set pageShareButtonEnabled(value) {
+        settingsState.pageShareButtonEnabled = value;
       },
       get lastError() {
         return connectionState.lastError;
@@ -418,6 +427,15 @@ async function notifyContentScripts(
   message: BackgroundToContentMessage,
 ): Promise<void> {
   await notifyContentTabs(message, BILIBILI_VIDEO_URL_PATTERNS);
+}
+
+async function notifyPageShareButtonSettings(): Promise<void> {
+  await notifyContentScripts({
+    type: "background:page-share-button-settings",
+    payload: {
+      enabled: settingsState.pageShareButtonEnabled,
+    },
+  });
 }
 
 function notifyAll(): void {

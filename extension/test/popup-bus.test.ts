@@ -17,6 +17,7 @@ test("popup snapshot includes connection, room, retry, clock, and logs state", (
   state.room.pendingJoinRoomCode = "ROOM02";
   state.clock.clockOffsetMs = 120;
   state.clock.rttMs = 45;
+  state.settings.pageShareButtonEnabled = false;
   state.diagnostics.logs = [{ at: 1, scope: "background", message: "hello" }];
 
   const snapshot = createPopupStateSnapshot({
@@ -35,6 +36,7 @@ test("popup snapshot includes connection, room, retry, clock, and logs state", (
   assert.equal(snapshot.payload.retryAttemptMax, 5);
   assert.equal(snapshot.payload.clockOffsetMs, 120);
   assert.equal(snapshot.payload.rttMs, 45);
+  assert.equal(snapshot.payload.pageShareButtonEnabled, false);
   assert.deepEqual(snapshot.payload.logs, [
     { at: 1, scope: "background", message: "hello" },
   ]);

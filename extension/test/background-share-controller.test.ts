@@ -69,7 +69,7 @@ test("background share controller forwards a share without playback when content
   harness.runtimeState.room.memberId = "member-1";
 
   try {
-    await harness.controller.queueOrSendSharedVideo(
+    const result = await harness.controller.queueOrSendSharedVideo(
       {
         video: {
           videoId: "BV199W9zEEcH",
@@ -81,6 +81,7 @@ test("background share controller forwards a share without playback when content
       123,
     );
 
+    assert.deepEqual(result, { ok: true });
     assert.deepEqual(harness.rememberedSharedTabs, [
       {
         tabId: 123,
@@ -113,7 +114,7 @@ test("background share controller sends create request with protocolVersion when
   harness.runtimeState.room.displayName = "Alice";
 
   try {
-    await harness.controller.queueOrSendSharedVideo(
+    const result = await harness.controller.queueOrSendSharedVideo(
       {
         video: {
           videoId: "BV199W9zEEcH",
@@ -125,6 +126,7 @@ test("background share controller sends create request with protocolVersion when
       123,
     );
 
+    assert.deepEqual(result, { ok: true });
     assert.deepEqual(harness.sendToServerCalls, [
       {
         type: "room:create",
@@ -138,4 +140,37 @@ test("background share controller sends create request with protocolVersion when
   } finally {
     selfHarness.restore();
   }
+});
+
+test("background share controller reports missing member token without queuing a local share", async () => {
+  const harness = createControllerHarness();
+  harness.runtimeState.connection.connected = true;
+  harness.runtimeState.room.roomCode = "ROOM01";
+  harness.runtimeState.room.memberToken = null;
+
+  const result = await harness.controller.queueOrSendSharedVideo(
+    {
+      video: {
+        videoId: "BV199W9zEEcH",
+        url: "https://www.bilibili.com/video/BV199W9zEEcH",
+        title: "New Video",
+      },
+      playback: null,
+    },
+    123,
+  );
+
+  assert.deepEqual(result, {
+    ok: false,
+    error: "Member token is missing. Rejoin the room.",
+  });
+  assert.deepEqual(harness.rememberedSharedTabs, [
+    {
+      tabId: 123,
+      videoUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+    },
+  ]);
+  assert.deepEqual(harness.sendToServerCalls, []);
+  assert.equal(harness.runtimeState.share.pendingLocalShareUrl, null);
+  assert.equal(harness.notifyAllCalls, 0);
 });

@@ -86,6 +86,7 @@ function createPopupRefs(): PopupRefs {
     logs: createElement() as unknown as HTMLElement,
     memberList: createElement() as unknown as HTMLElement,
     copyLogsButton: createElement() as unknown as HTMLButtonElement,
+    pageShareButtonEnabledInput: createElement() as unknown as HTMLInputElement,
     serverUrlInput: createElement() as unknown as HTMLInputElement,
     saveServerUrlButton: createElement() as unknown as HTMLButtonElement,
     debugMemberStatus: createElement() as unknown as HTMLElement,
@@ -166,6 +167,7 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
         retryAttemptMax: 5,
         clockOffsetMs: 25,
         rttMs: 60,
+        pageShareButtonEnabled: false,
         logs: [
           {
             at: 1_710_000_000_000,
@@ -196,6 +198,7 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
     assert.equal(refs.message.textContent, "Ready");
     assert.equal(roomCodeInput.value, "ROOM01:join-token-1");
     assert.equal(serverUrlInput.value, "ws://localhost:8787");
+    assert.equal(refs.pageShareButtonEnabledInput.checked, false);
     assert.deepEqual(draftValues, ["ROOM01:join-token-1"]);
     assert.equal(refs.copyRoomButton.disabled, false);
     assert.equal(
@@ -249,6 +252,7 @@ test("renderPopup debug log distinguishes background pending state from local UI
         retryAttemptMax: 5,
         clockOffsetMs: null,
         rttMs: null,
+        pageShareButtonEnabled: true,
         logs: [],
       },
       serverUrlDraft: { value: "", dirty: false },
@@ -304,6 +308,7 @@ test("renderPopup only logs once for repeated identical pending renders", async 
       retryAttemptMax: 5,
       clockOffsetMs: null,
       rttMs: null,
+      pageShareButtonEnabled: true,
       logs: [],
     },
     serverUrlDraft: { value: "", dirty: false },
@@ -374,6 +379,7 @@ test("renderPopup falls back to sharedByDisplayName when the sharer is no longer
         retryAttemptMax: 5,
         clockOffsetMs: null,
         rttMs: null,
+        pageShareButtonEnabled: true,
         logs: [],
       },
       serverUrlDraft: { value: "", dirty: false },

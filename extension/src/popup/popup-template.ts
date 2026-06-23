@@ -78,6 +78,18 @@ export function renderPopupTemplate(): string {
 
           <div class="advanced-content">
             <div class="setting-group">
+              <label class="toggle-row" for="page-share-button-enabled">
+                <span>${escapeHtml(t("settingPageShareButtonEnabled"))}</span>
+                <span class="toggle-switch">
+                  <input class="toggle-switch-input" id="page-share-button-enabled" type="checkbox">
+                  <span class="toggle-switch-track" aria-hidden="true">
+                    <span class="toggle-switch-thumb"></span>
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            <div class="setting-group">
               <label class="field-label" for="server-url">${escapeHtml(t("metricServerUrl"))}</label>
               <div class="settings-row">
                 <input id="server-url" placeholder="${escapeHtml(DEFAULT_SERVER_URL)}">

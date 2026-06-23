@@ -28,6 +28,7 @@ const REF_KEYS = [
   "logs",
   "memberList",
   "copyLogsButton",
+  "pageShareButtonEnabledInput",
   "serverUrlInput",
   "saveServerUrlButton",
   "debugMemberStatus",
@@ -83,6 +84,7 @@ function createState(
     retryAttemptMax: 5,
     clockOffsetMs: null,
     rttMs: null,
+    pageShareButtonEnabled: true,
     logs: [],
     ...overrides,
   };
@@ -272,4 +274,32 @@ test("saveServerUrl clears a previous localStatusMessage on a successful save", 
   } finally {
     setLocaleForTests(null);
   }
+});
+
+test("page share button setting sends the updated enabled value", async () => {
+  const refs = createRefs();
+  const requests: unknown[] = [];
+
+  installChromeRuntimeStub((message) => {
+    const typed = message as { type?: string; enabled?: boolean };
+    if (typed.type === "popup:set-page-share-button-enabled") {
+      requests.push(message);
+      return createState({ pageShareButtonEnabled: Boolean(typed.enabled) });
+    }
+    return createState();
+  });
+
+  bindPopupActions(buildBindings({ refs }));
+
+  (
+    refs.pageShareButtonEnabledInput as unknown as { checked: boolean }
+  ).checked = false;
+  (refs.pageShareButtonEnabledInput as unknown as EventTarget).dispatchEvent(
+    new Event("change"),
+  );
+  await flushMicrotasks();
+
+  assert.deepEqual(requests, [
+    { type: "popup:set-page-share-button-enabled", enabled: false },
+  ]);
 });

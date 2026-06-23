@@ -15,6 +15,7 @@ export interface PopupRefs {
   logs: HTMLElement;
   memberList: HTMLElement;
   copyLogsButton: HTMLButtonElement;
+  pageShareButtonEnabledInput: HTMLInputElement;
   serverUrlInput: HTMLInputElement;
   saveServerUrlButton: HTMLButtonElement;
   debugMemberStatus: HTMLElement;
@@ -46,6 +47,9 @@ export function collectPopupRefs(): PopupRefs {
     logs: getById("debug-logs"),
     memberList: getById("member-list"),
     copyLogsButton: getById("copy-logs") as HTMLButtonElement,
+    pageShareButtonEnabledInput: getById(
+      "page-share-button-enabled",
+    ) as HTMLInputElement,
     serverUrlInput: getById("server-url") as HTMLInputElement,
     saveServerUrlButton: getById("save-server-url") as HTMLButtonElement,
     debugMemberStatus: getById("member-status"),

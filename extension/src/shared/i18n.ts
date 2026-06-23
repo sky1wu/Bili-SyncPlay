@@ -1,4 +1,5 @@
 import type { ErrorCode } from "@bili-syncplay/protocol";
+import { isExtensionContextInvalidatedError } from "./extension-errors";
 
 type MessageParams = Record<string, string | number | null | undefined>;
 
@@ -22,8 +23,22 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     actionOpenSharedVideo: "打开共享视频",
     ownerSharedBy: "由 {owner} 共享",
     actionShareCurrentVideo: "同步当前页视频",
+    actionSharePending: "同步中...",
+    pageShareSuccess: "已同步当前页视频",
+    pageShareFailed: "同步失败：{error}",
+    pageSharePopoverTitle: "同步房间",
+    pageSharePopoverLoading: "读取房间信息...",
+    pageSharePopoverError: "无法读取房间信息",
+    pageShareRoomNotJoined: "未加入房间",
+    pageShareRoomCode: "房间码",
+    pageShareMemberCount: "成员",
+    pageShareSharedVideo: "共享视频",
+    pageShareNoSharedVideo: "暂无共享视频",
+    pageShareButtonQuickDisable: "显示悬浮按钮",
+    pageShareButtonDisabled: "已关闭页面内同步按钮",
     sectionRoomMembers: "成员",
     sectionAdvancedInfo: "高级设置",
+    settingPageShareButtonEnabled: "启用页面内同步按钮",
     metricServerUrl: "服务器地址",
     actionSave: "保存",
     metricCurrentIdentity: "当前身份",
@@ -102,8 +117,22 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     actionOpenSharedVideo: "Open shared video",
     ownerSharedBy: "Shared by {owner}",
     actionShareCurrentVideo: "Sync current page video",
+    actionSharePending: "Syncing...",
+    pageShareSuccess: "Current page video synced",
+    pageShareFailed: "Sync failed: {error}",
+    pageSharePopoverTitle: "Sync room",
+    pageSharePopoverLoading: "Reading room info...",
+    pageSharePopoverError: "Unable to read room info",
+    pageShareRoomNotJoined: "Not in a room",
+    pageShareRoomCode: "Room code",
+    pageShareMemberCount: "Members",
+    pageShareSharedVideo: "Shared video",
+    pageShareNoSharedVideo: "No shared video yet",
+    pageShareButtonQuickDisable: "Show floating button",
+    pageShareButtonDisabled: "In-page sync button disabled",
     sectionRoomMembers: "Room members",
     sectionAdvancedInfo: "Advanced info",
+    settingPageShareButtonEnabled: "Enable in-page sync button",
     metricServerUrl: "Server URL",
     actionSave: "Save",
     metricCurrentIdentity: "Identity",
@@ -190,8 +219,17 @@ function interpolate(template: string, params: MessageParams = {}): string {
 }
 
 export function getUiLanguage(): string {
-  const chromeLocale =
-    typeof chrome !== "undefined" ? chrome.i18n?.getUILanguage?.() : undefined;
+  let chromeLocale: string | undefined;
+  try {
+    chromeLocale =
+      typeof chrome !== "undefined"
+        ? chrome.i18n?.getUILanguage?.()
+        : undefined;
+  } catch (error) {
+    if (!isExtensionContextInvalidatedError(error)) {
+      throw error;
+    }
+  }
   if (typeof chromeLocale === "string" && chromeLocale.trim()) {
     return chromeLocale;
   }

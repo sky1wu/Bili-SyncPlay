@@ -22,12 +22,22 @@ export type PopupToBackgroundMessage =
   | { type: "popup:get-active-video" }
   | { type: "popup:share-current-video" }
   | { type: "popup:set-server-url"; serverUrl: string }
+  | { type: "popup:set-page-share-button-enabled"; enabled: boolean }
   | { type: "popup:open-shared-video" };
+
+export interface ActiveVideoResponsePayload {
+  video: SharedVideo;
+  playback: PlaybackState | null;
+}
 
 export type ContentToBackgroundMessage =
   | { type: "content:playback-update"; payload: PlaybackState }
   | { type: "content:report-user"; payload: { displayName: string } }
   | { type: "content:get-room-state" }
+  | { type: "content:get-share-context" }
+  | { type: "content:share-current-video" }
+  | { type: "content:get-page-share-button-settings" }
+  | { type: "content:set-page-share-button-enabled"; enabled: boolean }
   | { type: "content:debug-log"; payload: { message: string } };
 
 export interface DebugLogEntry {
@@ -55,6 +65,7 @@ export type BackgroundToPopupMessage =
         retryAttemptMax: number;
         clockOffsetMs: number | null;
         rttMs: number | null;
+        pageShareButtonEnabled: boolean;
         logs: DebugLogEntry[];
       };
     }
@@ -95,19 +106,35 @@ export function isBackgroundPopupStateMessage(
     typeof payload === "object" &&
     payload !== null &&
     typeof (payload as { connected?: unknown }).connected === "boolean" &&
-    typeof (payload as { serverUrl?: unknown }).serverUrl === "string"
+    typeof (payload as { serverUrl?: unknown }).serverUrl === "string" &&
+    typeof (payload as { pageShareButtonEnabled?: unknown })
+      .pageShareButtonEnabled === "boolean"
   );
-}
-
-export interface ActiveVideoResponsePayload {
-  video: SharedVideo;
-  playback: PlaybackState | null;
 }
 
 export interface ActiveVideoResponse {
   ok: boolean;
   payload: ActiveVideoResponsePayload | null;
   tabId: number | null;
+  error?: string;
+}
+
+export interface ShareContextResponse {
+  ok: boolean;
+  roomCode: string | null;
+  memberCount: number | null;
+  sharedVideo: SharedVideo | null;
+  error?: string;
+}
+
+export interface ShareCurrentVideoResponse {
+  ok: boolean;
+  error?: string;
+}
+
+export interface PageShareButtonSettingsResponse {
+  ok: boolean;
+  enabled: boolean;
   error?: string;
 }
 
@@ -151,6 +178,76 @@ export function isActiveVideoResponse(
   return true;
 }
 
+export function isShareContextResponse(
+  value: unknown,
+): value is ShareContextResponse {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as {
+    ok?: unknown;
+    roomCode?: unknown;
+    memberCount?: unknown;
+    sharedVideo?: unknown;
+    error?: unknown;
+  };
+  if (typeof record.ok !== "boolean") {
+    return false;
+  }
+  if (record.roomCode !== null && typeof record.roomCode !== "string") {
+    return false;
+  }
+  if (
+    record.memberCount !== null &&
+    (typeof record.memberCount !== "number" ||
+      !Number.isInteger(record.memberCount) ||
+      record.memberCount < 0)
+  ) {
+    return false;
+  }
+  if (record.sharedVideo !== null && !isSharedVideo(record.sharedVideo)) {
+    return false;
+  }
+  if (record.error !== undefined && typeof record.error !== "string") {
+    return false;
+  }
+  return true;
+}
+
+export function isShareCurrentVideoResponse(
+  value: unknown,
+): value is ShareCurrentVideoResponse {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as {
+    ok?: unknown;
+    error?: unknown;
+  };
+  return (
+    typeof record.ok === "boolean" &&
+    (record.error === undefined || typeof record.error === "string")
+  );
+}
+
+export function isPageShareButtonSettingsResponse(
+  value: unknown,
+): value is PageShareButtonSettingsResponse {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as {
+    ok?: unknown;
+    enabled?: unknown;
+    error?: unknown;
+  };
+  return (
+    typeof record.ok === "boolean" &&
+    typeof record.enabled === "boolean" &&
+    (record.error === undefined || typeof record.error === "string")
+  );
+}
+
 export type BackgroundToContentMessage =
   | {
       type: "background:apply-room-state";
@@ -164,6 +261,12 @@ export type BackgroundToContentMessage =
         connected: boolean;
         memberId: string | null;
         rttMs: number | null;
+      };
+    }
+  | {
+      type: "background:page-share-button-settings";
+      payload: {
+        enabled: boolean;
       };
     }
   | { type: "background:get-current-video" };

@@ -13,7 +13,24 @@ function createControllerHarness(
       displayName: string | null;
       roomState: RoomState | null;
     };
+    settingsState?: {
+      pageShareButtonEnabled: boolean;
+    };
     isActiveSharedTab?: boolean;
+    tabVideoPayloadResult?: {
+      ok: boolean;
+      payload: {
+        video: {
+          videoId: string;
+          url: string;
+          title: string;
+        };
+        playback: null;
+      } | null;
+      tabId: number | null;
+      error?: string;
+    };
+    queueOrSendSharedVideoResult?: { ok: true } | { ok: false; error: string };
   } = {},
 ) {
   const calls = {
@@ -27,11 +44,15 @@ function createControllerHarness(
     sendToServer: [] as unknown[],
     persistState: 0,
     persistProfileState: 0,
+    notifyPageShareButtonSettings: 0,
     notifyAll: 0,
     queueOrSendSharedVideo: [] as Array<{
       payload: unknown;
       tabId: number | null;
     }>,
+    getVideoPayloadFromTab: [] as Array<
+      Pick<chrome.tabs.Tab, "id" | "url"> | null | undefined
+    >,
     openSharedVideoFromPopup: 0,
     updateServerUrl: [] as string[],
   };
@@ -52,10 +73,14 @@ function createControllerHarness(
     },
   };
   const popupState = { ok: true, roomCode: roomSessionState.roomCode };
+  const settingsState = overrides.settingsState ?? {
+    pageShareButtonEnabled: true,
+  };
 
   const controller = createMessageController({
     connectionState,
     roomSessionState,
+    settingsState,
     diagnosticsController: {
       log(scope, message) {
         if (scope === "popup") {
@@ -104,8 +129,27 @@ function createControllerHarness(
           tabId: 123,
         };
       },
+      async getVideoPayloadFromTab(tab) {
+        calls.getVideoPayloadFromTab.push(tab);
+        if (overrides.tabVideoPayloadResult) {
+          return overrides.tabVideoPayloadResult;
+        }
+        return {
+          ok: true,
+          payload: {
+            video: {
+              videoId: "BV199W9zEEcH",
+              url: "https://www.bilibili.com/video/BV199W9zEEcH",
+              title: "New Video",
+            },
+            playback: null,
+          },
+          tabId: tab?.id ?? null,
+        };
+      },
       async queueOrSendSharedVideo(payload, tabId) {
         calls.queueOrSendSharedVideo.push({ payload, tabId });
+        return overrides.queueOrSendSharedVideoResult ?? { ok: true };
       },
     },
     tabController: {
@@ -143,12 +187,22 @@ function createControllerHarness(
     async persistProfileState() {
       calls.persistProfileState += 1;
     },
+    async notifyPageShareButtonSettings() {
+      calls.notifyPageShareButtonSettings += 1;
+    },
     notifyAll() {
       calls.notifyAll += 1;
     },
   });
 
-  return { controller, calls, connectionState, roomSessionState, popupState };
+  return {
+    controller,
+    calls,
+    connectionState,
+    roomSessionState,
+    popupState,
+    settingsState,
+  };
 }
 
 test("message controller waits for popup join completion only when already connected", async () => {
@@ -211,6 +265,218 @@ test("message controller reconnects on popup:get-state when room context exists 
 
   assert.equal(harness.calls.connect, 1);
   assert.deepEqual(response, harness.popupState);
+});
+
+test("message controller updates the page share button setting from popup", async () => {
+  const harness = createControllerHarness();
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "popup:set-page-share-button-enabled", enabled: false },
+    {},
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.equal(harness.settingsState.pageShareButtonEnabled, false);
+  assert.equal(harness.calls.persistProfileState, 1);
+  assert.equal(harness.calls.notifyAll, 1);
+  assert.equal(harness.calls.notifyPageShareButtonSettings, 1);
+  assert.deepEqual(response, harness.popupState);
+});
+
+test("message controller returns the page share button setting to content", async () => {
+  const harness = createControllerHarness({
+    settingsState: { pageShareButtonEnabled: false },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "content:get-page-share-button-settings" },
+    {},
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.deepEqual(response, { ok: true, enabled: false });
+});
+
+test("message controller updates the page share button setting from content", async () => {
+  const harness = createControllerHarness();
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "content:set-page-share-button-enabled", enabled: false },
+    {},
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.equal(harness.settingsState.pageShareButtonEnabled, false);
+  assert.equal(harness.calls.persistProfileState, 1);
+  assert.equal(harness.calls.notifyAll, 1);
+  assert.equal(harness.calls.notifyPageShareButtonSettings, 1);
+  assert.deepEqual(response, { ok: true, enabled: false });
+});
+
+test("message controller returns share context for content page actions", async () => {
+  const sharedVideo = {
+    videoId: "BV199W9zEEcH",
+    url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    title: "Shared Video",
+    sharedByMemberId: "member-88",
+    sharedByDisplayName: "Alice",
+  };
+  const harness = createControllerHarness({
+    roomSessionState: {
+      roomCode: "ROOM88",
+      memberToken: "member-token-88",
+      memberId: "member-88",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM88",
+        sharedVideo,
+        playback: null,
+        members: [
+          { id: "member-88", name: "Alice" },
+          { id: "member-99", name: "Bob" },
+        ],
+      },
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "content:get-share-context" },
+    { tab: { id: 456 } },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.deepEqual(response, {
+    ok: true,
+    roomCode: "ROOM88",
+    memberCount: 2,
+    sharedVideo: {
+      videoId: "BV199W9zEEcH",
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+      title: "Shared Video",
+    },
+  });
+});
+
+test("message controller shares content page video by reading the sender tab", async () => {
+  const harness = createControllerHarness();
+  let response: unknown;
+  const senderTab = {
+    id: 456,
+    url: "https://www.bilibili.com/video/BV199W9zEEcH",
+  };
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:share-current-video",
+    },
+    { tab: senderTab },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.deepEqual(harness.calls.getVideoPayloadFromTab, [senderTab]);
+  assert.deepEqual(harness.calls.queueOrSendSharedVideo, [
+    {
+      payload: {
+        video: {
+          videoId: "BV199W9zEEcH",
+          url: "https://www.bilibili.com/video/BV199W9zEEcH",
+          title: "New Video",
+        },
+        playback: null,
+      },
+      tabId: 456,
+    },
+  ]);
+  assert.equal(harness.calls.persistState, 1);
+  assert.equal(harness.calls.notifyAll, 1);
+  assert.deepEqual(response, { ok: true });
+});
+
+test("message controller reports content page share read failures", async () => {
+  const harness = createControllerHarness({
+    tabVideoPayloadResult: {
+      ok: false,
+      payload: null,
+      tabId: 456,
+      error: "无法读取当前视频。",
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:share-current-video",
+    },
+    {
+      tab: {
+        id: 456,
+        url: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
+  assert.equal(harness.connectionState.lastError, "无法读取当前视频。");
+  assert.equal(harness.calls.persistState, 0);
+  assert.equal(harness.calls.notifyAll, 1);
+  assert.deepEqual(response, {
+    ok: false,
+    error: "无法读取当前视频。",
+  });
+});
+
+test("message controller reports content page share send failures", async () => {
+  const harness = createControllerHarness({
+    queueOrSendSharedVideoResult: {
+      ok: false,
+      error: "成员令牌缺失，请重新加入房间。",
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:share-current-video",
+    },
+    {
+      tab: {
+        id: 456,
+        url: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.equal(
+    harness.connectionState.lastError,
+    "成员令牌缺失，请重新加入房间。",
+  );
+  assert.equal(harness.calls.queueOrSendSharedVideo.length, 1);
+  assert.equal(harness.calls.persistState, 0);
+  assert.equal(harness.calls.notifyAll, 1);
+  assert.deepEqual(response, {
+    ok: false,
+    error: "成员令牌缺失，请重新加入房间。",
+  });
 });
 
 test("message controller persists content:report-user and forwards profile update for active room members", async () => {

@@ -34,6 +34,7 @@ function createPopupState(
     retryAttemptMax: 5,
     clockOffsetMs: null,
     rttMs: null,
+    pageShareButtonEnabled: true,
     logs: [],
     ...overrides,
   };
