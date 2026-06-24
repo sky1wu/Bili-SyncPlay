@@ -261,6 +261,25 @@ export function createPlaybackBindingController(args: {
     return true;
   }
 
+  function shouldReapplyPauseHoldForUnstableVideoIdentity(
+    currentVideo: SharedVideo | null,
+  ): boolean {
+    if (
+      !currentVideo ||
+      hasStableSharedVideoIdentity(currentVideo) ||
+      !args.runtimeState.activeRoomCode ||
+      !args.runtimeState.activeSharedUrl ||
+      nowOf() >= args.runtimeState.pauseHoldUntil
+    ) {
+      return false;
+    }
+
+    return (
+      args.runtimeState.intendedPlayState === "paused" ||
+      args.runtimeState.intendedPlayState === "buffering"
+    );
+  }
+
   function forcePauseOnNonSharedPage(video: HTMLVideoElement): boolean {
     if (
       !args.runtimeState.activeRoomCode ||
@@ -370,6 +389,20 @@ export function createPlaybackBindingController(args: {
         }, 0);
         return true;
       }
+
+      if (shouldReapplyPauseHoldForUnstableVideoIdentity(currentVideo)) {
+        args.debugLog(
+          `Forced pause hold reapplied for unstable video identity intended=${args.runtimeState.intendedPlayState}`,
+        );
+        args.runtimeState.explicitNonSharedPlaybackUrl = null;
+        args.runtimeState.lastNonSharedGuardUrl = null;
+        args.runtimeState.lastForcedPauseAt = nowOf();
+        window.setTimeout(() => {
+          pauseVideo(video);
+        }, 0);
+        return true;
+      }
+
       if (forcePauseOnNonSharedPage(video)) {
         return true;
       }
