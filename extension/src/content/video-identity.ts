@@ -12,6 +12,22 @@ export function hasStableSharedVideoIdentity(
   );
 }
 
+export function isUnstableSharedVideoUrl(url: string | null): boolean {
+  if (!url) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.pathname.startsWith("/festival/") ||
+      /^\/bangumi\/play\/ss\d+$/i.test(parsed.pathname.replace(/\/+$/, ""))
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function isConfirmedDifferentSharedVideo(args: {
   currentVideo: SharedVideo | null;
   sharedVideo: SharedVideo | null;
@@ -28,6 +44,7 @@ export function isConfirmedDifferentSharedVideo(args: {
 
   if (
     !hasStableSharedVideoIdentity(args.currentVideo) ||
+    !hasStableSharedVideoIdentity(args.sharedVideo) ||
     !args.normalizedCurrentUrl ||
     !args.normalizedSharedUrl
   ) {

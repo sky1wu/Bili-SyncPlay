@@ -2,6 +2,7 @@ import {
   resetUserGestureState,
   type ContentRuntimeState,
 } from "./runtime-state";
+import { isUnstableSharedVideoUrl } from "./video-identity";
 
 export interface NavigationController {
   start(): void;
@@ -90,11 +91,11 @@ export function createNavigationController(args: {
     );
     args.attachPlaybackListeners();
     const video = args.getVideoElement();
-    if (
-      video &&
-      !video.paused &&
-      nextNormalizedPageUrl === args.runtimeState.activeSharedUrl
-    ) {
+    const shouldPauseImmediately =
+      nextNormalizedPageUrl === args.runtimeState.activeSharedUrl ||
+      (Boolean(args.runtimeState.activeSharedUrl) &&
+        isUnstableSharedVideoUrl(nextNormalizedPageUrl));
+    if (video && !video.paused && shouldPauseImmediately) {
       args.debugLog(
         `Suppressed autoplay immediately after in-room navigation to ${nextPageUrl}`,
       );

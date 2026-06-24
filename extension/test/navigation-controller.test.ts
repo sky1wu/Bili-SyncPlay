@@ -178,6 +178,64 @@ test("navigation controller hydrates without pausing when switching to a non-sha
   }
 });
 
+test("navigation controller suppresses autoplay when navigating through an unstable shared route", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/video/BVfestival?cid=123";
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let hydrateCalls = 0;
+  let pauseCalls = 0;
+
+  function normalizeFestival(url: string): string | null {
+    if (url.includes("/festival/demo")) {
+      return "https://www.bilibili.com/festival/demo";
+    }
+    return normalizeTestVideoPageUrl(url);
+  }
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeFestival,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {},
+    debugLog: () => {},
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/festival/demo";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(hydrateCalls, 1);
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.pendingRoomStateHydration, true);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller anchors active shared url for post-navigation settle gate", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
