@@ -13,7 +13,10 @@ import type {
   ExplicitUserActionKind,
   LocalPlaybackEventSource,
 } from "./runtime-state";
-import { hasStableSharedVideoIdentity } from "./video-identity";
+import {
+  hasStableSharedVideoIdentity,
+  isUnstableSharedVideoUrl,
+} from "./video-identity";
 
 export interface PlaybackBindingController {
   start(): void;
@@ -183,11 +186,23 @@ export function createPlaybackBindingController(args: {
   }
 
   function isKnownNonSharedVideo(currentVideo: SharedVideo | null): boolean {
+    const activeSharedUrl = args.runtimeState.activeSharedUrl;
     return Boolean(
       currentVideo &&
       hasStableSharedVideoIdentity(currentVideo) &&
-      args.runtimeState.activeSharedUrl &&
+      activeSharedUrl &&
+      !isUnstableSharedVideoUrl(activeSharedUrl) &&
       !isCurrentVideoShared(currentVideo),
+    );
+  }
+
+  function hasUnconfirmedSharedVideoContext(
+    currentVideo: SharedVideo | null,
+  ): boolean {
+    return Boolean(
+      !currentVideo ||
+      !hasStableSharedVideoIdentity(currentVideo) ||
+      isUnstableSharedVideoUrl(args.runtimeState.activeSharedUrl),
     );
   }
 
@@ -261,12 +276,10 @@ export function createPlaybackBindingController(args: {
     return true;
   }
 
-  function shouldReapplyPauseHoldForUnstableVideoIdentity(
+  function shouldReapplyPauseHoldForUnconfirmedSharedVideo(
     currentVideo: SharedVideo | null,
   ): boolean {
     if (
-      !currentVideo ||
-      hasStableSharedVideoIdentity(currentVideo) ||
       !args.runtimeState.activeRoomCode ||
       !args.runtimeState.activeSharedUrl ||
       nowOf() >= args.runtimeState.pauseHoldUntil
@@ -274,10 +287,14 @@ export function createPlaybackBindingController(args: {
       return false;
     }
 
-    return (
-      args.runtimeState.intendedPlayState === "paused" ||
-      args.runtimeState.intendedPlayState === "buffering"
-    );
+    if (
+      args.runtimeState.intendedPlayState !== "paused" &&
+      args.runtimeState.intendedPlayState !== "buffering"
+    ) {
+      return false;
+    }
+
+    return hasUnconfirmedSharedVideoContext(currentVideo);
   }
 
   function forcePauseOnNonSharedPage(video: HTMLVideoElement): boolean {
@@ -285,6 +302,11 @@ export function createPlaybackBindingController(args: {
       !args.runtimeState.activeRoomCode ||
       !args.runtimeState.activeSharedUrl
     ) {
+      return false;
+    }
+    if (isUnstableSharedVideoUrl(args.runtimeState.activeSharedUrl)) {
+      args.runtimeState.explicitNonSharedPlaybackUrl = null;
+      args.runtimeState.lastNonSharedGuardUrl = null;
       return false;
     }
 
@@ -390,9 +412,9 @@ export function createPlaybackBindingController(args: {
         return true;
       }
 
-      if (shouldReapplyPauseHoldForUnstableVideoIdentity(currentVideo)) {
+      if (shouldReapplyPauseHoldForUnconfirmedSharedVideo(currentVideo)) {
         args.debugLog(
-          `Forced pause hold reapplied for unstable video identity intended=${args.runtimeState.intendedPlayState}`,
+          `Forced pause hold reapplied for unconfirmed shared video context intended=${args.runtimeState.intendedPlayState}`,
         );
         args.runtimeState.explicitNonSharedPlaybackUrl = null;
         args.runtimeState.lastNonSharedGuardUrl = null;

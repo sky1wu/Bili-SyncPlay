@@ -143,6 +143,48 @@ export function createRoomStateApplyController(args: {
     }
     args.runtimeState.deferredRemotePausedState = null;
   };
+  const isPausedOrBufferingPlayback = (
+    playback: PlaybackState | null,
+  ): playback is PlaybackState =>
+    playback?.playState === "paused" || playback?.playState === "buffering";
+  const shouldPreserveInitialPauseProtection = (input: {
+    currentVideo: SharedVideo | null;
+    playback: PlaybackState | null;
+    normalizedSharedUrl: string | null;
+    normalizedCurrentUrl: string | null;
+    normalizedPlaybackUrl: string | null;
+  }): boolean => {
+    if (
+      !isPausedOrBufferingPlayback(input.playback) ||
+      !input.normalizedSharedUrl ||
+      input.normalizedPlaybackUrl !== input.normalizedSharedUrl
+    ) {
+      return false;
+    }
+
+    return (
+      !input.currentVideo ||
+      !input.normalizedCurrentUrl ||
+      input.normalizedCurrentUrl === input.normalizedSharedUrl
+    );
+  };
+  const activateInitialPauseProtection = (input: {
+    playback: PlaybackState;
+    normalizedSharedUrl: string;
+    roomCode: string;
+    logReason: string;
+  }): void => {
+    args.runtimeState.activeSharedUrl = input.normalizedSharedUrl;
+    args.runtimeState.intendedPlayState = input.playback.playState;
+    args.runtimeState.intendedPlaybackRate = input.playback.playbackRate;
+    args.activatePauseHold(args.initialRoomStatePauseHoldMs);
+    const video = args.getVideoElement();
+    if (video && !video.paused) {
+      args.runtimeState.lastForcedPauseAt = nowOf();
+      args.debugLog(`${input.logReason} for ${input.roomCode}`);
+      pauseVideo(video);
+    }
+  };
 
   /**
    * When hydrating an empty room, suppress autoplay only if the video was not
@@ -403,6 +445,27 @@ export function createRoomStateApplyController(args: {
 
     if (decision.kind === "no-current-video") {
       args.cancelActiveSoftApply(args.getVideoElement(), "no-current-video");
+      if (
+        args.runtimeState.pendingRoomStateHydration &&
+        state.playback &&
+        normalizedSharedUrl &&
+        shouldPreserveInitialPauseProtection({
+          currentVideo,
+          playback: state.playback,
+          normalizedSharedUrl,
+          normalizedCurrentUrl,
+          normalizedPlaybackUrl,
+        })
+      ) {
+        activateInitialPauseProtection({
+          playback: state.playback,
+          normalizedSharedUrl,
+          roomCode: state.roomCode,
+          logReason:
+            "Suppressed autoplay while waiting for page bridge during hydrate",
+        });
+        scheduleHydrationRetry();
+      }
       return;
     }
 
@@ -428,6 +491,7 @@ export function createRoomStateApplyController(args: {
           args.debugLog(
             `Suppressed autoplay during unstable shared url hydration for ${state.roomCode}`,
           );
+          args.runtimeState.lastForcedPauseAt = nowOf();
           pauseVideo(video);
         }
       }
@@ -662,51 +726,36 @@ export function createRoomStateApplyController(args: {
       args.debugLog(
         `Hydrate room state success for ${response.roomState.roomCode}`,
       );
-      if (
-        response.roomState.playback?.playState === "paused" ||
-        response.roomState.playback?.playState === "buffering"
-      ) {
-        const currentVideo = args.getSharedVideo();
-        const normalizedSharedUrl = args.normalizeUrl(
-          response.roomState.sharedVideo?.url,
-        );
-        const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
-        const normalizedPlaybackUrl = args.normalizeUrl(
-          response.roomState.playback.url,
-        );
-        const isCurrentSharedVideo =
-          normalizedSharedUrl !== null &&
-          normalizedCurrentUrl === normalizedSharedUrl &&
-          normalizedPlaybackUrl === normalizedSharedUrl;
-        if (isCurrentSharedVideo) {
-          args.runtimeState.intendedPlayState =
-            response.roomState.playback.playState;
-          args.activatePauseHold(args.initialRoomStatePauseHoldMs);
-        }
-      }
       const video = args.getVideoElement();
       const currentVideo = args.getSharedVideo();
+      const playback = response.roomState.playback ?? null;
       const normalizedSharedUrl = args.normalizeUrl(
         response.roomState.sharedVideo?.url,
       );
       const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
-      const normalizedPlaybackUrl = args.normalizeUrl(
-        response.roomState.playback?.url,
-      );
-      const isCurrentSharedVideo =
-        normalizedSharedUrl !== null &&
-        normalizedCurrentUrl === normalizedSharedUrl &&
-        normalizedPlaybackUrl === normalizedSharedUrl;
+      const normalizedPlaybackUrl = args.normalizeUrl(playback?.url);
+      const shouldPreserveInitialPause = shouldPreserveInitialPauseProtection({
+        currentVideo,
+        playback,
+        normalizedSharedUrl,
+        normalizedCurrentUrl,
+        normalizedPlaybackUrl,
+      });
+      if (playback && normalizedSharedUrl && shouldPreserveInitialPause) {
+        args.runtimeState.activeSharedUrl = normalizedSharedUrl;
+        args.runtimeState.intendedPlayState = playback.playState;
+        args.runtimeState.intendedPlaybackRate = playback.playbackRate;
+        args.activatePauseHold(args.initialRoomStatePauseHoldMs);
+      }
       if (
         video &&
         !video.paused &&
-        isCurrentSharedVideo &&
-        (response.roomState.playback?.playState === "paused" ||
-          response.roomState.playback?.playState === "buffering") &&
+        playback &&
+        shouldPreserveInitialPause &&
         nowOf() - args.runtimeState.lastUserGestureAt >= args.userGestureGraceMs
       ) {
-        args.runtimeState.intendedPlayState =
-          response.roomState.playback.playState;
+        args.runtimeState.intendedPlayState = playback.playState;
+        args.runtimeState.lastForcedPauseAt = nowOf();
         args.debugLog(
           `Suppressed autoplay during hydrate for ${response.roomState.roomCode}`,
         );

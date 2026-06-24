@@ -608,6 +608,75 @@ test("playback binding controller reapplies pause hold for unstable identity aft
   }
 });
 
+test("playback binding controller reapplies pause hold for unstable room shared url", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ss73077";
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.pauseHoldUntil = 4_000;
+  runtimeState.lastUserGestureAt = 1_050;
+  runtimeState.explicitNonSharedPlaybackUrl =
+    "https://www.bilibili.com/video/BVold";
+  runtimeState.lastNonSharedGuardUrl = "https://www.bilibili.com/video/BVold";
+  let pausedByGuard = 0;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => ({
+      videoId: "ep1231523",
+      url: "https://www.bilibili.com/bangumi/play/ep1231523",
+      title: "Bangumi",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+
+  dom.video.pause = () => {
+    pausedByGuard += 1;
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+
+    assert.equal(pausedByGuard, 1);
+    assert.equal(runtimeState.lastForcedPauseAt, 1_100);
+    assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
+    assert.equal(runtimeState.lastNonSharedGuardUrl, null);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
 test("playback binding controller clears explicit seek intent after seek-triggered autoplay is blocked", () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();

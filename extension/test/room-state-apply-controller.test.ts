@@ -445,10 +445,57 @@ test("pauses during hydration when unstable shared url mismatch follows a recent
     await harness.controller.applyRoomState(roomState);
 
     assert.equal(video.paused, true);
+    assert.equal(harness.runtimeState.lastForcedPauseAt, 30_000);
     assert.equal(harness.pauseHoldActivated, true);
     assert.equal(harness.acceptedHydration, true);
     assert.equal(harness.runtimeState.deferredRemotePausedState, null);
     assert.equal(win.scheduled.length, 0);
+  } finally {
+    win.restore();
+  }
+});
+
+test("hydrates paused room state while page bridge is not ready", async () => {
+  const win = installWindowTimerStub();
+  try {
+    const video = createStubVideo(false);
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    }) as RoomState;
+    const harness = createController({
+      video,
+      now: 30_000,
+      currentVideo: null,
+      runtimeSendMessage: async () =>
+        ({
+          ok: true,
+          roomState,
+          memberId: "local-member",
+          roomCode: "ROOM01",
+        }) as never,
+    });
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 29_500;
+
+    await harness.controller.hydrateRoomState();
+
+    assert.equal(video.paused, true);
+    assert.equal(harness.runtimeState.lastForcedPauseAt, 30_000);
+    assert.equal(harness.pauseHoldActivated, true);
+    assert.equal(harness.acceptedHydration, false);
+    assert.equal(harness.runtimeState.pendingRoomStateHydration, true);
+    assert.equal(harness.runtimeState.hydrationReady, true);
+    assert.equal(
+      harness.runtimeState.activeSharedUrl,
+      "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    );
+    assert.equal(harness.runtimeState.intendedPlayState, "paused");
+    assert.equal(win.scheduled.length, 1);
+    assert.equal(win.scheduled[0].ms, 350);
   } finally {
     win.restore();
   }
