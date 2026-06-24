@@ -129,16 +129,19 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
   }
 });
 
-test("navigation controller hydrates without pausing when switching to a non-shared video", () => {
+test("navigation controller hydrates without pausing or suppressing when switching to a non-shared video", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
   runtimeState.pendingRoomStateHydration = false;
   runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  // The user is actively watching this confirmed non-shared video.
+  runtimeState.intendedPlayState = "playing";
 
   let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
   let hydrateCalls = 0;
   let pauseCalls = 0;
+  let pauseHoldCalls = 0;
 
   const controller = createNavigationController({
     runtimeState,
@@ -160,7 +163,9 @@ test("navigation controller hydrates without pausing when switching to a non-sha
     hydrateRoomState: async () => {
       hydrateCalls += 1;
     },
-    activatePauseHold: () => {},
+    activatePauseHold: () => {
+      pauseHoldCalls += 1;
+    },
     debugLog: () => {},
   });
 
@@ -171,8 +176,67 @@ test("navigation controller hydrates without pausing when switching to a non-sha
 
     assert.equal(hydrateCalls, 1);
     assert.equal(pauseCalls, 0);
-    assert.equal(runtimeState.pendingRoomStateHydration, true);
-    assert.equal(runtimeState.intendedPlayState, "paused");
+    // A confirmed different, stable non-shared video must not engage autoplay
+    // suppression. Otherwise the binding guards would re-pause it once it
+    // autoplays while the page bridge has not yet produced `currentVideo`.
+    assert.equal(pauseHoldCalls, 0);
+    assert.equal(runtimeState.pendingRoomStateHydration, false);
+    assert.equal(runtimeState.intendedPlayState, "playing");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller does not engage autoplay suppression for a non-shared video that is not playing yet", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let hydrateCalls = 0;
+  let pauseCalls = 0;
+  let pauseHoldCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    // The element has not started playing yet at navigation detection time;
+    // its autoplay fires later. The fix must not leave pending hydration /
+    // pause-hold state that would force-pause that later autoplay.
+    getVideoElement: () =>
+      ({
+        paused: true,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {
+      pauseHoldCalls += 1;
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(hydrateCalls, 1);
+    assert.equal(pauseCalls, 0);
+    assert.equal(pauseHoldCalls, 0);
+    assert.equal(runtimeState.pendingRoomStateHydration, false);
   } finally {
     windowHarness.restore();
   }
