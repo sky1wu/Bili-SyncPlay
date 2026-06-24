@@ -100,13 +100,16 @@ export function createNavigationController(args: {
 
     if (canConfirmDifferentVideo) {
       // Navigated to a confirmed different, stable, non-shared video. Do not
-      // engage autoplay suppression: leaving `pendingRoomStateHydration`,
-      // `intendedPlayState = "paused"` or a pause hold active would make the
-      // playback-binding guards re-pause this non-shared video once it
-      // autoplays while the page bridge has not yet produced `currentVideo`
-      // (which they treat as an unconfirmed shared context). Still hydrate to
-      // refresh room state — `applyRoomState` ignores room playback on a
-      // non-shared page.
+      // engage autoplay suppression, and clear any pause hold inherited from
+      // the previously shared (paused) video. Otherwise, once this non-shared
+      // video autoplays while the page bridge has not yet produced
+      // `currentVideo`, `shouldReapplyPauseHoldForUnconfirmedSharedVideo`
+      // (which treats a null `currentVideo` as an unconfirmed shared context)
+      // would re-pause it on the strength of the still-live `pauseHoldUntil`.
+      // `pendingRoomStateHydration` is left false so the hydration pause guard
+      // also stays inert. Still hydrate to refresh room state — `applyRoomState`
+      // ignores room playback on a non-shared page.
+      args.runtimeState.pauseHoldUntil = 0;
       args.debugLog(
         `Detected in-room navigation to non-shared video ${nextPageUrl}, skipping autoplay suppression`,
       );

@@ -300,6 +300,62 @@ test("navigation controller suppresses autoplay when navigating through an unsta
   }
 });
 
+test("navigation controller clears an inherited pause hold when switching to a non-shared video", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  // A pause hold is still live from the previously shared (paused) video.
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.pauseHoldUntil = 99_999;
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let pauseCalls = 0;
+  let pauseHoldCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: true,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {
+      pauseHoldCalls += 1;
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+
+    // The inherited pause hold must be cleared so the binding guards do not
+    // re-pause this confirmed non-shared video once it autoplays before the
+    // page bridge produces `currentVideo`.
+    assert.equal(runtimeState.pauseHoldUntil, 0);
+    assert.equal(pauseHoldCalls, 0);
+    assert.equal(pauseCalls, 0);
+    assert.equal(runtimeState.pendingRoomStateHydration, false);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller suppresses autoplay when shared url is an unstable season and page resolved to an episode", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
