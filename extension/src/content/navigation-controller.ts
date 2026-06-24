@@ -91,10 +91,22 @@ export function createNavigationController(args: {
     );
     args.attachPlaybackListeners();
     const video = args.getVideoElement();
+    // Pause an already-playing video immediately when we cannot yet confirm the
+    // navigated page is a *different* video. That is true when the page is the
+    // shared video, or when either side of the comparison is still an unstable
+    // (festival / bangumi season) identity: the navigated page URL itself, or
+    // the room's shared URL. The latter covers a paused shared season (e.g.
+    // `.../play/ss73077`) whose page has already resolved to a concrete
+    // `.../play/ep...` URL — without it `shouldPauseImmediately` would be false
+    // and an autoplaying shared episode could slip through the
+    // navigation/hydration window before any new `play` event fires.
+    const sharedContextUnconfirmed =
+      Boolean(args.runtimeState.activeSharedUrl) &&
+      (isUnstableSharedVideoUrl(nextNormalizedPageUrl) ||
+        isUnstableSharedVideoUrl(args.runtimeState.activeSharedUrl));
     const shouldPauseImmediately =
       nextNormalizedPageUrl === args.runtimeState.activeSharedUrl ||
-      (Boolean(args.runtimeState.activeSharedUrl) &&
-        isUnstableSharedVideoUrl(nextNormalizedPageUrl));
+      sharedContextUnconfirmed;
     if (video && !video.paused && shouldPauseImmediately) {
       args.debugLog(
         `Suppressed autoplay immediately after in-room navigation to ${nextPageUrl}`,

@@ -236,6 +236,65 @@ test("navigation controller suppresses autoplay when navigating through an unsta
   }
 });
 
+test("navigation controller suppresses autoplay when shared url is an unstable season and page resolved to an episode", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  // Room shares an unstable bangumi season url; the page may belong to it even
+  // though it has already resolved to a concrete episode url.
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ss73077";
+
+  let currentUrl = "https://www.bilibili.com/bangumi/play/ss73077";
+  let hydrateCalls = 0;
+  let pauseCalls = 0;
+
+  function normalizeBangumi(url: string): string | null {
+    return (
+      url.match(/https:\/\/www\.bilibili\.com\/bangumi\/play\/[^/?]+/)?.[0] ??
+      null
+    );
+  }
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeBangumi,
+    isSupportedVideoPage: (url) => url.includes("/bangumi/play/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {},
+    debugLog: () => {},
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/bangumi/play/ep1231523";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(hydrateCalls, 1);
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.pendingRoomStateHydration, true);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller anchors active shared url for post-navigation settle gate", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
