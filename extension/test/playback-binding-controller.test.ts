@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createContentRuntimeState } from "../src/content/runtime-state";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
+import { createRoomStateController } from "../src/content/room-state-controller";
+import { createToastCoordinatorState } from "../src/content/toast";
 
 type ListenerMap = Map<string, EventListener>;
 
@@ -369,6 +371,107 @@ test("playback binding controller keeps hydration pause guard when shared url is
 
     assert.equal(pausedByGuard, 1);
     assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller keeps hydration guard after direct room switch clears stale shared url", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const staleSharedUrl = "https://www.bilibili.com/video/BVold?p=1";
+  const currentUrl = "https://www.bilibili.com/video/BVnew?p=1";
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.activeSharedUrl = staleSharedUrl;
+  runtimeState.explicitNonSharedPlaybackUrl = currentUrl;
+  runtimeState.lastNonSharedGuardUrl = currentUrl;
+  runtimeState.postNavigationAnchorSharedUrl = staleSharedUrl;
+  runtimeState.postNavigationAnchorSetAt = 1_000;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.hasReceivedInitialRoomState = true;
+  runtimeState.hydrationReady = true;
+  runtimeState.lastUserGestureAt = 1_000;
+  let pausedByGuard = 0;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+  const hydrationRetries: number[] = [];
+
+  const roomStateController = createRoomStateController({
+    runtimeState,
+    toastState: createToastCoordinatorState(),
+    toastPresenter: {
+      resetMountTarget: () => {},
+      show: () => {},
+    },
+    getSharedVideo: () => null,
+    normalizeUrl: (url) => url ?? null,
+    debugLog: () => {},
+    resetPlaybackSyncState: () => {},
+    scheduleHydrationRetry: (delayMs) => {
+      hydrationRetries.push(delayMs ?? 0);
+    },
+  });
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => ({
+      videoId: "BVnew:p1",
+      url: currentUrl,
+      title: "New room shared video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+
+  dom.video.pause = () => {
+    pausedByGuard += 1;
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  try {
+    roomStateController.handleSyncStatus({
+      roomCode: "ROOM02",
+      connected: true,
+      memberId: "member-2",
+      rttMs: 20,
+    });
+    controller.attachPlaybackListeners();
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+
+    assert.equal(runtimeState.activeRoomCode, "ROOM02");
+    assert.equal(runtimeState.activeSharedUrl, null);
+    assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
+    assert.equal(runtimeState.lastNonSharedGuardUrl, null);
+    assert.equal(runtimeState.postNavigationAnchorSharedUrl, null);
+    assert.equal(runtimeState.postNavigationAnchorSetAt, 0);
+    assert.equal(runtimeState.pendingRoomStateHydration, true);
+    assert.equal(runtimeState.hasReceivedInitialRoomState, false);
+    assert.equal(runtimeState.hydrationReady, false);
+    assert.deepEqual(hydrationRetries, [150]);
+    assert.equal(pausedByGuard, 1);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;

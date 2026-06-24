@@ -424,12 +424,7 @@ export function createRoomStateApplyController(args: {
         const video = args.getVideoElement();
         args.runtimeState.intendedPlayState = state.playback.playState;
         args.activatePauseHold(args.initialRoomStatePauseHoldMs);
-        if (
-          video &&
-          !video.paused &&
-          nowOf() - args.runtimeState.lastUserGestureAt >=
-            args.userGestureGraceMs
-        ) {
+        if (video && !video.paused) {
           args.debugLog(
             `Suppressed autoplay during unstable shared url hydration for ${state.roomCode}`,
           );

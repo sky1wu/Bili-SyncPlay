@@ -408,7 +408,7 @@ test("does not pre-pause non-shared video during paused room hydration", async (
   }
 });
 
-test("pauses during hydration when shared url mismatch may be unstable", async () => {
+test("pauses during hydration when unstable shared url mismatch follows a recent gesture", async () => {
   const win = installWindowTimerStub();
   try {
     const video = createStubVideo(false);
@@ -440,6 +440,7 @@ test("pauses during hydration when shared url mismatch may be unstable", async (
     });
     harness.runtimeState.localMemberId = "local-member";
     harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 29_500;
 
     await harness.controller.applyRoomState(roomState);
 
