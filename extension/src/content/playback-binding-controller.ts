@@ -13,6 +13,7 @@ import type {
   ExplicitUserActionKind,
   LocalPlaybackEventSource,
 } from "./runtime-state";
+import { hasStableSharedVideoIdentity } from "./video-identity";
 
 export interface PlaybackBindingController {
   start(): void;
@@ -184,6 +185,7 @@ export function createPlaybackBindingController(args: {
   function isKnownNonSharedVideo(currentVideo: SharedVideo | null): boolean {
     return Boolean(
       currentVideo &&
+      hasStableSharedVideoIdentity(currentVideo) &&
       args.runtimeState.activeSharedUrl &&
       !isCurrentVideoShared(currentVideo),
     );
@@ -271,6 +273,11 @@ export function createPlaybackBindingController(args: {
     const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
     if (!currentVideo) {
       args.runtimeState.explicitNonSharedPlaybackUrl = null;
+      return false;
+    }
+    if (!hasStableSharedVideoIdentity(currentVideo)) {
+      args.runtimeState.explicitNonSharedPlaybackUrl = null;
+      args.runtimeState.lastNonSharedGuardUrl = null;
       return false;
     }
 

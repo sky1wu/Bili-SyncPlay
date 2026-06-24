@@ -420,6 +420,22 @@ export function createRoomStateApplyController(args: {
 
     if (decision.kind === "ignore-non-shared") {
       args.cancelActiveSoftApply(args.getVideoElement(), "non-shared-page");
+      if (decision.shouldPauseNonSharedVideo && state.playback) {
+        const video = args.getVideoElement();
+        args.runtimeState.intendedPlayState = state.playback.playState;
+        args.activatePauseHold(args.initialRoomStatePauseHoldMs);
+        if (
+          video &&
+          !video.paused &&
+          nowOf() - args.runtimeState.lastUserGestureAt >=
+            args.userGestureGraceMs
+        ) {
+          args.debugLog(
+            `Suppressed autoplay during unstable shared url hydration for ${state.roomCode}`,
+          );
+          pauseVideo(video);
+        }
+      }
       if (
         args.shouldLogHeartbeat(
           ignoredRoomStateLogState,

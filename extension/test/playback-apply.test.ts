@@ -88,6 +88,39 @@ test("ignores non-shared page during hydration without pausing it", () => {
   );
 });
 
+test("keeps hydration pause guard for unstable shared url mismatch", () => {
+  assert.deepEqual(
+    decidePlaybackApplication({
+      roomState: createRoomState(
+        "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
+      ),
+      currentVideo: {
+        videoId: "/festival/demo",
+        url: "https://www.bilibili.com/festival/demo",
+        title: "Festival",
+      },
+      normalizedSharedUrl: "https://www.bilibili.com/video/BVfestival?cid=123",
+      normalizedCurrentUrl: "https://www.bilibili.com/festival/demo",
+      normalizedPlaybackUrl:
+        "https://www.bilibili.com/video/BVfestival?cid=123",
+      pendingRoomStateHydration: true,
+      explicitNonSharedPlaybackUrl: null,
+      now: 1_000,
+      lastLocalIntentAt: 0,
+      lastLocalIntentPlayState: null,
+      localIntentGuardMs: 1_200,
+      lastAppliedVersion: null,
+      lastLocalPlaybackVersion: null,
+      localMemberId: null,
+    }),
+    {
+      kind: "ignore-non-shared",
+      acceptedHydration: true,
+      shouldPauseNonSharedVideo: true,
+    },
+  );
+});
+
 test("ignores conflicting remote resume during local pause guard", () => {
   assert.equal(
     decidePlaybackApplication({

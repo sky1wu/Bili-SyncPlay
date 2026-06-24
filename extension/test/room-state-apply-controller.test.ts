@@ -408,6 +408,51 @@ test("does not pre-pause non-shared video during paused room hydration", async (
   }
 });
 
+test("pauses during hydration when shared url mismatch may be unstable", async () => {
+  const win = installWindowTimerStub();
+  try {
+    const video = createStubVideo(false);
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    }) as RoomState;
+    const harness = createController({
+      video,
+      now: 30_000,
+      remotePauseDebounceMs: 250,
+      currentVideo: {
+        videoId: "/festival/demo",
+        url: "https://www.bilibili.com/festival/demo",
+        title: "Festival",
+      },
+      normalizeUrl: (url) => {
+        if (
+          url ===
+          "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123"
+        ) {
+          return "https://www.bilibili.com/video/BVfestival?cid=123";
+        }
+        return url ?? null;
+      },
+    });
+    harness.runtimeState.localMemberId = "local-member";
+    harness.runtimeState.pendingRoomStateHydration = true;
+
+    await harness.controller.applyRoomState(roomState);
+
+    assert.equal(video.paused, true);
+    assert.equal(harness.pauseHoldActivated, true);
+    assert.equal(harness.acceptedHydration, true);
+    assert.equal(harness.runtimeState.deferredRemotePausedState, null);
+    assert.equal(win.scheduled.length, 0);
+  } finally {
+    win.restore();
+  }
+});
+
 test("defers remote paused room state when remotePauseDebounceMs > 0", async () => {
   const win = installWindowTimerStub();
   try {
