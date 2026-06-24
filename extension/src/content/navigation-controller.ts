@@ -91,23 +91,28 @@ export function createNavigationController(args: {
     );
     args.attachPlaybackListeners();
     const video = args.getVideoElement();
-    // Pause an already-playing video immediately when we cannot yet confirm the
-    // navigated page is a *different* video. That is true when the page is the
-    // shared video, or when either side of the comparison is still an unstable
-    // (festival / bangumi season) identity: the navigated page URL itself, or
-    // the room's shared URL. The latter covers a paused shared season (e.g.
-    // `.../play/ss73077`) whose page has already resolved to a concrete
-    // `.../play/ep...` URL — without it `shouldPauseImmediately` would be false
-    // and an autoplaying shared episode could slip through the
-    // navigation/hydration window before any new `play` event fires.
-    const sharedContextUnconfirmed =
-      Boolean(args.runtimeState.activeSharedUrl) &&
-      (isUnstableSharedVideoUrl(nextNormalizedPageUrl) ||
-        isUnstableSharedVideoUrl(args.runtimeState.activeSharedUrl));
-    const shouldPauseImmediately =
-      nextNormalizedPageUrl === args.runtimeState.activeSharedUrl ||
-      sharedContextUnconfirmed;
-    if (video && !video.paused && shouldPauseImmediately) {
+    // Pause an already-playing video immediately unless we can positively
+    // confirm the navigated page is a *different* video. Confirmation requires
+    // the room's shared URL and the navigated page URL to both be present,
+    // stable (not a festival / bangumi-season identity), and different. In
+    // every other case the page may still be the shared video and we must
+    // suppress autoplay through the navigation/hydration window:
+    //   - page URL equals the shared URL — it is the shared video;
+    //   - either URL is still an unstable identity (e.g. a paused shared season
+    //     `.../play/ss73077` whose page resolved to `.../play/ep...`, or a
+    //     festival route) — we cannot tell whether it is the shared video;
+    //   - the shared URL is not yet known (just joined/switched room before the
+    //     initial room state arrives) — the page may well be the shared video.
+    // Waiting for a later `play` event is not enough: it never fires for a
+    // video that is already playing when navigation completes.
+    const activeSharedUrl = args.runtimeState.activeSharedUrl;
+    const canConfirmDifferentVideo =
+      activeSharedUrl !== null &&
+      !isUnstableSharedVideoUrl(activeSharedUrl) &&
+      nextNormalizedPageUrl !== null &&
+      !isUnstableSharedVideoUrl(nextNormalizedPageUrl) &&
+      nextNormalizedPageUrl !== activeSharedUrl;
+    if (video && !video.paused && !canConfirmDifferentVideo) {
       args.debugLog(
         `Suppressed autoplay immediately after in-room navigation to ${nextPageUrl}`,
       );
