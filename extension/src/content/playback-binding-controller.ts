@@ -13,6 +13,10 @@ import type {
   ExplicitUserActionKind,
   LocalPlaybackEventSource,
 } from "./runtime-state";
+import {
+  hasStableSharedVideoIdentity,
+  isUnstableSharedVideoUrl,
+} from "./video-identity";
 
 export interface PlaybackBindingController {
   start(): void;
@@ -181,14 +185,34 @@ export function createPlaybackBindingController(args: {
     );
   }
 
+  function isKnownNonSharedVideo(currentVideo: SharedVideo | null): boolean {
+    const activeSharedUrl = args.runtimeState.activeSharedUrl;
+    return Boolean(
+      currentVideo &&
+      hasStableSharedVideoIdentity(currentVideo) &&
+      activeSharedUrl &&
+      !isUnstableSharedVideoUrl(activeSharedUrl) &&
+      !isCurrentVideoShared(currentVideo),
+    );
+  }
+
+  function hasUnconfirmedSharedVideoContext(
+    currentVideo: SharedVideo | null,
+  ): boolean {
+    return Boolean(
+      !currentVideo ||
+      !hasStableSharedVideoIdentity(currentVideo) ||
+      isUnstableSharedVideoUrl(args.runtimeState.activeSharedUrl),
+    );
+  }
+
   function shouldPreRecordNonSharedExplicitPlay(): boolean {
     const currentVideo = args.getSharedVideo();
     if (
       !hasRecentUserGesture() ||
       args.runtimeState.lastUserGestureAt <=
         args.runtimeState.lastForcedPauseAt ||
-      !currentVideo ||
-      isCurrentVideoShared(currentVideo)
+      !isKnownNonSharedVideo(currentVideo)
     ) {
       return false;
     }
@@ -213,7 +237,7 @@ export function createPlaybackBindingController(args: {
   function preAuthorizeExplicitNonSharedPlay(): void {
     const currentVideo = args.getSharedVideo();
     const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
-    if (!normalizedCurrentUrl || isCurrentVideoShared(currentVideo)) {
+    if (!normalizedCurrentUrl || !isKnownNonSharedVideo(currentVideo)) {
       return;
     }
 
@@ -224,6 +248,11 @@ export function createPlaybackBindingController(args: {
   function forcePauseWhileWaitingForInitialRoomState(
     video: HTMLVideoElement,
   ): boolean {
+    const currentVideo = args.getSharedVideo();
+    if (isKnownNonSharedVideo(currentVideo)) {
+      return false;
+    }
+
     if (
       !shouldForcePauseWhileWaitingForInitialRoomState({
         activeRoomCode: args.runtimeState.activeRoomCode,
@@ -247,6 +276,27 @@ export function createPlaybackBindingController(args: {
     return true;
   }
 
+  function shouldReapplyPauseHoldForUnconfirmedSharedVideo(
+    currentVideo: SharedVideo | null,
+  ): boolean {
+    if (
+      !args.runtimeState.activeRoomCode ||
+      !args.runtimeState.activeSharedUrl ||
+      nowOf() >= args.runtimeState.pauseHoldUntil
+    ) {
+      return false;
+    }
+
+    if (
+      args.runtimeState.intendedPlayState !== "paused" &&
+      args.runtimeState.intendedPlayState !== "buffering"
+    ) {
+      return false;
+    }
+
+    return hasUnconfirmedSharedVideoContext(currentVideo);
+  }
+
   function forcePauseOnNonSharedPage(video: HTMLVideoElement): boolean {
     if (
       !args.runtimeState.activeRoomCode ||
@@ -254,11 +304,21 @@ export function createPlaybackBindingController(args: {
     ) {
       return false;
     }
+    if (isUnstableSharedVideoUrl(args.runtimeState.activeSharedUrl)) {
+      args.runtimeState.explicitNonSharedPlaybackUrl = null;
+      args.runtimeState.lastNonSharedGuardUrl = null;
+      return false;
+    }
 
     const currentVideo = args.getSharedVideo();
     const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
     if (!currentVideo) {
       args.runtimeState.explicitNonSharedPlaybackUrl = null;
+      return false;
+    }
+    if (!hasStableSharedVideoIdentity(currentVideo)) {
+      args.runtimeState.explicitNonSharedPlaybackUrl = null;
+      args.runtimeState.lastNonSharedGuardUrl = null;
       return false;
     }
 
@@ -298,19 +358,12 @@ export function createPlaybackBindingController(args: {
 
     args.runtimeState.explicitNonSharedPlaybackUrl =
       decision.nextExplicitNonSharedPlaybackUrl;
-    if (!decision.shouldPause) {
-      return false;
+    if (decision.shouldPause) {
+      args.debugLog(
+        `Ignored non-shared playback guard for ${currentVideo.url}`,
+      );
     }
-
-    args.runtimeState.intendedPlayState = "paused";
-    args.runtimeState.lastForcedPauseAt = nowOf();
-    args.activatePauseHold(args.initialRoomStatePauseHoldMs);
-    window.setTimeout(() => {
-      if (!video.paused) {
-        pauseVideo(video);
-      }
-    }, 0);
-    return true;
+    return decision.shouldPause;
   }
 
   function attachPlaybackListeners(): void {
@@ -358,6 +411,20 @@ export function createPlaybackBindingController(args: {
         }, 0);
         return true;
       }
+
+      if (shouldReapplyPauseHoldForUnconfirmedSharedVideo(currentVideo)) {
+        args.debugLog(
+          `Forced pause hold reapplied for unconfirmed shared video context intended=${args.runtimeState.intendedPlayState}`,
+        );
+        args.runtimeState.explicitNonSharedPlaybackUrl = null;
+        args.runtimeState.lastNonSharedGuardUrl = null;
+        args.runtimeState.lastForcedPauseAt = nowOf();
+        window.setTimeout(() => {
+          pauseVideo(video);
+        }, 0);
+        return true;
+      }
+
       if (forcePauseOnNonSharedPage(video)) {
         return true;
       }

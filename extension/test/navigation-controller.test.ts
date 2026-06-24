@@ -85,6 +85,345 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
   runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let hydrateCalls = 0;
+  let pauseCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {},
+    debugLog: () => {},
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(hydrateCalls, 1);
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.pendingRoomStateHydration, true);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller hydrates without pausing or suppressing when switching to a non-shared video", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  // The user is actively watching this confirmed non-shared video.
+  runtimeState.intendedPlayState = "playing";
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let hydrateCalls = 0;
+  let pauseCalls = 0;
+  let pauseHoldCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {
+      pauseHoldCalls += 1;
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(hydrateCalls, 1);
+    assert.equal(pauseCalls, 0);
+    // A confirmed different, stable non-shared video must not engage autoplay
+    // suppression. Otherwise the binding guards would re-pause it once it
+    // autoplays while the page bridge has not yet produced `currentVideo`.
+    assert.equal(pauseHoldCalls, 0);
+    assert.equal(runtimeState.pendingRoomStateHydration, false);
+    assert.equal(runtimeState.intendedPlayState, "playing");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller does not engage autoplay suppression for a non-shared video that is not playing yet", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let hydrateCalls = 0;
+  let pauseCalls = 0;
+  let pauseHoldCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    // The element has not started playing yet at navigation detection time;
+    // its autoplay fires later. The fix must not leave pending hydration /
+    // pause-hold state that would force-pause that later autoplay.
+    getVideoElement: () =>
+      ({
+        paused: true,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {
+      pauseHoldCalls += 1;
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(hydrateCalls, 1);
+    assert.equal(pauseCalls, 0);
+    assert.equal(pauseHoldCalls, 0);
+    assert.equal(runtimeState.pendingRoomStateHydration, false);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller suppresses autoplay when navigating through an unstable shared route", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/video/BVfestival?cid=123";
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let hydrateCalls = 0;
+  let pauseCalls = 0;
+
+  function normalizeFestival(url: string): string | null {
+    if (url.includes("/festival/demo")) {
+      return "https://www.bilibili.com/festival/demo";
+    }
+    return normalizeTestVideoPageUrl(url);
+  }
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeFestival,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {},
+    debugLog: () => {},
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/festival/demo";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(hydrateCalls, 1);
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.pendingRoomStateHydration, true);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller clears an inherited pause hold when switching to a non-shared video", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  // A pause hold is still live from the previously shared (paused) video.
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.pauseHoldUntil = 99_999;
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let pauseCalls = 0;
+  let pauseHoldCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: true,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {
+      pauseHoldCalls += 1;
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+
+    // The inherited pause hold must be cleared so the binding guards do not
+    // re-pause this confirmed non-shared video once it autoplays before the
+    // page bridge produces `currentVideo`.
+    assert.equal(runtimeState.pauseHoldUntil, 0);
+    assert.equal(pauseHoldCalls, 0);
+    assert.equal(pauseCalls, 0);
+    assert.equal(runtimeState.pendingRoomStateHydration, false);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller suppresses autoplay when shared url is an unstable season and page resolved to an episode", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  // Room shares an unstable bangumi season url; the page may belong to it even
+  // though it has already resolved to a concrete episode url.
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ss73077";
+
+  let currentUrl = "https://www.bilibili.com/bangumi/play/ss73077";
+  let hydrateCalls = 0;
+  let pauseCalls = 0;
+
+  function normalizeBangumi(url: string): string | null {
+    return (
+      url.match(/https:\/\/www\.bilibili\.com\/bangumi\/play\/[^/?]+/)?.[0] ??
+      null
+    );
+  }
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeBangumi,
+    isSupportedVideoPage: (url) => url.includes("/bangumi/play/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {},
+    debugLog: () => {},
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/bangumi/play/ep1231523";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(hydrateCalls, 1);
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.pendingRoomStateHydration, true);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller suppresses autoplay when shared url is not yet known", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  // In a room but the initial room state has not populated the shared url yet
+  // (e.g. just joined/switched room before hydration completes). The page may
+  // still be the shared video, so an already-playing video must be paused.
+  runtimeState.activeSharedUrl = null;
 
   let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
   let hydrateCalls = 0;

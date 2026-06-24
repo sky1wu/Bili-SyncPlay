@@ -58,7 +58,7 @@ test("accepts empty room state during hydration", () => {
   );
 });
 
-test("protects non-shared page during hydration", () => {
+test("ignores non-shared page during hydration without pausing it", () => {
   assert.deepEqual(
     decidePlaybackApplication({
       roomState: createRoomState("https://www.bilibili.com/video/BVshared?p=1"),
@@ -70,6 +70,136 @@ test("protects non-shared page during hydration", () => {
       normalizedSharedUrl: "https://www.bilibili.com/video/BVshared?p=1",
       normalizedCurrentUrl: "https://www.bilibili.com/video/BVother?p=1",
       normalizedPlaybackUrl: "https://www.bilibili.com/video/BVshared?p=1",
+      pendingRoomStateHydration: true,
+      explicitNonSharedPlaybackUrl: null,
+      now: 1_000,
+      lastLocalIntentAt: 0,
+      lastLocalIntentPlayState: null,
+      localIntentGuardMs: 1_200,
+      lastAppliedVersion: null,
+      lastLocalPlaybackVersion: null,
+      localMemberId: null,
+    }),
+    {
+      kind: "ignore-non-shared",
+      acceptedHydration: true,
+      shouldPauseNonSharedVideo: false,
+    },
+  );
+});
+
+test("keeps hydration pause guard for unstable shared url mismatch", () => {
+  assert.deepEqual(
+    decidePlaybackApplication({
+      roomState: createRoomState(
+        "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
+      ),
+      currentVideo: {
+        videoId: "/festival/demo",
+        url: "https://www.bilibili.com/festival/demo",
+        title: "Festival",
+      },
+      normalizedSharedUrl: "https://www.bilibili.com/video/BVfestival?cid=123",
+      normalizedCurrentUrl: "https://www.bilibili.com/festival/demo",
+      normalizedPlaybackUrl:
+        "https://www.bilibili.com/video/BVfestival?cid=123",
+      pendingRoomStateHydration: true,
+      explicitNonSharedPlaybackUrl: null,
+      now: 1_000,
+      lastLocalIntentAt: 0,
+      lastLocalIntentPlayState: null,
+      localIntentGuardMs: 1_200,
+      lastAppliedVersion: null,
+      lastLocalPlaybackVersion: null,
+      localMemberId: null,
+    }),
+    {
+      kind: "ignore-non-shared",
+      acceptedHydration: true,
+      shouldPauseNonSharedVideo: true,
+    },
+  );
+});
+
+test("keeps hydration pause guard when room shared identity is unstable", () => {
+  assert.deepEqual(
+    decidePlaybackApplication({
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo: {
+          videoId: "ss73077",
+          url: "https://www.bilibili.com/bangumi/play/ss73077",
+          title: "Bangumi",
+        },
+        playback: {
+          url: "https://www.bilibili.com/bangumi/play/ss73077",
+          currentTime: 12,
+          playState: "paused",
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 10,
+          actorId: "remote-member",
+          seq: 2,
+        },
+        members: [],
+      },
+      currentVideo: {
+        videoId: "ep1231523",
+        url: "https://www.bilibili.com/bangumi/play/ep1231523",
+        title: "Bangumi",
+      },
+      normalizedSharedUrl: "https://www.bilibili.com/bangumi/play/ss73077",
+      normalizedCurrentUrl: "https://www.bilibili.com/bangumi/play/ep1231523",
+      normalizedPlaybackUrl: "https://www.bilibili.com/bangumi/play/ss73077",
+      pendingRoomStateHydration: true,
+      explicitNonSharedPlaybackUrl: null,
+      now: 1_000,
+      lastLocalIntentAt: 0,
+      lastLocalIntentPlayState: null,
+      localIntentGuardMs: 1_200,
+      lastAppliedVersion: null,
+      lastLocalPlaybackVersion: null,
+      localMemberId: null,
+    }),
+    {
+      kind: "ignore-non-shared",
+      acceptedHydration: true,
+      shouldPauseNonSharedVideo: true,
+    },
+  );
+});
+
+test("keeps hydration pause guard when room shared identity is a paged season", () => {
+  assert.deepEqual(
+    decidePlaybackApplication({
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo: {
+          videoId: "ss73077:p2",
+          url: "https://www.bilibili.com/bangumi/play/ss73077?p=2",
+          title: "Bangumi",
+        },
+        playback: {
+          url: "https://www.bilibili.com/bangumi/play/ss73077?p=2",
+          currentTime: 12,
+          playState: "paused",
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 10,
+          actorId: "remote-member",
+          seq: 2,
+        },
+        members: [],
+      },
+      currentVideo: {
+        videoId: "ep1231523",
+        url: "https://www.bilibili.com/bangumi/play/ep1231523",
+        title: "Bangumi",
+      },
+      normalizedSharedUrl: "https://www.bilibili.com/bangumi/play/ss73077?p=2",
+      normalizedCurrentUrl: "https://www.bilibili.com/bangumi/play/ep1231523",
+      normalizedPlaybackUrl:
+        "https://www.bilibili.com/bangumi/play/ss73077?p=2",
       pendingRoomStateHydration: true,
       explicitNonSharedPlaybackUrl: null,
       now: 1_000,

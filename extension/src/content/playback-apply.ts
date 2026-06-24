@@ -3,6 +3,7 @@ import type {
   RoomState,
   SharedVideo,
 } from "@bili-syncplay/protocol";
+import { isConfirmedDifferentSharedVideo } from "./video-identity";
 
 export interface PlaybackApplyDecisionInput {
   roomState: RoomState;
@@ -57,12 +58,21 @@ export function decidePlaybackApplication(
     input.normalizedCurrentUrl !== input.normalizedSharedUrl ||
     input.normalizedPlaybackUrl !== input.normalizedSharedUrl
   ) {
+    const shouldPauseNonSharedVideo =
+      input.pendingRoomStateHydration &&
+      (input.roomState.playback.playState === "paused" ||
+        input.roomState.playback.playState === "buffering") &&
+      !isConfirmedDifferentSharedVideo({
+        currentVideo: input.currentVideo,
+        sharedVideo: input.roomState.sharedVideo,
+        normalizedCurrentUrl: input.normalizedCurrentUrl,
+        normalizedSharedUrl: input.normalizedSharedUrl,
+      });
+
     return {
       kind: "ignore-non-shared",
       acceptedHydration: input.pendingRoomStateHydration,
-      shouldPauseNonSharedVideo:
-        input.pendingRoomStateHydration &&
-        input.explicitNonSharedPlaybackUrl !== input.normalizedCurrentUrl,
+      shouldPauseNonSharedVideo,
     };
   }
 

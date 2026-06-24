@@ -82,6 +82,14 @@ export function createRoomStateController(args: {
     }
   }
 
+  function clearRoomScopedSharedVideoState(): void {
+    args.runtimeState.activeSharedUrl = null;
+    args.runtimeState.explicitNonSharedPlaybackUrl = null;
+    args.runtimeState.lastNonSharedGuardUrl = null;
+    args.runtimeState.postNavigationAnchorSharedUrl = null;
+    args.runtimeState.postNavigationAnchorSetAt = 0;
+  }
+
   function handleSyncStatus(payload: {
     roomCode: string | null;
     connected: boolean;
@@ -105,10 +113,12 @@ export function createRoomStateController(args: {
       args.toastState.lastRoomState = null;
       args.runtimeState.hasReceivedInitialRoomState = false;
       args.runtimeState.pendingRoomStateHydration = true;
+      clearRoomScopedSharedVideoState();
     }
 
     if (payload.roomCode && !args.runtimeState.hasReceivedInitialRoomState) {
       args.runtimeState.pendingRoomStateHydration = true;
+      args.runtimeState.hydrationReady = false;
       if (lastWaitingRoomStateLogRoomCode !== payload.roomCode) {
         args.debugLog(`Waiting for initial room state of ${payload.roomCode}`);
         lastWaitingRoomStateLogRoomCode = payload.roomCode;
@@ -120,10 +130,11 @@ export function createRoomStateController(args: {
       if (previousRoomCode) {
         args.resetPlaybackSyncState(`room cleared from ${previousRoomCode}`);
       }
-      args.runtimeState.activeSharedUrl = null;
+      clearRoomScopedSharedVideoState();
       args.toastState.lastRoomState = null;
       args.runtimeState.pendingRoomStateHydration = false;
       args.runtimeState.hasReceivedInitialRoomState = false;
+      args.runtimeState.hydrationReady = false;
       lastWaitingRoomStateLogRoomCode = null;
     }
   }
