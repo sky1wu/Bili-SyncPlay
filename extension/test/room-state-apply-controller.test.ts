@@ -37,6 +37,7 @@ function createController(overrides: {
     playback: import("@bili-syncplay/protocol").PlaybackState,
   ) => void;
   applyPendingPlaybackApplication?: (video: HTMLVideoElement) => void;
+  resetPlaybackSyncState?: (reason: string) => void;
 }) {
   const runtimeState = overrides.runtimeState ?? createContentRuntimeState();
   const video = overrides.video ?? null;
@@ -77,7 +78,7 @@ function createController(overrides: {
     notifyRoomStateToasts: () => {},
     maybeShowSharedVideoToast: () => {},
     cancelActiveSoftApply: () => {},
-    resetPlaybackSyncState: () => {},
+    resetPlaybackSyncState: overrides.resetPlaybackSyncState ?? (() => {}),
     activatePauseHold: () => {
       _pauseHoldActivated = true;
     },
@@ -496,6 +497,58 @@ test("hydrates paused room state while page bridge is not ready", async () => {
     assert.equal(harness.runtimeState.intendedPlayState, "paused");
     assert.equal(win.scheduled.length, 1);
     assert.equal(win.scheduled[0].ms, 350);
+  } finally {
+    win.restore();
+  }
+});
+
+test("clears stale sync state when hydration switches shared video before page bridge is ready", async () => {
+  const win = installWindowTimerStub();
+  try {
+    const video = createStubVideo(false);
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BVnew?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    }) as RoomState;
+    const resetReasons: string[] = [];
+    const harness = createController({
+      video,
+      now: 30_000,
+      currentVideo: null,
+      resetPlaybackSyncState: (reason) => resetReasons.push(reason),
+      runtimeSendMessage: async () =>
+        ({
+          ok: true,
+          roomState,
+          memberId: "local-member",
+          roomCode: "ROOM01",
+        }) as never,
+    });
+    // A previous shared video is still recorded; switching to a different
+    // shared video while the page bridge is not ready must not strand its
+    // playback sync state.
+    harness.runtimeState.activeSharedUrl =
+      "https://www.bilibili.com/video/BVold?p=1";
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 0;
+
+    await harness.controller.hydrateRoomState();
+
+    // Reset runs exactly once for the genuine shared-url change (the second
+    // switch call during applyRoomState no-ops because the url already matches).
+    assert.deepEqual(resetReasons, [
+      "shared url changed to https://www.bilibili.com/video/BVnew?p=1",
+    ]);
+    assert.equal(
+      harness.runtimeState.activeSharedUrl,
+      "https://www.bilibili.com/video/BVnew?p=1",
+    );
+    assert.equal(video.paused, true);
+    assert.equal(harness.runtimeState.intendedPlayState, "paused");
+    assert.equal(harness.runtimeState.pendingRoomStateHydration, true);
   } finally {
     win.restore();
   }

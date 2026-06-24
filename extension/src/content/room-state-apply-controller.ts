@@ -168,13 +168,43 @@ export function createRoomStateApplyController(args: {
       input.normalizedCurrentUrl === input.normalizedSharedUrl
     );
   };
+  /**
+   * Switch `activeSharedUrl` to a new shared video and clear any playback sync
+   * state stranded by the previous shared video. Mirrors the reset performed on
+   * the main `applyRoomState` apply path so the early pause-protection paths
+   * (page-bridge-not-ready hydration) cannot leave a previous video's
+   * `pendingPlaybackApplication`, soft-apply, or local override active on the
+   * new shared page — which could otherwise be applied after the new video's
+   * `loadedmetadata`. No-op when the shared URL is unchanged.
+   */
+  const switchActiveSharedUrlWithReset = (
+    normalizedSharedUrl: string | null,
+    sharedVideoUrl: string | null | undefined,
+  ): void => {
+    if (args.runtimeState.activeSharedUrl === normalizedSharedUrl) {
+      return;
+    }
+    args.runtimeState.activeSharedUrl = normalizedSharedUrl ?? null;
+    args.resetPlaybackSyncState(
+      `shared url changed to ${sharedVideoUrl ?? "none"}`,
+    );
+    args.runtimeState.intendedPlayState = "paused";
+    args.runtimeState.intendedPlaybackRate = 1;
+    args.debugLog(
+      `Reset local sync state for shared url ${sharedVideoUrl ?? "none"}`,
+    );
+  };
   const activateInitialPauseProtection = (input: {
     playback: PlaybackState;
     normalizedSharedUrl: string;
+    sharedVideoUrl: string | null | undefined;
     roomCode: string;
     logReason: string;
   }): void => {
-    args.runtimeState.activeSharedUrl = input.normalizedSharedUrl;
+    switchActiveSharedUrlWithReset(
+      input.normalizedSharedUrl,
+      input.sharedVideoUrl,
+    );
     args.runtimeState.intendedPlayState = input.playback.playState;
     args.runtimeState.intendedPlaybackRate = input.playback.playbackRate;
     args.activatePauseHold(args.initialRoomStatePauseHoldMs);
@@ -460,6 +490,7 @@ export function createRoomStateApplyController(args: {
         activateInitialPauseProtection({
           playback: state.playback,
           normalizedSharedUrl,
+          sharedVideoUrl: state.sharedVideo?.url,
           roomCode: state.roomCode,
           logReason:
             "Suppressed autoplay while waiting for page bridge during hydrate",
@@ -469,17 +500,7 @@ export function createRoomStateApplyController(args: {
       return;
     }
 
-    if (args.runtimeState.activeSharedUrl !== normalizedSharedUrl) {
-      args.runtimeState.activeSharedUrl = normalizedSharedUrl ?? null;
-      args.resetPlaybackSyncState(
-        `shared url changed to ${state.sharedVideo?.url ?? "none"}`,
-      );
-      args.runtimeState.intendedPlayState = "paused";
-      args.runtimeState.intendedPlaybackRate = 1;
-      args.debugLog(
-        `Reset local sync state for shared url ${state.sharedVideo?.url ?? "none"}`,
-      );
-    }
+    switchActiveSharedUrlWithReset(normalizedSharedUrl, state.sharedVideo?.url);
 
     if (decision.kind === "ignore-non-shared") {
       args.cancelActiveSoftApply(args.getVideoElement(), "non-shared-page");
@@ -742,7 +763,10 @@ export function createRoomStateApplyController(args: {
         normalizedPlaybackUrl,
       });
       if (playback && normalizedSharedUrl && shouldPreserveInitialPause) {
-        args.runtimeState.activeSharedUrl = normalizedSharedUrl;
+        switchActiveSharedUrlWithReset(
+          normalizedSharedUrl,
+          response.roomState.sharedVideo?.url,
+        );
         args.runtimeState.intendedPlayState = playback.playState;
         args.runtimeState.intendedPlaybackRate = playback.playbackRate;
         args.activatePauseHold(args.initialRoomStatePauseHoldMs);
