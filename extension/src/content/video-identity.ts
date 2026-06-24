@@ -8,7 +8,8 @@ export function hasStableSharedVideoIdentity(
   }
 
   return !(
-    video.videoId.startsWith("/festival/") || /^ss\d+$/i.test(video.videoId)
+    video.videoId.startsWith("/festival/") ||
+    /^ss\d+(?::p[1-9]\d*)?$/i.test(video.videoId)
   );
 }
 
