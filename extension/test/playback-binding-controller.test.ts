@@ -1133,7 +1133,7 @@ test("playback binding controller suppresses non-shared autoplay replayed after 
   }
 });
 
-test("playback binding controller pauses a non-sharer at the shared video end before local autoplay advances", () => {
+test("playback binding controller holds a non-sharer at the shared video natural end", () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
@@ -1186,10 +1186,10 @@ test("playback binding controller pauses a non-sharer at the shared video end be
 
   try {
     controller.attachPlaybackListeners();
-    dom.video.paused = false;
     dom.video.duration = 120;
-    dom.video.currentTime = 119.7;
-    dom.listeners.get("timeupdate")?.(new Event("timeupdate"));
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("ended")?.(new Event("ended"));
 
     assert.equal(pauseCalls, 1);
     assert.equal(pauseHoldCalls, 1);
@@ -1258,8 +1258,74 @@ test("playback binding controller does not pause the sharer at the shared video 
 
   try {
     controller.attachPlaybackListeners();
+    dom.video.duration = 120;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("ended")?.(new Event("ended"));
+
+    assert.equal(pauseCalls, 0);
+    assert.equal(pauseHoldCalls, 0);
+    assert.equal(maintainCalls, 0);
+    assert.equal(runtimeState.intendedPlayState, "playing");
+  } finally {
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not pause a non-sharer before the shared video naturally ends", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-2";
+  runtimeState.intendedPlayState = "playing";
+  let pauseCalls = 0;
+  let pauseHoldCalls = 0;
+  let maintainCalls = 0;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url: "https://www.bilibili.com/video/BVshared?p=1",
+      title: "Shared Video",
+      sharedByMemberId: "member-1",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 8_000,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {
+      maintainCalls += 1;
+    },
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {
+      pauseHoldCalls += 1;
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  dom.video.pause = () => {
+    pauseCalls += 1;
+    dom.video.paused = true;
+  };
+
+  try {
+    controller.attachPlaybackListeners();
     dom.video.paused = false;
     dom.video.duration = 120;
+    // Within the old 0.45s pre-end threshold, but the video has not ended yet:
+    // the non-sharer must keep playing so it does not miss the final moments.
     dom.video.currentTime = 119.7;
     dom.listeners.get("timeupdate")?.(new Event("timeupdate"));
 
@@ -1268,6 +1334,81 @@ test("playback binding controller does not pause the sharer at the shared video 
     assert.equal(maintainCalls, 1);
     assert.equal(runtimeState.intendedPlayState, "playing");
   } finally {
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller re-pauses non-sharer multi-part autoplay after the shared video natural end", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-2";
+  runtimeState.intendedPlayState = "playing";
+  runtimeState.lastUserGestureAt = 0;
+  let pauseCalls = 0;
+  const originalPause = dom.video.pause;
+  const originalSetTimeout = globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url: "https://www.bilibili.com/video/BVshared?p=1",
+      title: "Shared Video",
+      sharedByMemberId: "member-1",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 8_000,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: (durationMs = 3_000) => {
+      runtimeState.pauseHoldUntil = 10_000 + durationMs;
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  dom.video.pause = () => {
+    pauseCalls += 1;
+    dom.video.paused = true;
+  };
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  try {
+    controller.attachPlaybackListeners();
+    // The shared video reaches its natural end and the non-sharer is held.
+    dom.video.duration = 120;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("ended")?.(new Event("ended"));
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+
+    // Bilibili autoplay continues the next part in the same element (no URL
+    // change), so the navigation controller never sees it. The resume guard
+    // must re-pause it while the end hold is still active.
+    dom.video.paused = false;
+    dom.listeners.get("playing")?.(new Event("playing"));
+
+    assert.equal(pauseCalls, 2);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;
     dom.restore();
   }

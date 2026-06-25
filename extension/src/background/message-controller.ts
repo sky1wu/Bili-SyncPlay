@@ -292,16 +292,25 @@ export function createMessageController(args: {
           return;
         }
 
-        const currentSharedVideoUrl =
-          args.roomSessionState.roomState?.sharedVideo?.url ?? null;
+        // The page bridge can still return the previous episode's
+        // `__INITIAL_STATE__` while the SPA transition settles, so the resolved
+        // URL equals the video the room is already parked on
+        // (`previousSharedUrl`). Sharing it would be a no-op while the sharer has
+        // already advanced to the next episode. Report a retryable failure so
+        // the content controller retries until the bridge resolves the new
+        // video, instead of treating the stale resolution as a successful share
+        // and leaving the room behind.
         if (
-          currentSharedVideoUrl &&
           areSharedVideoUrlsEqual(
-            currentSharedVideoUrl,
             response.payload.video.url,
+            message.payload.previousSharedUrl,
           )
         ) {
-          sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
+          args.diagnosticsController.log(
+            "content",
+            "Auto-share next video not ready: page bridge still resolves the previous shared video",
+          );
+          sendResponse({ ok: false } satisfies ShareCurrentVideoResponse);
           return;
         }
 

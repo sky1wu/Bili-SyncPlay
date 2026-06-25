@@ -357,6 +357,7 @@ export function bindVideoElement(args: {
   onSeeked: () => void;
   onRateChange: () => void;
   onTimeUpdate: () => void;
+  onEnded: () => void;
 }): boolean {
   const boundVideo = args.video as HTMLVideoElement & {
     __biliSyncBound?: boolean;
@@ -377,5 +378,6 @@ export function bindVideoElement(args: {
   args.video.addEventListener("seeked", args.onSeeked);
   args.video.addEventListener("ratechange", args.onRateChange);
   args.video.addEventListener("timeupdate", args.onTimeUpdate);
+  args.video.addEventListener("ended", args.onEnded);
   return true;
 }

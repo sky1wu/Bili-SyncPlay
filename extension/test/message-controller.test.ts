@@ -640,7 +640,7 @@ test("message controller skips auto-share next video from other tabs", async () 
   assert.deepEqual(response, { ok: true });
 });
 
-test("message controller skips auto-share next video when the resolved video is already shared", async () => {
+test("message controller reports a retryable failure when the page bridge still resolves the previous shared video", async () => {
   const senderTab = {
     id: 456,
     url: "https://www.bilibili.com/video/BV1xx411c7mD",
@@ -692,10 +692,13 @@ test("message controller skips auto-share next video when the resolved video is 
     },
   );
 
+  // The page bridge still resolves the previous shared video mid-SPA, so
+  // sharing it would be a no-op while the sharer has advanced. The room must
+  // learn this is retryable rather than treating the stale resolution as done.
   assert.deepEqual(harness.calls.getVideoPayloadFromTab, [senderTab]);
   assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
   assert.equal(harness.calls.persistState, 0);
-  assert.deepEqual(response, { ok: true });
+  assert.deepEqual(response, { ok: false });
 });
 
 test("message controller still authorizes auto-share next video while the sharer is briefly offline", async () => {

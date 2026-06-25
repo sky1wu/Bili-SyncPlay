@@ -268,6 +268,50 @@ test("auto-share next controller retry does not cancel a newer navigation's pend
   }
 });
 
+test("auto-share next controller re-shares the same target after the previous request settled", async () => {
+  const windowHarness = installWindowStub();
+  const currentUrl = "https://www.bilibili.com/video/BV1NextVideo";
+  const sentMessages: unknown[] = [];
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      return { ok: true };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    // The room is on A and the sharer autoplays A→B. The share completes.
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+    windowHarness.runTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(sentMessages.length, 1);
+
+    // Later the room returns to A and the sharer autoplays A→B again. The
+    // settled dedup marker must not suppress this legitimate fresh request.
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+    assert.equal(windowHarness.timers.size, 1);
+    windowHarness.runTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(sentMessages.length, 2);
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
 test("auto-share next controller deduplicates repeated requests for the same target", () => {
   const windowHarness = installWindowStub();
   const controller = createAutoShareNextController({

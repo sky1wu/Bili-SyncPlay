@@ -90,13 +90,15 @@ export function createAutoShareNextController(args: {
     };
     const response =
       await args.runtimeSendMessage<ShareCurrentVideoResponse>(message);
+
+    // A newer navigation arrived while this request was in flight. Abandon the
+    // stale request so its retry cannot cancel the newer pending timer and its
+    // settlement cannot clear the newer navigation's de-duplication marker.
+    if (pending.generation !== scheduleGeneration) {
+      return;
+    }
+
     if (response?.ok === false) {
-      // A newer navigation arrived while this request was in flight. Abandon
-      // the stale request so its retry cannot cancel the newer pending timer or
-      // clobber the newer target tracked in `pendingNormalizedUrl`.
-      if (pending.generation !== scheduleGeneration) {
-        return;
-      }
       // The background reports failure when the page bridge has not resolved
       // the new video yet (a slow SPA transition) or when sharing transiently
       // failed. In both cases the room is still stuck on the previous video, so
@@ -116,6 +118,15 @@ export function createAutoShareNextController(args: {
       args.debugLog(
         `Auto-share next video gave up after ${maxAttempts} attempts${response.error ? `: ${response.error}` : ""}`,
       );
+    }
+
+    // The request has settled (shared successfully or gave up). Lift the
+    // in-flight de-duplication marker so a legitimate later navigation back to
+    // the same target — e.g. the room returning to A and the sharer autoplaying
+    // A→B again — can schedule a fresh auto-share instead of being suppressed
+    // for the rest of the tab's lifetime.
+    if (lastRequestedNormalizedUrl === pending.targetNormalizedUrl) {
+      lastRequestedNormalizedUrl = null;
     }
   }
 
