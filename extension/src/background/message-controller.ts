@@ -258,20 +258,25 @@ export function createMessageController(args: {
           return;
         }
 
-        // Confirm the room is still parked on the video that was shared when
-        // this auto-share was scheduled. The 900ms settle delay leaves a window
-        // where the same member could have shared a different video from
-        // elsewhere; without this guard the stale timer would overwrite the
-        // room back to the previous video's next episode.
-        const sharedVideoUrl =
-          args.roomSessionState.roomState?.sharedVideo?.url ?? null;
-        if (
-          !sharedVideoUrl ||
-          !areSharedVideoUrlsEqual(
-            sharedVideoUrl,
-            message.payload.previousSharedUrl,
-          )
-        ) {
+        // Whether the room is still parked on the video that was shared when
+        // this auto-share was scheduled. Re-read room state each call because
+        // awaits below yield the event loop, during which the same member could
+        // share a different video or fresh room state could arrive; without
+        // re-checking, the stale timer would overwrite the room back to the
+        // previous video's next episode.
+        const isRoomStillOnScheduledVideo = (): boolean => {
+          const sharedVideoUrl =
+            args.roomSessionState.roomState?.sharedVideo?.url ?? null;
+          return (
+            sharedVideoUrl !== null &&
+            areSharedVideoUrlsEqual(
+              sharedVideoUrl,
+              message.payload.previousSharedUrl,
+            )
+          );
+        };
+
+        if (!isRoomStillOnScheduledVideo()) {
           args.diagnosticsController.log(
             "content",
             "Auto-share next video skipped: room moved past the scheduled shared video",
@@ -292,25 +297,37 @@ export function createMessageController(args: {
           return;
         }
 
-        // The page bridge can still return the previous episode's
-        // `__INITIAL_STATE__` while the SPA transition settles, so the resolved
-        // URL equals the video the room is already parked on
-        // (`previousSharedUrl`). Sharing it would be a no-op while the sharer has
-        // already advanced to the next episode. Report a retryable failure so
-        // the content controller retries until the bridge resolves the new
-        // video, instead of treating the stale resolution as a successful share
-        // and leaving the room behind.
+        // The tab must currently resolve the exact next episode this auto-share
+        // was scheduled for. Mid-SPA the page bridge can still return the
+        // previous episode's `__INITIAL_STATE__` (a no-op share), or the tab may
+        // have already jumped past it to a different video (which we must not
+        // share in the room's name). In both cases the resolved URL differs from
+        // the scheduled `targetNormalizedUrl`, so report a retryable failure and
+        // let the content controller retry until the bridge settles on it.
         if (
-          areSharedVideoUrlsEqual(
+          !areSharedVideoUrlsEqual(
             response.payload.video.url,
-            message.payload.previousSharedUrl,
+            message.payload.targetNormalizedUrl,
           )
         ) {
           args.diagnosticsController.log(
             "content",
-            "Auto-share next video not ready: page bridge still resolves the previous shared video",
+            "Auto-share next video not ready: tab has not resolved the scheduled next video",
           );
           sendResponse({ ok: false } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
+        // `getVideoPayloadFromTab` yielded the event loop, so re-confirm the room
+        // is still on `previousSharedUrl` before overwriting it. A manual share
+        // or fresh room state received in that window means the room has moved
+        // on and this stale auto-share must not clobber it.
+        if (!isRoomStillOnScheduledVideo()) {
+          args.diagnosticsController.log(
+            "content",
+            "Auto-share next video skipped: room moved past the scheduled shared video while reading the tab",
+          );
+          sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
           return;
         }
 

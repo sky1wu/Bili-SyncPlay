@@ -16,10 +16,11 @@ interface PendingAutoShare {
   targetNormalizedUrl: string;
   attempt: number;
   /**
-   * Identifies the navigation that produced this request. A later navigation
-   * bumps the active generation; an in-flight request whose generation is stale
-   * must abandon itself instead of rescheduling, otherwise its failure retry
-   * would cancel the newer navigation's pending timer.
+   * Identifies the navigation that produced this request. A later navigation —
+   * even one back to the same target — bumps the active generation and
+   * supersedes any in-flight request: the stale request abandons itself instead
+   * of rescheduling, so its failure retry cannot cancel the newer navigation's
+   * pending timer.
    */
   generation: number;
 }
@@ -46,7 +47,6 @@ export function createAutoShareNextController(args: {
 
   let pendingTimer: number | null = null;
   let pendingNormalizedUrl: string | null = null;
-  let lastRequestedNormalizedUrl: string | null = null;
   let scheduleGeneration = 0;
 
   function clearPendingTimer(): void {
@@ -63,27 +63,11 @@ export function createAutoShareNextController(args: {
       pendingTimer = null;
       pendingNormalizedUrl = null;
       void requestAutoShare(pending).catch((error) => {
-        // The send threw after we marked the target as requested. Release the
-        // de-duplication marker so a later navigation back to the same target is
-        // not suppressed forever.
-        releaseRequestedMarker(pending);
         args.debugLog(
           `Auto-share next video failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       });
     }, delayMs);
-  }
-
-  /**
-   * Release the in-flight de-duplication marker when (and only when) it still
-   * points at this request's target. Guarding on the target prevents a stale
-   * request from clearing a newer navigation's marker, while ensuring the stale
-   * request never leaves its own target stuck in `lastRequestedNormalizedUrl`.
-   */
-  function releaseRequestedMarker(pending: PendingAutoShare): void {
-    if (lastRequestedNormalizedUrl === pending.targetNormalizedUrl) {
-      lastRequestedNormalizedUrl = null;
-    }
   }
 
   async function requestAutoShare(pending: PendingAutoShare): Promise<void> {
@@ -97,35 +81,29 @@ export function createAutoShareNextController(args: {
       return;
     }
 
-    lastRequestedNormalizedUrl = pending.targetNormalizedUrl;
     const message: ContentToBackgroundMessage = {
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: pending.previousSharedUrl,
+        targetNormalizedUrl: pending.targetNormalizedUrl,
       },
     };
     const response =
       await args.runtimeSendMessage<ShareCurrentVideoResponse>(message);
 
-    // A newer navigation arrived while this request was in flight. Abandon the
-    // stale request so its retry cannot cancel the newer pending timer and its
-    // settlement cannot clear the newer navigation's de-duplication marker.
-    // Still release the marker this stale request set for its own target,
-    // otherwise it would suppress a future legitimate navigation back to that
-    // target for the rest of the tab's lifetime.
+    // A newer navigation arrived while this request was in flight (it bumped the
+    // generation, even if it targets the same URL). Abandon this stale request
+    // so its retry cannot cancel the newer navigation's pending timer.
     if (pending.generation !== scheduleGeneration) {
-      releaseRequestedMarker(pending);
       return;
     }
 
     if (response?.ok === false) {
-      // The background reports failure when the page bridge has not resolved
-      // the new video yet (a slow SPA transition) or when sharing transiently
-      // failed. In both cases the room is still stuck on the previous video, so
-      // retry instead of leaving the sharer ahead of the room. Allow a retry to
-      // re-run by clearing the de-duplication marker first.
+      // The background reports failure when the page bridge has not resolved the
+      // scheduled next video yet (a slow SPA transition) or when sharing
+      // transiently failed. In both cases the room is still stuck on the
+      // previous video, so retry instead of leaving the sharer ahead of it.
       if (pending.attempt < maxAttempts) {
-        lastRequestedNormalizedUrl = null;
         scheduleRequest(
           { ...pending, attempt: pending.attempt + 1 },
           retryDelayMs,
@@ -139,13 +117,6 @@ export function createAutoShareNextController(args: {
         `Auto-share next video gave up after ${maxAttempts} attempts${response.error ? `: ${response.error}` : ""}`,
       );
     }
-
-    // The request has settled (shared successfully or gave up). Lift the
-    // in-flight de-duplication marker so a legitimate later navigation back to
-    // the same target — e.g. the room returning to A and the sharer autoplaying
-    // A→B again — can schedule a fresh auto-share instead of being suppressed
-    // for the rest of the tab's lifetime.
-    releaseRequestedMarker(pending);
   }
 
   function scheduleForNavigation(input: {
@@ -155,10 +126,12 @@ export function createAutoShareNextController(args: {
     if (input.previousSharedUrl === input.nextNormalizedPageUrl) {
       return;
     }
-    if (
-      pendingNormalizedUrl === input.nextNormalizedPageUrl ||
-      lastRequestedNormalizedUrl === input.nextNormalizedPageUrl
-    ) {
+    // Coalesce only with a still-pending timer for the exact same target so
+    // rapid duplicate navigation signals do not keep pushing back the settle
+    // deadline. Once the timer has fired (the request is in flight), a fresh
+    // navigation — including one back to the same target — supersedes it via the
+    // generation bump below instead of being dropped.
+    if (pendingNormalizedUrl === input.nextNormalizedPageUrl) {
       return;
     }
 

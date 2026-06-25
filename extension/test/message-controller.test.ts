@@ -516,6 +516,7 @@ test("message controller auto-shares the next video from the original sharer's s
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
     { tab: senderTab },
@@ -574,6 +575,7 @@ test("message controller skips auto-share next video from non-sharers", async ()
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
     {
@@ -621,6 +623,7 @@ test("message controller skips auto-share next video from other tabs", async () 
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
     {
@@ -684,6 +687,7 @@ test("message controller reports a retryable failure when the page bridge still 
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
     { tab: senderTab },
@@ -735,6 +739,7 @@ test("message controller still authorizes auto-share next video while the sharer
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
     { tab: senderTab },
@@ -782,6 +787,7 @@ test("message controller skips auto-share next video when the room moved past th
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
     { tab: senderTab },

@@ -38,7 +38,7 @@ export type ContentToBackgroundMessage =
   | { type: "content:share-current-video" }
   | {
       type: "content:auto-share-next-video";
-      payload: { previousSharedUrl: string };
+      payload: { previousSharedUrl: string; targetNormalizedUrl: string };
     }
   | { type: "content:get-page-share-button-settings" }
   | { type: "content:set-page-share-button-enabled"; enabled: boolean }

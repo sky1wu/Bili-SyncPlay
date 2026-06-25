@@ -73,6 +73,7 @@ test("auto-share next controller sends a request after the navigation settles", 
         type: "content:auto-share-next-video",
         payload: {
           previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+          targetNormalizedUrl: "https://www.bilibili.com/video/BV1NextVideo",
         },
       },
     ]);
@@ -157,6 +158,7 @@ test("auto-share next controller retries when the background reports the page is
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV1NextVideo",
       },
     });
   } finally {
@@ -260,6 +262,7 @@ test("auto-share next controller retry does not cancel a newer navigation's pend
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV1SecondVideo",
       },
     });
   } finally {
@@ -268,7 +271,7 @@ test("auto-share next controller retry does not cancel a newer navigation's pend
   }
 });
 
-test("auto-share next controller does not leave the dedup marker stuck after a stale request is superseded", async () => {
+test("auto-share next controller supersedes an in-flight request when a new navigation returns to the same target", async () => {
   const windowHarness = installWindowStub();
   let currentUrl = "https://www.bilibili.com/video/BV1FirstVideo";
   const sentMessages: unknown[] = [];
@@ -292,8 +295,79 @@ test("auto-share next controller does not leave the dedup marker stuck after a s
   });
 
   try {
-    // First navigation to B settles and starts an in-flight request that marks
-    // B as requested.
+    // Sharer autoplays A→B; B's request settles and starts an in-flight send.
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1FirstVideo",
+    });
+    windowHarness.runTimers();
+    await Promise.resolve();
+    assert.equal(sentMessages.length, 1);
+
+    // The page autoplays on to C and then back to B while B's request is still
+    // awaiting. The return-to-B navigation must NOT be dropped as a duplicate —
+    // it supersedes the stale in-flight request with a fresh round.
+    currentUrl = "https://www.bilibili.com/video/BV1SecondVideo";
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1SecondVideo",
+    });
+    currentUrl = "https://www.bilibili.com/video/BV1FirstVideo";
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1FirstVideo",
+    });
+
+    // The original B request resolves but is now stale and abandons itself.
+    resolveFirst?.({ ok: false });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The freshest round (back to B) is the only pending timer and shares B.
+    assert.equal(windowHarness.timers.size, 1);
+    windowHarness.runTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(sentMessages.length, 2);
+    assert.deepEqual(sentMessages[1], {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV1FirstVideo",
+      },
+    });
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
+test("auto-share next controller re-sends the same target after a superseded request bails and the page moves on", async () => {
+  const windowHarness = installWindowStub();
+  let currentUrl = "https://www.bilibili.com/video/BV1FirstVideo";
+  const sentMessages: unknown[] = [];
+  let resolveFirst: ((value: { ok: boolean }) => void) | null = null;
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    retryDelayMs: 300,
+    maxAttempts: 4,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      if (sentMessages.length === 1) {
+        return await new Promise<{ ok: boolean }>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return { ok: true };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    // First navigation to B settles and starts an in-flight request.
     controller.scheduleForNavigation({
       previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
       nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1FirstVideo",
@@ -311,15 +385,13 @@ test("auto-share next controller does not leave the dedup marker stuck after a s
     });
 
     // The stale B request resolves and abandons itself because its generation is
-    // stale — but it must release the marker it set for B, otherwise B stays
-    // suppressed forever.
+    // stale, leaving no trace that could suppress a future request for B.
     resolveFirst?.({ ok: true });
     await Promise.resolve();
     await Promise.resolve();
 
     // The page moves on again before the C request runs, so the superseding
-    // request bails early without sending — and therefore never overwrites the
-    // (now hopefully released) B marker.
+    // request bails early without sending.
     currentUrl = "https://www.bilibili.com/video/BV1ThirdVideo";
     windowHarness.runTimers();
     await Promise.resolve();
@@ -327,7 +399,7 @@ test("auto-share next controller does not leave the dedup marker stuck after a s
     assert.equal(sentMessages.length, 1);
 
     // The room later returns to B and the sharer autoplays back into it. This
-    // legitimate navigation must not be suppressed by the stale B marker.
+    // legitimate navigation must still schedule and send a fresh request.
     currentUrl = "https://www.bilibili.com/video/BV1FirstVideo";
     controller.scheduleForNavigation({
       previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
@@ -343,6 +415,7 @@ test("auto-share next controller does not leave the dedup marker stuck after a s
       type: "content:auto-share-next-video",
       payload: {
         previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV1FirstVideo",
       },
     });
   } finally {
