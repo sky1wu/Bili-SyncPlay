@@ -84,6 +84,7 @@ export function createRoomStateController(args: {
 
   function clearRoomScopedSharedVideoState(): void {
     args.runtimeState.activeSharedUrl = null;
+    args.runtimeState.activeSharedByMemberId = null;
     args.runtimeState.explicitNonSharedPlaybackUrl = null;
     args.runtimeState.lastNonSharedGuardUrl = null;
     args.runtimeState.postNavigationAnchorSharedUrl = null;

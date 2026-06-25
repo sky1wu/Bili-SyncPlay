@@ -107,29 +107,44 @@ export function createNavigationController(args: {
     args.attachPlaybackListeners();
 
     if (canConfirmDifferentVideo) {
-      if (
+      const isLocalSharedSource =
+        args.runtimeState.localMemberId !== null &&
+        args.runtimeState.activeSharedByMemberId ===
+          args.runtimeState.localMemberId;
+      const shouldTreatAsAutoplay =
         !hadRecentUserGesture &&
         activeSharedUrl !== null &&
-        nextNormalizedPageUrl !== null
-      ) {
+        nextNormalizedPageUrl !== null;
+      const shouldPauseNonSharerAutoplay =
+        shouldTreatAsAutoplay && !isLocalSharedSource;
+
+      if (shouldTreatAsAutoplay && isLocalSharedSource) {
+        args.runtimeState.explicitNonSharedPlaybackUrl = nextNormalizedPageUrl;
         args.scheduleAutoShareNextVideo?.({
           previousSharedUrl: activeSharedUrl,
           nextNormalizedPageUrl,
         });
+      } else if (shouldPauseNonSharerAutoplay) {
+        args.runtimeState.intendedPlayState = "paused";
+        args.activatePauseHold(args.initialRoomStatePauseHoldMs);
+        const video = args.getVideoElement();
+        if (video && !video.paused) {
+          args.runtimeState.lastForcedPauseAt = now;
+          args.debugLog(`Suppressed non-sharer autoplay to ${nextPageUrl}`);
+          args.pauseVideo(video);
+        }
       }
-      // Navigated to a confirmed different, stable, non-shared video. Do not
-      // engage autoplay suppression, and clear any pause hold inherited from
-      // the previously shared (paused) video. Otherwise, once this non-shared
-      // video autoplays while the page bridge has not yet produced
-      // `currentVideo`, `shouldReapplyPauseHoldForUnconfirmedSharedVideo`
-      // (which treats a null `currentVideo` as an unconfirmed shared context)
-      // would re-pause it on the strength of the still-live `pauseHoldUntil`.
-      // `pendingRoomStateHydration` is left false so the hydration pause guard
-      // also stays inert. Still hydrate to refresh room state — `applyRoomState`
-      // ignores room playback on a non-shared page.
-      args.runtimeState.pauseHoldUntil = 0;
+      // For manual non-shared navigation and local-sharer autoplay, clear any
+      // pause hold inherited from the previously shared video. For non-sharer
+      // autoplay, keep the freshly armed pause hold so a delayed play event is
+      // still stopped.
+      if (!shouldPauseNonSharerAutoplay) {
+        args.runtimeState.pauseHoldUntil = 0;
+      }
       args.debugLog(
-        `Detected in-room navigation to non-shared video ${nextPageUrl}, skipping autoplay suppression`,
+        shouldPauseNonSharerAutoplay
+          ? `Detected non-sharer autoplay to ${nextPageUrl}, holding paused state`
+          : `Detected in-room navigation to non-shared video ${nextPageUrl}, skipping autoplay suppression`,
       );
       void args.hydrateRoomState();
       return;

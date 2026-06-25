@@ -71,6 +71,7 @@ export interface ContentRuntimeState {
   lastLocalPlaybackVersion: { serverTime: number; seq: number } | null;
   pendingLocalPlaybackOverride: PendingLocalPlaybackOverride | null;
   activeSharedUrl: string | null;
+  activeSharedByMemberId: string | null;
   activeRoomCode: string | null;
   hydrationReady: boolean;
   hasReceivedInitialRoomState: boolean;
@@ -161,6 +162,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     lastLocalPlaybackVersion: null,
     pendingLocalPlaybackOverride: null,
     activeSharedUrl: null,
+    activeSharedByMemberId: null,
     activeRoomCode: null,
     hydrationReady: false,
     hasReceivedInitialRoomState: false,
