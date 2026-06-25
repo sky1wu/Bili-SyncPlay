@@ -7,6 +7,7 @@ import type { RoomSessionState, ShareState } from "./runtime-state";
 export interface TabController {
   rememberSharedSourceTab(tabId: number | undefined, url: string): void;
   isActiveSharedTab(tabId: number | undefined, url: string): boolean;
+  isRememberedSharedSourceTab(tabId: number | undefined): boolean;
   ensureSharedVideoOpen(): Promise<void>;
   openSharedVideoFromPopup(): Promise<void>;
 }
@@ -64,6 +65,10 @@ export function createTabController(args: {
     }
 
     return decision.accepted;
+  }
+
+  function isRememberedSharedSourceTab(tabId: number | undefined): boolean {
+    return tabId !== undefined && args.shareState.sharedTabId === tabId;
   }
 
   async function ensureSharedVideoOpen(): Promise<void> {
@@ -170,6 +175,7 @@ export function createTabController(args: {
   return {
     rememberSharedSourceTab,
     isActiveSharedTab,
+    isRememberedSharedSourceTab,
     ensureSharedVideoOpen,
     openSharedVideoFromPopup,
   };

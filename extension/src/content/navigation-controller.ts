@@ -23,6 +23,10 @@ export function createNavigationController(args: {
   pauseVideo: (video: HTMLVideoElement) => void;
   hydrateRoomState: () => Promise<void>;
   activatePauseHold: (durationMs?: number) => void;
+  scheduleAutoShareNextVideo?: (input: {
+    previousSharedUrl: string;
+    nextNormalizedPageUrl: string;
+  }) => void;
   debugLog: (message: string) => void;
   getNow?: () => number;
 }): NavigationController {
@@ -61,6 +65,10 @@ export function createNavigationController(args: {
     }
 
     const activeSharedUrl = args.runtimeState.activeSharedUrl;
+    const now = nowOf();
+    const hadRecentUserGesture =
+      args.runtimeState.lastUserGestureAt > 0 &&
+      now - args.runtimeState.lastUserGestureAt <= args.userGestureGraceMs;
     // We can only positively confirm the navigated page is a *different*
     // (non-shared) video when the room's shared URL and the navigated page URL
     // are both present, stable (not a festival / bangumi-season identity), and
@@ -90,7 +98,7 @@ export function createNavigationController(args: {
     // URL and broadcasts are not at risk of leaking stale data.
     if (activeSharedUrl && nextNormalizedPageUrl !== activeSharedUrl) {
       args.runtimeState.postNavigationAnchorSharedUrl = activeSharedUrl;
-      args.runtimeState.postNavigationAnchorSetAt = nowOf();
+      args.runtimeState.postNavigationAnchorSetAt = now;
     } else {
       args.runtimeState.postNavigationAnchorSharedUrl = null;
       args.runtimeState.postNavigationAnchorSetAt = 0;
@@ -99,6 +107,16 @@ export function createNavigationController(args: {
     args.attachPlaybackListeners();
 
     if (canConfirmDifferentVideo) {
+      if (
+        !hadRecentUserGesture &&
+        activeSharedUrl !== null &&
+        nextNormalizedPageUrl !== null
+      ) {
+        args.scheduleAutoShareNextVideo?.({
+          previousSharedUrl: activeSharedUrl,
+          nextNormalizedPageUrl,
+        });
+      }
       // Navigated to a confirmed different, stable, non-shared video. Do not
       // engage autoplay suppression, and clear any pause hold inherited from
       // the previously shared (paused) video. Otherwise, once this non-shared

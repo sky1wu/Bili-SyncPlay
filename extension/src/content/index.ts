@@ -1,5 +1,6 @@
 import { type BackgroundToContentMessage } from "../shared/messages";
 import { normalizeSharedVideoUrl } from "../shared/url";
+import { createAutoShareNextController } from "./auto-share-next-controller";
 import { runtimeSendMessage } from "./content-messaging";
 import { createFestivalBridgeController } from "./festival-bridge";
 import { startUserGestureTracking } from "./gesture-tracker";
@@ -42,6 +43,7 @@ const FESTIVAL_SNAPSHOT_TTL_MS = 1200;
 const NAVIGATION_WATCH_INTERVAL_MS = 400;
 const VIDEO_BIND_INTERVAL_MS = 250;
 const HEARTBEAT_LOG_INTERVAL_MS = 10000;
+const AUTO_SHARE_NEXT_SETTLE_DELAY_MS = 900;
 const PAGE_SHARE_BUTTON_SETTINGS_RETRY_DELAY_MS = 400;
 const PAGE_SHARE_BUTTON_SETTINGS_MAX_ATTEMPTS = 6;
 const festivalBridge = createFestivalBridgeController();
@@ -54,6 +56,13 @@ const shareController = createShareController({
   nextSeq: () => seq++,
   getFestivalSnapshot: () => festivalBridge.getSnapshot(),
   refreshFestivalBridge: (input) => festivalBridge.refreshSnapshot(input),
+  debugLog,
+});
+const autoShareNextController = createAutoShareNextController({
+  settleDelayMs: AUTO_SHARE_NEXT_SETTLE_DELAY_MS,
+  getCurrentPageUrl: () => window.location.href.split("#")[0],
+  normalizeVideoPageUrl: (url) => normalizeSharedVideoUrl(url),
+  runtimeSendMessage,
   debugLog,
 });
 const roomStateController = createRoomStateController({
@@ -139,6 +148,8 @@ const navigationController = createNavigationController({
   pauseVideo,
   hydrateRoomState: () => syncController.hydrateRoomState(),
   activatePauseHold,
+  scheduleAutoShareNextVideo: (input) =>
+    autoShareNextController.scheduleForNavigation(input),
   debugLog,
 });
 const pageShareButtonController = createPageShareButtonController({
@@ -186,6 +197,7 @@ async function init(): Promise<void> {
     if (!event.persisted) {
       clearPageShareButtonSettingsHydrationTimer();
       pageShareButtonController.destroy();
+      autoShareNextController.destroy();
       syncController.destroy();
       playbackBindingController.destroy();
       navigationController.destroy();

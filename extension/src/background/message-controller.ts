@@ -6,6 +6,7 @@ import type {
   ShareCurrentVideoResponse,
 } from "../shared/messages";
 import { t } from "../shared/i18n";
+import { areSharedVideoUrlsEqual } from "../shared/url";
 import type {
   PlaybackState,
   RoomState,
@@ -75,6 +76,7 @@ export function createMessageController(args: {
   tabController: {
     openSharedVideoFromPopup(): Promise<void>;
     isActiveSharedTab(tabId?: number, videoUrl?: string | null): boolean;
+    isRememberedSharedSourceTab(tabId?: number): boolean;
   };
   clockController: {
     compensateRoomState(state: RoomState): RoomState;
@@ -94,6 +96,21 @@ export function createMessageController(args: {
     await args.persistProfileState();
     args.notifyAll();
     await args.notifyPageShareButtonSettings();
+  }
+
+  function canAutoShareNextVideoFromSender(
+    sender: chrome.runtime.MessageSender,
+  ): boolean {
+    const sharedByMemberId =
+      args.roomSessionState.roomState?.sharedVideo?.sharedByMemberId;
+    return (
+      args.connectionState.connected &&
+      args.roomSessionState.roomCode !== null &&
+      args.roomSessionState.memberToken !== null &&
+      args.roomSessionState.memberId !== null &&
+      sharedByMemberId === args.roomSessionState.memberId &&
+      args.tabController.isRememberedSharedSourceTab(sender.tab?.id)
+    );
   }
 
   async function handleRuntimeMessage(
@@ -221,6 +238,57 @@ export function createMessageController(args: {
         if (shareResult.ok === false) {
           args.connectionState.lastError = shareResult.error;
           args.notifyAll();
+          sendResponse({
+            ok: false,
+            error: shareResult.error,
+          } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+        await args.persistState();
+        args.notifyAll();
+        sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
+        return;
+      }
+      case "content:auto-share-next-video": {
+        if (!canAutoShareNextVideoFromSender(sender)) {
+          sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
+        const response = await args.shareController.getVideoPayloadFromTab(
+          sender.tab,
+        );
+        if (!response.ok || !response.payload) {
+          args.diagnosticsController.log(
+            "content",
+            `Auto-share next video skipped: ${response.error ?? t("popupErrorCannotReadCurrentVideo")}`,
+          );
+          sendResponse({ ok: false } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
+        const currentSharedVideoUrl =
+          args.roomSessionState.roomState?.sharedVideo?.url ?? null;
+        if (
+          currentSharedVideoUrl &&
+          areSharedVideoUrlsEqual(
+            currentSharedVideoUrl,
+            response.payload.video.url,
+          )
+        ) {
+          sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
+        const shareResult = await args.shareController.queueOrSendSharedVideo(
+          response.payload,
+          response.tabId,
+        );
+        if (shareResult.ok === false) {
+          args.diagnosticsController.log(
+            "content",
+            `Auto-share next video failed: ${shareResult.error}`,
+          );
           sendResponse({
             ok: false,
             error: shareResult.error,

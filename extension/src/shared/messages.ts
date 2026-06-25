@@ -36,6 +36,7 @@ export type ContentToBackgroundMessage =
   | { type: "content:get-room-state" }
   | { type: "content:get-share-context" }
   | { type: "content:share-current-video" }
+  | { type: "content:auto-share-next-video" }
   | { type: "content:get-page-share-button-settings" }
   | { type: "content:set-page-share-button-enabled"; enabled: boolean }
   | { type: "content:debug-log"; payload: { message: string } };
