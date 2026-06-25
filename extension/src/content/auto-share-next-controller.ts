@@ -15,6 +15,13 @@ interface PendingAutoShare {
   previousSharedUrl: string;
   targetNormalizedUrl: string;
   attempt: number;
+  /**
+   * Identifies the navigation that produced this request. A later navigation
+   * bumps the active generation; an in-flight request whose generation is stale
+   * must abandon itself instead of rescheduling, otherwise its failure retry
+   * would cancel the newer navigation's pending timer.
+   */
+  generation: number;
 }
 
 export function createAutoShareNextController(args: {
@@ -40,6 +47,7 @@ export function createAutoShareNextController(args: {
   let pendingTimer: number | null = null;
   let pendingNormalizedUrl: string | null = null;
   let lastRequestedNormalizedUrl: string | null = null;
+  let scheduleGeneration = 0;
 
   function clearPendingTimer(): void {
     if (pendingTimer !== null) {
@@ -83,6 +91,12 @@ export function createAutoShareNextController(args: {
     const response =
       await args.runtimeSendMessage<ShareCurrentVideoResponse>(message);
     if (response?.ok === false) {
+      // A newer navigation arrived while this request was in flight. Abandon
+      // the stale request so its retry cannot cancel the newer pending timer or
+      // clobber the newer target tracked in `pendingNormalizedUrl`.
+      if (pending.generation !== scheduleGeneration) {
+        return;
+      }
       // The background reports failure when the page bridge has not resolved
       // the new video yet (a slow SPA transition) or when sharing transiently
       // failed. In both cases the room is still stuck on the previous video, so
@@ -119,11 +133,13 @@ export function createAutoShareNextController(args: {
       return;
     }
 
+    scheduleGeneration += 1;
     scheduleRequest(
       {
         previousSharedUrl: input.previousSharedUrl,
         targetNormalizedUrl: input.nextNormalizedPageUrl,
         attempt: 1,
+        generation: scheduleGeneration,
       },
       args.settleDelayMs,
     );
@@ -132,6 +148,8 @@ export function createAutoShareNextController(args: {
   function destroy(): void {
     clearPendingTimer();
     pendingNormalizedUrl = null;
+    // Invalidate any in-flight request so it cannot reschedule after teardown.
+    scheduleGeneration += 1;
   }
 
   return {
