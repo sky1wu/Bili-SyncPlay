@@ -485,6 +485,27 @@ export function createPlaybackBindingController(args: {
       }
 
       if (forcePauseOnNonSharedPage(video)) {
+        // `forcePauseOnNonSharedPage` only suppresses the broadcast; it does
+        // not stop the local element. For a non-sharer whose player autoplayed
+        // into the next episode while the navigated page had not resolved yet,
+        // the navigation controller armed a pause hold and recorded a paused
+        // intent. Once that delayed `play` finally fires we must actually pause,
+        // otherwise the non-sharer keeps watching the next episode while the
+        // room stays on the shared video. A genuine manual navigation to a
+        // non-shared page clears the pause hold, so this branch leaves it alone.
+        if (
+          nowOf() < args.runtimeState.pauseHoldUntil &&
+          (args.runtimeState.intendedPlayState === "paused" ||
+            args.runtimeState.intendedPlayState === "buffering")
+        ) {
+          args.debugLog(
+            "Forced pause for delayed non-sharer autoplay into non-shared video",
+          );
+          args.runtimeState.lastForcedPauseAt = nowOf();
+          window.setTimeout(() => {
+            pauseVideo(video);
+          }, 0);
+        }
         return true;
       }
       if (forcePauseWhileWaitingForInitialRoomState(video)) {

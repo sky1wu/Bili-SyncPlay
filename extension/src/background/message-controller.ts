@@ -103,8 +103,11 @@ export function createMessageController(args: {
   ): boolean {
     const sharedByMemberId =
       args.roomSessionState.roomState?.sharedVideo?.sharedByMemberId;
+    // Deliberately not gated on `connectionState.connected`: when the sharer is
+    // briefly offline (reconnecting) we still want to authorize the share and
+    // let `queueOrSendSharedVideo` queue it for delivery on reconnect, rather
+    // than silently skipping and leaving the room stuck on the old video.
     return (
-      args.connectionState.connected &&
       args.roomSessionState.roomCode !== null &&
       args.roomSessionState.memberToken !== null &&
       args.roomSessionState.memberId !== null &&
@@ -251,6 +254,28 @@ export function createMessageController(args: {
       }
       case "content:auto-share-next-video": {
         if (!canAutoShareNextVideoFromSender(sender)) {
+          sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
+        // Confirm the room is still parked on the video that was shared when
+        // this auto-share was scheduled. The 900ms settle delay leaves a window
+        // where the same member could have shared a different video from
+        // elsewhere; without this guard the stale timer would overwrite the
+        // room back to the previous video's next episode.
+        const sharedVideoUrl =
+          args.roomSessionState.roomState?.sharedVideo?.url ?? null;
+        if (
+          !sharedVideoUrl ||
+          !areSharedVideoUrlsEqual(
+            sharedVideoUrl,
+            message.payload.previousSharedUrl,
+          )
+        ) {
+          args.diagnosticsController.log(
+            "content",
+            "Auto-share next video skipped: room moved past the scheduled shared video",
+          );
           sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
           return;
         }

@@ -68,7 +68,14 @@ test("auto-share next controller sends a request after the navigation settles", 
     windowHarness.runTimers();
     await Promise.resolve();
 
-    assert.deepEqual(sentMessages, [{ type: "content:auto-share-next-video" }]);
+    assert.deepEqual(sentMessages, [
+      {
+        type: "content:auto-share-next-video",
+        payload: {
+          previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+        },
+      },
+    ]);
     assert.deepEqual(debugLogs, []);
   } finally {
     currentUrl = "";
@@ -106,6 +113,88 @@ test("auto-share next controller skips a settled request when the page moved aga
 
     assert.deepEqual(sentMessages, []);
     assert.equal(debugLogs.length, 1);
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
+test("auto-share next controller retries when the background reports the page is not ready", async () => {
+  const windowHarness = installWindowStub();
+  const sentMessages: unknown[] = [];
+  const responses = [{ ok: false }, { ok: true }];
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    retryDelayMs: 300,
+    maxAttempts: 4,
+    getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      return responses.shift() ?? { ok: true };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+
+    windowHarness.runTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+    // A retry timer should have been armed after the first failure.
+    assert.equal(windowHarness.timers.size, 1);
+
+    windowHarness.runTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(sentMessages.length, 2);
+    assert.deepEqual(sentMessages[1], {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      },
+    });
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
+test("auto-share next controller stops retrying after the maximum attempts", async () => {
+  const windowHarness = installWindowStub();
+  const sentMessages: unknown[] = [];
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    retryDelayMs: 300,
+    maxAttempts: 3,
+    getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      return { ok: false };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+
+    for (let i = 0; i < 6; i += 1) {
+      windowHarness.runTimers();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    assert.equal(sentMessages.length, 3);
+    assert.equal(windowHarness.timers.size, 0);
   } finally {
     controller.destroy();
     windowHarness.restore();

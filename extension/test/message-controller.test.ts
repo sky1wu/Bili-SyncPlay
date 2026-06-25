@@ -514,6 +514,9 @@ test("message controller auto-shares the next video from the original sharer's s
   await harness.controller.handleRuntimeMessage(
     {
       type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+      },
     },
     { tab: senderTab },
     (nextResponse) => {
@@ -569,6 +572,9 @@ test("message controller skips auto-share next video from non-sharers", async ()
   await harness.controller.handleRuntimeMessage(
     {
       type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+      },
     },
     {
       tab: {
@@ -613,6 +619,9 @@ test("message controller skips auto-share next video from other tabs", async () 
   await harness.controller.handleRuntimeMessage(
     {
       type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+      },
     },
     {
       tab: {
@@ -673,6 +682,9 @@ test("message controller skips auto-share next video when the resolved video is 
   await harness.controller.handleRuntimeMessage(
     {
       type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+      },
     },
     { tab: senderTab },
     (nextResponse) => {
@@ -681,6 +693,101 @@ test("message controller skips auto-share next video when the resolved video is 
   );
 
   assert.deepEqual(harness.calls.getVideoPayloadFromTab, [senderTab]);
+  assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
+  assert.equal(harness.calls.persistState, 0);
+  assert.deepEqual(response, { ok: true });
+});
+
+test("message controller still authorizes auto-share next video while the sharer is briefly offline", async () => {
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    title: "Old Video",
+    sharedByMemberId: "member-1",
+  };
+  const harness = createControllerHarness({
+    connectionState: { connected: false, lastError: null },
+    isRememberedSharedSourceTab: true,
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo,
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    },
+  });
+  const senderTab = {
+    id: 456,
+    url: "https://www.bilibili.com/video/BV199W9zEEcH",
+  };
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+      },
+    },
+    { tab: senderTab },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  // While offline the share is still authorized and handed to
+  // queueOrSendSharedVideo, which queues it for delivery on reconnect.
+  assert.deepEqual(harness.calls.getVideoPayloadFromTab, [senderTab]);
+  assert.equal(harness.calls.queueOrSendSharedVideo.length, 1);
+  assert.deepEqual(response, { ok: true });
+});
+
+test("message controller skips auto-share next video when the room moved past the scheduled shared video", async () => {
+  const harness = createControllerHarness({
+    isRememberedSharedSourceTab: true,
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo: {
+          videoId: "BV1Newer",
+          url: "https://www.bilibili.com/video/BV1Newer",
+          title: "Newer Video",
+          sharedByMemberId: "member-1",
+        },
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    },
+  });
+  const senderTab = {
+    id: 456,
+    url: "https://www.bilibili.com/video/BV199W9zEEcH",
+  };
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+      },
+    },
+    { tab: senderTab },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  assert.deepEqual(harness.calls.getVideoPayloadFromTab, []);
   assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
   assert.equal(harness.calls.persistState, 0);
   assert.deepEqual(response, { ok: true });
