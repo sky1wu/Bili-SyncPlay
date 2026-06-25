@@ -469,6 +469,8 @@ export function createRoomStateApplyController(args: {
       args.cancelActiveSoftApply(args.getVideoElement(), "room-empty");
       args.runtimeState.activeSharedUrl = null;
       args.runtimeState.activeSharedByMemberId = null;
+      args.runtimeState.suppressedLocalEndPauseUrl = null;
+      args.runtimeState.suppressedLocalEndPauseUntil = 0;
       args.clearRemoteFollowPlayingWindow();
       if (decision.acceptedHydration) {
         args.debugLog(`Accepted empty room state for ${state.roomCode}`);

@@ -83,6 +83,8 @@ export interface ContentRuntimeState {
   lastUserGestureAt: number;
   lastExplicitPlaybackAction: ExplicitPlaybackAction | null;
   explicitNonSharedPlaybackUrl: string | null;
+  suppressedLocalEndPauseUrl: string | null;
+  suppressedLocalEndPauseUntil: number;
   lastForcedPauseAt: number;
   pauseHoldUntil: number;
   pendingPlaybackApplication: PlaybackState | null;
@@ -153,6 +155,8 @@ export function resetUserGestureState(state: ContentRuntimeState): void {
   state.lastExplicitUserAction = null;
   state.lastNonSharedGuardUrl = null;
   state.lastForcedPauseAt = 0;
+  state.suppressedLocalEndPauseUrl = null;
+  state.suppressedLocalEndPauseUntil = 0;
 }
 
 export function createContentRuntimeState(): ContentRuntimeState {
@@ -174,6 +178,8 @@ export function createContentRuntimeState(): ContentRuntimeState {
     lastUserGestureAt: 0,
     lastExplicitPlaybackAction: null,
     explicitNonSharedPlaybackUrl: null,
+    suppressedLocalEndPauseUrl: null,
+    suppressedLocalEndPauseUntil: 0,
     lastForcedPauseAt: 0,
     pauseHoldUntil: 0,
     pendingPlaybackApplication: null,

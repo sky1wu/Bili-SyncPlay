@@ -1429,6 +1429,45 @@ test("sync controller broadcasts paused once buffer-pause upgrade window elapses
   assert.equal(payload.playState, "paused");
 });
 
+test("sync controller suppresses local end-pause broadcasts from non-sharer autoplay guard", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: true,
+    readyState: 4,
+    currentTime: 119.7,
+    duration: 120,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.runtimeState.localMemberId = "member-2";
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.runtimeState.lastForcedPauseAt = 20_000;
+  harness.runtimeState.suppressedLocalEndPauseUrl = sharedVideo.url;
+  harness.runtimeState.suppressedLocalEndPauseUntil = 21_500;
+  harness.setNow(20_100);
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  await harness.controller.broadcastPlayback(video, "pause");
+
+  assert.equal(harness.runtimeMessages.length, 0);
+  assert.equal(
+    harness.debugLogs.some((message) =>
+      message.includes("result=local-end-pause-suppress"),
+    ),
+    true,
+  );
+});
+
 test("sync controller tags broadcast with userInitiated:true on a fresh user pause", async () => {
   const harness = createControllerHarness();
   const sharedVideo = {

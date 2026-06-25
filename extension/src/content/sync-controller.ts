@@ -248,6 +248,8 @@ export function createSyncController(args: {
     args.runtimeState.lastNonSharedGuardUrl = null;
     args.runtimeState.lastExplicitPlaybackAction = null;
     args.runtimeState.explicitNonSharedPlaybackUrl = null;
+    args.runtimeState.suppressedLocalEndPauseUrl = null;
+    args.runtimeState.suppressedLocalEndPauseUntil = 0;
     args.runtimeState.postNavigationAnchorSharedUrl = null;
     args.runtimeState.postNavigationAnchorSetAt = 0;
     args.debugLog(`Reset playback sync state: ${reason}`);
@@ -852,6 +854,55 @@ export function createSyncController(args: {
       eventSource,
       now,
     });
+    const hasExplicitUserActionAfterForcedPause = Boolean(
+      args.runtimeState.lastExplicitUserAction &&
+      args.runtimeState.lastExplicitUserAction.at >
+        args.runtimeState.lastForcedPauseAt &&
+      now - args.runtimeState.lastExplicitUserAction.at <
+        args.userGestureGraceMs,
+    );
+    if (
+      eventSource === "pause" &&
+      playState === "paused" &&
+      args.runtimeState.suppressedLocalEndPauseUrl &&
+      now < args.runtimeState.suppressedLocalEndPauseUntil &&
+      normalizedCurrentVideoUrl ===
+        args.runtimeState.suppressedLocalEndPauseUrl &&
+      !hasExplicitUserActionAfterForcedPause
+    ) {
+      args.debugLog(
+        `Skip broadcast ${formatPlaybackDiagnostic({
+          actor: args.runtimeState.localMemberId,
+          playState,
+          url: currentVideo.url,
+          localTime: video.currentTime,
+          targetTime: video.currentTime,
+          result: "local-end-pause-suppress",
+        })}`,
+      );
+      logBroadcastTrace(
+        "local-end-pause-suppress",
+        eventSource,
+        formatBroadcastTrace({
+          eventSource,
+          currentVideoUrl: currentVideo.url,
+          normalizedCurrentVideoUrl,
+          playState,
+          currentTime: video.currentTime,
+          playbackRate: video.playbackRate,
+        }),
+        normalizedCurrentVideoUrl,
+        now,
+      );
+      return;
+    }
+    if (
+      args.runtimeState.suppressedLocalEndPauseUrl &&
+      now >= args.runtimeState.suppressedLocalEndPauseUntil
+    ) {
+      args.runtimeState.suppressedLocalEndPauseUrl = null;
+      args.runtimeState.suppressedLocalEndPauseUntil = 0;
+    }
     const programmaticDecision = shouldSuppressProgrammaticEventGuard({
       programmaticApplyUntil: args.runtimeState.programmaticApplyUntil,
       programmaticApplySignature: args.runtimeState.programmaticApplySignature,
@@ -900,11 +951,7 @@ export function createSyncController(args: {
       return;
     }
     if (
-      args.runtimeState.lastExplicitUserAction &&
-      args.runtimeState.lastExplicitUserAction.at >
-        args.runtimeState.lastForcedPauseAt &&
-      now - args.runtimeState.lastExplicitUserAction.at <
-        args.userGestureGraceMs &&
+      hasExplicitUserActionAfterForcedPause &&
       (eventSource === "play" ||
         eventSource === "playing" ||
         eventSource === "pause" ||

@@ -10,6 +10,9 @@ test("content state store exposes stable mutable state and patch semantics", () 
     activeRoomCode: "ROOM01",
     activeSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     activeSharedByMemberId: "member-1",
+    suppressedLocalEndPauseUrl:
+      "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    suppressedLocalEndPauseUntil: 1_500,
     hydrationReady: true,
   });
 
@@ -21,6 +24,11 @@ test("content state store exposes stable mutable state and patch semantics", () 
     "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
   );
   assert.equal(nextState.activeSharedByMemberId, "member-1");
+  assert.equal(
+    nextState.suppressedLocalEndPauseUrl,
+    "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+  );
+  assert.equal(nextState.suppressedLocalEndPauseUntil, 1_500);
   assert.equal(nextState.hydrationReady, true);
   assert.equal(nextState.pendingRoomStateHydration, true);
 });
@@ -41,6 +49,8 @@ test("content state store replace and reset restore runtime defaults", () => {
   const resetState = store.reset();
   assert.equal(resetState.activeRoomCode, null);
   assert.equal(resetState.activeSharedByMemberId, null);
+  assert.equal(resetState.suppressedLocalEndPauseUrl, null);
+  assert.equal(resetState.suppressedLocalEndPauseUntil, 0);
   assert.equal(resetState.hydrationReady, false);
   assert.equal(resetState.intendedPlayState, "paused");
 });

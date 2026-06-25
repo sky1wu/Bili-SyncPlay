@@ -18,6 +18,8 @@ import {
   isUnstableSharedVideoUrl,
 } from "./video-identity";
 
+const NON_SHARER_END_PAUSE_THRESHOLD_SECONDS = 0.45;
+
 export interface PlaybackBindingController {
   start(): void;
   attachPlaybackListeners(): void;
@@ -183,6 +185,63 @@ export function createPlaybackBindingController(args: {
     return (
       args.normalizeUrl(currentVideo.url) === args.runtimeState.activeSharedUrl
     );
+  }
+
+  function isLocalSharedSource(): boolean {
+    return Boolean(
+      args.runtimeState.localMemberId &&
+      args.runtimeState.activeSharedByMemberId &&
+      args.runtimeState.localMemberId ===
+        args.runtimeState.activeSharedByMemberId,
+    );
+  }
+
+  function shouldPauseNonSharerAtSharedVideoEnd(
+    video: HTMLVideoElement,
+  ): boolean {
+    if (
+      !args.runtimeState.activeRoomCode ||
+      !args.runtimeState.activeSharedUrl ||
+      !args.runtimeState.localMemberId ||
+      !args.runtimeState.activeSharedByMemberId ||
+      isLocalSharedSource() ||
+      video.paused ||
+      !Number.isFinite(video.duration) ||
+      !Number.isFinite(video.currentTime) ||
+      video.duration <= 0
+    ) {
+      return false;
+    }
+
+    const currentVideo = args.getSharedVideo();
+    if (!isCurrentVideoShared(currentVideo)) {
+      return false;
+    }
+
+    const remainingSeconds = video.duration - video.currentTime;
+    return (
+      remainingSeconds >= 0 &&
+      remainingSeconds <= NON_SHARER_END_PAUSE_THRESHOLD_SECONDS
+    );
+  }
+
+  function pauseNonSharerAtSharedVideoEnd(video: HTMLVideoElement): boolean {
+    if (!shouldPauseNonSharerAtSharedVideoEnd(video)) {
+      return false;
+    }
+
+    args.runtimeState.intendedPlayState = "paused";
+    args.runtimeState.lastForcedPauseAt = nowOf();
+    args.runtimeState.suppressedLocalEndPauseUrl =
+      args.runtimeState.activeSharedUrl;
+    args.runtimeState.suppressedLocalEndPauseUntil =
+      nowOf() + args.initialRoomStatePauseHoldMs;
+    args.activatePauseHold(args.initialRoomStatePauseHoldMs);
+    args.debugLog(
+      `Paused non-sharer at shared video end before local autoplay advances`,
+    );
+    pauseVideo(video);
+    return true;
   }
 
   function isKnownNonSharedVideo(currentVideo: SharedVideo | null): boolean {
@@ -563,6 +622,9 @@ export function createPlaybackBindingController(args: {
         scheduleBroadcast(video, "ratechange", 120);
       },
       onTimeUpdate: () => {
+        if (pauseNonSharerAtSharedVideoEnd(video)) {
+          return;
+        }
         args.maintainActiveSoftApply(video);
         if (nowOf() - args.getLastBroadcastAt() > 2000 && !video.paused) {
           void args.broadcastPlayback(video, "timeupdate");

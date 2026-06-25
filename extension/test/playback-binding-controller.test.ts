@@ -1064,6 +1064,146 @@ test("playback binding controller suppresses non-shared autoplay replayed after 
   }
 });
 
+test("playback binding controller pauses a non-sharer at the shared video end before local autoplay advances", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-2";
+  runtimeState.intendedPlayState = "playing";
+  let pauseCalls = 0;
+  let pauseHoldCalls = 0;
+  let maintainCalls = 0;
+  const events: string[] = [];
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url: "https://www.bilibili.com/video/BVshared?p=1",
+      title: "Shared Video",
+      sharedByMemberId: "member-1",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 8_000,
+    broadcastPlayback: async (_video, eventSource) => {
+      events.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {
+      maintainCalls += 1;
+    },
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: (durationMs = 3_000) => {
+      pauseHoldCalls += 1;
+      runtimeState.pauseHoldUntil = 10_000 + durationMs;
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  dom.video.pause = () => {
+    pauseCalls += 1;
+    dom.video.paused = true;
+  };
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.video.paused = false;
+    dom.video.duration = 120;
+    dom.video.currentTime = 119.7;
+    dom.listeners.get("timeupdate")?.(new Event("timeupdate"));
+
+    assert.equal(pauseCalls, 1);
+    assert.equal(pauseHoldCalls, 1);
+    assert.equal(maintainCalls, 0);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+    assert.equal(runtimeState.lastForcedPauseAt, 10_000);
+    assert.equal(runtimeState.pauseHoldUntil, 13_000);
+    assert.equal(
+      runtimeState.suppressedLocalEndPauseUrl,
+      "https://www.bilibili.com/video/BVshared?p=1",
+    );
+    assert.equal(runtimeState.suppressedLocalEndPauseUntil, 13_000);
+    assert.deepEqual(events, []);
+  } finally {
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not pause the sharer at the shared video end", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  let pauseCalls = 0;
+  let pauseHoldCalls = 0;
+  let maintainCalls = 0;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url: "https://www.bilibili.com/video/BVshared?p=1",
+      title: "Shared Video",
+      sharedByMemberId: "member-1",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 9_500,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {
+      maintainCalls += 1;
+    },
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {
+      pauseHoldCalls += 1;
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  dom.video.pause = () => {
+    pauseCalls += 1;
+    dom.video.paused = true;
+  };
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.video.paused = false;
+    dom.video.duration = 120;
+    dom.video.currentTime = 119.7;
+    dom.listeners.get("timeupdate")?.(new Event("timeupdate"));
+
+    assert.equal(pauseCalls, 0);
+    assert.equal(pauseHoldCalls, 0);
+    assert.equal(maintainCalls, 1);
+    assert.equal(runtimeState.intendedPlayState, "playing");
+  } finally {
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
 test("playback binding controller classifies pause as buffer when waiting fired recently", () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
