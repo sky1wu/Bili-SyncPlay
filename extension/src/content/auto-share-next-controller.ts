@@ -63,11 +63,27 @@ export function createAutoShareNextController(args: {
       pendingTimer = null;
       pendingNormalizedUrl = null;
       void requestAutoShare(pending).catch((error) => {
+        // The send threw after we marked the target as requested. Release the
+        // de-duplication marker so a later navigation back to the same target is
+        // not suppressed forever.
+        releaseRequestedMarker(pending);
         args.debugLog(
           `Auto-share next video failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       });
     }, delayMs);
+  }
+
+  /**
+   * Release the in-flight de-duplication marker when (and only when) it still
+   * points at this request's target. Guarding on the target prevents a stale
+   * request from clearing a newer navigation's marker, while ensuring the stale
+   * request never leaves its own target stuck in `lastRequestedNormalizedUrl`.
+   */
+  function releaseRequestedMarker(pending: PendingAutoShare): void {
+    if (lastRequestedNormalizedUrl === pending.targetNormalizedUrl) {
+      lastRequestedNormalizedUrl = null;
+    }
   }
 
   async function requestAutoShare(pending: PendingAutoShare): Promise<void> {
@@ -94,7 +110,11 @@ export function createAutoShareNextController(args: {
     // A newer navigation arrived while this request was in flight. Abandon the
     // stale request so its retry cannot cancel the newer pending timer and its
     // settlement cannot clear the newer navigation's de-duplication marker.
+    // Still release the marker this stale request set for its own target,
+    // otherwise it would suppress a future legitimate navigation back to that
+    // target for the rest of the tab's lifetime.
     if (pending.generation !== scheduleGeneration) {
+      releaseRequestedMarker(pending);
       return;
     }
 
@@ -125,9 +145,7 @@ export function createAutoShareNextController(args: {
     // the same target — e.g. the room returning to A and the sharer autoplaying
     // A→B again — can schedule a fresh auto-share instead of being suppressed
     // for the rest of the tab's lifetime.
-    if (lastRequestedNormalizedUrl === pending.targetNormalizedUrl) {
-      lastRequestedNormalizedUrl = null;
-    }
+    releaseRequestedMarker(pending);
   }
 
   function scheduleForNavigation(input: {
