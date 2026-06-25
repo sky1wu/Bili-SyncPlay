@@ -51,6 +51,10 @@ export function createNavigationController(args: {
       return;
     }
 
+    // The normalized video page the tab was showing *before* this navigation.
+    // Used to confirm an autoplay actually started from the room's shared video
+    // rather than from a local detour the user manually navigated to.
+    const previousNormalizedPageUrl = lastObservedNormalizedPageUrl;
     lastObservedPageUrl = nextPageUrl;
     lastObservedNormalizedPageUrl = nextNormalizedPageUrl;
     args.clearFestivalSnapshot();
@@ -111,8 +115,18 @@ export function createNavigationController(args: {
         args.runtimeState.localMemberId !== null &&
         args.runtimeState.activeSharedByMemberId ===
           args.runtimeState.localMemberId;
+      // Only treat this as a room-video autoplay when the tab actually
+      // autoplayed *from* the shared video. If the page before this navigation
+      // was a local detour (e.g. the sharer manually opened video X off the
+      // shared A, then X auto-advanced to Y), this is not the room advancing:
+      // auto-sharing Y with `previousSharedUrl=A` or pausing a non-sharer's own
+      // detour would both be wrong.
+      const navigatedFromSharedVideo =
+        previousNormalizedPageUrl !== null &&
+        previousNormalizedPageUrl === activeSharedUrl;
       const shouldTreatAsAutoplay =
         !hadRecentUserGesture &&
+        navigatedFromSharedVideo &&
         activeSharedUrl !== null &&
         nextNormalizedPageUrl !== null;
       const shouldPauseNonSharerAutoplay =

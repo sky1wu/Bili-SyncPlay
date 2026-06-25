@@ -514,16 +514,19 @@ export function createPlaybackBindingController(args: {
       }
 
       if (forcePauseOnNonSharedPage(video)) {
-        // `forcePauseOnNonSharedPage` only suppresses the broadcast; it does
-        // not stop the local element. For a non-sharer whose player autoplayed
-        // into the next episode while the navigated page had not resolved yet,
-        // the navigation controller armed a pause hold and recorded a paused
-        // intent. Once that delayed `play` finally fires we must actually pause,
-        // otherwise the non-sharer keeps watching the next episode while the
-        // room stays on the shared video. A genuine manual navigation to a
-        // non-shared page clears the pause hold, so this branch leaves it alone.
+        // `forcePauseOnNonSharedPage` only suppresses the broadcast; it does not
+        // stop the local element. A play with a recent user gesture is the
+        // user's own non-shared playback and is left to run (broadcast still
+        // suppressed). A play with no recent gesture is autoplay: for a
+        // non-sharer whose player autoplayed into the next episode we must
+        // actually pause it, otherwise it keeps playing while the room stays on
+        // the shared video. Gate on the absence of a recent gesture rather than
+        // on the pause hold still being active, because a slow SPA load/ad can
+        // delay the `play`/`playing` event past `initialRoomStatePauseHoldMs`,
+        // after which the expired hold would let the delayed autoplay slip
+        // through.
         if (
-          nowOf() < args.runtimeState.pauseHoldUntil &&
+          !hasRecentUserGesture() &&
           (args.runtimeState.intendedPlayState === "paused" ||
             args.runtimeState.intendedPlayState === "buffering")
         ) {

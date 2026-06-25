@@ -705,7 +705,7 @@ test("message controller reports a retryable failure when the page bridge still 
   assert.deepEqual(response, { ok: false });
 });
 
-test("message controller still authorizes auto-share next video while the sharer is briefly offline", async () => {
+test("message controller defers auto-share next video with a retryable failure while the sharer is offline", async () => {
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
     url: "https://www.bilibili.com/video/BV1xx411c7mD",
@@ -748,11 +748,13 @@ test("message controller still authorizes auto-share next video while the sharer
     },
   );
 
-  // While offline the share is still authorized and handed to
-  // queueOrSendSharedVideo, which queues it for delivery on reconnect.
-  assert.deepEqual(harness.calls.getVideoPayloadFromTab, [senderTab]);
-  assert.equal(harness.calls.queueOrSendSharedVideo.length, 1);
-  assert.deepEqual(response, { ok: true });
+  // While offline the local room state may be stale, so the share must NOT be
+  // queued (queuing would let it overwrite the room on reconnect). It is
+  // deferred with a retryable failure for the content controller to retry once
+  // reconnected against authoritative room state.
+  assert.deepEqual(harness.calls.getVideoPayloadFromTab, []);
+  assert.equal(harness.calls.queueOrSendSharedVideo.length, 0);
+  assert.deepEqual(response, { ok: false });
 });
 
 test("message controller skips auto-share next video when the room moved past the scheduled shared video", async () => {

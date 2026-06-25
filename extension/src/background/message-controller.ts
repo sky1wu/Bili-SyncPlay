@@ -103,10 +103,9 @@ export function createMessageController(args: {
   ): boolean {
     const sharedByMemberId =
       args.roomSessionState.roomState?.sharedVideo?.sharedByMemberId;
-    // Deliberately not gated on `connectionState.connected`: when the sharer is
-    // briefly offline (reconnecting) we still want to authorize the share and
-    // let `queueOrSendSharedVideo` queue it for delivery on reconnect, rather
-    // than silently skipping and leaving the room stuck on the old video.
+    // Authorization is about *who* may auto-share, not connectivity. The handler
+    // separately defers (with a retryable failure) while disconnected so a stale
+    // queued share cannot overwrite the room on reconnect.
     return (
       args.roomSessionState.roomCode !== null &&
       args.roomSessionState.memberToken !== null &&
@@ -255,6 +254,21 @@ export function createMessageController(args: {
       case "content:auto-share-next-video": {
         if (!canAutoShareNextVideoFromSender(sender)) {
           sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
+        // While disconnected the local room state may be stale, and queuing the
+        // share to flush on reconnect would let it overwrite whatever another
+        // member shared in the meantime (the `room:joined` path flushes pending
+        // shares before the fresh `room:state` arrives). Defer with a retryable
+        // failure so the content controller retries once reconnected, when the
+        // room check below can run against authoritative state.
+        if (!args.connectionState.connected) {
+          args.diagnosticsController.log(
+            "content",
+            "Auto-share next video deferred: offline, will retry after reconnect",
+          );
+          sendResponse({ ok: false } satisfies ShareCurrentVideoResponse);
           return;
         }
 

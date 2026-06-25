@@ -310,6 +310,66 @@ test("navigation controller does not auto-share a recent user-initiated navigati
   }
 });
 
+test("navigation controller does not auto-share an autoplay that started from a local detour", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+  // A recent gesture for the first (manual) hop off the shared video.
+  runtimeState.lastUserGestureAt = 9_900;
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  const autoShareRequests: Array<{
+    previousSharedUrl: string;
+    nextNormalizedPageUrl: string;
+  }> = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    // Manual detour off the shared video A → X (carries a gesture, so it is not
+    // auto-shared but it does become the "previous" page).
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+    assert.deepEqual(autoShareRequests, []);
+
+    // X autoplays on to Y with no gesture. Because the page before this hop was
+    // the local detour X (not the shared video A), it must NOT be auto-shared.
+    currentUrl = "https://www.bilibili.com/video/BV1NewerVideo";
+    windowHarness.intervals[0]?.();
+
+    assert.deepEqual(autoShareRequests, []);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller pauses non-sharer autoplay to a different video", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();

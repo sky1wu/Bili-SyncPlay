@@ -47,6 +47,7 @@ export function createAutoShareNextController(args: {
 
   let pendingTimer: number | null = null;
   let pendingNormalizedUrl: string | null = null;
+  let pendingPreviousSharedUrl: string | null = null;
   let scheduleGeneration = 0;
 
   function clearPendingTimer(): void {
@@ -59,9 +60,11 @@ export function createAutoShareNextController(args: {
   function scheduleRequest(pending: PendingAutoShare, delayMs: number): void {
     clearPendingTimer();
     pendingNormalizedUrl = pending.targetNormalizedUrl;
+    pendingPreviousSharedUrl = pending.previousSharedUrl;
     pendingTimer = window.setTimeout(() => {
       pendingTimer = null;
       pendingNormalizedUrl = null;
+      pendingPreviousSharedUrl = null;
       void requestAutoShare(pending).catch((error) => {
         args.debugLog(
           `Auto-share next video failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -126,12 +129,19 @@ export function createAutoShareNextController(args: {
     if (input.previousSharedUrl === input.nextNormalizedPageUrl) {
       return;
     }
-    // Coalesce only with a still-pending timer for the exact same target so
-    // rapid duplicate navigation signals do not keep pushing back the settle
-    // deadline. Once the timer has fired (the request is in flight), a fresh
-    // navigation — including one back to the same target — supersedes it via the
-    // generation bump below instead of being dropped.
-    if (pendingNormalizedUrl === input.nextNormalizedPageUrl) {
+    // Coalesce only with a still-pending timer for the exact same transition —
+    // same target *and* same source shared video — so rapid duplicate
+    // navigation signals do not keep pushing back the settle deadline. A new
+    // navigation to the same target but from a different `previousSharedUrl`
+    // (e.g. the room moved A→C and the sharer autoplays C→B while an A→B retry
+    // was still pending) is a distinct legitimate advance and must supersede the
+    // old pending request via the generation bump below, not be dropped. Once
+    // the timer has fired (the request is in flight), any fresh navigation also
+    // supersedes it through the same generation bump.
+    if (
+      pendingNormalizedUrl === input.nextNormalizedPageUrl &&
+      pendingPreviousSharedUrl === input.previousSharedUrl
+    ) {
       return;
     }
 
@@ -150,6 +160,7 @@ export function createAutoShareNextController(args: {
   function destroy(): void {
     clearPendingTimer();
     pendingNormalizedUrl = null;
+    pendingPreviousSharedUrl = null;
     // Invalidate any in-flight request so it cannot reschedule after teardown.
     scheduleGeneration += 1;
   }

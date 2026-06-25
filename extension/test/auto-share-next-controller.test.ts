@@ -424,6 +424,61 @@ test("auto-share next controller re-sends the same target after a superseded req
   }
 });
 
+test("auto-share next controller supersedes a pending request when the same target arrives from a different source video", async () => {
+  const windowHarness = installWindowStub();
+  const currentUrl = "https://www.bilibili.com/video/BV1NextVideo";
+  const sentMessages: Array<{
+    type: string;
+    payload: { previousSharedUrl: string; targetNormalizedUrl: string };
+  }> = [];
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(
+        message as {
+          type: string;
+          payload: { previousSharedUrl: string; targetNormalizedUrl: string };
+        },
+      );
+      return { ok: true };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    // A→B is scheduled and its settle timer is still pending.
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1VideoA",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+    assert.equal(windowHarness.timers.size, 1);
+
+    // The room advanced A→C and the sharer autoplays C→B (same target B, new
+    // source C). This must replace the pending A→B request, not be dropped as a
+    // duplicate — otherwise the stale A→B would run and the background would
+    // reject it (room no longer on A), leaving the room behind on C.
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1VideoC",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+    assert.equal(windowHarness.timers.size, 1);
+
+    windowHarness.runTimers();
+    await Promise.resolve();
+
+    assert.equal(sentMessages.length, 1);
+    assert.equal(
+      sentMessages[0].payload.previousSharedUrl,
+      "https://www.bilibili.com/video/BV1VideoC",
+    );
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
 test("auto-share next controller re-shares the same target after the previous request settled", async () => {
   const windowHarness = installWindowStub();
   const currentUrl = "https://www.bilibili.com/video/BV1NextVideo";
