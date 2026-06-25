@@ -310,6 +310,59 @@ test("navigation controller does not auto-share a recent user-initiated navigati
   }
 });
 
+test("navigation controller cancels a pending auto-share on a manual non-autoplay navigation", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+  // A recent user gesture marks this as a manual detour, not an autoplay.
+  runtimeState.lastUserGestureAt = 9_800;
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  const autoShareRequests: unknown[] = [];
+  let cancelCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    cancelAutoShareNextVideo: () => {
+      cancelCalls += 1;
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+
+    // Any genuine navigation cancels a pending auto-share; a manual detour must
+    // not re-schedule one.
+    assert.equal(cancelCalls, 1);
+    assert.deepEqual(autoShareRequests, []);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller marks a manual navigation to a non-shared video as explicit local playback", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();

@@ -77,6 +77,7 @@ export function createMessageController(args: {
     openSharedVideoFromPopup(): Promise<void>;
     isActiveSharedTab(tabId?: number, videoUrl?: string | null): boolean;
     isRememberedSharedSourceTab(tabId?: number): boolean;
+    canReclaimSharedSourceTab(tabId?: number): boolean;
     reclaimSharedSourceTabIfUnclaimed(tabId?: number): boolean;
   };
   clockController: {
@@ -281,14 +282,20 @@ export function createMessageController(args: {
         // re-checking, the stale timer would overwrite the room back to the
         // previous video's next episode.
         const isRoomStillOnScheduledVideo = (): boolean => {
-          const sharedVideoUrl =
-            args.roomSessionState.roomState?.sharedVideo?.url ?? null;
+          const sharedVideo = args.roomSessionState.roomState?.sharedVideo;
+          const sharedVideoUrl = sharedVideo?.url ?? null;
           return (
             sharedVideoUrl !== null &&
             areSharedVideoUrlsEqual(
               sharedVideoUrl,
               message.payload.previousSharedUrl,
-            )
+            ) &&
+            // The local member must still own the share. If another member
+            // re-shared the same URL during an await, the URL is unchanged but
+            // `sharedByMemberId` is now someone else's — this stale autoplay must
+            // not override the new sharer's freshly acquired control.
+            args.roomSessionState.memberId !== null &&
+            sharedVideo?.sharedByMemberId === args.roomSessionState.memberId
           );
         };
 
@@ -304,12 +311,16 @@ export function createMessageController(args: {
         // The auto-share must come from the remembered shared source tab. After
         // an MV3 service worker restart `sharedTabId` is lost (it is not in the
         // persisted snapshot) while room state is restored, so a genuine source
-        // tab would be silently skipped. Since the sender is the sharer and the
-        // room is confirmed still on the scheduled video above, re-claim the
-        // binding when it is unset rather than dropping the share.
+        // tab would be silently skipped. Admit an as-yet-unbound binding here,
+        // but defer actually re-claiming it until the payload below validates the
+        // scheduled next video: claiming up front would let a tab whose payload
+        // fails or resolves a stale URL permanently steal the binding from the
+        // real source tab, blocking all later auto-shares and playback updates.
+        const isRememberedSourceTab =
+          args.tabController.isRememberedSharedSourceTab(sender.tab?.id);
         if (
-          !args.tabController.isRememberedSharedSourceTab(sender.tab?.id) &&
-          !args.tabController.reclaimSharedSourceTabIfUnclaimed(sender.tab?.id)
+          !isRememberedSourceTab &&
+          !args.tabController.canReclaimSharedSourceTab(sender.tab?.id)
         ) {
           args.diagnosticsController.log(
             "content",
@@ -363,6 +374,15 @@ export function createMessageController(args: {
           );
           sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
           return;
+        }
+
+        // Payload, target, and room are all validated; only now claim the
+        // source-tab binding if it was lost (MV3 restart). Re-claiming here —
+        // not before reading the tab — guarantees a tab that failed validation
+        // never strands the binding away from the real source tab. No-op when
+        // already bound (to this tab or, harmlessly, to another).
+        if (!isRememberedSourceTab) {
+          args.tabController.reclaimSharedSourceTabIfUnclaimed(sender.tab?.id);
         }
 
         const shareResult = await args.shareController.queueOrSendSharedVideo(

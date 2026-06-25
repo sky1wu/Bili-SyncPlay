@@ -593,3 +593,73 @@ test("auto-share next controller deduplicates repeated requests for the same tar
     windowHarness.restore();
   }
 });
+
+test("auto-share next controller cancels a pending request when navigation is not autoplay", () => {
+  const windowHarness = installWindowStub();
+  const sentMessages: unknown[] = [];
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      return { ok: true };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+    assert.equal(windowHarness.timers.size, 1);
+
+    // A manual detour back to the same target cancels the pending settle timer
+    // so it cannot fire and auto-share without the manual confirmation.
+    controller.cancelPending();
+    assert.equal(windowHarness.timers.size, 0);
+
+    windowHarness.runTimers();
+    assert.deepEqual(sentMessages, []);
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
+test("auto-share next controller invalidates an in-flight request after cancelPending", async () => {
+  const windowHarness = installWindowStub();
+  const sentMessages: unknown[] = [];
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      // The page bridge is not ready: without cancellation this would schedule a
+      // retry. cancelPending (a manual navigation) must abandon it instead.
+      return { ok: false };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+    windowHarness.runTimers();
+    // Cancel while the request is in flight (before its response resolves).
+    controller.cancelPending();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The stale request abandons itself: no retry timer is armed.
+    assert.equal(sentMessages.length, 1);
+    assert.equal(windowHarness.timers.size, 0);
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});

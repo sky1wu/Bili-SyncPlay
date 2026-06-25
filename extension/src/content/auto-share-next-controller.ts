@@ -8,6 +8,13 @@ export interface AutoShareNextController {
     previousSharedUrl: string;
     nextNormalizedPageUrl: string;
   }): void;
+  /**
+   * Invalidate any pending/in-flight auto-share. Called when a fresh navigation
+   * is not itself a sharer autoplay (e.g. a manual detour, even back to the same
+   * target) so a stale settle timer cannot later fire and bypass the manual
+   * share confirmation.
+   */
+  cancelPending(): void;
   destroy(): void;
 }
 
@@ -170,16 +177,23 @@ export function createAutoShareNextController(args: {
     );
   }
 
-  function destroy(): void {
+  function cancelPending(): void {
     clearPendingTimer();
     pendingNormalizedUrl = null;
     pendingPreviousSharedUrl = null;
-    // Invalidate any in-flight request so it cannot reschedule after teardown.
+    // Bump the generation so any in-flight request abandons itself instead of
+    // rescheduling — a manual/non-autoplay navigation must fully invalidate a
+    // pending auto-share, including one already awaiting the background.
     scheduleGeneration += 1;
+  }
+
+  function destroy(): void {
+    cancelPending();
   }
 
   return {
     scheduleForNavigation,
+    cancelPending,
     destroy,
   };
 }

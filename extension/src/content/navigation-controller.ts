@@ -27,6 +27,7 @@ export function createNavigationController(args: {
     previousSharedUrl: string;
     nextNormalizedPageUrl: string;
   }) => void;
+  cancelAutoShareNextVideo?: () => void;
   debugLog: (message: string) => void;
   getNow?: () => number;
 }): NavigationController {
@@ -65,6 +66,12 @@ export function createNavigationController(args: {
     args.clearFestivalSnapshot();
     args.runtimeState.pendingPlaybackApplication = null;
     args.runtimeState.explicitNonSharedPlaybackUrl = null;
+    // Any genuine navigation invalidates an auto-share scheduled by an earlier
+    // autoplay. A manual detour — even one that returns to the same target — must
+    // not let a stale settle timer fire and auto-share without the manual
+    // confirmation. The local-sharer autoplay branch below re-schedules when this
+    // navigation is itself a sharer autoplay-next.
+    args.cancelAutoShareNextVideo?.();
 
     if (
       !args.runtimeState.activeRoomCode ||

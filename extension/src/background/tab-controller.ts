@@ -8,6 +8,7 @@ export interface TabController {
   rememberSharedSourceTab(tabId: number | undefined, url: string): void;
   isActiveSharedTab(tabId: number | undefined, url: string): boolean;
   isRememberedSharedSourceTab(tabId: number | undefined): boolean;
+  canReclaimSharedSourceTab(tabId: number | undefined): boolean;
   reclaimSharedSourceTabIfUnclaimed(tabId: number | undefined): boolean;
   ensureSharedVideoOpen(): Promise<void>;
   openSharedVideoFromPopup(): Promise<void>;
@@ -80,6 +81,15 @@ export function createTabController(args: {
    * the binding. Callers must first confirm the sender is the room's sharer and
    * the room is still on the scheduled video.
    */
+  // Whether `reclaimSharedSourceTabIfUnclaimed` would succeed for this tab right
+  // now, without mutating the binding. The handler uses this to admit an
+  // auto-share from an as-yet-unbound source tab (after an MV3 restart) while
+  // deferring the actual re-claim until the payload validates the scheduled
+  // next video — so a tab that never validates cannot strand the binding.
+  function canReclaimSharedSourceTab(tabId: number | undefined): boolean {
+    return tabId !== undefined && args.shareState.sharedTabId === null;
+  }
+
   function reclaimSharedSourceTabIfUnclaimed(
     tabId: number | undefined,
   ): boolean {
@@ -199,6 +209,7 @@ export function createTabController(args: {
     rememberSharedSourceTab,
     isActiveSharedTab,
     isRememberedSharedSourceTab,
+    canReclaimSharedSourceTab,
     reclaimSharedSourceTabIfUnclaimed,
     ensureSharedVideoOpen,
     openSharedVideoFromPopup,

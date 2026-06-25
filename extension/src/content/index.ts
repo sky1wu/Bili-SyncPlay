@@ -150,6 +150,7 @@ const navigationController = createNavigationController({
   activatePauseHold,
   scheduleAutoShareNextVideo: (input) =>
     autoShareNextController.scheduleForNavigation(input),
+  cancelAutoShareNextVideo: () => autoShareNextController.cancelPending(),
   debugLog,
 });
 const pageShareButtonController = createPageShareButtonController({

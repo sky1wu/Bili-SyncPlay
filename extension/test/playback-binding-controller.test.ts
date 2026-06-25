@@ -1866,3 +1866,74 @@ test("playback binding controller re-broadcasts paused after buffer-pause upgrad
     dom.restore();
   }
 });
+
+test("playback binding controller suppresses the natural-end pause for a non-sharer", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared";
+  runtimeState.pendingRoomStateHydration = false;
+  // The local member is NOT the sharer, so its end-of-video pause must not be
+  // broadcast (it would flip the room to paused and disrupt the sharer's
+  // autoplay-next advance).
+  runtimeState.localMemberId = "member-2";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  const events: string[] = [];
+  let pauseCalls = 0;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared",
+      url: "https://www.bilibili.com/video/BVshared",
+      title: "Shared Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      events.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 5_000,
+  });
+
+  dom.video.pause = () => {
+    pauseCalls += 1;
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+
+  try {
+    controller.attachPlaybackListeners();
+    // The browser dispatches `pause` (with `ended` already true) right before
+    // `ended` at the natural end of the shared video.
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+
+    await Promise.resolve();
+
+    // The end-pause is suppressed and the end-hold protection is armed before any
+    // broadcast leaks out.
+    assert.deepEqual(events, []);
+    assert.equal(pauseCalls, 1);
+    assert.equal(
+      runtimeState.suppressedLocalEndPauseUrl,
+      "https://www.bilibili.com/video/BVshared",
+    );
+    assert.equal(runtimeState.intendedPlayState, "paused");
+  } finally {
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});

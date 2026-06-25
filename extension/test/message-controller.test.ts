@@ -18,6 +18,7 @@ function createControllerHarness(
     };
     isActiveSharedTab?: boolean;
     isRememberedSharedSourceTab?: boolean;
+    canReclaimSharedSourceTab?: boolean;
     reclaimSharedSourceTabIfUnclaimed?: boolean;
     tabVideoPayloadResult?: {
       ok: boolean;
@@ -33,6 +34,7 @@ function createControllerHarness(
       error?: string;
     };
     queueOrSendSharedVideoResult?: { ok: true } | { ok: false; error: string };
+    onReadTabPayload?: () => void;
   } = {},
 ) {
   const calls = {
@@ -57,6 +59,7 @@ function createControllerHarness(
     >,
     openSharedVideoFromPopup: 0,
     updateServerUrl: [] as string[],
+    reclaimSharedSourceTab: [] as Array<number | undefined>,
   };
   const connectionState = overrides.connectionState ?? {
     connected: true,
@@ -133,6 +136,9 @@ function createControllerHarness(
       },
       async getVideoPayloadFromTab(tab) {
         calls.getVideoPayloadFromTab.push(tab);
+        // Lets a test simulate room state changing during this await (the real
+        // implementation yields the event loop here).
+        overrides.onReadTabPayload?.();
         if (overrides.tabVideoPayloadResult) {
           return overrides.tabVideoPayloadResult;
         }
@@ -164,7 +170,11 @@ function createControllerHarness(
       isRememberedSharedSourceTab() {
         return overrides.isRememberedSharedSourceTab ?? false;
       },
-      reclaimSharedSourceTabIfUnclaimed() {
+      canReclaimSharedSourceTab() {
+        return overrides.canReclaimSharedSourceTab ?? false;
+      },
+      reclaimSharedSourceTabIfUnclaimed(tabId?: number) {
+        calls.reclaimSharedSourceTab.push(tabId);
         return overrides.reclaimSharedSourceTabIfUnclaimed ?? false;
       },
     },
@@ -560,6 +570,7 @@ test("message controller re-claims the shared source tab after a worker restart 
     // not yet remembered, but it can be re-claimed since the sender is the
     // sharer and the room is still on the scheduled video.
     isRememberedSharedSourceTab: false,
+    canReclaimSharedSourceTab: true,
     reclaimSharedSourceTabIfUnclaimed: true,
     roomSessionState: {
       roomCode: "ROOM01",
@@ -594,9 +605,130 @@ test("message controller re-claims the shared source tab after a worker restart 
     },
   );
 
-  // The re-claimed source tab is allowed to advance the room.
+  // The re-claimed source tab is allowed to advance the room, and the binding is
+  // only claimed after the tab payload validated against the scheduled target.
   assert.deepEqual(harness.calls.getVideoPayloadFromTab, [senderTab]);
+  assert.deepEqual(harness.calls.reclaimSharedSourceTab, [senderTab.id]);
   assert.equal(harness.calls.queueOrSendSharedVideo.length, 1);
+  assert.deepEqual(response, { ok: true });
+});
+
+test("message controller does not claim the source tab when the auto-share payload fails to validate", async () => {
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    title: "Old Video",
+    sharedByMemberId: "member-1",
+  };
+  const harness = createControllerHarness({
+    // Worker restart lost the binding (re-claimable), but the page bridge still
+    // resolves the previous episode mid-SPA — the binding must NOT be claimed by
+    // this not-yet-validated tab, or the real source tab could never re-claim it.
+    isRememberedSharedSourceTab: false,
+    canReclaimSharedSourceTab: true,
+    reclaimSharedSourceTabIfUnclaimed: true,
+    tabVideoPayloadResult: {
+      ok: true,
+      payload: {
+        video: {
+          videoId: "BV1xx411c7mD",
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          title: "Old Video",
+        },
+        playback: null,
+      },
+      tabId: 456,
+    },
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo,
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  // Payload resolved the previous video, not the scheduled target: report a
+  // retryable failure and leave the binding unclaimed.
+  assert.deepEqual(harness.calls.reclaimSharedSourceTab, []);
+  assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
+  assert.deepEqual(response, { ok: false });
+});
+
+test("message controller skips auto-share when another member re-shared the same URL during the tab read", async () => {
+  let response: unknown;
+
+  // While reading the tab, another member re-shares the SAME URL: the URL is
+  // unchanged but ownership moves to member-2, so this stale autoplay must not
+  // overwrite the new sharer's control.
+  const racingHarness = createControllerHarness({
+    isRememberedSharedSourceTab: true,
+    onReadTabPayload: () => {
+      if (racingHarness.roomSessionState.roomState?.sharedVideo) {
+        racingHarness.roomSessionState.roomState.sharedVideo.sharedByMemberId =
+          "member-2";
+      }
+    },
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo: {
+          videoId: "BV1xx411c7mD",
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          title: "Old Video",
+          sharedByMemberId: "member-1",
+        },
+        playback: null,
+        members: [
+          { id: "member-1", name: "Alice" },
+          { id: "member-2", name: "Bob" },
+        ],
+      },
+    },
+  });
+
+  await racingHarness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  // The tab was read, but the post-await ownership re-check fails, so the share
+  // is dropped without clobbering the new sharer.
+  assert.equal(racingHarness.calls.getVideoPayloadFromTab.length, 1);
+  assert.deepEqual(racingHarness.calls.queueOrSendSharedVideo, []);
   assert.deepEqual(response, { ok: true });
 });
 

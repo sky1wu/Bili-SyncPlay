@@ -40,3 +40,19 @@ test("reclaimSharedSourceTabIfUnclaimed ignores an undefined tab id", () => {
   assert.equal(controller.reclaimSharedSourceTabIfUnclaimed(undefined), false);
   assert.equal(shareState.sharedTabId, null);
 });
+
+test("canReclaimSharedSourceTab reports reclaimability without mutating the binding", () => {
+  const { controller, shareState } = createController();
+
+  shareState.sharedTabId = null;
+  assert.equal(controller.canReclaimSharedSourceTab(42), true);
+  // The probe must not claim the binding — the real claim happens later, only
+  // after the auto-share payload validates.
+  assert.equal(shareState.sharedTabId, null);
+
+  assert.equal(controller.canReclaimSharedSourceTab(undefined), false);
+
+  shareState.sharedTabId = 7;
+  assert.equal(controller.canReclaimSharedSourceTab(42), false);
+  assert.equal(shareState.sharedTabId, 7);
+});

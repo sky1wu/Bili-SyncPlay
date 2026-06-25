@@ -562,6 +562,14 @@ export function createPlaybackBindingController(args: {
       },
       onPause: () => {
         const currentVideo = args.getSharedVideo();
+        // At a natural end the browser dispatches `pause` immediately before
+        // `ended`. Arm the non-sharer end-hold here (idempotent with the `ended`
+        // handler) and skip the broadcast: otherwise this end `pause` is sent to
+        // the room before `onEnded` establishes the suppression marker, flipping
+        // the room to paused and disrupting the sharer's autoplay-next advance.
+        if (video.ended && holdNonSharerAtSharedVideoEnd(video)) {
+          return;
+        }
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "pause");
         }
