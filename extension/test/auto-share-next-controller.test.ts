@@ -167,6 +167,50 @@ test("auto-share next controller retries when the background reports the page is
   }
 });
 
+test("auto-share next controller keeps retrying offline deferrals without consuming the attempt budget", async () => {
+  const windowHarness = installWindowStub();
+  const sentMessages: unknown[] = [];
+  const responses = [
+    { ok: false, deferred: true },
+    { ok: false, deferred: true },
+    { ok: false, deferred: true },
+    { ok: true },
+  ];
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    retryDelayMs: 300,
+    maxAttempts: 2,
+    getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      return responses.shift() ?? { ok: true };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+
+    for (let i = 0; i < 5; i += 1) {
+      windowHarness.runTimers();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    // Despite maxAttempts=2, the three offline deferrals did not burn the
+    // page-bridge attempt budget, so the eventual successful share still went
+    // through once the sharer reconnected — 4 sends total.
+    assert.equal(sentMessages.length, 4);
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
 test("auto-share next controller stops retrying after the maximum attempts", async () => {
   const windowHarness = installWindowStub();
   const sentMessages: unknown[] = [];

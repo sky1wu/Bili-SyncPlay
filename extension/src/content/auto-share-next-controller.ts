@@ -102,6 +102,19 @@ export function createAutoShareNextController(args: {
     }
 
     if (response?.ok === false) {
+      // Connectivity deferral: the sharer is reconnecting and the background
+      // cannot safely act on stale room state yet. Keep retrying *without*
+      // consuming the short page-bridge attempt budget — a WebSocket reconnect
+      // can easily take longer than maxAttempts × retryDelayMs, and no separate
+      // event re-triggers this auto-share afterwards, so spending the budget
+      // here would strand the room on the old video.
+      if (response.deferred) {
+        scheduleRequest({ ...pending }, retryDelayMs);
+        args.debugLog(
+          "Auto-share next video deferred while offline, will retry after reconnect",
+        );
+        return;
+      }
       // The background reports failure when the page bridge has not resolved the
       // scheduled next video yet (a slow SPA transition) or when sharing
       // transiently failed. In both cases the room is still stuck on the

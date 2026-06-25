@@ -55,6 +55,11 @@ export function createNavigationController(args: {
     // Used to confirm an autoplay actually started from the room's shared video
     // rather than from a local detour the user manually navigated to.
     const previousNormalizedPageUrl = lastObservedNormalizedPageUrl;
+    // The local video the user was explicitly watching before this navigation
+    // (if any). Captured before the reset below so an explicit local-playback
+    // intent can be transferred across a detour that auto-advances.
+    const previousExplicitNonSharedPlaybackUrl =
+      args.runtimeState.explicitNonSharedPlaybackUrl;
     lastObservedPageUrl = nextPageUrl;
     lastObservedNormalizedPageUrl = nextNormalizedPageUrl;
     args.clearFestivalSnapshot();
@@ -131,6 +136,19 @@ export function createNavigationController(args: {
         nextNormalizedPageUrl !== null;
       const shouldPauseNonSharerAutoplay =
         shouldTreatAsAutoplay && !isLocalSharedSource;
+      // User-driven local browsing that lands on a non-shared video: either the
+      // user manually navigated here (recent gesture), or a local detour the
+      // user was already explicitly watching auto-advanced to the next video.
+      // Mark the target as explicit local playback so the paused-room autoplay
+      // guard lets the user watch it — the navigation reset above clears
+      // `lastUserGestureAt`, so without this the later `play` event would look
+      // like an autoplay and be paused.
+      const isUserDrivenLocalNavigation =
+        !shouldTreatAsAutoplay &&
+        (hadRecentUserGesture ||
+          (previousNormalizedPageUrl !== null &&
+            previousNormalizedPageUrl ===
+              previousExplicitNonSharedPlaybackUrl));
 
       if (shouldTreatAsAutoplay && isLocalSharedSource) {
         args.runtimeState.explicitNonSharedPlaybackUrl = nextNormalizedPageUrl;
@@ -147,6 +165,8 @@ export function createNavigationController(args: {
           args.debugLog(`Suppressed non-sharer autoplay to ${nextPageUrl}`);
           args.pauseVideo(video);
         }
+      } else if (isUserDrivenLocalNavigation) {
+        args.runtimeState.explicitNonSharedPlaybackUrl = nextNormalizedPageUrl;
       }
       // For manual non-shared navigation and local-sharer autoplay, clear any
       // pause hold inherited from the previously shared video. For non-sharer

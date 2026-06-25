@@ -8,6 +8,7 @@ export interface TabController {
   rememberSharedSourceTab(tabId: number | undefined, url: string): void;
   isActiveSharedTab(tabId: number | undefined, url: string): boolean;
   isRememberedSharedSourceTab(tabId: number | undefined): boolean;
+  reclaimSharedSourceTabIfUnclaimed(tabId: number | undefined): boolean;
   ensureSharedVideoOpen(): Promise<void>;
   openSharedVideoFromPopup(): Promise<void>;
 }
@@ -69,6 +70,28 @@ export function createTabController(args: {
 
   function isRememberedSharedSourceTab(tabId: number | undefined): boolean {
     return tabId !== undefined && args.shareState.sharedTabId === tabId;
+  }
+
+  /**
+   * Re-claim the shared source tab when the binding is currently unset (e.g. an
+   * MV3 service worker restart dropped the in-memory `sharedTabId` while room
+   * state was restored). Only claims an unbound slot — if `sharedTabId` already
+   * points at a different tab this is a no-op so a non-source tab cannot hijack
+   * the binding. Callers must first confirm the sender is the room's sharer and
+   * the room is still on the scheduled video.
+   */
+  function reclaimSharedSourceTabIfUnclaimed(
+    tabId: number | undefined,
+  ): boolean {
+    if (tabId === undefined || args.shareState.sharedTabId !== null) {
+      return false;
+    }
+    args.shareState.sharedTabId = tabId;
+    args.log(
+      "background",
+      `Re-claimed shared source tab=${tabId} after a lost binding`,
+    );
+    return true;
   }
 
   async function ensureSharedVideoOpen(): Promise<void> {
@@ -176,6 +199,7 @@ export function createTabController(args: {
     rememberSharedSourceTab,
     isActiveSharedTab,
     isRememberedSharedSourceTab,
+    reclaimSharedSourceTabIfUnclaimed,
     ensureSharedVideoOpen,
     openSharedVideoFromPopup,
   };

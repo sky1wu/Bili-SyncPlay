@@ -310,6 +310,70 @@ test("navigation controller does not auto-share a recent user-initiated navigati
   }
 });
 
+test("navigation controller marks a manual navigation to a non-shared video as explicit local playback", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-2";
+  // The room video is paused and the user clicks an in-site link to a local
+  // video (a recent gesture).
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.lastUserGestureAt = 9_900;
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let pauseCalls = 0;
+  const autoShareRequests: Array<{
+    previousSharedUrl: string;
+    nextNormalizedPageUrl: string;
+  }> = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    windowHarness.intervals[0]?.();
+
+    // It is not auto-shared (manual) and the non-sharer is not force-paused; the
+    // target is recorded as explicit local playback so the user can watch it.
+    assert.deepEqual(autoShareRequests, []);
+    assert.equal(pauseCalls, 0);
+    assert.equal(
+      runtimeState.explicitNonSharedPlaybackUrl,
+      "https://www.bilibili.com/video/BV1Em421N7uU",
+    );
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller does not auto-share an autoplay that started from a local detour", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();

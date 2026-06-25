@@ -77,6 +77,7 @@ export function createMessageController(args: {
     openSharedVideoFromPopup(): Promise<void>;
     isActiveSharedTab(tabId?: number, videoUrl?: string | null): boolean;
     isRememberedSharedSourceTab(tabId?: number): boolean;
+    reclaimSharedSourceTabIfUnclaimed(tabId?: number): boolean;
   };
   clockController: {
     compensateRoomState(state: RoomState): RoomState;
@@ -98,20 +99,18 @@ export function createMessageController(args: {
     await args.notifyPageShareButtonSettings();
   }
 
-  function canAutoShareNextVideoFromSender(
-    sender: chrome.runtime.MessageSender,
-  ): boolean {
+  function canAutoShareNextVideoFromSender(): boolean {
     const sharedByMemberId =
       args.roomSessionState.roomState?.sharedVideo?.sharedByMemberId;
-    // Authorization is about *who* may auto-share, not connectivity. The handler
-    // separately defers (with a retryable failure) while disconnected so a stale
-    // queued share cannot overwrite the room on reconnect.
+    // Identity check only: the sender must be the room's current sharer. The
+    // source-tab binding is verified separately in the handler (after the room
+    // check) so it can be re-claimed when an MV3 worker restart lost it. This is
+    // also deliberately not gated on connectivity — the handler defers offline.
     return (
       args.roomSessionState.roomCode !== null &&
       args.roomSessionState.memberToken !== null &&
       args.roomSessionState.memberId !== null &&
-      sharedByMemberId === args.roomSessionState.memberId &&
-      args.tabController.isRememberedSharedSourceTab(sender.tab?.id)
+      sharedByMemberId === args.roomSessionState.memberId
     );
   }
 
@@ -252,7 +251,7 @@ export function createMessageController(args: {
         return;
       }
       case "content:auto-share-next-video": {
-        if (!canAutoShareNextVideoFromSender(sender)) {
+        if (!canAutoShareNextVideoFromSender()) {
           sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
           return;
         }
@@ -268,7 +267,10 @@ export function createMessageController(args: {
             "content",
             "Auto-share next video deferred: offline, will retry after reconnect",
           );
-          sendResponse({ ok: false } satisfies ShareCurrentVideoResponse);
+          sendResponse({
+            ok: false,
+            deferred: true,
+          } satisfies ShareCurrentVideoResponse);
           return;
         }
 
@@ -294,6 +296,24 @@ export function createMessageController(args: {
           args.diagnosticsController.log(
             "content",
             "Auto-share next video skipped: room moved past the scheduled shared video",
+          );
+          sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
+        // The auto-share must come from the remembered shared source tab. After
+        // an MV3 service worker restart `sharedTabId` is lost (it is not in the
+        // persisted snapshot) while room state is restored, so a genuine source
+        // tab would be silently skipped. Since the sender is the sharer and the
+        // room is confirmed still on the scheduled video above, re-claim the
+        // binding when it is unset rather than dropping the share.
+        if (
+          !args.tabController.isRememberedSharedSourceTab(sender.tab?.id) &&
+          !args.tabController.reclaimSharedSourceTabIfUnclaimed(sender.tab?.id)
+        ) {
+          args.diagnosticsController.log(
+            "content",
+            "Auto-share next video skipped: not from the remembered shared source tab",
           );
           sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
           return;
