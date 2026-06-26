@@ -175,6 +175,12 @@ export function createSocketController(args: {
       args.log("background", "Socket connected");
       args.onOpen();
       if (args.roomSessionState.pendingCreateRoom) {
+        // Establishing/re-establishing a session: the cached room state is not
+        // authoritative until the server replies with a fresh `room:state`.
+        // Mark it so auto-share-next defers across the handshake window
+        // (this `open` precedes the `room:joined`/`room:created` that arm the
+        // bootstrap wait). Cleared once `room:state` lands.
+        args.roomSessionState.awaitingFreshRoomState = true;
         args.roomSessionState.pendingCreateRoom = false;
         args.sendToServer({
           type: "room:create",
@@ -188,6 +194,7 @@ export function createSocketController(args: {
         args.roomSessionState.pendingJoinToken &&
         !args.roomSessionState.pendingJoinRequestSent
       ) {
+        args.roomSessionState.awaitingFreshRoomState = true;
         args.sendJoinRequest(
           args.roomSessionState.pendingJoinRoomCode,
           args.roomSessionState.pendingJoinToken,
@@ -196,6 +203,7 @@ export function createSocketController(args: {
         args.roomSessionState.roomCode &&
         args.roomSessionState.joinToken
       ) {
+        args.roomSessionState.awaitingFreshRoomState = true;
         args.sendJoinRequest(
           args.roomSessionState.roomCode,
           args.roomSessionState.joinToken,

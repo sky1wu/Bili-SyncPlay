@@ -39,6 +39,7 @@ export function createRuntimeSyncController(args: {
         pendingJoinRoomCode: args.roomSessionState.pendingJoinRoomCode,
         pendingJoinToken: args.roomSessionState.pendingJoinToken,
         pendingJoinRequestSent: args.roomSessionState.pendingJoinRequestSent,
+        awaitingFreshRoomState: args.roomSessionState.awaitingFreshRoomState,
         pendingSharedVideo: args.roomSessionState.pendingSharedVideo,
         pendingSharedPlayback: args.roomSessionState.pendingSharedPlayback,
       },

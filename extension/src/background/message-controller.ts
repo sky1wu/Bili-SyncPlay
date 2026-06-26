@@ -35,6 +35,7 @@ export function createMessageController(args: {
     memberId: string | null;
     displayName: string | null;
     roomState: RoomState | null;
+    awaitingFreshRoomState: boolean;
   };
   settingsState: {
     pageShareButtonEnabled: boolean;
@@ -263,10 +264,25 @@ export function createMessageController(args: {
         // shares before the fresh `room:state` arrives). Defer with a retryable
         // failure so the content controller retries once reconnected, when the
         // room check below can run against authoritative state.
-        if (!args.connectionState.connected) {
+        //
+        // `awaitingFreshRoomState` extends the same guard across the reconnect
+        // handshake: the socket reports `connected` as soon as it opens, but the
+        // re-sent `room:join` is not acknowledged (`room:joined` → fresh
+        // `room:state`) until later. Sending in that window would run against a
+        // stale `roomState`/member token, and `queueOrSendSharedVideo` returns
+        // success immediately — silencing the content retry — even if the server
+        // rejects the `video:share` for not-yet-rejoined, or the room has since
+        // been advanced by another member. Keep deferring until authoritative
+        // room state lands.
+        if (
+          !args.connectionState.connected ||
+          args.roomSessionState.awaitingFreshRoomState
+        ) {
           args.diagnosticsController.log(
             "content",
-            "Auto-share next video deferred: offline, will retry after reconnect",
+            args.connectionState.connected
+              ? "Auto-share next video deferred: awaiting fresh room state after reconnect"
+              : "Auto-share next video deferred: offline, will retry after reconnect",
           );
           sendResponse({
             ok: false,
@@ -379,10 +395,27 @@ export function createMessageController(args: {
         // Payload, target, and room are all validated; only now claim the
         // source-tab binding if it was lost (MV3 restart). Re-claiming here —
         // not before reading the tab — guarantees a tab that failed validation
-        // never strands the binding away from the real source tab. No-op when
-        // already bound (to this tab or, harmlessly, to another).
+        // never strands the binding away from the real source tab.
         if (!isRememberedSourceTab) {
-          args.tabController.reclaimSharedSourceTabIfUnclaimed(sender.tab?.id);
+          // The earlier `canReclaimSharedSourceTab` probe only proved the slot
+          // was free *before* the tab read. During that await the genuine
+          // source tab can send a playback update and bind `sharedTabId` to
+          // itself, so re-claiming now returns false. Bail out instead of
+          // continuing: `queueOrSendSharedVideo` would otherwise re-`remember`
+          // the binding with this stale/non-source tab and advance the room in
+          // the sharer's name from a tab that has lost its eligibility.
+          if (
+            !args.tabController.reclaimSharedSourceTabIfUnclaimed(
+              sender.tab?.id,
+            )
+          ) {
+            args.diagnosticsController.log(
+              "content",
+              "Auto-share next video skipped: source tab binding was claimed during the tab read",
+            );
+            sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
+            return;
+          }
         }
 
         const shareResult = await args.shareController.queueOrSendSharedVideo(

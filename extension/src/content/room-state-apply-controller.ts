@@ -482,6 +482,16 @@ export function createRoomStateApplyController(args: {
 
     if (decision.kind === "no-current-video") {
       args.cancelActiveSoftApply(args.getVideoElement(), "no-current-video");
+      // Keep the cached sharer identity in sync with the room even when the page
+      // bridge briefly returns no current video (this branch otherwise returns
+      // without touching it). If another member re-shares the same room video
+      // during this window, a stale `activeSharedByMemberId` would make the
+      // navigation controller still treat this — no longer the sharer — user as
+      // the local share source: it would skip the non-sharer pause and fire an
+      // auto-share the background silently drops, letting local playback run
+      // ahead of the room.
+      args.runtimeState.activeSharedByMemberId =
+        state.sharedVideo?.sharedByMemberId ?? null;
       if (
         args.runtimeState.pendingRoomStateHydration &&
         state.playback &&

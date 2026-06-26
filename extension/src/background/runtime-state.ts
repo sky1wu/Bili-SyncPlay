@@ -48,6 +48,15 @@ export interface RoomSessionState {
   pendingJoinRoomCode: string | null;
   pendingJoinToken: string | null;
   pendingJoinRequestSent: boolean;
+  /**
+   * True while connected but the (re)join handshake has not yet delivered an
+   * authoritative `room:state` for the current session. During this window the
+   * locally cached `roomState`/`memberToken` may be stale (a reconnect re-sends
+   * `room:join` but the server only acknowledges with `room:joined` then a
+   * fresh `room:state`), so auto-share-next must defer rather than send a
+   * `video:share` the server can still reject.
+   */
+  awaitingFreshRoomState: boolean;
   pendingSharedVideo: SharedVideo | null;
   pendingSharedPlayback: PlaybackState | null;
 }
@@ -111,6 +120,7 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       pendingJoinRoomCode: null,
       pendingJoinToken: null,
       pendingJoinRequestSent: false,
+      awaitingFreshRoomState: false,
       pendingSharedVideo: null,
       pendingSharedPlayback: null,
     },

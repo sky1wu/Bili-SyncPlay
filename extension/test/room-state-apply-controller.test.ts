@@ -250,6 +250,51 @@ test("clears post-navigation anchor when room becomes empty", async () => {
   assert.equal(harness.runtimeState.postNavigationAnchorSharedUrl, null);
 });
 
+test("refreshes the cached sharer identity when the page bridge has no current video", async () => {
+  const video = createStubVideo(true);
+  const harness = createController({
+    video,
+    now: 10_000,
+    // The page bridge briefly resolves no current video (e.g. mid-SPA), which
+    // takes applyRoomState down the no-current-video branch.
+    currentVideo: null,
+  });
+
+  // Stale cache: this member used to be the sharer.
+  harness.runtimeState.activeSharedByMemberId = "member-1";
+  harness.runtimeState.pendingRoomStateHydration = false;
+
+  await harness.controller.applyRoomState({
+    roomCode: "ROOM01",
+    sharedVideo: {
+      videoId: "ep1231523",
+      url: "https://www.bilibili.com/bangumi/play/ep1231523",
+      title: "原番剧第1话",
+      // Another member re-shared the same room video while we had no current
+      // video resolved.
+      sharedByMemberId: "member-2",
+    },
+    playback: {
+      url: "https://www.bilibili.com/bangumi/play/ep1231523",
+      playState: "playing",
+      currentTime: 0,
+      playbackRate: 1,
+      actorId: "member-2",
+      seq: 1,
+      serverTime: 1_000,
+    },
+    members: [
+      { id: "member-1", name: "Alice" },
+      { id: "member-2", name: "Bob" },
+    ],
+  });
+
+  // The sharer identity must follow the room, otherwise the navigation
+  // controller would still treat this no-longer-sharer user as the local share
+  // source and race ahead of the room.
+  assert.equal(harness.runtimeState.activeSharedByMemberId, "member-2");
+});
+
 test("pauses video when gesture age exactly equals the grace window boundary", async () => {
   const video = createStubVideo(false);
   const harness = createController({

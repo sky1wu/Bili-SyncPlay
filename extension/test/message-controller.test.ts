@@ -12,6 +12,7 @@ function createControllerHarness(
       memberId: string | null;
       displayName: string | null;
       roomState: RoomState | null;
+      awaitingFreshRoomState?: boolean;
     };
     settingsState?: {
       pageShareButtonEnabled: boolean;
@@ -65,17 +66,20 @@ function createControllerHarness(
     connected: true,
     lastError: null,
   };
-  const roomSessionState = overrides.roomSessionState ?? {
-    roomCode: "ROOM01",
-    memberToken: "member-token-1",
-    memberId: "member-1",
-    displayName: "Alice",
-    roomState: {
+  const roomSessionState = {
+    awaitingFreshRoomState: false,
+    ...(overrides.roomSessionState ?? {
       roomCode: "ROOM01",
-      sharedVideo: null,
-      playback: null,
-      members: [],
-    },
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo: null,
+        playback: null,
+        members: [],
+      },
+    }),
   };
   const popupState = { ok: true, roomCode: roomSessionState.roomCode };
   const settingsState = overrides.settingsState ?? {
@@ -675,6 +679,60 @@ test("message controller does not claim the source tab when the auto-share paylo
   assert.deepEqual(response, { ok: false });
 });
 
+test("message controller skips auto-share when the source tab binding was claimed during the tab read", async () => {
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    title: "Old Video",
+    sharedByMemberId: "member-1",
+  };
+  const harness = createControllerHarness({
+    // Worker restart left the binding free when the handler admitted this tab
+    // (canReclaim=true), but during the getVideoPayloadFromTab await the genuine
+    // source tab sent a playback update and bound sharedTabId — so the deferred
+    // re-claim now fails.
+    isRememberedSharedSourceTab: false,
+    canReclaimSharedSourceTab: true,
+    reclaimSharedSourceTabIfUnclaimed: false,
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo,
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  // The tab read happened and the re-claim was attempted, but it lost the race.
+  // The share must NOT be sent: queueOrSendSharedVideo would re-remember the
+  // binding with this stale/non-source tab and advance the room in the sharer's
+  // name from a tab that has lost its eligibility.
+  assert.deepEqual(harness.calls.getVideoPayloadFromTab.length, 1);
+  assert.deepEqual(harness.calls.reclaimSharedSourceTab, [456]);
+  assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
+  assert.deepEqual(response, { ok: true });
+});
+
 test("message controller skips auto-share when another member re-shared the same URL during the tab read", async () => {
   let response: unknown;
 
@@ -941,6 +999,62 @@ test("message controller defers auto-share next video with a retryable failure w
   // deferred with a retryable failure flagged `deferred` so the content
   // controller keeps retrying after reconnect without burning its short
   // page-bridge attempt budget.
+  assert.deepEqual(harness.calls.getVideoPayloadFromTab, []);
+  assert.equal(harness.calls.queueOrSendSharedVideo.length, 0);
+  assert.deepEqual(response, { ok: false, deferred: true });
+});
+
+test("message controller defers auto-share next video while awaiting fresh room state after reconnect", async () => {
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    title: "Old Video",
+    sharedByMemberId: "member-1",
+  };
+  const harness = createControllerHarness({
+    // The socket has re-opened (connected=true) but the re-sent room:join has
+    // not yet been acknowledged with a fresh room:state, so the cached room
+    // state/member token may be stale.
+    connectionState: { connected: true, lastError: null },
+    isRememberedSharedSourceTab: true,
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      awaitingFreshRoomState: true,
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo,
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    },
+  });
+  const senderTab = {
+    id: 456,
+    url: "https://www.bilibili.com/video/BV199W9zEEcH",
+  };
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    { tab: senderTab },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  // Across the reconnect handshake the share must NOT be sent — queuing would
+  // return success and silence the content retry even though the server can
+  // still reject the video:share before the rejoin completes. Defer instead so
+  // the content controller retries once authoritative room state lands.
   assert.deepEqual(harness.calls.getVideoPayloadFromTab, []);
   assert.equal(harness.calls.queueOrSendSharedVideo.length, 0);
   assert.deepEqual(response, { ok: false, deferred: true });

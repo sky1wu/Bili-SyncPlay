@@ -172,6 +172,7 @@ export function createRoomSessionController(args: {
 
   function stopWaitingForBootstrapRoomState(): void {
     waitingForBootstrapRoomState = false;
+    args.roomSessionState.awaitingFreshRoomState = false;
     bootstrapRoomStateGeneration += 1;
     if (bootstrapRoomStateTimer !== null) {
       globalThis.clearTimeout(bootstrapRoomStateTimer);
@@ -190,6 +191,9 @@ export function createRoomSessionController(args: {
     }
 
     waitingForBootstrapRoomState = false;
+    // The bootstrap room state never arrived within the timeout. Stop blocking
+    // auto-share-next on it; the room/member checks still guard correctness.
+    args.roomSessionState.awaitingFreshRoomState = false;
     bootstrapRoomStateTimer = null;
     const roomCode = args.roomSessionState.roomCode;
     if (!roomCode) {
@@ -246,6 +250,7 @@ export function createRoomSessionController(args: {
   function startWaitingForBootstrapRoomState(): void {
     stopWaitingForBootstrapRoomState();
     waitingForBootstrapRoomState = true;
+    args.roomSessionState.awaitingFreshRoomState = true;
     bootstrapRoomStateGeneration += 1;
     const generation = bootstrapRoomStateGeneration;
     bootstrapRoomStateTimer = globalThis.setTimeout(() => {
