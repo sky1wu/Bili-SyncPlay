@@ -191,9 +191,12 @@ export function createRoomSessionController(args: {
     }
 
     waitingForBootstrapRoomState = false;
-    // The bootstrap room state never arrived within the timeout. Stop blocking
-    // auto-share-next on it; the room/member checks still guard correctness.
-    args.roomSessionState.awaitingFreshRoomState = false;
+    // Deliberately do NOT clear `awaitingFreshRoomState` here: this timeout only
+    // bounds how long queued member deltas wait, not the authoritative room
+    // state. If `room:state` is simply slow, releasing the guard would let a
+    // deferred auto-share send against the pre-disconnect room snapshot/member
+    // token and clobber whatever the room advanced to. Keep deferring until a
+    // real `room:state` (or room teardown) lands.
     bootstrapRoomStateTimer = null;
     const roomCode = args.roomSessionState.roomCode;
     if (!roomCode) {

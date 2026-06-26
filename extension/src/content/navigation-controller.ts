@@ -28,14 +28,6 @@ export function createNavigationController(args: {
     nextNormalizedPageUrl: string;
   }) => void;
   cancelAutoShareNextVideo?: () => void;
-  /**
-   * Normalized URL of the video the page bridge currently resolves as the
-   * playing part. B站 multi-part/collection playback can advance to the next
-   * part inside the same `<video>` element without changing
-   * `window.location.href`, so this is polled alongside the page URL to detect
-   * a same-element part advance the page-URL watcher would otherwise miss.
-   */
-  getResolvedSharedVideoUrl?: () => string | null;
   debugLog: (message: string) => void;
   getNow?: () => number;
 }): NavigationController {
@@ -44,62 +36,10 @@ export function createNavigationController(args: {
   let lastObservedPageUrl = args.getCurrentPageUrl();
   let lastObservedNormalizedPageUrl =
     args.normalizeVideoPageUrl(lastObservedPageUrl);
-  let lastObservedResolvedSharedUrl =
-    args.getResolvedSharedVideoUrl?.() ?? null;
-
-  // Handle a same-`<video>`-element part advance (B站多P/合集) that did not change
-  // `window.location.href`. Only the sharer advances the room here, and only on
-  // genuine autoplay; a non-sharer's same-element continuation is re-paused by the
-  // playback binding's end-hold, and a manual part click is the user's own action.
-  function maybeHandleSameElementPartAdvance(): void {
-    const nextResolved = args.getResolvedSharedVideoUrl?.() ?? null;
-    if (nextResolved === lastObservedResolvedSharedUrl) {
-      return;
-    }
-    const previousResolved = lastObservedResolvedSharedUrl;
-    lastObservedResolvedSharedUrl = nextResolved;
-
-    const activeSharedUrl = args.runtimeState.activeSharedUrl;
-    if (
-      !args.runtimeState.activeRoomCode ||
-      activeSharedUrl === null ||
-      isUnstableSharedVideoUrl(activeSharedUrl) ||
-      nextResolved === null ||
-      isUnstableSharedVideoUrl(nextResolved) ||
-      nextResolved === activeSharedUrl ||
-      // The part we were on must have been exactly the room's shared video, so
-      // this advance is the room video continuing — not a local detour advancing.
-      previousResolved !== activeSharedUrl
-    ) {
-      return;
-    }
-
-    const isLocalSharedSource =
-      args.runtimeState.localMemberId !== null &&
-      args.runtimeState.activeSharedByMemberId ===
-        args.runtimeState.localMemberId;
-    const now = nowOf();
-    const hadRecentUserGesture =
-      args.runtimeState.lastUserGestureAt > 0 &&
-      now - args.runtimeState.lastUserGestureAt <= args.userGestureGraceMs;
-    if (!isLocalSharedSource || hadRecentUserGesture) {
-      return;
-    }
-
-    args.runtimeState.explicitNonSharedPlaybackUrl = nextResolved;
-    args.debugLog(
-      `Detected sharer same-element multi-part advance to ${nextResolved}, auto-sharing next`,
-    );
-    args.scheduleAutoShareNextVideo?.({
-      previousSharedUrl: activeSharedUrl,
-      nextNormalizedPageUrl: nextResolved,
-    });
-  }
 
   function handlePotentialNavigation(): void {
     const nextPageUrl = args.getCurrentPageUrl();
     if (nextPageUrl === lastObservedPageUrl) {
-      maybeHandleSameElementPartAdvance();
       return;
     }
 
@@ -109,8 +49,6 @@ export function createNavigationController(args: {
       nextNormalizedPageUrl === lastObservedNormalizedPageUrl
     ) {
       lastObservedPageUrl = nextPageUrl;
-      lastObservedResolvedSharedUrl =
-        args.getResolvedSharedVideoUrl?.() ?? lastObservedResolvedSharedUrl;
       return;
     }
 
@@ -125,10 +63,6 @@ export function createNavigationController(args: {
       args.runtimeState.explicitNonSharedPlaybackUrl;
     lastObservedPageUrl = nextPageUrl;
     lastObservedNormalizedPageUrl = nextNormalizedPageUrl;
-    // Re-baseline the resolved-part tracker for this href navigation so the
-    // same-element detector does not also fire for the same transition.
-    lastObservedResolvedSharedUrl =
-      args.getResolvedSharedVideoUrl?.() ?? nextNormalizedPageUrl;
     args.clearFestivalSnapshot();
     args.runtimeState.pendingPlaybackApplication = null;
     args.runtimeState.explicitNonSharedPlaybackUrl = null;

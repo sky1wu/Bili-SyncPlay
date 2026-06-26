@@ -38,6 +38,13 @@ export interface ShareController {
   clearPendingLocalShare(reason: string): void;
   expirePendingLocalShareIfNeeded(): void;
   setPendingLocalShare(url: string): void;
+  /**
+   * Whether an explicit local share is still awaiting server confirmation. Used
+   * to stop a stale auto-share from overwriting a manual share the user just
+   * made (which only sets a pending local share; `roomState.sharedVideo` still
+   * holds the previous video until the server confirms).
+   */
+  hasActivePendingLocalShare(): boolean;
 }
 
 export function createShareController(args: {
@@ -221,6 +228,16 @@ export function createShareController(args: {
     } = cleanup.nextState);
   }
 
+  function hasActivePendingLocalShare(): boolean {
+    return (
+      getActivePendingLocalShareUrl({
+        pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
+        pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
+        now: Date.now(),
+      }) !== null
+    );
+  }
+
   function expirePendingLocalShareIfNeeded(): void {
     const activePendingShare = getActivePendingLocalShareUrl({
       pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
@@ -257,5 +274,6 @@ export function createShareController(args: {
     clearPendingLocalShare,
     expirePendingLocalShareIfNeeded,
     setPendingLocalShare,
+    hasActivePendingLocalShare,
   };
 }

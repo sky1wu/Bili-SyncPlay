@@ -36,6 +36,7 @@ function createControllerHarness(
     };
     queueOrSendSharedVideoResult?: { ok: true } | { ok: false; error: string };
     onReadTabPayload?: () => void;
+    hasActivePendingLocalShare?: boolean;
   } = {},
 ) {
   const calls = {
@@ -170,6 +171,9 @@ function createControllerHarness(
       async queueOrSendSharedVideo(payload, tabId) {
         calls.queueOrSendSharedVideo.push({ payload, tabId });
         return overrides.queueOrSendSharedVideoResult ?? { ok: true };
+      },
+      hasActivePendingLocalShare() {
+        return overrides.hasActivePendingLocalShare ?? false;
       },
     },
     tabController: {
@@ -813,6 +817,52 @@ test("message controller treats a next video with no readable playback as retrya
   // retryable failure so the content controller retries once playback is readable.
   assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
   assert.deepEqual(response, { ok: false });
+});
+
+test("message controller skips auto-share when a manual share is awaiting confirmation", async () => {
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    title: "Old Video",
+    sharedByMemberId: "member-1",
+  };
+  const harness = createControllerHarness({
+    isRememberedSharedSourceTab: true,
+    // The user just made an explicit share that is still awaiting server
+    // confirmation; roomState.sharedVideo still holds the previous video.
+    hasActivePendingLocalShare: true,
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo,
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  // The auto-share must not overwrite the unconfirmed manual share.
+  assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
+  assert.deepEqual(response, { ok: true });
 });
 
 test("message controller defers auto-share when the socket drops while validating", async () => {

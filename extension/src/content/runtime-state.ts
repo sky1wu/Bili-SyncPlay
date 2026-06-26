@@ -86,17 +86,6 @@ export interface ContentRuntimeState {
   suppressedLocalEndPauseUrl: string | null;
   suppressedLocalEndPauseUntil: number;
   /**
-   * Armed when a non-sharer's player reaches the shared video's natural end. It
-   * keeps the non-sharer's local element re-paused through any same-`<video>`
-   * multi-part continuation (which carries no URL change for the navigation
-   * controller to catch) until the room actually advances, the user explicitly
-   * acts, or navigation/room teardown clears it. Unlike
-   * [[suppressedLocalEndPauseUntil]] (a short broadcast-suppression window) this
-   * is not time-bounded: a delayed next-part `play` (countdown/ad/slow load) can
-   * arrive long after the end, and the non-sharer must still not run ahead.
-   */
-  nonSharerEndHoldActive: boolean;
-  /**
    * Normalized URL of a non-shared page that a non-sharer's player autoplayed
    * into via in-SPA navigation (set by the navigation controller's non-sharer
    * autoplay branch). The playback binding only force-pauses a gesture-less
@@ -177,7 +166,6 @@ export function resetUserGestureState(state: ContentRuntimeState): void {
   state.lastForcedPauseAt = 0;
   state.suppressedLocalEndPauseUrl = null;
   state.suppressedLocalEndPauseUntil = 0;
-  state.nonSharerEndHoldActive = false;
   state.nonSharerAutoplayHoldUrl = null;
 }
 
@@ -202,7 +190,6 @@ export function createContentRuntimeState(): ContentRuntimeState {
     explicitNonSharedPlaybackUrl: null,
     suppressedLocalEndPauseUrl: null,
     suppressedLocalEndPauseUntil: 0,
-    nonSharerEndHoldActive: false,
     nonSharerAutoplayHoldUrl: null,
     lastForcedPauseAt: 0,
     pauseHoldUntil: 0,

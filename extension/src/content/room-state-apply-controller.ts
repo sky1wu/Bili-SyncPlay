@@ -187,9 +187,6 @@ export function createRoomStateApplyController(args: {
       return;
     }
     args.runtimeState.activeSharedUrl = normalizedSharedUrl ?? null;
-    // `resetPlaybackSyncState` clears the non-sharer end-hold and the
-    // broadcast-suppression markers, so a move to a different shared video does
-    // not leave the previous video's holds blocking the new one.
     args.resetPlaybackSyncState(
       `shared url changed to ${sharedVideoUrl ?? "none"}`,
     );
@@ -474,7 +471,6 @@ export function createRoomStateApplyController(args: {
       args.runtimeState.activeSharedByMemberId = null;
       args.runtimeState.suppressedLocalEndPauseUrl = null;
       args.runtimeState.suppressedLocalEndPauseUntil = 0;
-      args.runtimeState.nonSharerEndHoldActive = false;
       args.runtimeState.nonSharerAutoplayHoldUrl = null;
       args.clearRemoteFollowPlayingWindow();
       if (decision.acceptedHydration) {

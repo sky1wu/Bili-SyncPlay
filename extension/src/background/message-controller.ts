@@ -73,6 +73,7 @@ export function createMessageController(args: {
       payload: { video: SharedVideo; playback: PlaybackState | null },
       tabId: number | null,
     ): Promise<QueueSharedVideoResult>;
+    hasActivePendingLocalShare(): boolean;
   };
   tabController: {
     openSharedVideoFromPopup(): Promise<void>;
@@ -456,6 +457,19 @@ export function createMessageController(args: {
             ok: false,
             deferred: true,
           } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
+        // An explicit share the user just made only sets a pending local share;
+        // `roomState.sharedVideo` still holds the previous video until the server
+        // confirms, so the room re-check above can still pass. Sending now would
+        // overwrite that unconfirmed manual share — skip and let it stand.
+        if (args.shareController.hasActivePendingLocalShare()) {
+          args.diagnosticsController.log(
+            "content",
+            "Auto-share next video skipped: a manual share is awaiting confirmation",
+          );
+          sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
           return;
         }
 
