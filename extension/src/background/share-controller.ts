@@ -16,6 +16,7 @@ import type {
   RoomSessionState,
   ShareState,
 } from "./runtime-state";
+import { isSocketWritable } from "./socket-manager";
 
 export interface ActiveVideoPayloadResult {
   ok: boolean;
@@ -152,12 +153,13 @@ export function createShareController(args: {
     // the old video with no retry — and auto-share gets no failure to retry on.
     // Falling through to the offline branch instead queues the share into
     // `pendingSharedVideo` and reconnects, so it is flushed after the rejoin.
-    const isSocketWritable =
-      args.connectionState.socket?.readyState === WebSocket.OPEN;
-
+    // (For the non-explicit auto-share path the message controller defers on the
+    // same writability check *before* reaching here, so it never queues a stale
+    // auto-share that would clobber another member's share on the reconnect
+    // flush — only explicit user shares fall through to the queue.)
     if (
       args.connectionState.connected &&
-      isSocketWritable &&
+      isSocketWritable(args.connectionState.socket) &&
       args.roomSessionState.roomCode
     ) {
       if (!args.roomSessionState.memberToken) {

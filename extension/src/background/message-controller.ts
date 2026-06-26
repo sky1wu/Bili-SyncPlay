@@ -7,6 +7,7 @@ import type {
 } from "../shared/messages";
 import { t } from "../shared/i18n";
 import { areSharedVideoUrlsEqual } from "../shared/url";
+import { isSocketWritable } from "./socket-manager";
 import type {
   PlaybackState,
   RoomState,
@@ -28,6 +29,7 @@ export function createMessageController(args: {
   connectionState: {
     connected: boolean;
     lastError: string | null;
+    socket: WebSocket | null;
   };
   roomSessionState: {
     roomCode: string | null;
@@ -275,8 +277,16 @@ export function createMessageController(args: {
         // rejects the `video:share` for not-yet-rejoined, or the room has since
         // been advanced by another member. Keep deferring until authoritative
         // room state lands.
+        //
+        // `!isSocketWritable` closes the CLOSING micro-window: the socket has
+        // already moved to CLOSING/CLOSED but its close event has not fired, so
+        // `connected` still reads true. Without this the auto-share would reach
+        // `queueOrSendSharedVideo`, take its offline branch, and queue a
+        // `pendingSharedVideo` that the reconnect `room:joined` flushes before
+        // fresh `room:state` — clobbering whatever the room advanced to.
         if (
           !args.connectionState.connected ||
+          !isSocketWritable(args.connectionState.socket) ||
           args.roomSessionState.awaitingFreshRoomState
         ) {
           args.diagnosticsController.log(
@@ -444,9 +454,11 @@ export function createMessageController(args: {
         // this non-explicit auto-share as a pending share that flushes on the
         // next `room:joined` — before the fresh `room:state` — clobbering whatever
         // the room advanced to while we were disconnected. Defer instead so the
-        // content controller retries against authoritative state.
+        // content controller retries against authoritative state. `!isSocketWritable`
+        // also covers the CLOSING micro-window where `connected` still reads true.
         if (
           !args.connectionState.connected ||
+          !isSocketWritable(args.connectionState.socket) ||
           args.roomSessionState.awaitingFreshRoomState
         ) {
           args.diagnosticsController.log(

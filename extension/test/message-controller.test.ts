@@ -5,7 +5,11 @@ import type { RoomState } from "@bili-syncplay/protocol";
 
 function createControllerHarness(
   overrides: {
-    connectionState?: { connected: boolean; lastError: string | null };
+    connectionState?: {
+      connected: boolean;
+      lastError: string | null;
+      socket?: WebSocket | null;
+    };
     roomSessionState?: {
       roomCode: string | null;
       memberToken: string | null;
@@ -63,9 +67,24 @@ function createControllerHarness(
     updateServerUrl: [] as string[],
     reclaimSharedSourceTab: [] as Array<number | undefined>,
   };
-  const connectionState = overrides.connectionState ?? {
+  const connectionStateInput = overrides.connectionState ?? {
     connected: true,
     lastError: null,
+  };
+  // The message controller now gates auto-share defers on the live socket being
+  // writable, not just `connected`. Default an undeclared socket from
+  // `connected` (OPEN when online, none when offline) so existing tests keep
+  // their intent; tests exercising the CLOSING micro-window pass an explicit
+  // socket with a non-OPEN `readyState`.
+  const connectionState = {
+    connected: connectionStateInput.connected,
+    lastError: connectionStateInput.lastError,
+    socket:
+      connectionStateInput.socket !== undefined
+        ? connectionStateInput.socket
+        : connectionStateInput.connected
+          ? ({ readyState: WebSocket.OPEN } as WebSocket)
+          : null,
   };
   const roomSessionState = {
     awaitingFreshRoomState: false,
@@ -910,6 +929,60 @@ test("message controller defers auto-share when the socket drops while validatin
 
   // queueOrSendSharedVideo would take its offline branch and store a pending
   // share that flushes on reconnect before fresh room state. Defer instead.
+  assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
+  assert.deepEqual(response, { ok: false, deferred: true });
+});
+
+test("message controller defers auto-share during the socket CLOSING micro-window", async () => {
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    title: "Old Video",
+    sharedByMemberId: "member-1",
+  };
+  const harness = createControllerHarness({
+    // `connected` still reads true because the socket's close event has not
+    // dispatched yet, but the socket is already CLOSING and cannot be written.
+    connectionState: {
+      connected: true,
+      lastError: null,
+      socket: { readyState: WebSocket.CLOSING } as WebSocket,
+    },
+    isRememberedSharedSourceTab: true,
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo,
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  // The auto-share must defer (retryable) rather than fall through to the
+  // offline queue, which would flush before fresh room state on reconnect and
+  // clobber whatever another member shared during the disconnect. The tab is
+  // never even read since the first guard defers up front.
+  assert.deepEqual(harness.calls.getVideoPayloadFromTab, []);
   assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
   assert.deepEqual(response, { ok: false, deferred: true });
 });
