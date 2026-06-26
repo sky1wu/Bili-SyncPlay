@@ -255,9 +255,19 @@ export function createSocketController(args: {
       // for a superseded socket so a kicked / disconnected / closed-room session
       // is torn down rather than silently rejoined by the replacement.
       if (event.reason && ADMIN_SESSION_RESET_REASONS.has(event.reason)) {
-        if (!isSuperseded()) {
-          args.connectionState.connected = false;
-          args.stopClockSyncTimer();
+        args.stopClockSyncTimer();
+        // Tear down the *live* connection. When this admin close arrived on a
+        // socket that a CLOSING-window reconnect had already replaced, the
+        // replacement is the live socket and may have rejoined; closing it stops
+        // the kicked session from lingering as a ghost connection. Null the ref
+        // before closing so the replacement's own close event is treated as
+        // superseded and cannot schedule a reconnect (`onAdminSessionReset` then
+        // clears the room context, which also resets the reconnect state).
+        const liveSocket = args.connectionState.socket;
+        args.connectionState.socket = null;
+        args.connectionState.connected = false;
+        if (liveSocket && liveSocket !== socket) {
+          liveSocket.close();
         }
         args.onAdminSessionReset(
           args.formatAdminSessionResetReason(event.reason),

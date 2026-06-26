@@ -12,6 +12,7 @@ class FakeWebSocket {
 
   readyState = FakeWebSocket.CONNECTING;
   url: string;
+  closeCalls = 0;
   private readonly listeners = new Map<string, (event: unknown) => void>();
 
   constructor(url: string) {
@@ -28,7 +29,10 @@ class FakeWebSocket {
   }
 
   send(): void {}
-  close(): void {}
+  close(): void {
+    this.closeCalls += 1;
+    this.readyState = FakeWebSocket.CLOSING;
+  }
 }
 
 let createdSockets: FakeWebSocket[] = [];
@@ -170,6 +174,10 @@ test("socket close still applies an admin session reset even with a queued share
     // The admin reset must take effect regardless of the queued share / marker
     // handling, so the client honours the kick instead of silently rejoining.
     assert.deepEqual(harness.adminResets, ["Admin kicked member"]);
+    // The live socket reference is torn down (it is the closing socket itself,
+    // so no extra close() is needed).
+    assert.equal(harness.runtimeState.connection.socket, null);
+    assert.equal(socket.closeCalls, 0);
   } finally {
     harness?.controller.clearReconnectTimer();
     globals.restore();
@@ -219,12 +227,19 @@ test("socket controller still applies an admin reset from a superseded socket", 
     const firstSocket = createdSockets[0];
     firstSocket.readyState = FakeWebSocket.CLOSING;
     await harness.controller.connect();
+    const secondSocket = createdSockets[1];
 
     // An admin kick on the old connection must still tear down the session even
     // though the socket has been superseded, so the kicked user cannot rejoin.
-    firstSocket.emit("close", closeEvent("Admin kicked member"));
+    firstSocket.emit("close", closeEvent("Admin disconnected session"));
 
-    assert.deepEqual(harness.adminResets, ["Admin kicked member"]);
+    assert.deepEqual(harness.adminResets, ["Admin disconnected session"]);
+    // The live replacement socket must be closed (otherwise it lingers as a
+    // ghost connection that already rejoined), and the ref nulled so its own
+    // close is treated as superseded and never reconnects.
+    assert.equal(secondSocket.closeCalls, 1);
+    assert.equal(firstSocket.closeCalls, 0);
+    assert.equal(harness.runtimeState.connection.socket, null);
   } finally {
     harness?.controller.clearReconnectTimer();
     globals.restore();
