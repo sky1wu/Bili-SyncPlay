@@ -20,8 +20,19 @@ function installSelfStub() {
   };
 }
 
+function setSocketReadyState(
+  runtimeState: ReturnType<typeof createBackgroundRuntimeState>,
+  readyState: number,
+): void {
+  runtimeState.connection.socket = { readyState } as WebSocket;
+}
+
 function createControllerHarness() {
   const runtimeState = createBackgroundRuntimeState();
+  // Default the connected-path tests to a writable socket. Production now gates
+  // the "send now" branch on the live socket being OPEN, not just
+  // `connection.connected`, so an online harness must expose an OPEN socket.
+  setSocketReadyState(runtimeState, WebSocket.OPEN);
   const sendToServerCalls: Array<unknown> = [];
   const rememberedSharedTabs: Array<{
     tabId?: number;
@@ -102,6 +113,48 @@ test("background share controller forwards a share without playback when content
       },
     ]);
     assert.equal(harness.notifyAllCalls, 0);
+  } finally {
+    selfHarness.restore();
+  }
+});
+
+test("background share controller queues the share for reconnect when the socket is closing", async () => {
+  const selfHarness = installSelfStub();
+  const harness = createControllerHarness();
+  // `connected` lags the socket: the close event has not dispatched yet, so the
+  // background still believes it is online while the socket can no longer write.
+  harness.runtimeState.connection.connected = true;
+  setSocketReadyState(harness.runtimeState, WebSocket.CLOSING);
+  harness.runtimeState.room.roomCode = "ROOM01";
+  harness.runtimeState.room.memberToken = "member-token-1";
+  harness.runtimeState.room.memberId = "member-1";
+
+  try {
+    const result = await harness.controller.queueOrSendSharedVideo(
+      {
+        video: {
+          videoId: "BV199W9zEEcH",
+          url: "https://www.bilibili.com/video/BV199W9zEEcH",
+          title: "New Video",
+        },
+        playback: null,
+      },
+      123,
+    );
+
+    assert.deepEqual(result, { ok: true });
+    // The share must NOT be sent over the dying socket (it would be dropped
+    // silently). It is queued instead and the member token is cleared to force a
+    // fresh rejoin, after which `flushPendingShare` re-sends it.
+    assert.deepEqual(harness.sendToServerCalls, []);
+    assert.deepEqual(harness.runtimeState.room.pendingSharedVideo, {
+      videoId: "BV199W9zEEcH",
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+      title: "New Video",
+    });
+    assert.equal(harness.runtimeState.room.memberToken, null);
+    // The offline branch reconnects (the harness `connect` stub flips this true).
+    assert.equal(harness.runtimeState.connection.connected, true);
   } finally {
     selfHarness.restore();
   }

@@ -142,7 +142,24 @@ export function createShareController(args: {
   ): Promise<ShareVideoResult> {
     args.rememberSharedSourceTab(tabId ?? undefined, payload.video.url);
 
-    if (args.connectionState.connected && args.roomSessionState.roomCode) {
+    // Treat the live socket's `readyState` as the source of truth for whether we
+    // can actually write a `video:share`. `connectionState.connected` is only
+    // flipped to false by the socket's `close`/`error` events, so during the
+    // micro-window where the socket has already moved to CLOSING/CLOSED but the
+    // close event has not dispatched yet it still reads true. Taking the
+    // connected branch there returns `{ ok: true }` while `sendToServer` (which
+    // requires an OPEN socket) silently drops the message, stranding the room on
+    // the old video with no retry — and auto-share gets no failure to retry on.
+    // Falling through to the offline branch instead queues the share into
+    // `pendingSharedVideo` and reconnects, so it is flushed after the rejoin.
+    const isSocketWritable =
+      args.connectionState.socket?.readyState === WebSocket.OPEN;
+
+    if (
+      args.connectionState.connected &&
+      isSocketWritable &&
+      args.roomSessionState.roomCode
+    ) {
       if (!args.roomSessionState.memberToken) {
         const error = t("popupErrorMemberTokenMissing");
         args.connectionState.lastError = error;
