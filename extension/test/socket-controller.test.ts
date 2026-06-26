@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { SharedVideo } from "@bili-syncplay/protocol";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
 import { createSocketController } from "../src/background/socket-controller";
 
@@ -56,6 +57,7 @@ function createHarness() {
   runtimeState.connection.serverUrl = "ws://localhost:9999";
   runtimeState.room.roomCode = "ROOM01";
   const clearPendingLocalShareReasons: string[] = [];
+  const adminResets: string[] = [];
 
   const controller = createSocketController({
     connectionState: runtimeState.connection,
@@ -79,63 +81,97 @@ function createHarness() {
     buildConnectionCheckUrl: () => null,
     buildHealthcheckUrl: () => null,
     onOpen: () => {},
-    onAdminSessionReset: () => {},
+    onAdminSessionReset: (reason) => {
+      adminResets.push(reason);
+    },
     formatAdminSessionResetReason: (reason) => reason,
     reconnectFailedMessage: () => "reconnect failed",
   });
 
-  return { runtimeState, controller, clearPendingLocalShareReasons };
+  return {
+    runtimeState,
+    controller,
+    clearPendingLocalShareReasons,
+    adminResets,
+  };
 }
 
-const closeEvent = { code: 1006, reason: "", wasClean: false };
+const sampleVideo: SharedVideo = {
+  videoId: "BV199W9zEEcH",
+  url: "https://www.bilibili.com/video/BV199W9zEEcH",
+  title: "New Video",
+};
 
-test("socket controller ignores the close event of a superseded socket", async () => {
+function closeEvent(reason = "") {
+  return { code: 1006, reason, wasClean: false };
+}
+
+test("socket close keeps the pending local share marker while a share is queued for re-flush", async () => {
   const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
   try {
-    const harness = createHarness();
-
-    await harness.controller.connect();
-    const firstSocket = createdSockets[0];
-    assert.equal(harness.runtimeState.connection.socket, firstSocket);
-
-    // The first socket is dying (CLOSING) but its close event has not fired yet.
-    // A replacement connection is opened (mirrors the explicit-share-during-
-    // CLOSING offline branch calling `connect()`).
-    firstSocket.readyState = FakeWebSocket.CLOSING;
-    await harness.controller.connect();
-    const secondSocket = createdSockets[1];
-    assert.notEqual(secondSocket, firstSocket);
-    assert.equal(harness.runtimeState.connection.socket, secondSocket);
-
-    harness.runtimeState.connection.connected = true;
-
-    // The stale first socket finally emits close. It must be ignored: clearing
-    // the pending local share here would drop the share-confirmation marker.
-    firstSocket.emit("close", closeEvent);
-
-    assert.deepEqual(harness.clearPendingLocalShareReasons, []);
-    assert.equal(harness.runtimeState.connection.connected, true);
-  } finally {
-    globals.restore();
-  }
-});
-
-test("socket controller processes the close event of the current socket", async () => {
-  const globals = installGlobals();
-  try {
-    const harness = createHarness();
+    harness = createHarness();
 
     await harness.controller.connect();
     const socket = createdSockets[0];
     harness.runtimeState.connection.connected = true;
+    // The share was queued (offline/CLOSING branch) and will be re-flushed on
+    // reconnect, so the confirmation marker must survive this close.
+    harness.runtimeState.room.pendingSharedVideo = sampleVideo;
 
-    socket.emit("close", closeEvent);
+    socket.emit("close", closeEvent());
+
+    assert.deepEqual(harness.clearPendingLocalShareReasons, []);
+    assert.equal(harness.runtimeState.connection.connected, false);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("socket close clears the pending local share marker when no share is queued", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+
+    await harness.controller.connect();
+    const socket = createdSockets[0];
+    harness.runtimeState.connection.connected = true;
+    // Nothing queued to re-flush: the in-flight share is lost, so the marker
+    // must be cleared to let fresh room state apply.
+    harness.runtimeState.room.pendingSharedVideo = null;
+
+    socket.emit("close", closeEvent());
 
     assert.deepEqual(harness.clearPendingLocalShareReasons, [
       "socket closed before share confirmation",
     ]);
     assert.equal(harness.runtimeState.connection.connected, false);
   } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("socket close still applies an admin session reset even with a queued share", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+
+    await harness.controller.connect();
+    const socket = createdSockets[0];
+    harness.runtimeState.connection.connected = true;
+    harness.runtimeState.room.pendingSharedVideo = sampleVideo;
+
+    socket.emit("close", closeEvent("Admin kicked member"));
+
+    // The admin reset must take effect regardless of the queued share / marker
+    // handling, so the client honours the kick instead of silently rejoining.
+    assert.deepEqual(harness.adminResets, ["Admin kicked member"]);
+  } finally {
+    harness?.controller.clearReconnectTimer();
     globals.restore();
   }
 });

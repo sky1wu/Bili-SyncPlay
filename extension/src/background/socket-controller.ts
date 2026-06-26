@@ -165,22 +165,9 @@ export function createSocketController(args: {
       }
     }
 
-    // Capture this socket instance so each handler can ignore events from a
-    // connection that has since been superseded. A replacement socket can be
-    // opened before this one's events drain — e.g. an explicit share queued
-    // during the CLOSING micro-window takes the offline branch and calls
-    // `connect()`, which opens a new socket while this one is still CLOSING.
-    // When this stale socket's `close` later fires, running the normal handler
-    // would `clearPendingLocalShare` and flip `connected`, dropping the share
-    // confirmation marker that keeps the post-rejoin stale `room:state` from
-    // pulling the sharer back to the previous video.
-    const socket = new WebSocket(serverUrlResult.normalizedUrl);
-    args.connectionState.socket = socket;
+    args.connectionState.socket = new WebSocket(serverUrlResult.normalizedUrl);
 
-    socket.addEventListener("open", () => {
-      if (args.connectionState.socket !== socket) {
-        return;
-      }
+    args.connectionState.socket.addEventListener("open", () => {
       args.connectionState.connected = true;
       args.connectionState.lastError = null;
       args.connectionState.reconnectAttempt = 0;
@@ -227,10 +214,7 @@ export function createSocketController(args: {
       args.notifyAll();
     });
 
-    socket.addEventListener("message", (event) => {
-      if (args.connectionState.socket !== socket) {
-        return;
-      }
+    args.connectionState.socket.addEventListener("message", (event) => {
       let parsed: unknown;
       try {
         parsed = JSON.parse(event.data);
@@ -245,13 +229,21 @@ export function createSocketController(args: {
       void args.handleServerMessage(parsed);
     });
 
-    socket.addEventListener("close", (event) => {
-      if (args.connectionState.socket !== socket) {
-        return;
-      }
+    args.connectionState.socket.addEventListener("close", (event) => {
       args.connectionState.connected = false;
       args.stopClockSyncTimer();
-      args.clearPendingLocalShare("socket closed before share confirmation");
+      // Keep the pending local-share confirmation marker when the share is
+      // queued for re-flush on reconnect (the offline/CLOSING branch of
+      // `queueOrSendSharedVideo` set `pendingSharedVideo` before opening the
+      // replacement connection). The reconnect `room:joined` re-sends it, and
+      // the surviving marker keeps the interim stale `room:state` (the previous
+      // video) from pulling the sharer back until the re-shared video is
+      // confirmed. With nothing queued the in-flight share is genuinely lost, so
+      // clear the marker and let fresh room state apply instead of stranding the
+      // client on a never-confirmed local share.
+      if (args.roomSessionState.pendingSharedVideo === null) {
+        args.clearPendingLocalShare("socket closed before share confirmation");
+      }
       const closeReason = event.reason
         ? ` reason=${JSON.stringify(event.reason)}`
         : "";
@@ -269,22 +261,23 @@ export function createSocketController(args: {
       args.notifyAll();
     });
 
-    socket.addEventListener("error", () => {
-      if (args.connectionState.socket !== socket) {
-        return;
-      }
+    args.connectionState.socket.addEventListener("error", () => {
       args.connectionState.lastError = getConnectionErrorMessage({
         healthcheckReachable,
         extensionOrigin,
       });
       args.connectionState.connected = false;
       args.stopClockSyncTimer();
-      args.clearPendingLocalShare("socket error before share confirmation");
+      // See the close handler: preserve the marker only while a queued share is
+      // still pending re-flush, otherwise clear it.
+      if (args.roomSessionState.pendingSharedVideo === null) {
+        args.clearPendingLocalShare("socket error before share confirmation");
+      }
       args.logConnectionProbeFailure({
         stage: "websocket",
         serverUrl: serverUrlResult.normalizedUrl,
         extensionOrigin,
-        readyState: socket.readyState,
+        readyState: args.connectionState.socket?.readyState ?? -1,
       });
       args.notifyAll();
     });
