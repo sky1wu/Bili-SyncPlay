@@ -154,7 +154,15 @@ function createControllerHarness(
               url: "https://www.bilibili.com/video/BV199W9zEEcH",
               title: "New Video",
             },
-            playback: null,
+            playback: {
+              url: "https://www.bilibili.com/video/BV199W9zEEcH",
+              playState: "playing",
+              currentTime: 0,
+              playbackRate: 1,
+              actorId: "member-1",
+              seq: 1,
+              serverTime: 1_000,
+            },
           },
           tabId: tab?.id ?? null,
         };
@@ -418,7 +426,15 @@ test("message controller shares content page video by reading the sender tab", a
           url: "https://www.bilibili.com/video/BV199W9zEEcH",
           title: "New Video",
         },
-        playback: null,
+        playback: {
+          url: "https://www.bilibili.com/video/BV199W9zEEcH",
+          playState: "playing",
+          currentTime: 0,
+          playbackRate: 1,
+          actorId: "member-1",
+          seq: 1,
+          serverTime: 1_000,
+        },
       },
       tabId: 456,
     },
@@ -552,7 +568,15 @@ test("message controller auto-shares the next video from the original sharer's s
           url: "https://www.bilibili.com/video/BV199W9zEEcH",
           title: "New Video",
         },
-        playback: null,
+        playback: {
+          url: "https://www.bilibili.com/video/BV199W9zEEcH",
+          playState: "playing",
+          currentTime: 0,
+          playbackRate: 1,
+          actorId: "member-1",
+          seq: 1,
+          serverTime: 1_000,
+        },
       },
       tabId: 456,
     },
@@ -731,6 +755,113 @@ test("message controller skips auto-share when the source tab binding was claime
   assert.deepEqual(harness.calls.reclaimSharedSourceTab, [456]);
   assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
   assert.deepEqual(response, { ok: true });
+});
+
+test("message controller treats a next video with no readable playback as retryable", async () => {
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    title: "Old Video",
+    sharedByMemberId: "member-1",
+  };
+  const harness = createControllerHarness({
+    isRememberedSharedSourceTab: true,
+    // The SPA resolved the next video's URL but its new <video> element is not
+    // bound yet, so the content side reports no playback.
+    tabVideoPayloadResult: {
+      ok: true,
+      payload: {
+        video: {
+          videoId: "BV199W9zEEcH",
+          url: "https://www.bilibili.com/video/BV199W9zEEcH",
+          title: "New Video",
+        },
+        playback: null,
+      },
+      tabId: 456,
+    },
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo,
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  // Sharing now would advance the room to a paused@0 backfill; instead report a
+  // retryable failure so the content controller retries once playback is readable.
+  assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
+  assert.deepEqual(response, { ok: false });
+});
+
+test("message controller defers auto-share when the socket drops while validating", async () => {
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    title: "Old Video",
+    sharedByMemberId: "member-1",
+  };
+  const harness = createControllerHarness({
+    connectionState: { connected: true, lastError: null },
+    isRememberedSharedSourceTab: true,
+    // The socket drops mid-validation, while the handler is awaiting the tab read.
+    onReadTabPayload: () => {
+      harness.connectionState.connected = false;
+    },
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo,
+        playback: null,
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    },
+  });
+  let response: unknown;
+
+  await harness.controller.handleRuntimeMessage(
+    {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    },
+    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    (nextResponse) => {
+      response = nextResponse;
+    },
+  );
+
+  // queueOrSendSharedVideo would take its offline branch and store a pending
+  // share that flushes on reconnect before fresh room state. Defer instead.
+  assert.deepEqual(harness.calls.queueOrSendSharedVideo, []);
+  assert.deepEqual(response, { ok: false, deferred: true });
 });
 
 test("message controller skips auto-share when another member re-shared the same URL during the tab read", async () => {

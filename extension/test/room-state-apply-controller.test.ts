@@ -250,7 +250,7 @@ test("clears post-navigation anchor when room becomes empty", async () => {
   assert.equal(harness.runtimeState.postNavigationAnchorSharedUrl, null);
 });
 
-test("refreshes the cached sharer identity when the page bridge has no current video", async () => {
+test("syncs the cached shared url and sharer when the page bridge has no current video", async () => {
   const video = createStubVideo(true);
   const harness = createController({
     video,
@@ -260,7 +260,9 @@ test("refreshes the cached sharer identity when the page bridge has no current v
     currentVideo: null,
   });
 
-  // Stale cache: this member used to be the sharer.
+  // Stale cache: we were on shared video A as its sharer.
+  harness.runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ep1111111";
   harness.runtimeState.activeSharedByMemberId = "member-1";
   harness.runtimeState.pendingRoomStateHydration = false;
 
@@ -270,8 +272,8 @@ test("refreshes the cached sharer identity when the page bridge has no current v
       videoId: "ep1231523",
       url: "https://www.bilibili.com/bangumi/play/ep1231523",
       title: "原番剧第1话",
-      // Another member re-shared the same room video while we had no current
-      // video resolved.
+      // The room switched from A to B (re-shared by another member) while we had
+      // no current video resolved.
       sharedByMemberId: "member-2",
     },
     playback: {
@@ -289,9 +291,14 @@ test("refreshes the cached sharer identity when the page bridge has no current v
     ],
   });
 
-  // The sharer identity must follow the room, otherwise the navigation
-  // controller would still treat this no-longer-sharer user as the local share
-  // source and race ahead of the room.
+  // Both the shared URL and sharer identity must follow the room. A stale
+  // `activeSharedUrl` (still A) would make the navigation controller miss a later
+  // B→C autoplay; a stale sharer id would treat this no-longer-sharer user as the
+  // local share source. Both would let local playback race ahead of the room.
+  assert.equal(
+    harness.runtimeState.activeSharedUrl,
+    "https://www.bilibili.com/bangumi/play/ep1231523",
+  );
   assert.equal(harness.runtimeState.activeSharedByMemberId, "member-2");
 });
 

@@ -250,6 +250,8 @@ export function createSyncController(args: {
     args.runtimeState.explicitNonSharedPlaybackUrl = null;
     args.runtimeState.suppressedLocalEndPauseUrl = null;
     args.runtimeState.suppressedLocalEndPauseUntil = 0;
+    args.runtimeState.nonSharerEndHoldActive = false;
+    args.runtimeState.nonSharerAutoplayHoldUrl = null;
     args.runtimeState.postNavigationAnchorSharedUrl = null;
     args.runtimeState.postNavigationAnchorSetAt = 0;
     args.debugLog(`Reset playback sync state: ${reason}`);

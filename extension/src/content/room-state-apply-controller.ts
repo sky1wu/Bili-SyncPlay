@@ -187,6 +187,9 @@ export function createRoomStateApplyController(args: {
       return;
     }
     args.runtimeState.activeSharedUrl = normalizedSharedUrl ?? null;
+    // `resetPlaybackSyncState` clears the non-sharer end-hold and the
+    // broadcast-suppression markers, so a move to a different shared video does
+    // not leave the previous video's holds blocking the new one.
     args.resetPlaybackSyncState(
       `shared url changed to ${sharedVideoUrl ?? "none"}`,
     );
@@ -471,6 +474,8 @@ export function createRoomStateApplyController(args: {
       args.runtimeState.activeSharedByMemberId = null;
       args.runtimeState.suppressedLocalEndPauseUrl = null;
       args.runtimeState.suppressedLocalEndPauseUntil = 0;
+      args.runtimeState.nonSharerEndHoldActive = false;
+      args.runtimeState.nonSharerAutoplayHoldUrl = null;
       args.clearRemoteFollowPlayingWindow();
       if (decision.acceptedHydration) {
         args.debugLog(`Accepted empty room state for ${state.roomCode}`);
@@ -482,16 +487,20 @@ export function createRoomStateApplyController(args: {
 
     if (decision.kind === "no-current-video") {
       args.cancelActiveSoftApply(args.getVideoElement(), "no-current-video");
-      // Keep the cached sharer identity in sync with the room even when the page
-      // bridge briefly returns no current video (this branch otherwise returns
-      // without touching it). If another member re-shares the same room video
-      // during this window, a stale `activeSharedByMemberId` would make the
-      // navigation controller still treat this — no longer the sharer — user as
-      // the local share source: it would skip the non-sharer pause and fire an
-      // auto-share the background silently drops, letting local playback run
-      // ahead of the room.
-      args.runtimeState.activeSharedByMemberId =
-        state.sharedVideo?.sharedByMemberId ?? null;
+      // Keep the cached shared-video identity (URL *and* sharer) in sync with the
+      // room even when the page bridge briefly returns no current video (this
+      // branch otherwise returns without touching it). If the room switches from
+      // A to B during this window, a stale `activeSharedUrl` (still A) would make
+      // the navigation controller miss a later B→C autoplay
+      // (`previousNormalizedPageUrl !== activeSharedUrl`): the sharer would not
+      // auto-share C and a non-sharer would not hold, so local playback runs
+      // ahead of the room. Mirror the normal apply path's reset so both the URL
+      // and the sharer id follow the room.
+      switchActiveSharedUrlWithReset(
+        normalizedSharedUrl,
+        state.sharedVideo?.url,
+        state.sharedVideo?.sharedByMemberId,
+      );
       if (
         args.runtimeState.pendingRoomStateHydration &&
         state.playback &&

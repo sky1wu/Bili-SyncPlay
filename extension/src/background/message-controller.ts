@@ -379,6 +379,24 @@ export function createMessageController(args: {
           return;
         }
 
+        // The SPA can resolve the next video's identity before its new `<video>`
+        // element is bound/loaded, in which case the content side returns
+        // `playback: null`. Sharing now would advance the room to the next
+        // episode but the server backfills the missing playback as paused@0 — the
+        // room would jump to a 0s paused state while the sharer's own later
+        // `play` could still be broadcast-suppressed as a non-shared page until
+        // room state applies. Treat a missing playback as a retryable
+        // "page not ready" so the content controller retries once the element is
+        // bound and the current playback can be read.
+        if (!response.payload.playback) {
+          args.diagnosticsController.log(
+            "content",
+            "Auto-share next video not ready: next video has no readable playback yet",
+          );
+          sendResponse({ ok: false } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+
         // `getVideoPayloadFromTab` yielded the event loop, so re-confirm the room
         // is still on `previousSharedUrl` before overwriting it. A manual share
         // or fresh room state received in that window means the room has moved
@@ -416,6 +434,29 @@ export function createMessageController(args: {
             sendResponse({ ok: true } satisfies ShareCurrentVideoResponse);
             return;
           }
+        }
+
+        // Re-check connectivity right before sending. The validations above
+        // (`getVideoPayloadFromTab`, the re-claim) yielded the event loop, so the
+        // socket may have dropped (or a reconnect handshake started) in between.
+        // `queueOrSendSharedVideo` would then take its offline branch and store
+        // this non-explicit auto-share as a pending share that flushes on the
+        // next `room:joined` — before the fresh `room:state` — clobbering whatever
+        // the room advanced to while we were disconnected. Defer instead so the
+        // content controller retries against authoritative state.
+        if (
+          !args.connectionState.connected ||
+          args.roomSessionState.awaitingFreshRoomState
+        ) {
+          args.diagnosticsController.log(
+            "content",
+            "Auto-share next video deferred: connection dropped while validating, will retry after reconnect",
+          );
+          sendResponse({
+            ok: false,
+            deferred: true,
+          } satisfies ShareCurrentVideoResponse);
+          return;
         }
 
         const shareResult = await args.shareController.queueOrSendSharedVideo(

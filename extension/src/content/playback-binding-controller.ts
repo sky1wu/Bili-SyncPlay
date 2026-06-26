@@ -98,6 +98,18 @@ export function createPlaybackBindingController(args: {
   };
   const hasRecentUserGesture = () =>
     nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs;
+  const releaseEndHoldOnUserGesture = () => {
+    // A genuine user play (gesture newer than our last forced pause) means the
+    // viewer deliberately chose to keep watching locally, so stop fighting them
+    // by re-pausing same-element continuations.
+    if (
+      args.runtimeState.nonSharerEndHoldActive &&
+      hasRecentUserGesture() &&
+      args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
+    ) {
+      args.runtimeState.nonSharerEndHoldActive = false;
+    }
+  };
   const getRecentExplicitSeekWithoutNewGestureAt = (): number | null => {
     const explicitAction = args.runtimeState.lastExplicitUserAction;
     if (
@@ -231,6 +243,11 @@ export function createPlaybackBindingController(args: {
       args.runtimeState.activeSharedUrl;
     args.runtimeState.suppressedLocalEndPauseUntil =
       nowOf() + args.initialRoomStatePauseHoldMs;
+    // Arm the persistent end-hold so any same-element multi-part continuation is
+    // re-paused even if its `play` arrives long after the short broadcast
+    // suppression window above. Cleared when the room advances, the user acts, or
+    // navigation/room teardown resets state.
+    args.runtimeState.nonSharerEndHoldActive = true;
     args.activatePauseHold(args.initialRoomStatePauseHoldMs);
     args.debugLog(
       `Held non-sharer at shared video natural end to block local autoplay-next`,
@@ -241,16 +258,20 @@ export function createPlaybackBindingController(args: {
 
   function shouldReapplyHoldAfterSharedVideoEnd(
     video: HTMLVideoElement,
-    currentVideo: SharedVideo | null,
   ): boolean {
+    // Identity-agnostic on purpose: a same-`<video>` multi-part autoplay may have
+    // already flipped the resolved current part to the *next* part (a URL the
+    // navigation controller never saw), so we must not gate on the current URL
+    // still matching the shared video. While the persistent end-hold is armed and
+    // the room still has us as a paused non-sharer, re-pause any local resume so
+    // the non-sharer cannot run ahead. The hold is cleared the moment the room
+    // advances, the user acts, or navigation/room teardown resets state.
     return Boolean(
-      currentVideo &&
-      isCurrentVideoShared(currentVideo) &&
+      args.runtimeState.nonSharerEndHoldActive &&
+      !isLocalSharedSource() &&
+      args.runtimeState.activeRoomCode &&
+      args.runtimeState.activeSharedUrl &&
       args.runtimeState.intendedPlayState !== "playing" &&
-      args.runtimeState.suppressedLocalEndPauseUrl !== null &&
-      nowOf() < args.runtimeState.suppressedLocalEndPauseUntil &&
-      args.normalizeUrl(currentVideo.url) ===
-        args.runtimeState.suppressedLocalEndPauseUrl &&
       nowOf() - args.runtimeState.lastUserGestureAt >=
         args.userGestureGraceMs &&
       !video.paused,
@@ -467,7 +488,7 @@ export function createPlaybackBindingController(args: {
         return true;
       }
 
-      if (shouldReapplyHoldAfterSharedVideoEnd(video, currentVideo)) {
+      if (shouldReapplyHoldAfterSharedVideoEnd(video)) {
         // The non-sharer's player resumed right after we held it at the shared
         // video's natural end. This is local multi-part autoplay continuing in
         // the same element (no URL change for the navigation controller to
@@ -517,18 +538,26 @@ export function createPlaybackBindingController(args: {
         // `forcePauseOnNonSharedPage` only suppresses the broadcast; it does not
         // stop the local element. A play with a recent user gesture is the
         // user's own non-shared playback and is left to run (broadcast still
-        // suppressed). A play with no recent gesture is autoplay: for a
-        // non-sharer whose player autoplayed into the next episode we must
-        // actually pause it, otherwise it keeps playing while the room stays on
-        // the shared video. Gate on the absence of a recent gesture rather than
-        // on the pause hold still being active, because a slow SPA load/ad can
-        // delay the `play`/`playing` event past `initialRoomStatePauseHoldMs`,
-        // after which the expired hold would let the delayed autoplay slip
-        // through.
+        // suppressed). A play with no recent gesture on a page the navigation
+        // controller flagged as a non-sharer autoplay (`nonSharerAutoplayHoldUrl`)
+        // is autoplay into the next episode: we must actually pause it, otherwise
+        // it keeps playing while the room stays on the shared video. Gate on the
+        // marker (and absence of a gesture) rather than on the pause hold still
+        // being active, because a slow SPA load/ad can delay the `play`/`playing`
+        // event past `initialRoomStatePauseHoldMs`. Requiring the marker also
+        // avoids pausing a non-shared video the user manually opened via full-page
+        // navigation (address bar/bookmark/direct link): that page was never
+        // reached through an in-SPA autoplay, so it carries no marker and is left
+        // playable.
+        const normalizedCurrentUrl = args.normalizeUrl(
+          args.getSharedVideo()?.url,
+        );
         if (
           !hasRecentUserGesture() &&
           (args.runtimeState.intendedPlayState === "paused" ||
-            args.runtimeState.intendedPlayState === "buffering")
+            args.runtimeState.intendedPlayState === "buffering") &&
+          normalizedCurrentUrl !== null &&
+          normalizedCurrentUrl === args.runtimeState.nonSharerAutoplayHoldUrl
         ) {
           args.debugLog(
             "Forced pause for delayed non-sharer autoplay into non-shared video",
@@ -555,6 +584,7 @@ export function createPlaybackBindingController(args: {
         if (guardUnexpectedResume()) {
           return;
         }
+        releaseEndHoldOnUserGesture();
         clearActivePauseClassification();
         rememberExplicitPlaybackAction("playing");
         rememberExplicitUserAction("play");
@@ -657,6 +687,7 @@ export function createPlaybackBindingController(args: {
         if (guardUnexpectedResume()) {
           return;
         }
+        releaseEndHoldOnUserGesture();
         clearActivePauseClassification();
         rememberExplicitPlaybackAction("playing");
         rememberExplicitUserAction("play");
