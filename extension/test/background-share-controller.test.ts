@@ -4,6 +4,18 @@ import { PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
 import { createShareController } from "../src/background/share-controller";
 
+// Node < 22 has no global WebSocket; production `isSocketWritable` reads
+// `WebSocket.OPEN`. Provide the readyState statics so these unit tests run on
+// any Node (CI pins Node 22 via .nvmrc, where it is already present).
+if (typeof (globalThis as { WebSocket?: unknown }).WebSocket === "undefined") {
+  (globalThis as { WebSocket?: unknown }).WebSocket = {
+    CONNECTING: 0,
+    OPEN: 1,
+    CLOSING: 2,
+    CLOSED: 3,
+  };
+}
+
 function installSelfStub() {
   const originalSelf = globalThis.self;
   Object.assign(globalThis, {
@@ -144,16 +156,18 @@ test("background share controller queues the share for reconnect when the socket
 
     assert.deepEqual(result, { ok: true });
     // The share must NOT be sent over the dying socket (it would be dropped
-    // silently). It is queued instead and the member token is cleared to force a
-    // fresh rejoin, after which `flushPendingShare` re-sends it.
+    // silently). It is queued for the reconnect flush instead.
     assert.deepEqual(harness.sendToServerCalls, []);
     assert.deepEqual(harness.runtimeState.room.pendingSharedVideo, {
       videoId: "BV199W9zEEcH",
       url: "https://www.bilibili.com/video/BV199W9zEEcH",
       title: "New Video",
     });
-    assert.equal(harness.runtimeState.room.memberToken, null);
-    // The offline branch reconnects (the harness `connect` stub flips this true).
+    // The session is still valid: the member token is KEPT so the rejoin
+    // re-attaches as the same member (clearing it would spawn a new memberId /
+    // duplicate member). The reconnect flush re-sends the queued share.
+    assert.equal(harness.runtimeState.room.memberToken, "member-token-1");
+    // The CLOSING branch reconnects (the harness `connect` stub flips this true).
     assert.equal(harness.runtimeState.connection.connected, true);
   } finally {
     selfHarness.restore();

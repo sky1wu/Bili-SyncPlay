@@ -175,3 +175,58 @@ test("socket close still applies an admin session reset even with a queued share
     globals.restore();
   }
 });
+
+test("socket controller ignores the close of a superseded socket", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+
+    await harness.controller.connect();
+    const firstSocket = createdSockets[0];
+    // The first socket is dying; a replacement connection is opened (mirrors the
+    // CLOSING-window share / clock-sync calling `connect()`).
+    firstSocket.readyState = FakeWebSocket.CLOSING;
+    await harness.controller.connect();
+    const secondSocket = createdSockets[1];
+    assert.notEqual(secondSocket, firstSocket);
+    assert.equal(harness.runtimeState.connection.socket, secondSocket);
+
+    harness.runtimeState.connection.connected = true;
+    // Even with nothing queued (which on the current socket would clear the
+    // marker), the superseded socket's close must not touch the live state:
+    // after `flushPendingShare` nulls `pendingSharedVideo`, a late old close
+    // would otherwise drop the marker the new connection is still confirming.
+    harness.runtimeState.room.pendingSharedVideo = null;
+
+    firstSocket.emit("close", closeEvent());
+
+    assert.deepEqual(harness.clearPendingLocalShareReasons, []);
+    assert.equal(harness.runtimeState.connection.connected, true);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("socket controller still applies an admin reset from a superseded socket", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+
+    await harness.controller.connect();
+    const firstSocket = createdSockets[0];
+    firstSocket.readyState = FakeWebSocket.CLOSING;
+    await harness.controller.connect();
+
+    // An admin kick on the old connection must still tear down the session even
+    // though the socket has been superseded, so the kicked user cannot rejoin.
+    firstSocket.emit("close", closeEvent("Admin kicked member"));
+
+    assert.deepEqual(harness.adminResets, ["Admin kicked member"]);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});

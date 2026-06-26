@@ -165,9 +165,19 @@ export function createSocketController(args: {
       }
     }
 
-    args.connectionState.socket = new WebSocket(serverUrlResult.normalizedUrl);
+    const socket = new WebSocket(serverUrlResult.normalizedUrl);
+    args.connectionState.socket = socket;
 
-    args.connectionState.socket.addEventListener("open", () => {
+    // True once a newer connection has replaced this socket (e.g. a reconnect
+    // opened while this one was still CLOSING — an explicit share queued in the
+    // CLOSING micro-window opens the replacement). A superseded socket's events
+    // must not mutate the live connection state, which the replacement now owns.
+    const isSuperseded = () => args.connectionState.socket !== socket;
+
+    socket.addEventListener("open", () => {
+      if (isSuperseded()) {
+        return;
+      }
       args.connectionState.connected = true;
       args.connectionState.lastError = null;
       args.connectionState.reconnectAttempt = 0;
@@ -214,7 +224,10 @@ export function createSocketController(args: {
       args.notifyAll();
     });
 
-    args.connectionState.socket.addEventListener("message", (event) => {
+    socket.addEventListener("message", (event) => {
+      if (isSuperseded()) {
+        return;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(event.data);
@@ -229,21 +242,7 @@ export function createSocketController(args: {
       void args.handleServerMessage(parsed);
     });
 
-    args.connectionState.socket.addEventListener("close", (event) => {
-      args.connectionState.connected = false;
-      args.stopClockSyncTimer();
-      // Keep the pending local-share confirmation marker when the share is
-      // queued for re-flush on reconnect (the offline/CLOSING branch of
-      // `queueOrSendSharedVideo` set `pendingSharedVideo` before opening the
-      // replacement connection). The reconnect `room:joined` re-sends it, and
-      // the surviving marker keeps the interim stale `room:state` (the previous
-      // video) from pulling the sharer back until the re-shared video is
-      // confirmed. With nothing queued the in-flight share is genuinely lost, so
-      // clear the marker and let fresh room state apply instead of stranding the
-      // client on a never-confirmed local share.
-      if (args.roomSessionState.pendingSharedVideo === null) {
-        args.clearPendingLocalShare("socket closed before share confirmation");
-      }
+    socket.addEventListener("close", (event) => {
       const closeReason = event.reason
         ? ` reason=${JSON.stringify(event.reason)}`
         : "";
@@ -251,17 +250,51 @@ export function createSocketController(args: {
         "background",
         `Socket closed code=${event.code} clean=${event.wasClean}${closeReason}`,
       );
+
+      // Admin session resets are authoritative server actions: honour them even
+      // for a superseded socket so a kicked / disconnected / closed-room session
+      // is torn down rather than silently rejoined by the replacement.
       if (event.reason && ADMIN_SESSION_RESET_REASONS.has(event.reason)) {
+        if (!isSuperseded()) {
+          args.connectionState.connected = false;
+          args.stopClockSyncTimer();
+        }
         args.onAdminSessionReset(
           args.formatAdminSessionResetReason(event.reason),
         );
         return;
       }
+
+      // A superseded socket's close belongs to a connection the replacement has
+      // already taken over. Acting here would clear a share-confirmation marker
+      // the new connection is still confirming (`flushPendingShare` nulls
+      // `pendingSharedVideo` right after rejoin, so the queued-share check below
+      // can no longer tell a re-flushed share from a lost one), flip `connected`
+      // false on the live socket, and schedule a redundant reconnect.
+      if (isSuperseded()) {
+        return;
+      }
+
+      args.connectionState.connected = false;
+      args.stopClockSyncTimer();
+      // Keep the pending local-share confirmation marker while a share is queued
+      // for re-flush on reconnect (the CLOSING/offline branch of
+      // `queueOrSendSharedVideo` set `pendingSharedVideo`): the reconnect
+      // `room:joined` re-sends it and the surviving marker suppresses the
+      // interim stale `room:state` until the re-shared video is confirmed. With
+      // nothing queued the in-flight share is lost, so clear the marker and let
+      // fresh room state apply instead of stranding the client on it.
+      if (args.roomSessionState.pendingSharedVideo === null) {
+        args.clearPendingLocalShare("socket closed before share confirmation");
+      }
       scheduleReconnect();
       args.notifyAll();
     });
 
-    args.connectionState.socket.addEventListener("error", () => {
+    socket.addEventListener("error", () => {
+      if (isSuperseded()) {
+        return;
+      }
       args.connectionState.lastError = getConnectionErrorMessage({
         healthcheckReachable,
         extensionOrigin,
@@ -277,7 +310,7 @@ export function createSocketController(args: {
         stage: "websocket",
         serverUrl: serverUrlResult.normalizedUrl,
         extensionOrigin,
-        readyState: args.connectionState.socket?.readyState ?? -1,
+        readyState: socket.readyState,
       });
       args.notifyAll();
     });

@@ -147,16 +147,12 @@ export function createShareController(args: {
     // can actually write a `video:share`. `connectionState.connected` is only
     // flipped to false by the socket's `close`/`error` events, so during the
     // micro-window where the socket has already moved to CLOSING/CLOSED but the
-    // close event has not dispatched yet it still reads true. Taking the
-    // connected branch there returns `{ ok: true }` while `sendToServer` (which
-    // requires an OPEN socket) silently drops the message, stranding the room on
-    // the old video with no retry — and auto-share gets no failure to retry on.
-    // Falling through to the offline branch instead queues the share into
-    // `pendingSharedVideo` and reconnects, so it is flushed after the rejoin.
+    // close event has not dispatched yet it still reads true. Sending in that
+    // window returns `{ ok: true }` while `sendToServer` (which requires an OPEN
+    // socket) silently drops the message, stranding the room on the old video.
     // (For the non-explicit auto-share path the message controller defers on the
-    // same writability check *before* reaching here, so it never queues a stale
-    // auto-share that would clobber another member's share on the reconnect
-    // flush — only explicit user shares fall through to the queue.)
+    // same writability check *before* reaching here, so only explicit user
+    // shares reach the CLOSING/offline queue below.)
     if (
       args.connectionState.connected &&
       isSocketWritable(args.connectionState.socket) &&
@@ -185,6 +181,33 @@ export function createShareController(args: {
             : {}),
         },
       });
+      return { ok: true };
+    }
+
+    // CLOSING micro-window: the socket can no longer be written but the session
+    // is otherwise valid (`connected` still true, room + member token present).
+    // Queue the share for the reconnect flush and open the replacement
+    // connection WITHOUT tearing down the session — keep the member token so the
+    // rejoin re-attaches as the same member. Dropping it (as the fully-offline
+    // branch below does) makes the server assign a new memberId and can surface
+    // a duplicate member until the old socket leaves. The superseded old socket's
+    // close is ignored by the socket controller, so this marker survives until
+    // the re-flushed share is confirmed.
+    if (
+      args.connectionState.connected &&
+      args.roomSessionState.roomCode &&
+      args.roomSessionState.memberToken
+    ) {
+      setPendingLocalShare(payload.video.url);
+      args.roomSessionState.pendingSharedVideo = payload.video;
+      args.roomSessionState.pendingSharedPlayback = payload.playback
+        ? {
+            ...payload.playback,
+            serverTime: 0,
+            actorId: args.roomSessionState.memberId ?? payload.playback.actorId,
+          }
+        : null;
+      await args.connect();
       return { ok: true };
     }
 

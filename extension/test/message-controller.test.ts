@@ -3,6 +3,18 @@ import test from "node:test";
 import { createMessageController } from "../src/background/message-controller";
 import type { RoomState } from "@bili-syncplay/protocol";
 
+// Node < 22 has no global WebSocket; production `isSocketWritable` reads
+// `WebSocket.OPEN`. Provide the readyState statics so these unit tests run on
+// any Node (CI pins Node 22 via .nvmrc, where it is already present).
+if (typeof (globalThis as { WebSocket?: unknown }).WebSocket === "undefined") {
+  (globalThis as { WebSocket?: unknown }).WebSocket = {
+    CONNECTING: 0,
+    OPEN: 1,
+    CLOSING: 2,
+    CLOSED: 3,
+  };
+}
+
 function createControllerHarness(
   overrides: {
     connectionState?: {
