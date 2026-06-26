@@ -165,9 +165,22 @@ export function createSocketController(args: {
       }
     }
 
-    args.connectionState.socket = new WebSocket(serverUrlResult.normalizedUrl);
+    // Capture this socket instance so each handler can ignore events from a
+    // connection that has since been superseded. A replacement socket can be
+    // opened before this one's events drain — e.g. an explicit share queued
+    // during the CLOSING micro-window takes the offline branch and calls
+    // `connect()`, which opens a new socket while this one is still CLOSING.
+    // When this stale socket's `close` later fires, running the normal handler
+    // would `clearPendingLocalShare` and flip `connected`, dropping the share
+    // confirmation marker that keeps the post-rejoin stale `room:state` from
+    // pulling the sharer back to the previous video.
+    const socket = new WebSocket(serverUrlResult.normalizedUrl);
+    args.connectionState.socket = socket;
 
-    args.connectionState.socket.addEventListener("open", () => {
+    socket.addEventListener("open", () => {
+      if (args.connectionState.socket !== socket) {
+        return;
+      }
       args.connectionState.connected = true;
       args.connectionState.lastError = null;
       args.connectionState.reconnectAttempt = 0;
@@ -214,7 +227,10 @@ export function createSocketController(args: {
       args.notifyAll();
     });
 
-    args.connectionState.socket.addEventListener("message", (event) => {
+    socket.addEventListener("message", (event) => {
+      if (args.connectionState.socket !== socket) {
+        return;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(event.data);
@@ -229,7 +245,10 @@ export function createSocketController(args: {
       void args.handleServerMessage(parsed);
     });
 
-    args.connectionState.socket.addEventListener("close", (event) => {
+    socket.addEventListener("close", (event) => {
+      if (args.connectionState.socket !== socket) {
+        return;
+      }
       args.connectionState.connected = false;
       args.stopClockSyncTimer();
       args.clearPendingLocalShare("socket closed before share confirmation");
@@ -250,7 +269,10 @@ export function createSocketController(args: {
       args.notifyAll();
     });
 
-    args.connectionState.socket.addEventListener("error", () => {
+    socket.addEventListener("error", () => {
+      if (args.connectionState.socket !== socket) {
+        return;
+      }
       args.connectionState.lastError = getConnectionErrorMessage({
         healthcheckReachable,
         extensionOrigin,
@@ -262,7 +284,7 @@ export function createSocketController(args: {
         stage: "websocket",
         serverUrl: serverUrlResult.normalizedUrl,
         extensionOrigin,
-        readyState: args.connectionState.socket?.readyState ?? -1,
+        readyState: socket.readyState,
       });
       args.notifyAll();
     });
