@@ -85,6 +85,102 @@ test("auto-share next controller sends a request after the navigation settles", 
   }
 });
 
+test("auto-share next controller re-anchors to its own confirmed previous step before sending", async () => {
+  // A→B→C chained autoplay: B→C was scheduled while the room was still on A, with
+  // B recorded as our own previous chain step. B's room state confirmed during
+  // the settle window so the live shared video is now B. The sent request must
+  // re-anchor to B (the live video), not the stale A, so the background stays
+  // "on-scheduled" and advances to C.
+  const windowHarness = installWindowStub();
+  const sentMessages: unknown[] = [];
+  let activeSharedUrl: string | null =
+    "https://www.bilibili.com/video/BV1AVideo";
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1CVideo",
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    getActiveSharedUrl: () => activeSharedUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      return { ok: true };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1AVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1CVideo",
+      previousAutoShareTargetUrl: "https://www.bilibili.com/video/BV1BVideo",
+    });
+    // Our own previous step B confirms during the settle window.
+    activeSharedUrl = "https://www.bilibili.com/video/BV1BVideo";
+    windowHarness.runTimers();
+    await Promise.resolve();
+
+    assert.deepEqual(sentMessages, [
+      {
+        type: "content:auto-share-next-video",
+        payload: {
+          previousSharedUrl: "https://www.bilibili.com/video/BV1BVideo",
+          targetNormalizedUrl: "https://www.bilibili.com/video/BV1CVideo",
+        },
+      },
+    ]);
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
+test("auto-share next controller does not re-anchor to an unrelated video the room moved to", async () => {
+  // A→B auto-share queued (no prior chain step). During the settle window the
+  // same member manually shares X from another tab and it confirms, so the live
+  // shared video is now X. X is NOT our own previous chain step, so the request
+  // must keep the scheduled anchor A — letting the background skip this stale
+  // auto-share as moved-on rather than clobber the manual X with B.
+  const windowHarness = installWindowStub();
+  const sentMessages: unknown[] = [];
+  let activeSharedUrl: string | null =
+    "https://www.bilibili.com/video/BV1AVideo";
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1BVideo",
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    getActiveSharedUrl: () => activeSharedUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      return { ok: true };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1AVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1BVideo",
+      previousAutoShareTargetUrl: null,
+    });
+    // A manual share X confirms during the settle window.
+    activeSharedUrl = "https://www.bilibili.com/video/BV1XVideo";
+    windowHarness.runTimers();
+    await Promise.resolve();
+
+    assert.deepEqual(sentMessages, [
+      {
+        type: "content:auto-share-next-video",
+        payload: {
+          previousSharedUrl: "https://www.bilibili.com/video/BV1AVideo",
+          targetNormalizedUrl: "https://www.bilibili.com/video/BV1BVideo",
+        },
+      },
+    ]);
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
 test("auto-share next controller skips a settled request when the page moved again", async () => {
   const windowHarness = installWindowStub();
   let currentUrl = "https://www.bilibili.com/video/BV1NextVideo";

@@ -62,6 +62,7 @@ const autoShareNextController = createAutoShareNextController({
   settleDelayMs: AUTO_SHARE_NEXT_SETTLE_DELAY_MS,
   getCurrentPageUrl: () => window.location.href.split("#")[0],
   normalizeVideoPageUrl: (url) => normalizeSharedVideoUrl(url),
+  getActiveSharedUrl: () => runtimeState.activeSharedUrl,
   runtimeSendMessage,
   debugLog,
 });

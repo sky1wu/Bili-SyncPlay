@@ -26,6 +26,14 @@ export function createNavigationController(args: {
   scheduleAutoShareNextVideo?: (input: {
     previousSharedUrl: string;
     nextNormalizedPageUrl: string;
+    /**
+     * The sharer's own in-flight auto-share target this navigation advanced FROM
+     * (the previous chain step), or `null` when this is not a chained step. The
+     * auto-share controller may re-anchor `previousSharedUrl` to the live shared
+     * video only when it matches this — i.e. our own previous step confirmed —
+     * never to an unrelated video (e.g. a manual share) the room moved to.
+     */
+    previousAutoShareTargetUrl: string | null;
   }) => void;
   cancelAutoShareNextVideo?: () => void;
   debugLog: (message: string) => void;
@@ -187,9 +195,18 @@ export function createNavigationController(args: {
         // the background advance the room directly to it (room A → latest). In the
         // normal single-step case `navigatedFromSharedVideo` guarantees
         // `previousNormalizedPageUrl === activeSharedUrl`, so this is unchanged.
+        //
+        // `activeSharedUrl` is the anchor as of *now*. If our own previous step
+        // (`previousPendingAutoShareTargetUrl`) confirms during the settle window,
+        // the room moves to it while this anchor goes stale; the auto-share
+        // controller re-anchors to the live shared video, but only when it equals
+        // that previous step — so an unrelated video the room moved to (e.g. a
+        // manual share confirmed in the same window) is never adopted as the
+        // anchor and the stale auto-share is correctly skipped as moved-on.
         args.scheduleAutoShareNextVideo?.({
           previousSharedUrl: activeSharedUrl,
           nextNormalizedPageUrl,
+          previousAutoShareTargetUrl: previousPendingAutoShareTargetUrl,
         });
         // Remember this target so the next chained autoplay (next → next+1) is
         // recognised as a sharer autoplay even before the room confirms it.

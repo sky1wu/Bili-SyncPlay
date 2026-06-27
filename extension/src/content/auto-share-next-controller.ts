@@ -7,6 +7,7 @@ export interface AutoShareNextController {
   scheduleForNavigation(args: {
     previousSharedUrl: string;
     nextNormalizedPageUrl: string;
+    previousAutoShareTargetUrl?: string | null;
   }): void;
   /**
    * Invalidate any pending/in-flight auto-share. Called when a fresh navigation
@@ -21,6 +22,13 @@ export interface AutoShareNextController {
 interface PendingAutoShare {
   previousSharedUrl: string;
   targetNormalizedUrl: string;
+  /**
+   * Our own previous chain step's target (the in-flight auto-share this
+   * navigation advanced FROM), or `null` for a non-chained step. The only video
+   * `previousSharedUrl` may be re-anchored to at send time if the room confirms
+   * it during the settle window — see {@link requestAutoShare}.
+   */
+  previousAutoShareTargetUrl: string | null;
   attempt: number;
   /**
    * Identifies the navigation that produced this request. A later navigation —
@@ -46,6 +54,14 @@ export function createAutoShareNextController(args: {
   retryDelayMs?: number;
   getCurrentPageUrl: () => string;
   normalizeVideoPageUrl: (url: string) => string | null;
+  /**
+   * The room's *currently* confirmed shared video, read fresh when a request is
+   * about to be sent. Used to re-anchor `previousSharedUrl` so a chained autoplay
+   * that confirms an intermediate step during the settle window is not sent with
+   * a now-stale anchor. Optional: when absent, the value captured at schedule
+   * time is used unchanged.
+   */
+  getActiveSharedUrl?: () => string | null;
   runtimeSendMessage: <T>(message: unknown) => Promise<T | null>;
   debugLog: (message: string) => void;
 }): AutoShareNextController {
@@ -91,10 +107,31 @@ export function createAutoShareNextController(args: {
       return;
     }
 
+    // Re-anchor to the room's *currently* confirmed shared video when — and only
+    // when — it is our own previous chain step that has just confirmed. A chained
+    // autoplay (A→B→C) schedules B→C while B is still unconfirmed, so the anchor
+    // is A; but B's `room:state` can confirm during this settle window, moving the
+    // room to B. Sending the stale anchor A would make the background see room=B ≠
+    // A, classify it as "moved-on", and skip C with `ok:true` (no retry) —
+    // stranding the room on B. Re-anchoring to B keeps the background
+    // "on-scheduled" so it advances to C.
+    //
+    // The re-anchor is restricted to `previousAutoShareTargetUrl` (our own prior
+    // step). If the room moved during the window to some *other* video — e.g. the
+    // same member manually shared X from another tab and it confirmed — the live
+    // anchor is X, not our prior step, so we keep the scheduled anchor and let the
+    // background skip this stale auto-share as moved-on rather than clobber X.
+    const liveAnchor = args.getActiveSharedUrl?.() ?? null;
+    const previousSharedUrl =
+      pending.previousAutoShareTargetUrl !== null &&
+      liveAnchor === pending.previousAutoShareTargetUrl
+        ? pending.previousAutoShareTargetUrl
+        : pending.previousSharedUrl;
+
     const message: ContentToBackgroundMessage = {
       type: "content:auto-share-next-video",
       payload: {
-        previousSharedUrl: pending.previousSharedUrl,
+        previousSharedUrl,
         targetNormalizedUrl: pending.targetNormalizedUrl,
       },
     };
@@ -145,6 +182,7 @@ export function createAutoShareNextController(args: {
   function scheduleForNavigation(input: {
     previousSharedUrl: string;
     nextNormalizedPageUrl: string;
+    previousAutoShareTargetUrl?: string | null;
   }): void {
     if (input.previousSharedUrl === input.nextNormalizedPageUrl) {
       return;
@@ -170,6 +208,7 @@ export function createAutoShareNextController(args: {
       {
         previousSharedUrl: input.previousSharedUrl,
         targetNormalizedUrl: input.nextNormalizedPageUrl,
+        previousAutoShareTargetUrl: input.previousAutoShareTargetUrl ?? null,
         attempt: 1,
         generation: scheduleGeneration,
       },

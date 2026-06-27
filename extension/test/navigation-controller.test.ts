@@ -207,6 +207,7 @@ test("navigation controller schedules auto-share when a shared source autoplays 
   const autoShareRequests: Array<{
     previousSharedUrl: string;
     nextNormalizedPageUrl: string;
+    previousAutoShareTargetUrl: string | null;
   }> = [];
 
   const controller = createNavigationController({
@@ -252,6 +253,8 @@ test("navigation controller schedules auto-share when a shared source autoplays 
       {
         previousSharedUrl: "https://www.bilibili.com/video/BV1DbiMBwEry",
         nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1Em421N7uU",
+        // Not a chained step: no previous in-flight auto-share to re-anchor to.
+        previousAutoShareTargetUrl: null,
       },
     ]);
   } finally {
@@ -272,6 +275,7 @@ test("navigation controller chains the next auto-share before the room confirms 
   const autoShareRequests: Array<{
     previousSharedUrl: string;
     nextNormalizedPageUrl: string;
+    previousAutoShareTargetUrl: string | null;
   }> = [];
 
   const controller = createNavigationController({
@@ -320,10 +324,16 @@ test("navigation controller chains the next auto-share before the room confirms 
       {
         previousSharedUrl: "https://www.bilibili.com/video/BV1aaaaaaaaa",
         nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1bbbbbbbbb",
+        // First step: came straight from the room's confirmed video A.
+        previousAutoShareTargetUrl: null,
       },
       {
         previousSharedUrl: "https://www.bilibili.com/video/BV1aaaaaaaaa",
         nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1ccccccccc",
+        // Chained step: came from our own in-flight auto-share target B, so the
+        // controller may re-anchor to B if it confirms during the settle window.
+        previousAutoShareTargetUrl:
+          "https://www.bilibili.com/video/BV1bbbbbbbbb",
       },
     ]);
     assert.equal(
