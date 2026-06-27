@@ -28,10 +28,10 @@ export function createNavigationController(args: {
     nextNormalizedPageUrl: string;
     /**
      * The sharer's own in-flight auto-share target this navigation advanced FROM
-     * (the previous chain step), or `null` when this is not a chained step. The
-     * auto-share controller may re-anchor `previousSharedUrl` to the live shared
-     * video only when it matches this — i.e. our own previous step confirmed —
-     * never to an unrelated video (e.g. a manual share) the room moved to.
+     * (the previous chain step), or `null` when this is not a chained step (it
+     * came straight from the room's confirmed shared video). A `null` value marks
+     * a fresh chain so the auto-share controller resets its sent-target lineage;
+     * a non-null value continues the current chain.
      */
     previousAutoShareTargetUrl: string | null;
   }) => void;
@@ -196,13 +196,15 @@ export function createNavigationController(args: {
         // normal single-step case `navigatedFromSharedVideo` guarantees
         // `previousNormalizedPageUrl === activeSharedUrl`, so this is unchanged.
         //
-        // `activeSharedUrl` is the anchor as of *now*. If our own previous step
-        // (`previousPendingAutoShareTargetUrl`) confirms during the settle window,
-        // the room moves to it while this anchor goes stale; the auto-share
-        // controller re-anchors to the live shared video, but only when it equals
-        // that previous step — so an unrelated video the room moved to (e.g. a
-        // manual share confirmed in the same window) is never adopted as the
-        // anchor and the stale auto-share is correctly skipped as moved-on.
+        // `activeSharedUrl` is the anchor as of *now*. If a step our own chain
+        // already sent confirms during the settle window, the room moves to it
+        // while this anchor goes stale; the auto-share controller re-anchors to the
+        // live shared video, but only when it is one of its own sent targets — so
+        // an unrelated video the room moved to (e.g. a manual share confirmed in
+        // the same window) is never adopted and the stale auto-share is correctly
+        // skipped as moved-on. `previousPendingAutoShareTargetUrl` tells the
+        // controller whether this is a chained step (continue the lineage) or a
+        // fresh start (reset it).
         args.scheduleAutoShareNextVideo?.({
           previousSharedUrl: activeSharedUrl,
           nextNormalizedPageUrl,

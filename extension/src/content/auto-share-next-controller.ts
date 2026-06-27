@@ -22,13 +22,6 @@ export interface AutoShareNextController {
 interface PendingAutoShare {
   previousSharedUrl: string;
   targetNormalizedUrl: string;
-  /**
-   * Our own previous chain step's target (the in-flight auto-share this
-   * navigation advanced FROM), or `null` for a non-chained step. The only video
-   * `previousSharedUrl` may be re-anchored to at send time if the room confirms
-   * it during the settle window — see {@link requestAutoShare}.
-   */
-  previousAutoShareTargetUrl: string | null;
   attempt: number;
   /**
    * Identifies the navigation that produced this request. A later navigation —
@@ -72,6 +65,12 @@ export function createAutoShareNextController(args: {
   let pendingNormalizedUrl: string | null = null;
   let pendingPreviousSharedUrl: string | null = null;
   let scheduleGeneration = 0;
+  // Targets this controller has actually *sent* in the current uninterrupted
+  // chain. The room's confirmed shared video, when it is ours, is always one of
+  // these — so a request whose scheduled anchor went stale may safely re-anchor
+  // to the live shared video iff it is in this set. Reset when a fresh
+  // (non-chained) auto-share starts; see {@link scheduleForNavigation}.
+  const sentChainTargets = new Set<string>();
 
   function clearPendingTimer(): void {
     if (pendingTimer !== null) {
@@ -108,25 +107,32 @@ export function createAutoShareNextController(args: {
     }
 
     // Re-anchor to the room's *currently* confirmed shared video when — and only
-    // when — it is our own previous chain step that has just confirmed. A chained
-    // autoplay (A→B→C) schedules B→C while B is still unconfirmed, so the anchor
-    // is A; but B's `room:state` can confirm during this settle window, moving the
-    // room to B. Sending the stale anchor A would make the background see room=B ≠
-    // A, classify it as "moved-on", and skip C with `ok:true` (no retry) —
-    // stranding the room on B. Re-anchoring to B keeps the background
+    // when — it is a video THIS chain has already sent that just confirmed. A
+    // chained autoplay (A→B→C) schedules B→C while B is still unconfirmed, so the
+    // anchor is A; but B's `room:state` can confirm during this settle window,
+    // moving the room to B. Sending the stale anchor A would make the background
+    // see room=B ≠ A, classify it as "moved-on", and skip C with `ok:true` (no
+    // retry) — stranding the room on B. Re-anchoring to B keeps the background
     // "on-scheduled" so it advances to C.
     //
-    // The re-anchor is restricted to `previousAutoShareTargetUrl` (our own prior
-    // step). If the room moved during the window to some *other* video — e.g. the
-    // same member manually shared X from another tab and it confirmed — the live
-    // anchor is X, not our prior step, so we keep the scheduled anchor and let the
-    // background skip this stale auto-share as moved-on rather than clobber X.
+    // Restricting the re-anchor to our own sent targets handles deeper lag too:
+    // if B→C→D rapidly superseded down to D while only B was actually sent, B
+    // (not the immediately-prior page C) is what confirms, and B ∈ sentChainTargets
+    // so D still re-anchors to it. Conversely, if the room moved during the window
+    // to a video we never sent — e.g. the same member manually shared X from
+    // another tab and it confirmed — X ∉ sentChainTargets, so we keep the
+    // scheduled anchor and let the background skip this stale auto-share as
+    // moved-on rather than clobber X.
     const liveAnchor = args.getActiveSharedUrl?.() ?? null;
     const previousSharedUrl =
-      pending.previousAutoShareTargetUrl !== null &&
-      liveAnchor === pending.previousAutoShareTargetUrl
-        ? pending.previousAutoShareTargetUrl
+      liveAnchor !== null && sentChainTargets.has(liveAnchor)
+        ? liveAnchor
         : pending.previousSharedUrl;
+
+    // Record the target before sending: once dispatched, the room may confirm it,
+    // and a later chain step whose anchor goes stale must be able to re-anchor to
+    // it here.
+    sentChainTargets.add(pending.targetNormalizedUrl);
 
     const message: ContentToBackgroundMessage = {
       type: "content:auto-share-next-video",
@@ -182,10 +188,22 @@ export function createAutoShareNextController(args: {
   function scheduleForNavigation(input: {
     previousSharedUrl: string;
     nextNormalizedPageUrl: string;
+    /**
+     * The sharer's own in-flight auto-share target this navigation advanced FROM,
+     * or `null`/absent when this is not a chained step (it came straight from the
+     * room's confirmed shared video). A `null`/absent value marks a fresh chain,
+     * so the sent-target lineage from any previous chain is reset.
+     */
     previousAutoShareTargetUrl?: string | null;
   }): void {
     if (input.previousSharedUrl === input.nextNormalizedPageUrl) {
       return;
+    }
+    // A fresh (non-chained) auto-share starts a new lineage: the room cannot be
+    // on a target an earlier, now-abandoned chain sent, so clear the set to keep
+    // the re-anchor (in `requestAutoShare`) from adopting a stale prior target.
+    if (input.previousAutoShareTargetUrl == null) {
+      sentChainTargets.clear();
     }
     // Coalesce only with a still-pending timer for the exact same transition —
     // same target *and* same source shared video — so rapid duplicate
@@ -208,7 +226,6 @@ export function createAutoShareNextController(args: {
       {
         previousSharedUrl: input.previousSharedUrl,
         targetNormalizedUrl: input.nextNormalizedPageUrl,
-        previousAutoShareTargetUrl: input.previousAutoShareTargetUrl ?? null,
         attempt: 1,
         generation: scheduleGeneration,
       },
