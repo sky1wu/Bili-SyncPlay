@@ -94,6 +94,17 @@ export interface ContentRuntimeState {
    * hence no marker) is left playable for the user.
    */
   nonSharerAutoplayHoldUrl: string | null;
+  /**
+   * Normalized URL the local sharer auto-shared as the next video but whose
+   * authoritative `room:state` has not arrived yet (`activeSharedUrl` still lags
+   * behind it). Lets chained autoplay (A→B→C) keep scheduling: when the player
+   * advances B→C before B's `room:state` returns, `activeSharedUrl` is still A,
+   * so the navigation guard would otherwise treat B→C as a local detour and not
+   * auto-share C. Treating a navigation whose previous page equals this in-flight
+   * target as a sharer autoplay re-arms the chain. Cleared once `room:state`
+   * confirms it (or another member takes over the share) and on room teardown.
+   */
+  pendingAutoShareTargetUrl: string | null;
   lastForcedPauseAt: number;
   pauseHoldUntil: number;
   pendingPlaybackApplication: PlaybackState | null;
@@ -191,6 +202,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     suppressedLocalEndPauseUrl: null,
     suppressedLocalEndPauseUntil: 0,
     nonSharerAutoplayHoldUrl: null,
+    pendingAutoShareTargetUrl: null,
     lastForcedPauseAt: 0,
     pauseHoldUntil: 0,
     pendingPlaybackApplication: null,

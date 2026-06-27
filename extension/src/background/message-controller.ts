@@ -76,6 +76,7 @@ export function createMessageController(args: {
       tabId: number | null,
     ): Promise<QueueSharedVideoResult>;
     hasActivePendingLocalShare(): boolean;
+    getActivePendingLocalShareUrl(): string | null;
   };
   tabController: {
     openSharedVideoFromPopup(): Promise<void>;
@@ -308,10 +309,27 @@ export function createMessageController(args: {
         // share a different video or fresh room state could arrive; without
         // re-checking, the stale timer would overwrite the room back to the
         // previous video's next episode.
-        const isRoomStillOnScheduledVideo = (): boolean => {
+        // Classify the room against the video this auto-share was scheduled from
+        // (`previousSharedUrl`):
+        //   - "on-scheduled": the room is parked on it and we still own the
+        //     share → safe to advance to the next video.
+        //   - "share-in-flight": the room has not reached it yet because our OWN
+        //     share of it is still awaiting confirmation — chained autoplay
+        //     (A→B→C) outran the room round-trip, so when C arrives the room is
+        //     still on A while `previousSharedUrl` is B, the video we just shared
+        //     but whose `room:state` has not returned. Retry without consuming
+        //     the page-bridge attempt budget; once B confirms, the retry sees
+        //     "on-scheduled" and advances to C.
+        //   - "moved-on": the room is on a different video for any other reason
+        //     (another member shared, the room genuinely advanced past it, …) →
+        //     skip so this stale autoplay does not override it.
+        const classifyRoomSchedule = ():
+          | "on-scheduled"
+          | "share-in-flight"
+          | "moved-on" => {
           const sharedVideo = args.roomSessionState.roomState?.sharedVideo;
           const sharedVideoUrl = sharedVideo?.url ?? null;
-          return (
+          if (
             sharedVideoUrl !== null &&
             areSharedVideoUrlsEqual(
               sharedVideoUrl,
@@ -323,10 +341,36 @@ export function createMessageController(args: {
             // not override the new sharer's freshly acquired control.
             args.roomSessionState.memberId !== null &&
             sharedVideo?.sharedByMemberId === args.roomSessionState.memberId
-          );
+          ) {
+            return "on-scheduled";
+          }
+          const inFlightOwnShareUrl =
+            args.shareController.getActivePendingLocalShareUrl();
+          if (
+            inFlightOwnShareUrl !== null &&
+            areSharedVideoUrlsEqual(
+              inFlightOwnShareUrl,
+              message.payload.previousSharedUrl,
+            )
+          ) {
+            return "share-in-flight";
+          }
+          return "moved-on";
         };
 
-        if (!isRoomStillOnScheduledVideo()) {
+        const scheduleState = classifyRoomSchedule();
+        if (scheduleState === "share-in-flight") {
+          args.diagnosticsController.log(
+            "content",
+            "Auto-share next video deferred: room has not confirmed the previous share yet",
+          );
+          sendResponse({
+            ok: false,
+            deferred: true,
+          } satisfies ShareCurrentVideoResponse);
+          return;
+        }
+        if (scheduleState === "moved-on") {
           args.diagnosticsController.log(
             "content",
             "Auto-share next video skipped: room moved past the scheduled shared video",
@@ -411,8 +455,11 @@ export function createMessageController(args: {
         // `getVideoPayloadFromTab` yielded the event loop, so re-confirm the room
         // is still on `previousSharedUrl` before overwriting it. A manual share
         // or fresh room state received in that window means the room has moved
-        // on and this stale auto-share must not clobber it.
-        if (!isRoomStillOnScheduledVideo()) {
+        // on and this stale auto-share must not clobber it. (Only "on-scheduled"
+        // may proceed here: having already passed the check above the room was on
+        // `previousSharedUrl`, so a non-on-scheduled recheck means it advanced —
+        // treat any such state as moved-on and skip rather than send.)
+        if (classifyRoomSchedule() !== "on-scheduled") {
           args.diagnosticsController.log(
             "content",
             "Auto-share next video skipped: room moved past the scheduled shared video while reading the tab",

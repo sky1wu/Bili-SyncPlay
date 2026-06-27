@@ -259,6 +259,79 @@ test("navigation controller schedules auto-share when a shared source autoplays 
   }
 });
 
+test("navigation controller chains the next auto-share before the room confirms the previous one", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1aaaaaaaaa";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+
+  let currentUrl = "https://www.bilibili.com/video/BV1aaaaaaaaa";
+  const autoShareRequests: Array<{
+    previousSharedUrl: string;
+    nextNormalizedPageUrl: string;
+  }> = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+
+    // A→B autoplay: the room is on A and we own it, so this is a sharer autoplay.
+    currentUrl = "https://www.bilibili.com/video/BV1bbbbbbbbb";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(
+      runtimeState.pendingAutoShareTargetUrl,
+      "https://www.bilibili.com/video/BV1bbbbbbbbb",
+    );
+
+    // B→C autoplay BEFORE B's room:state returns: `activeSharedUrl` is still A,
+    // but the previous page (B) matches the in-flight auto-share target, so this
+    // must still be recognised as a sharer autoplay and schedule C (from B).
+    currentUrl = "https://www.bilibili.com/video/BV1ccccccccc";
+    windowHarness.intervals[0]?.();
+
+    assert.deepEqual(autoShareRequests, [
+      {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1aaaaaaaaa",
+        nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1bbbbbbbbb",
+      },
+      {
+        previousSharedUrl: "https://www.bilibili.com/video/BV1bbbbbbbbb",
+        nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1ccccccccc",
+      },
+    ]);
+    assert.equal(
+      runtimeState.pendingAutoShareTargetUrl,
+      "https://www.bilibili.com/video/BV1ccccccccc",
+    );
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller does not auto-share a recent user-initiated navigation", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();

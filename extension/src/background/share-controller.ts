@@ -46,6 +46,15 @@ export interface ShareController {
    * holds the previous video until the server confirms).
    */
   hasActivePendingLocalShare(): boolean;
+  /**
+   * The URL of the share still awaiting server confirmation (the pending
+   * local-share marker), or null. This is the video this client last shared but
+   * whose authoritative `room:state` has not arrived yet — i.e. our own share
+   * still in flight. Used to tell a chained auto-share that the room simply has
+   * not caught up to the previous share yet (retry) from one where the room has
+   * genuinely moved on (skip).
+   */
+  getActivePendingLocalShareUrl(): string | null;
 }
 
 export function createShareController(args: {
@@ -295,14 +304,16 @@ export function createShareController(args: {
     } = cleanup.nextState);
   }
 
+  function readActivePendingLocalShareUrl(): string | null {
+    return getActivePendingLocalShareUrl({
+      pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
+      pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
+      now: Date.now(),
+    });
+  }
+
   function hasActivePendingLocalShare(): boolean {
-    return (
-      getActivePendingLocalShareUrl({
-        pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
-        pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
-        now: Date.now(),
-      }) !== null
-    );
+    return readActivePendingLocalShareUrl() !== null;
   }
 
   function expirePendingLocalShareIfNeeded(): void {
@@ -346,5 +357,6 @@ export function createShareController(args: {
     expirePendingLocalShareIfNeeded,
     setPendingLocalShare,
     hasActivePendingLocalShare,
+    getActivePendingLocalShareUrl: readActivePendingLocalShareUrl,
   };
 }

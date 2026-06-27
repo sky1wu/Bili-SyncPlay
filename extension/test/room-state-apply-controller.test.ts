@@ -302,6 +302,121 @@ test("syncs the cached shared url and sharer when the page bridge has no current
   assert.equal(harness.runtimeState.activeSharedByMemberId, "member-2");
 });
 
+test("clears the pending auto-share target once the room confirms it", async () => {
+  const video = createStubVideo(true);
+  const harness = createController({ video, now: 10_000, currentVideo: null });
+
+  harness.runtimeState.localMemberId = "member-1";
+  harness.runtimeState.activeSharedByMemberId = "member-1";
+  harness.runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ep1111111";
+  // Our chain's in-flight target is the video the room is now confirming.
+  harness.runtimeState.pendingAutoShareTargetUrl =
+    "https://www.bilibili.com/bangumi/play/ep1231523";
+  harness.runtimeState.pendingRoomStateHydration = false;
+
+  await harness.controller.applyRoomState({
+    roomCode: "ROOM01",
+    sharedVideo: {
+      videoId: "ep1231523",
+      url: "https://www.bilibili.com/bangumi/play/ep1231523",
+      title: "第2话",
+      sharedByMemberId: "member-1",
+    },
+    playback: {
+      url: "https://www.bilibili.com/bangumi/play/ep1231523",
+      playState: "playing",
+      currentTime: 0,
+      playbackRate: 1,
+      actorId: "member-1",
+      seq: 1,
+      serverTime: 1_000,
+    },
+    members: [{ id: "member-1", name: "Alice" }],
+  });
+
+  assert.equal(harness.runtimeState.pendingAutoShareTargetUrl, null);
+});
+
+test("keeps the pending auto-share target while the room is still catching up the chain", async () => {
+  const video = createStubVideo(true);
+  const harness = createController({ video, now: 10_000, currentVideo: null });
+
+  harness.runtimeState.localMemberId = "member-1";
+  harness.runtimeState.activeSharedByMemberId = "member-1";
+  harness.runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ep1111111";
+  // The chain already advanced to C while the room is only now confirming B.
+  harness.runtimeState.pendingAutoShareTargetUrl =
+    "https://www.bilibili.com/bangumi/play/ep_C";
+  harness.runtimeState.pendingRoomStateHydration = false;
+
+  await harness.controller.applyRoomState({
+    roomCode: "ROOM01",
+    sharedVideo: {
+      videoId: "ep1231523",
+      url: "https://www.bilibili.com/bangumi/play/ep1231523",
+      title: "第2话 B",
+      sharedByMemberId: "member-1",
+    },
+    playback: {
+      url: "https://www.bilibili.com/bangumi/play/ep1231523",
+      playState: "playing",
+      currentTime: 0,
+      playbackRate: 1,
+      actorId: "member-1",
+      seq: 1,
+      serverTime: 1_000,
+    },
+    members: [{ id: "member-1", name: "Alice" }],
+  });
+
+  // Still ours and not yet the confirmed target → the chain marker survives so
+  // the next B→C autoplay is still recognised.
+  assert.equal(
+    harness.runtimeState.pendingAutoShareTargetUrl,
+    "https://www.bilibili.com/bangumi/play/ep_C",
+  );
+});
+
+test("clears the pending auto-share target when another member takes over the share", async () => {
+  const video = createStubVideo(true);
+  const harness = createController({ video, now: 10_000, currentVideo: null });
+
+  harness.runtimeState.localMemberId = "member-1";
+  harness.runtimeState.activeSharedByMemberId = "member-1";
+  harness.runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ep1111111";
+  harness.runtimeState.pendingAutoShareTargetUrl =
+    "https://www.bilibili.com/bangumi/play/ep_C";
+  harness.runtimeState.pendingRoomStateHydration = false;
+
+  await harness.controller.applyRoomState({
+    roomCode: "ROOM01",
+    sharedVideo: {
+      videoId: "ep2222222",
+      url: "https://www.bilibili.com/bangumi/play/ep2222222",
+      title: "别人分享的",
+      sharedByMemberId: "member-2",
+    },
+    playback: {
+      url: "https://www.bilibili.com/bangumi/play/ep2222222",
+      playState: "playing",
+      currentTime: 0,
+      playbackRate: 1,
+      actorId: "member-2",
+      seq: 1,
+      serverTime: 1_000,
+    },
+    members: [
+      { id: "member-1", name: "Alice" },
+      { id: "member-2", name: "Bob" },
+    ],
+  });
+
+  assert.equal(harness.runtimeState.pendingAutoShareTargetUrl, null);
+});
+
 test("pauses video when gesture age exactly equals the grace window boundary", async () => {
   const video = createStubVideo(false);
   const harness = createController({

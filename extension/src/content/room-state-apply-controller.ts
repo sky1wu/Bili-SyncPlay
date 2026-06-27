@@ -183,6 +183,18 @@ export function createRoomStateApplyController(args: {
     sharedByMemberId: string | null | undefined,
   ): void => {
     args.runtimeState.activeSharedByMemberId = sharedByMemberId ?? null;
+    // Clear the chained auto-share target once the room confirms it, or once
+    // another member takes over the share: the in-flight chain marker that lets a
+    // sharer schedule the next autoplay before `room:state` catches up is no
+    // longer pending. Leaving it set could later make an unrelated autoplay look
+    // like a chain continuation.
+    if (
+      args.runtimeState.pendingAutoShareTargetUrl !== null &&
+      (normalizedSharedUrl === args.runtimeState.pendingAutoShareTargetUrl ||
+        (sharedByMemberId ?? null) !== args.runtimeState.localMemberId)
+    ) {
+      args.runtimeState.pendingAutoShareTargetUrl = null;
+    }
     if (args.runtimeState.activeSharedUrl === normalizedSharedUrl) {
       return;
     }
@@ -469,6 +481,7 @@ export function createRoomStateApplyController(args: {
       args.cancelActiveSoftApply(args.getVideoElement(), "room-empty");
       args.runtimeState.activeSharedUrl = null;
       args.runtimeState.activeSharedByMemberId = null;
+      args.runtimeState.pendingAutoShareTargetUrl = null;
       args.runtimeState.suppressedLocalEndPauseUrl = null;
       args.runtimeState.suppressedLocalEndPauseUntil = 0;
       args.runtimeState.nonSharerAutoplayHoldUrl = null;
