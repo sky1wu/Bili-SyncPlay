@@ -36,6 +36,7 @@ export function createSocketController(args: {
   syncClock: () => void;
   startClockSyncTimer: () => void;
   clearPendingLocalShare: (reason: string) => void;
+  getPendingLocalShareGeneration: () => number | null;
   sendJoinRequest: (targetRoomCode: string, targetJoinToken: string) => void;
   sendToServer: (message: ClientMessage) => void;
   handleServerMessage: (message: ServerMessage) => Promise<void>;
@@ -70,13 +71,19 @@ export function createSocketController(args: {
 
     clearReconnectTimer();
     args.log("background", `Connecting to ${serverUrlResult.normalizedUrl}`);
-    args.connectionState.connectProbe = openSocketWithProbe(
-      serverUrlResult.normalizedUrl,
-    );
+    const probe = openSocketWithProbe(serverUrlResult.normalizedUrl);
+    args.connectionState.connectProbe = probe;
     try {
-      await args.connectionState.connectProbe;
+      await probe;
     } finally {
-      args.connectionState.connectProbe = null;
+      // Only clear if this is still the active probe. An authoritative teardown
+      // (admin reset / leave) can abort this probe AND null `connectProbe` so a
+      // subsequent `connect()` starts fresh instead of awaiting this doomed
+      // promise; an unconditional clear here would then wipe that newer probe's
+      // reference when this aborted one finally settles.
+      if (args.connectionState.connectProbe === probe) {
+        args.connectionState.connectProbe = null;
+      }
     }
   }
 
@@ -90,6 +97,15 @@ export function createSocketController(args: {
       args.notifyAll();
       return;
     }
+
+    // Capture the abort generation before the first await. An authoritative
+    // teardown (admin session reset / explicit leave) that lands while this
+    // probe is awaiting connection-check/healthcheck bumps `connectEpoch`, so a
+    // resuming probe must abort rather than open a room-less ghost connection
+    // (which would also clear the teardown's `lastError`).
+    const probeEpoch = args.connectionState.connectEpoch;
+    const isProbeAborted = () =>
+      args.connectionState.connectEpoch !== probeEpoch;
 
     const extensionOrigin = getExtensionOrigin();
     const connectionCheckUrl = args.buildConnectionCheckUrl(
@@ -115,6 +131,9 @@ export function createSocketController(args: {
 
           const payload = (await response.json()) as ConnectionCheckResponse;
           healthcheckReachable = true;
+          if (isProbeAborted()) {
+            return;
+          }
           if (payload.data?.websocketAllowed === false) {
             args.connectionState.lastError = getConnectionErrorMessage({
               healthcheckReachable: true,
@@ -148,6 +167,9 @@ export function createSocketController(args: {
         });
         healthcheckReachable = true;
       } catch {
+        if (isProbeAborted()) {
+          return;
+        }
         args.connectionState.lastError = getConnectionErrorMessage({
           healthcheckReachable: false,
           extensionOrigin,
@@ -165,9 +187,36 @@ export function createSocketController(args: {
       }
     }
 
-    args.connectionState.socket = new WebSocket(serverUrlResult.normalizedUrl);
+    if (isProbeAborted()) {
+      return;
+    }
 
-    args.connectionState.socket.addEventListener("open", () => {
+    const socket = new WebSocket(serverUrlResult.normalizedUrl);
+    // Tag this socket with a fresh generation so its handlers can tell a marker
+    // it owns from one a newer connection set (see the superseded close below).
+    args.connectionState.socketGeneration += 1;
+    const socketGeneration = args.connectionState.socketGeneration;
+    // A reconnect opened in the CLOSING micro-window replaces a socket whose
+    // `connected` is still the stale `true` of the dying connection, but this
+    // new socket is only CONNECTING until its `open` fires. Reflect that now:
+    // callers that gate on `connected` right after `await connect()`
+    // (requestCreateRoom / requestJoinRoom) would otherwise hand
+    // `room:create` / `room:join` to a non-OPEN socket (silently dropped by
+    // `sendToServer`) and mark the request as already sent, so the `open`
+    // handler never re-issues it.
+    args.connectionState.connected = false;
+    args.connectionState.socket = socket;
+
+    // True once a newer connection has replaced this socket (e.g. a reconnect
+    // opened while this one was still CLOSING — an explicit share queued in the
+    // CLOSING micro-window opens the replacement). A superseded socket's events
+    // must not mutate the live connection state, which the replacement now owns.
+    const isSuperseded = () => args.connectionState.socket !== socket;
+
+    socket.addEventListener("open", () => {
+      if (isSuperseded()) {
+        return;
+      }
       args.connectionState.connected = true;
       args.connectionState.lastError = null;
       args.connectionState.reconnectAttempt = 0;
@@ -214,7 +263,10 @@ export function createSocketController(args: {
       args.notifyAll();
     });
 
-    args.connectionState.socket.addEventListener("message", (event) => {
+    socket.addEventListener("message", (event) => {
+      if (isSuperseded()) {
+        return;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(event.data);
@@ -229,10 +281,7 @@ export function createSocketController(args: {
       void args.handleServerMessage(parsed);
     });
 
-    args.connectionState.socket.addEventListener("close", (event) => {
-      args.connectionState.connected = false;
-      args.stopClockSyncTimer();
-      args.clearPendingLocalShare("socket closed before share confirmation");
+    socket.addEventListener("close", (event) => {
       const closeReason = event.reason
         ? ` reason=${JSON.stringify(event.reason)}`
         : "";
@@ -240,29 +289,108 @@ export function createSocketController(args: {
         "background",
         `Socket closed code=${event.code} clean=${event.wasClean}${closeReason}`,
       );
+
+      // Admin session resets are authoritative server actions: honour them even
+      // for a superseded socket so a kicked / disconnected / closed-room session
+      // is torn down rather than silently rejoined by the replacement.
       if (event.reason && ADMIN_SESSION_RESET_REASONS.has(event.reason)) {
+        args.stopClockSyncTimer();
+        // Tear down the *live* connection. When this admin close arrived on a
+        // socket that a CLOSING-window reconnect had already replaced, the
+        // replacement is the live socket and may have rejoined; closing it stops
+        // the kicked session from lingering as a ghost connection. Null the ref
+        // before closing so the replacement's own close event is treated as
+        // superseded and cannot schedule a reconnect (`onAdminSessionReset` then
+        // clears the room context, which also resets the reconnect state).
+        const liveSocket = args.connectionState.socket;
+        args.connectionState.socket = null;
+        args.connectionState.connected = false;
+        // Abort any in-flight connect probe: when this admin close arrived while
+        // a CLOSING-window reconnect was still awaiting connection-check /
+        // healthcheck (the replacement socket is not created yet, so closing
+        // `liveSocket` cannot reach it), the resuming probe would otherwise open
+        // a room-less ghost connection and clear this reset's `lastError`. Also
+        // null `connectProbe`: the aborted probe will short-circuit, but leaving
+        // its promise in place would make a later create/join reuse it (and
+        // never open a connection).
+        args.connectionState.connectEpoch += 1;
+        args.connectionState.connectProbe = null;
+        if (liveSocket && liveSocket !== socket) {
+          liveSocket.close();
+        }
         args.onAdminSessionReset(
           args.formatAdminSessionResetReason(event.reason),
         );
         return;
       }
+
+      // A superseded socket's close belongs to a connection the replacement has
+      // already taken over, so it must not flip `connected` false on the live
+      // socket or schedule a redundant reconnect. It must still tidy the marker
+      // though, gated on two checks:
+      //   1. `pendingSharedVideo` is null — nothing is still queued for the
+      //      replacement's rejoin to re-flush. While a share is queued the marker
+      //      is preserved (the rejoin re-sends it and reconfirms).
+      //   2. The marker's generation matches THIS socket — it owns the last send
+      //      the marker is tracking. A direct send stamps the marker with the
+      //      live socket's generation; a re-flush (`flushPendingShare`) transfers
+      //      ownership to the socket it re-sends on. So once a queued share has
+      //      been re-flushed on the replacement, the marker belongs to the
+      //      replacement and THIS old socket's late close no longer matches it
+      //      (leaving it for the replacement to confirm). Conversely a fresh
+      //      direct share the user sent on the new connection after this socket
+      //      was superseded carries the newer generation and is also left intact.
+      // When both hold the marker can only be reconfirmed by a `video:share` this
+      // dead socket may have dropped on close, so it would suppress the
+      // post-reconnect `room:state` until the 10s timeout; clear it.
+      if (isSuperseded()) {
+        if (
+          args.roomSessionState.pendingSharedVideo === null &&
+          args.getPendingLocalShareGeneration() === socketGeneration
+        ) {
+          args.clearPendingLocalShare(
+            "superseded socket closed before share confirmation",
+          );
+        }
+        return;
+      }
+
+      args.connectionState.connected = false;
+      args.stopClockSyncTimer();
+      // Keep the pending local-share confirmation marker while a share is queued
+      // for re-flush on reconnect (the CLOSING/offline branch of
+      // `queueOrSendSharedVideo` set `pendingSharedVideo`): the reconnect
+      // `room:joined` re-sends it and the surviving marker suppresses the
+      // interim stale `room:state` until the re-shared video is confirmed. With
+      // nothing queued the in-flight share is lost, so clear the marker and let
+      // fresh room state apply instead of stranding the client on it.
+      if (args.roomSessionState.pendingSharedVideo === null) {
+        args.clearPendingLocalShare("socket closed before share confirmation");
+      }
       scheduleReconnect();
       args.notifyAll();
     });
 
-    args.connectionState.socket.addEventListener("error", () => {
+    socket.addEventListener("error", () => {
+      if (isSuperseded()) {
+        return;
+      }
       args.connectionState.lastError = getConnectionErrorMessage({
         healthcheckReachable,
         extensionOrigin,
       });
       args.connectionState.connected = false;
       args.stopClockSyncTimer();
-      args.clearPendingLocalShare("socket error before share confirmation");
+      // See the close handler: preserve the marker only while a queued share is
+      // still pending re-flush, otherwise clear it.
+      if (args.roomSessionState.pendingSharedVideo === null) {
+        args.clearPendingLocalShare("socket error before share confirmation");
+      }
       args.logConnectionProbeFailure({
         stage: "websocket",
         serverUrl: serverUrlResult.normalizedUrl,
         extensionOrigin,
-        readyState: args.connectionState.socket?.readyState ?? -1,
+        readyState: socket.readyState,
       });
       args.notifyAll();
     });

@@ -24,6 +24,8 @@ export function createRuntimeSyncController(args: {
         connected: args.connectionState.connected,
         lastError: args.connectionState.lastError,
         connectProbe: args.connectionState.connectProbe,
+        socketGeneration: args.connectionState.socketGeneration,
+        connectEpoch: args.connectionState.connectEpoch,
         reconnectTimer: args.connectionState.reconnectTimer,
         reconnectAttempt: args.connectionState.reconnectAttempt,
         reconnectDeadlineMs: args.connectionState.reconnectDeadlineMs,
@@ -48,6 +50,8 @@ export function createRuntimeSyncController(args: {
         lastOpenedSharedUrl: args.shareState.lastOpenedSharedUrl,
         openingSharedUrl: args.shareState.openingSharedUrl,
         pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
+        pendingLocalShareGeneration:
+          args.shareState.pendingLocalShareGeneration,
         pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
         pendingLocalShareTimer: args.shareState.pendingLocalShareTimer,
         pendingShareToast: args.shareState.pendingShareToast,

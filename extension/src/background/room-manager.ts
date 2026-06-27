@@ -5,6 +5,7 @@ import type {
   SharedVideo,
 } from "@bili-syncplay/protocol";
 import type { SharedVideoToastPayload } from "../shared/messages";
+import { isSocketWritable } from "./socket-manager";
 
 export function createPendingShareToast(args: {
   state: RoomState;
@@ -79,6 +80,7 @@ export function flushPendingShare(args: {
   pendingSharedVideo: SharedVideo | null;
   pendingSharedPlayback: PlaybackState | null;
   connected: boolean;
+  socketWritable: boolean;
   roomCode: string | null;
   memberToken: string | null;
 }): {
@@ -89,6 +91,13 @@ export function flushPendingShare(args: {
   if (
     !args.pendingSharedVideo ||
     !args.connected ||
+    // `connected` lags the socket's close/error events, so a flush triggered by
+    // `room:joined` can still see it true while the socket has already moved to
+    // CLOSING/CLOSED. `sendToServer` silently drops a non-OPEN write, so gate on
+    // the live `readyState`: when it is not writable, leave the share queued (and
+    // its marker untouched) so the next reconnect's rejoin re-flushes it instead
+    // of nulling `pendingSharedVideo` against a dropped send.
+    !args.socketWritable ||
     !args.roomCode ||
     !args.memberToken
   ) {
@@ -113,13 +122,22 @@ export function executeFlushPendingShare(args: {
     memberToken: string | null;
     roomCode: string | null;
   };
-  connectionState: { connected: boolean };
+  connectionState: {
+    connected: boolean;
+    socketGeneration: number;
+    socket: WebSocket | null;
+  };
+  shareState: {
+    pendingLocalShareUrl: string | null;
+    pendingLocalShareGeneration: number | null;
+  };
   sendToServer: (message: ClientMessage) => void;
 }): void {
   const plan = flushPendingShare({
     pendingSharedVideo: args.roomSessionState.pendingSharedVideo,
     pendingSharedPlayback: args.roomSessionState.pendingSharedPlayback,
     connected: args.connectionState.connected,
+    socketWritable: isSocketWritable(args.connectionState.socket),
     roomCode: args.roomSessionState.roomCode,
     memberToken: args.roomSessionState.memberToken,
   });
@@ -137,4 +155,16 @@ export function executeFlushPendingShare(args: {
   });
   args.roomSessionState.pendingSharedVideo = null;
   args.roomSessionState.pendingSharedPlayback = null;
+  // The queued share was set while an earlier (now-superseded) socket was live,
+  // so the pending-local-share confirmation marker is still tagged with that
+  // socket's generation. This re-flush re-sends the share on the CURRENT live
+  // socket, which is the one that will receive the confirming `room:state`, so
+  // transfer marker ownership to it. Without this, the old socket's late close
+  // (generation match) would clear a marker the live socket is still confirming,
+  // while the live socket's own later supersede (nothing left queued) would fail
+  // to clear it. Only re-stamp when a marker is actually pending.
+  if (args.shareState.pendingLocalShareUrl !== null) {
+    args.shareState.pendingLocalShareGeneration =
+      args.connectionState.socketGeneration;
+  }
 }

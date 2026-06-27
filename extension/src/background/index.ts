@@ -158,6 +158,7 @@ const socketController = createSocketController({
   startClockSyncTimer: () => clockController.startClockSyncTimer(),
   clearPendingLocalShare: (reason) =>
     shareController.clearPendingLocalShare(reason),
+  getPendingLocalShareGeneration: () => shareState.pendingLocalShareGeneration,
   sendJoinRequest: (...args) => roomSessionController.sendJoinRequest(...args),
   sendToServer,
   handleServerMessage,
@@ -397,6 +398,7 @@ function flushPendingShare(): void {
   executeFlushPendingShare({
     roomSessionState,
     connectionState,
+    shareState,
     sendToServer,
   });
 }
