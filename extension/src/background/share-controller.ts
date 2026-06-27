@@ -35,10 +35,11 @@ export interface ShareController {
   queueOrSendSharedVideo(
     payload: { video: SharedVideo; playback: PlaybackState | null },
     tabId: number | null,
+    isAutoShare?: boolean,
   ): Promise<ShareVideoResult>;
   clearPendingLocalShare(reason: string): void;
   expirePendingLocalShareIfNeeded(): void;
-  setPendingLocalShare(url: string): void;
+  setPendingLocalShare(url: string, isAutoShare?: boolean): void;
   /**
    * Whether an explicit local share is still awaiting server confirmation. Used
    * to stop a stale auto-share from overwriting a manual share the user just
@@ -46,6 +47,13 @@ export interface ShareController {
    * holds the previous video until the server confirms).
    */
   hasActivePendingLocalShare(): boolean;
+  /**
+   * Whether a *manual* (non-auto-share) local share is still awaiting server
+   * confirmation. The auto-share handler skips on this so it does not clobber a
+   * deliberate user share, but it must keep advancing past its own in-flight
+   * auto-share (which this returns false for).
+   */
+  hasActivePendingManualShare(): boolean;
   /**
    * The URL of the share still awaiting server confirmation (the pending
    * local-share marker), or null. This is the video this client last shared but
@@ -149,6 +157,7 @@ export function createShareController(args: {
   async function queueOrSendSharedVideo(
     payload: { video: SharedVideo; playback: PlaybackState | null },
     tabId: number | null,
+    isAutoShare = false,
   ): Promise<ShareVideoResult> {
     args.rememberSharedSourceTab(tabId ?? undefined, payload.video.url);
 
@@ -172,7 +181,7 @@ export function createShareController(args: {
         args.connectionState.lastError = error;
         return { ok: false, error };
       }
-      setPendingLocalShare(payload.video.url);
+      setPendingLocalShare(payload.video.url, isAutoShare);
       args.sendToServer({
         type: "video:share",
         payload: {
@@ -230,7 +239,7 @@ export function createShareController(args: {
       args.roomSessionState.roomCode &&
       args.roomSessionState.memberToken
     ) {
-      setPendingLocalShare(payload.video.url);
+      setPendingLocalShare(payload.video.url, isAutoShare);
       args.roomSessionState.pendingSharedVideo = payload.video;
       args.roomSessionState.pendingSharedPlayback = payload.playback
         ? {
@@ -243,7 +252,7 @@ export function createShareController(args: {
       return { ok: true };
     }
 
-    setPendingLocalShare(payload.video.url);
+    setPendingLocalShare(payload.video.url, isAutoShare);
     args.roomSessionState.pendingSharedVideo = payload.video;
     args.roomSessionState.pendingSharedPlayback = payload.playback
       ? {
@@ -283,8 +292,9 @@ export function createShareController(args: {
 
   function clearPendingLocalShare(reason: string): void {
     // The marker is being torn down (confirmed, timed out, disconnect, etc.), so
-    // it no longer has an owning connection.
+    // it no longer has an owning connection and is no longer an auto-share.
     args.shareState.pendingLocalShareGeneration = null;
+    args.shareState.pendingLocalShareIsAutoShare = false;
     const cleanup = preparePendingLocalShareCleanup({
       pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
       pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
@@ -316,6 +326,13 @@ export function createShareController(args: {
     return readActivePendingLocalShareUrl() !== null;
   }
 
+  function hasActivePendingManualShare(): boolean {
+    return (
+      readActivePendingLocalShareUrl() !== null &&
+      !args.shareState.pendingLocalShareIsAutoShare
+    );
+  }
+
   function expirePendingLocalShareIfNeeded(): void {
     const activePendingShare = getActivePendingLocalShareUrl({
       pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
@@ -329,12 +346,16 @@ export function createShareController(args: {
     }
   }
 
-  function setPendingLocalShare(url: string): void {
+  function setPendingLocalShare(url: string, isAutoShare = false): void {
     clearPendingLocalShareTimer();
     // Record which connection owns this marker so a superseded socket's late
     // close only clears the marker it created, not one set by a newer connection.
     args.shareState.pendingLocalShareGeneration =
       args.connectionState.socketGeneration;
+    // Remember whether this marker is a chained auto-share so the auto-share
+    // handler can advance past its own in-flight share without skipping (only a
+    // manual share's marker should block the next auto-share).
+    args.shareState.pendingLocalShareIsAutoShare = isAutoShare;
     args.shareState.pendingLocalShareUrl = url;
     args.shareState.pendingLocalShareExpiresAt = createPendingLocalShareExpiry(
       Date.now(),
@@ -357,6 +378,7 @@ export function createShareController(args: {
     expirePendingLocalShareIfNeeded,
     setPendingLocalShare,
     hasActivePendingLocalShare,
+    hasActivePendingManualShare,
     getActivePendingLocalShareUrl: readActivePendingLocalShareUrl,
   };
 }

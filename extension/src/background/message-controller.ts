@@ -74,8 +74,10 @@ export function createMessageController(args: {
     queueOrSendSharedVideo(
       payload: { video: SharedVideo; playback: PlaybackState | null },
       tabId: number | null,
+      isAutoShare?: boolean,
     ): Promise<QueueSharedVideoResult>;
     hasActivePendingLocalShare(): boolean;
+    hasActivePendingManualShare(): boolean;
     getActivePendingLocalShareUrl(): string | null;
   };
   tabController: {
@@ -522,8 +524,11 @@ export function createMessageController(args: {
         // An explicit share the user just made only sets a pending local share;
         // `roomState.sharedVideo` still holds the previous video until the server
         // confirms, so the room re-check above can still pass. Sending now would
-        // overwrite that unconfirmed manual share — skip and let it stand.
-        if (args.shareController.hasActivePendingLocalShare()) {
+        // overwrite that unconfirmed manual share — skip and let it stand. Only a
+        // *manual* pending share blocks here: our own previous in-flight
+        // auto-share is the chain we are advancing, so skipping on it would strand
+        // the room one step behind when chained autoplay outruns confirmation.
+        if (args.shareController.hasActivePendingManualShare()) {
           args.diagnosticsController.log(
             "content",
             "Auto-share next video skipped: a manual share is awaiting confirmation",
@@ -535,6 +540,7 @@ export function createMessageController(args: {
         const shareResult = await args.shareController.queueOrSendSharedVideo(
           response.payload,
           response.tabId,
+          true,
         );
         if (shareResult.ok === false) {
           args.diagnosticsController.log(

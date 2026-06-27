@@ -52,6 +52,8 @@ export function createRuntimeSyncController(args: {
         pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
         pendingLocalShareGeneration:
           args.shareState.pendingLocalShareGeneration,
+        pendingLocalShareIsAutoShare:
+          args.shareState.pendingLocalShareIsAutoShare,
         pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
         pendingLocalShareTimer: args.shareState.pendingLocalShareTimer,
         pendingShareToast: args.shareState.pendingShareToast,

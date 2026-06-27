@@ -92,6 +92,15 @@ export interface ShareState {
    * connection set for a share still awaiting confirmation. Null when no marker.
    */
   pendingLocalShareGeneration: number | null;
+  /**
+   * Whether the current pending local-share marker was set by an auto-share
+   * (chained autoplay) rather than an explicit manual share. The auto-share
+   * handler skips when a *manual* share is still awaiting confirmation (so it
+   * does not clobber the user's deliberate share), but it must NOT skip on its
+   * own previous in-flight auto-share — that is the chain it is advancing, and
+   * skipping would strand the room one step behind. False when no marker.
+   */
+  pendingLocalShareIsAutoShare: boolean;
   pendingShareToast:
     | (SharedVideoToastPayload & { expiresAt: number; roomCode: string })
     | null;
@@ -156,6 +165,7 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       openingSharedUrl: null,
       pendingLocalShareUrl: null,
       pendingLocalShareGeneration: null,
+      pendingLocalShareIsAutoShare: false,
       pendingLocalShareExpiresAt: null,
       pendingLocalShareTimer: null,
       pendingShareToast: null,

@@ -130,6 +130,44 @@ test("background share controller forwards a share without playback when content
   }
 });
 
+test("background share controller distinguishes manual and auto pending local shares", async () => {
+  const selfHarness = installSelfStub();
+  const harness = createControllerHarness();
+  harness.runtimeState.connection.connected = true;
+  harness.runtimeState.room.roomCode = "ROOM01";
+  harness.runtimeState.room.memberToken = "member-token-1";
+  harness.runtimeState.room.memberId = "member-1";
+
+  const video = {
+    video: {
+      videoId: "BV199W9zEEcH",
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+      title: "New Video",
+    },
+    playback: null,
+  };
+
+  try {
+    // A manual share leaves a pending marker that blocks a chained auto-share.
+    await harness.controller.queueOrSendSharedVideo(video, 123);
+    assert.equal(harness.controller.hasActivePendingLocalShare(), true);
+    assert.equal(harness.controller.hasActivePendingManualShare(), true);
+
+    // An auto-share's own in-flight marker must NOT count as a manual share, so
+    // the next chain step can advance past it.
+    await harness.controller.queueOrSendSharedVideo(video, 123, true);
+    assert.equal(harness.controller.hasActivePendingLocalShare(), true);
+    assert.equal(harness.controller.hasActivePendingManualShare(), false);
+
+    // Clearing the marker resets the auto flag too.
+    harness.controller.clearPendingLocalShare("test");
+    assert.equal(harness.controller.hasActivePendingLocalShare(), false);
+    assert.equal(harness.controller.hasActivePendingManualShare(), false);
+  } finally {
+    selfHarness.restore();
+  }
+});
+
 test("background share controller queues the share for reconnect when the socket is closing", async () => {
   const selfHarness = installSelfStub();
   const harness = createControllerHarness();
