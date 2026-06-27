@@ -5,6 +5,7 @@ import type {
   SharedVideo,
 } from "@bili-syncplay/protocol";
 import type { SharedVideoToastPayload } from "../shared/messages";
+import { isSocketWritable } from "./socket-manager";
 
 export function createPendingShareToast(args: {
   state: RoomState;
@@ -79,6 +80,7 @@ export function flushPendingShare(args: {
   pendingSharedVideo: SharedVideo | null;
   pendingSharedPlayback: PlaybackState | null;
   connected: boolean;
+  socketWritable: boolean;
   roomCode: string | null;
   memberToken: string | null;
 }): {
@@ -89,6 +91,13 @@ export function flushPendingShare(args: {
   if (
     !args.pendingSharedVideo ||
     !args.connected ||
+    // `connected` lags the socket's close/error events, so a flush triggered by
+    // `room:joined` can still see it true while the socket has already moved to
+    // CLOSING/CLOSED. `sendToServer` silently drops a non-OPEN write, so gate on
+    // the live `readyState`: when it is not writable, leave the share queued (and
+    // its marker untouched) so the next reconnect's rejoin re-flushes it instead
+    // of nulling `pendingSharedVideo` against a dropped send.
+    !args.socketWritable ||
     !args.roomCode ||
     !args.memberToken
   ) {
@@ -113,7 +122,11 @@ export function executeFlushPendingShare(args: {
     memberToken: string | null;
     roomCode: string | null;
   };
-  connectionState: { connected: boolean; socketGeneration: number };
+  connectionState: {
+    connected: boolean;
+    socketGeneration: number;
+    socket: WebSocket | null;
+  };
   shareState: {
     pendingLocalShareUrl: string | null;
     pendingLocalShareGeneration: number | null;
@@ -124,6 +137,7 @@ export function executeFlushPendingShare(args: {
     pendingSharedVideo: args.roomSessionState.pendingSharedVideo,
     pendingSharedPlayback: args.roomSessionState.pendingSharedPlayback,
     connected: args.connectionState.connected,
+    socketWritable: isSocketWritable(args.connectionState.socket),
     roomCode: args.roomSessionState.roomCode,
     memberToken: args.roomSessionState.memberToken,
   });

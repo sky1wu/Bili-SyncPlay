@@ -3,6 +3,16 @@ import test from "node:test";
 import type { ClientMessage, SharedVideo } from "@bili-syncplay/protocol";
 import { executeFlushPendingShare } from "../src/background/room-manager";
 
+// Node < 22 has no global WebSocket; `isSocketWritable` reads `WebSocket.OPEN`.
+if (typeof (globalThis as { WebSocket?: unknown }).WebSocket === "undefined") {
+  (globalThis as { WebSocket?: unknown }).WebSocket = {
+    CONNECTING: 0,
+    OPEN: 1,
+    CLOSING: 2,
+    CLOSED: 3,
+  };
+}
+
 const sampleVideo: SharedVideo = {
   videoId: "BV199W9zEEcH",
   url: "https://www.bilibili.com/video/BV199W9zEEcH",
@@ -15,6 +25,7 @@ function createHarness(overrides?: {
   pendingLocalShareGeneration?: number | null;
   socketGeneration?: number;
   connected?: boolean;
+  socketReadyState?: number;
 }) {
   const sent: ClientMessage[] = [];
   const roomSessionState = {
@@ -29,6 +40,9 @@ function createHarness(overrides?: {
   const connectionState = {
     connected: overrides?.connected ?? true,
     socketGeneration: overrides?.socketGeneration ?? 2,
+    socket: {
+      readyState: overrides?.socketReadyState ?? WebSocket.OPEN,
+    } as WebSocket,
   };
   const shareState = {
     pendingLocalShareUrl:
@@ -92,5 +106,28 @@ test("executeFlushPendingShare does not re-stamp when nothing is queued to flush
 
   // No flush, so no re-send and the marker generation stays as it was.
   assert.equal(harness.sent.length, 0);
+  assert.equal(harness.shareState.pendingLocalShareGeneration, 1);
+});
+
+test("executeFlushPendingShare keeps the share queued when the socket is not writable", () => {
+  // `connected` still lags as true while the socket has moved to CLOSING (the
+  // close event has not dispatched yet). The send would be dropped, so the flush
+  // must NOT fire and must leave the queue + marker intact for the next rejoin.
+  const harness = createHarness({
+    connected: true,
+    socketReadyState: WebSocket.CLOSING,
+  });
+
+  executeFlushPendingShare({
+    roomSessionState: harness.roomSessionState,
+    connectionState: harness.connectionState,
+    shareState: harness.shareState,
+    sendToServer: (message) => harness.sent.push(message),
+  });
+
+  assert.equal(harness.sent.length, 0);
+  // The queued share survives so the next reconnect's rejoin re-flushes it.
+  assert.deepEqual(harness.roomSessionState.pendingSharedVideo, sampleVideo);
+  // Ownership is untouched (no re-send happened).
   assert.equal(harness.shareState.pendingLocalShareGeneration, 1);
 });
