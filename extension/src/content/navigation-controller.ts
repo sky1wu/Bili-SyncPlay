@@ -176,13 +176,19 @@ export function createNavigationController(args: {
 
       if (shouldTreatAsAutoplay && isLocalSharedSource) {
         args.runtimeState.explicitNonSharedPlaybackUrl = nextNormalizedPageUrl;
-        // Advance FROM the page we navigated from, not `activeSharedUrl`: in a
-        // chained autoplay these differ (prev=B, `activeSharedUrl` still A) and
-        // the room is catching up to B, so B is the correct `previousSharedUrl`.
-        // In the normal single-step case `navigatedFromSharedVideo` guarantees
+        // Advance FROM the room's confirmed shared video (`activeSharedUrl`), not
+        // the page we navigated from. A multi-part / chained autoplay that outruns
+        // room confirmation (A→B→C→D before any `room:state` returns) can't replay
+        // the intermediate videos — once the tab moves past B/C the background's
+        // tab-resolution check rejects them — so the room must jump straight to the
+        // latest video the sharer is actually on. The auto-share controller already
+        // collapses rapid navigations to the latest target via supersede; pairing
+        // that target with the room's confirmed video as `previousSharedUrl` lets
+        // the background advance the room directly to it (room A → latest). In the
+        // normal single-step case `navigatedFromSharedVideo` guarantees
         // `previousNormalizedPageUrl === activeSharedUrl`, so this is unchanged.
         args.scheduleAutoShareNextVideo?.({
-          previousSharedUrl: previousNormalizedPageUrl,
+          previousSharedUrl: activeSharedUrl,
           nextNormalizedPageUrl,
         });
         // Remember this target so the next chained autoplay (next → next+1) is

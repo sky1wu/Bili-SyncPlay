@@ -309,7 +309,10 @@ test("navigation controller chains the next auto-share before the room confirms 
 
     // B→C autoplay BEFORE B's room:state returns: `activeSharedUrl` is still A,
     // but the previous page (B) matches the in-flight auto-share target, so this
-    // must still be recognised as a sharer autoplay and schedule C (from B).
+    // must still be recognised as a sharer autoplay and schedule C. It advances
+    // FROM the room's confirmed video (A) — not the page B — so the background can
+    // jump the room straight to the latest video the sharer is on (intermediates
+    // the tab already left cannot be replayed).
     currentUrl = "https://www.bilibili.com/video/BV1ccccccccc";
     windowHarness.intervals[0]?.();
 
@@ -319,7 +322,7 @@ test("navigation controller chains the next auto-share before the room confirms 
         nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1bbbbbbbbb",
       },
       {
-        previousSharedUrl: "https://www.bilibili.com/video/BV1bbbbbbbbb",
+        previousSharedUrl: "https://www.bilibili.com/video/BV1aaaaaaaaa",
         nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1ccccccccc",
       },
     ]);
