@@ -215,7 +215,106 @@ test("background share controller keeps the member token for a second share duri
     // The member token MUST survive (do not fall through to the offline branch
     // that nulls it, which would spawn a duplicate member on rejoin).
     assert.equal(harness.runtimeState.room.memberToken, "member-token-1");
-    assert.equal(harness.runtimeState.room.shareReflushPending, true);
+  } finally {
+    selfHarness.restore();
+  }
+});
+
+test("background share controller replaces a still-queued share when direct-sending a newer one", async () => {
+  const selfHarness = installSelfStub();
+  const harness = createControllerHarness();
+  // The replacement socket opened (connected + writable) but `room:joined` has
+  // not returned yet, so a prior CLOSING-window share is still queued for the
+  // pending rejoin flush.
+  harness.runtimeState.connection.connected = true;
+  setSocketReadyState(harness.runtimeState, WebSocket.OPEN);
+  harness.runtimeState.room.roomCode = "ROOM01";
+  harness.runtimeState.room.memberToken = "member-token-1";
+  harness.runtimeState.room.memberId = "member-1";
+  harness.runtimeState.room.pendingSharedVideo = {
+    videoId: "BVfirst",
+    url: "https://www.bilibili.com/video/BVfirst",
+    title: "First Video",
+  };
+
+  try {
+    const result = await harness.controller.queueOrSendSharedVideo(
+      {
+        video: {
+          videoId: "BV199W9zEEcH",
+          url: "https://www.bilibili.com/video/BV199W9zEEcH",
+          title: "New Video",
+        },
+        playback: null,
+      },
+      123,
+    );
+
+    assert.deepEqual(result, { ok: true });
+    // The newer video is sent directly over the OPEN socket.
+    assert.deepEqual(harness.sendToServerCalls, [
+      {
+        type: "video:share",
+        payload: {
+          memberToken: "member-token-1",
+          video: {
+            videoId: "BV199W9zEEcH",
+            url: "https://www.bilibili.com/video/BV199W9zEEcH",
+            title: "New Video",
+          },
+        },
+      },
+    ]);
+    // The stale queued share MUST be replaced with the latest one; otherwise the
+    // post-rejoin flush would re-send the old video and roll back this share.
+    assert.deepEqual(harness.runtimeState.room.pendingSharedVideo, {
+      videoId: "BV199W9zEEcH",
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+      title: "New Video",
+    });
+  } finally {
+    selfHarness.restore();
+  }
+});
+
+test("background share controller keeps the member token in the error-before-close window", async () => {
+  const selfHarness = installSelfStub();
+  const harness = createControllerHarness();
+  // The socket `error` handler flipped `connected` false, but the socket lingers
+  // in CLOSING until its `close` event dispatches. A manual share here must keep
+  // the member token instead of falling through to the offline branch.
+  harness.runtimeState.connection.connected = false;
+  setSocketReadyState(harness.runtimeState, WebSocket.CLOSING);
+  harness.runtimeState.room.roomCode = "ROOM01";
+  harness.runtimeState.room.memberToken = "member-token-1";
+  harness.runtimeState.room.memberId = "member-1";
+
+  try {
+    const result = await harness.controller.queueOrSendSharedVideo(
+      {
+        video: {
+          videoId: "BV199W9zEEcH",
+          url: "https://www.bilibili.com/video/BV199W9zEEcH",
+          title: "New Video",
+        },
+        playback: null,
+      },
+      123,
+    );
+
+    assert.deepEqual(result, { ok: true });
+    // Not written over the dying socket; queued for the reconnect flush.
+    assert.deepEqual(harness.sendToServerCalls, []);
+    assert.deepEqual(harness.runtimeState.room.pendingSharedVideo, {
+      videoId: "BV199W9zEEcH",
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+      title: "New Video",
+    });
+    // The member token MUST survive so the rejoin re-attaches as the same member
+    // (clearing it would surface a duplicate member with a new memberId).
+    assert.equal(harness.runtimeState.room.memberToken, "member-token-1");
+    // The reconnect was triggered (the harness `connect` stub flips this true).
+    assert.equal(harness.runtimeState.connection.connected, true);
   } finally {
     selfHarness.restore();
   }

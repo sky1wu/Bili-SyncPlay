@@ -181,28 +181,43 @@ export function createShareController(args: {
             : {}),
         },
       });
+      // A prior CLOSING-window share may still be queued for re-flush on a
+      // pending rejoin (replacement socket `open` flips `connected` true and the
+      // socket writable before `room:joined` returns to flush the queue). We just
+      // direct-sent a newer video, so replace the queued payload with it;
+      // otherwise the post-rejoin flush would re-send the stale video and roll
+      // back the share the user just made.
+      if (args.roomSessionState.pendingSharedVideo !== null) {
+        args.roomSessionState.pendingSharedVideo = payload.video;
+        args.roomSessionState.pendingSharedPlayback = payload.playback
+          ? {
+              ...payload.playback,
+              serverTime: 0,
+              actorId:
+                args.roomSessionState.memberId ?? payload.playback.actorId,
+            }
+          : null;
+      }
       return { ok: true };
     }
 
-    // CLOSING micro-window / reconnect in progress: the socket can no longer be
-    // written but the session is otherwise valid (room + member token present).
-    // This covers both the CLOSING window (`connected` still true, close event
-    // not dispatched) and the window after a previous queued share already
-    // swapped in a CONNECTING replacement socket (which clears `connected`); a
-    // second manual share in that window must NOT fall through to the offline
-    // branch and drop the member token. Queue the share for the reconnect flush
-    // and open/await the replacement WITHOUT tearing down the session — keep the
-    // member token so the rejoin re-attaches as the same member. Dropping it (as
-    // the fully-offline branch below does) makes the server assign a new memberId
-    // and can surface a duplicate member until the old socket leaves. The
-    // superseded old socket's close is ignored by the socket controller, so this
-    // marker survives (flagged as a re-flush) until the re-flushed share is
-    // confirmed.
-    const reconnectInProgress =
-      args.connectionState.socket !== null &&
-      args.connectionState.socket.readyState === WebSocket.CONNECTING;
+    // Reconnect window: a live socket reference still exists but it can no longer
+    // be cleanly written, while the session is otherwise valid (room + member
+    // token present). This covers the CLOSING window (`connected` still true,
+    // close event not dispatched), the window after a previous queued share
+    // swapped in a CONNECTING replacement socket (which clears `connected`), and
+    // the error-before-close window (the `error` handler flips `connected` false
+    // but the socket lingers in CLOSING/CLOSED until its `close` event). A manual
+    // share in any of these must NOT fall through to the offline branch and drop
+    // the member token. Queue the share for the reconnect flush and open/await
+    // the replacement WITHOUT tearing down the session — keep the member token so
+    // the rejoin re-attaches as the same member. Dropping it (as the fully-offline
+    // branch below does) makes the server assign a new memberId and can surface a
+    // duplicate member until the old socket leaves. The superseded old socket's
+    // close is ignored by the socket controller, and the queued `pendingSharedVideo`
+    // keeps the marker alive until the re-flushed share is confirmed.
     if (
-      (args.connectionState.connected || reconnectInProgress) &&
+      args.connectionState.socket !== null &&
       args.roomSessionState.roomCode &&
       args.roomSessionState.memberToken
     ) {
@@ -215,7 +230,6 @@ export function createShareController(args: {
             actorId: args.roomSessionState.memberId ?? payload.playback.actorId,
           }
         : null;
-      args.roomSessionState.shareReflushPending = true;
       await args.connect();
       return { ok: true };
     }
@@ -229,10 +243,6 @@ export function createShareController(args: {
           actorId: args.roomSessionState.memberId ?? payload.playback.actorId,
         }
       : null;
-    // The reconnect rejoin (or room:create) flushes this queued share, so the
-    // marker is re-flush-backed: keep it across a superseded socket's late close.
-    args.roomSessionState.shareReflushPending = true;
-
     if (args.roomSessionState.roomCode) {
       args.roomSessionState.memberToken = null;
       await args.connect();
@@ -264,8 +274,7 @@ export function createShareController(args: {
 
   function clearPendingLocalShare(reason: string): void {
     // The marker is being torn down (confirmed, timed out, disconnect, etc.), so
-    // no re-flush is pending against it any more and it no longer has an owner.
-    args.roomSessionState.shareReflushPending = false;
+    // it no longer has an owning connection.
     args.shareState.pendingLocalShareGeneration = null;
     const cleanup = preparePendingLocalShareCleanup({
       pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
@@ -311,11 +320,6 @@ export function createShareController(args: {
 
   function setPendingLocalShare(url: string): void {
     clearPendingLocalShareTimer();
-    // A fresh marker defaults to a plain direct send; the CLOSING/offline queue
-    // branches set `shareReflushPending = true` afterwards when they queue a
-    // re-flush. Reset it here so a direct send that reuses the marker is never
-    // mistaken for a re-flush by a superseded socket's close.
-    args.roomSessionState.shareReflushPending = false;
     // Record which connection owns this marker so a superseded socket's late
     // close only clears the marker it created, not one set by a newer connection.
     args.shareState.pendingLocalShareGeneration =

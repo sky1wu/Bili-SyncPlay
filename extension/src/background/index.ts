@@ -398,6 +398,7 @@ function flushPendingShare(): void {
   executeFlushPendingShare({
     roomSessionState,
     connectionState,
+    shareState,
     sendToServer,
   });
 }

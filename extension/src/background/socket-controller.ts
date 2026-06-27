@@ -327,19 +327,25 @@ export function createSocketController(args: {
       // A superseded socket's close belongs to a connection the replacement has
       // already taken over, so it must not flip `connected` false on the live
       // socket or schedule a redundant reconnect. It must still tidy the marker
-      // though: a share sent directly on THIS now-dead socket (not queued for
-      // re-flush) will never be reconfirmed by the replacement, so its marker
-      // would suppress the post-reconnect `room:state` until the 10s timeout.
-      // `shareReflushPending` distinguishes that from a re-flush marker the
-      // replacement is still confirming (`flushPendingShare` nulls
-      // `pendingSharedVideo` right after rejoin, so `pendingSharedVideo` alone
-      // can no longer tell the two apart). The generation check ensures we only
-      // clear a marker THIS socket created: after it was superseded the user may
-      // have sent a fresh direct share on the new connection (also
-      // `shareReflushPending === false`), and that newer marker must survive.
+      // though, gated on two checks:
+      //   1. `pendingSharedVideo` is null — nothing is still queued for the
+      //      replacement's rejoin to re-flush. While a share is queued the marker
+      //      is preserved (the rejoin re-sends it and reconfirms).
+      //   2. The marker's generation matches THIS socket — it owns the last send
+      //      the marker is tracking. A direct send stamps the marker with the
+      //      live socket's generation; a re-flush (`flushPendingShare`) transfers
+      //      ownership to the socket it re-sends on. So once a queued share has
+      //      been re-flushed on the replacement, the marker belongs to the
+      //      replacement and THIS old socket's late close no longer matches it
+      //      (leaving it for the replacement to confirm). Conversely a fresh
+      //      direct share the user sent on the new connection after this socket
+      //      was superseded carries the newer generation and is also left intact.
+      // When both hold the marker can only be reconfirmed by a `video:share` this
+      // dead socket may have dropped on close, so it would suppress the
+      // post-reconnect `room:state` until the 10s timeout; clear it.
       if (isSuperseded()) {
         if (
-          !args.roomSessionState.shareReflushPending &&
+          args.roomSessionState.pendingSharedVideo === null &&
           args.getPendingLocalShareGeneration() === socketGeneration
         ) {
           args.clearPendingLocalShare(

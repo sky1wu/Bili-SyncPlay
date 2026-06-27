@@ -228,12 +228,10 @@ test("socket controller ignores the close of a superseded socket", async () => {
     assert.equal(harness.runtimeState.connection.socket, secondSocket);
 
     harness.runtimeState.connection.connected = true;
-    // A re-flush marker: `flushPendingShare` already nulled `pendingSharedVideo`
-    // after rejoin but the replacement is still confirming the re-sent share, so
-    // `shareReflushPending` stays true. A late close on the old socket must not
-    // touch the live state nor drop the marker the new connection is confirming.
-    harness.runtimeState.room.pendingSharedVideo = null;
-    harness.runtimeState.room.shareReflushPending = true;
+    // A share is still queued for re-flush on the replacement's rejoin
+    // (`pendingSharedVideo` non-null). A late close on the old socket must not
+    // touch the live state nor drop the marker the new connection will reconfirm.
+    harness.runtimeState.room.pendingSharedVideo = sampleVideo;
 
     firstSocket.emit("close", closeEvent());
 
@@ -245,7 +243,7 @@ test("socket controller ignores the close of a superseded socket", async () => {
   }
 });
 
-test("a superseded socket close clears a direct-send marker that will not be re-flushed", async () => {
+test("a superseded socket close clears a marker with nothing left to re-flush", async () => {
   const globals = installGlobals();
   let harness: ReturnType<typeof createHarness> | undefined;
   try {
@@ -259,11 +257,12 @@ test("a superseded socket close clears a direct-send marker that will not be re-
     assert.equal(harness.runtimeState.connection.socket, secondSocket);
 
     harness.runtimeState.connection.connected = true;
-    // A share was sent directly on the now-dead old socket (generation 1, not
-    // queued for re-flush): nothing will reconfirm it, so its marker must be
-    // cleared rather than suppress the post-reconnect room state until timeout.
+    // The marker this socket (generation 1) created has nothing left to
+    // re-flush: either it was a direct send, or the queued share was already
+    // flushed on this socket (`pendingSharedVideo` nulled) before it was
+    // superseded. Nothing will reconfirm it, so it must be cleared rather than
+    // suppress the post-reconnect room state until timeout.
     harness.runtimeState.room.pendingSharedVideo = null;
-    harness.runtimeState.room.shareReflushPending = false;
     harness.runtimeState.share.pendingLocalShareGeneration = 1;
 
     firstSocket.emit("close", closeEvent());
@@ -296,9 +295,8 @@ test("a superseded socket close keeps a direct-send marker owned by a newer conn
     harness.runtimeState.connection.connected = true;
     // The user sent a fresh direct share on the NEW connection (generation 2)
     // after the old socket was superseded. The old socket's late close must NOT
-    // clear that newer marker, even though it is a direct send (not a re-flush).
+    // clear that newer marker even though nothing is queued to re-flush.
     harness.runtimeState.room.pendingSharedVideo = null;
-    harness.runtimeState.room.shareReflushPending = false;
     harness.runtimeState.share.pendingLocalShareGeneration = 2;
 
     firstSocket.emit("close", closeEvent());

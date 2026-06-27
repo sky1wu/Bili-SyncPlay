@@ -113,7 +113,11 @@ export function executeFlushPendingShare(args: {
     memberToken: string | null;
     roomCode: string | null;
   };
-  connectionState: { connected: boolean };
+  connectionState: { connected: boolean; socketGeneration: number };
+  shareState: {
+    pendingLocalShareUrl: string | null;
+    pendingLocalShareGeneration: number | null;
+  };
   sendToServer: (message: ClientMessage) => void;
 }): void {
   const plan = flushPendingShare({
@@ -137,4 +141,16 @@ export function executeFlushPendingShare(args: {
   });
   args.roomSessionState.pendingSharedVideo = null;
   args.roomSessionState.pendingSharedPlayback = null;
+  // The queued share was set while an earlier (now-superseded) socket was live,
+  // so the pending-local-share confirmation marker is still tagged with that
+  // socket's generation. This re-flush re-sends the share on the CURRENT live
+  // socket, which is the one that will receive the confirming `room:state`, so
+  // transfer marker ownership to it. Without this, the old socket's late close
+  // (generation match) would clear a marker the live socket is still confirming,
+  // while the live socket's own later supersede (nothing left queued) would fail
+  // to clear it. Only re-stamp when a marker is actually pending.
+  if (args.shareState.pendingLocalShareUrl !== null) {
+    args.shareState.pendingLocalShareGeneration =
+      args.connectionState.socketGeneration;
+  }
 }

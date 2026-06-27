@@ -76,18 +76,6 @@ export interface RoomSessionState {
   awaitingFreshRoomState: boolean;
   pendingSharedVideo: SharedVideo | null;
   pendingSharedPlayback: PlaybackState | null;
-  /**
-   * Whether the current pending-local-share confirmation marker is backed by a
-   * share that a reconnect will re-flush and the replacement connection will
-   * reconfirm (the CLOSING/offline queue branches of `queueOrSendSharedVideo`),
-   * rather than a plain direct send. `executeFlushPendingShare` nulls
-   * `pendingSharedVideo` once it re-sends, so after a flush `pendingSharedVideo`
-   * alone can no longer tell a re-flush marker (keep across a superseded
-   * socket's late close — the replacement is still confirming it) from a
-   * direct-send marker whose share is lost when its socket dies (clear it so the
-   * post-reconnect `room:state` is not suppressed until the timeout).
-   */
-  shareReflushPending: boolean;
 }
 
 export interface ShareState {
@@ -161,7 +149,6 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       awaitingFreshRoomState: false,
       pendingSharedVideo: null,
       pendingSharedPlayback: null,
-      shareReflushPending: false,
     },
     share: {
       sharedTabId: null,

@@ -44,7 +44,6 @@ export function createRuntimeSyncController(args: {
         awaitingFreshRoomState: args.roomSessionState.awaitingFreshRoomState,
         pendingSharedVideo: args.roomSessionState.pendingSharedVideo,
         pendingSharedPlayback: args.roomSessionState.pendingSharedPlayback,
-        shareReflushPending: args.roomSessionState.shareReflushPending,
       },
       share: {
         sharedTabId: args.shareState.sharedTabId,
