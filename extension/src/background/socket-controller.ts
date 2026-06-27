@@ -91,6 +91,15 @@ export function createSocketController(args: {
       return;
     }
 
+    // Capture the abort generation before the first await. An authoritative
+    // teardown (admin session reset / explicit leave) that lands while this
+    // probe is awaiting connection-check/healthcheck bumps `connectEpoch`, so a
+    // resuming probe must abort rather than open a room-less ghost connection
+    // (which would also clear the teardown's `lastError`).
+    const probeEpoch = args.connectionState.connectEpoch;
+    const isProbeAborted = () =>
+      args.connectionState.connectEpoch !== probeEpoch;
+
     const extensionOrigin = getExtensionOrigin();
     const connectionCheckUrl = args.buildConnectionCheckUrl(
       serverUrlResult.normalizedUrl,
@@ -115,6 +124,9 @@ export function createSocketController(args: {
 
           const payload = (await response.json()) as ConnectionCheckResponse;
           healthcheckReachable = true;
+          if (isProbeAborted()) {
+            return;
+          }
           if (payload.data?.websocketAllowed === false) {
             args.connectionState.lastError = getConnectionErrorMessage({
               healthcheckReachable: true,
@@ -148,6 +160,9 @@ export function createSocketController(args: {
         });
         healthcheckReachable = true;
       } catch {
+        if (isProbeAborted()) {
+          return;
+        }
         args.connectionState.lastError = getConnectionErrorMessage({
           healthcheckReachable: false,
           extensionOrigin,
@@ -165,7 +180,20 @@ export function createSocketController(args: {
       }
     }
 
+    if (isProbeAborted()) {
+      return;
+    }
+
     const socket = new WebSocket(serverUrlResult.normalizedUrl);
+    // A reconnect opened in the CLOSING micro-window replaces a socket whose
+    // `connected` is still the stale `true` of the dying connection, but this
+    // new socket is only CONNECTING until its `open` fires. Reflect that now:
+    // callers that gate on `connected` right after `await connect()`
+    // (requestCreateRoom / requestJoinRoom) would otherwise hand
+    // `room:create` / `room:join` to a non-OPEN socket (silently dropped by
+    // `sendToServer`) and mark the request as already sent, so the `open`
+    // handler never re-issues it.
+    args.connectionState.connected = false;
     args.connectionState.socket = socket;
 
     // True once a newer connection has replaced this socket (e.g. a reconnect
@@ -266,6 +294,12 @@ export function createSocketController(args: {
         const liveSocket = args.connectionState.socket;
         args.connectionState.socket = null;
         args.connectionState.connected = false;
+        // Abort any in-flight connect probe: when this admin close arrived while
+        // a CLOSING-window reconnect was still awaiting connection-check /
+        // healthcheck (the replacement socket is not created yet, so closing
+        // `liveSocket` cannot reach it), the resuming probe would otherwise open
+        // a room-less ghost connection and clear this reset's `lastError`.
+        args.connectionState.connectEpoch += 1;
         if (liveSocket && liveSocket !== socket) {
           liveSocket.close();
         }

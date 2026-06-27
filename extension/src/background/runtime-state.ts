@@ -32,6 +32,15 @@ export interface ConnectionState {
   connected: boolean;
   lastError: string | null;
   connectProbe: Promise<void> | null;
+  /**
+   * Abort generation for the in-flight connect probe. `openSocketWithProbe`
+   * awaits connection-check/healthcheck fetches before opening the socket; an
+   * authoritative teardown during that window (admin session reset, or an
+   * explicit leave via `disconnectSocket`) bumps this so the resuming probe
+   * aborts instead of opening a room-less ghost connection that clears the
+   * teardown's `lastError`.
+   */
+  connectEpoch: number;
   reconnectTimer: number | null;
   reconnectAttempt: number;
   reconnectDeadlineMs: number | null;
@@ -105,6 +114,7 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       connected: false,
       lastError: null,
       connectProbe: null,
+      connectEpoch: 0,
       reconnectTimer: null,
       reconnectAttempt: 0,
       reconnectDeadlineMs: null,

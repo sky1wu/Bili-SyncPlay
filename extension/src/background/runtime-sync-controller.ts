@@ -24,6 +24,7 @@ export function createRuntimeSyncController(args: {
         connected: args.connectionState.connected,
         lastError: args.connectionState.lastError,
         connectProbe: args.connectionState.connectProbe,
+        connectEpoch: args.connectionState.connectEpoch,
         reconnectTimer: args.connectionState.reconnectTimer,
         reconnectAttempt: args.connectionState.reconnectAttempt,
         reconnectDeadlineMs: args.connectionState.reconnectDeadlineMs,

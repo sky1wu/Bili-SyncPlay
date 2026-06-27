@@ -37,17 +37,38 @@ class FakeWebSocket {
 
 let createdSockets: FakeWebSocket[] = [];
 
+// Controls the stubbed global `fetch` used by the connection-check probe. When
+// `blockFetch` is true the probe's fetch hangs until `releaseFetch()` is called,
+// letting a test interleave an admin close while the probe is mid-await.
+let blockFetch = false;
+let releaseFetch: (() => void) | null = null;
+
 function installGlobals(): { restore: () => void } {
   const original = {
     WebSocket: (globalThis as Record<string, unknown>).WebSocket,
     chrome: (globalThis as Record<string, unknown>).chrome,
     self: (globalThis as Record<string, unknown>).self,
+    fetch: (globalThis as Record<string, unknown>).fetch,
   };
   createdSockets = [];
+  blockFetch = false;
+  releaseFetch = null;
   Object.assign(globalThis, {
     WebSocket: FakeWebSocket,
     chrome: { runtime: { getURL: () => "chrome-extension://test/" } },
     self: { setTimeout, clearTimeout },
+    fetch: () => {
+      const result = {
+        ok: true,
+        json: async () => ({ data: { websocketAllowed: true } }),
+      };
+      if (blockFetch) {
+        return new Promise((resolve) => {
+          releaseFetch = () => resolve(result);
+        });
+      }
+      return Promise.resolve(result);
+    },
   });
   return {
     restore() {
@@ -56,7 +77,7 @@ function installGlobals(): { restore: () => void } {
   };
 }
 
-function createHarness() {
+function createHarness(options: { withProbeFetch?: boolean } = {}) {
   const runtimeState = createBackgroundRuntimeState();
   runtimeState.connection.serverUrl = "ws://localhost:9999";
   runtimeState.room.roomCode = "ROOM01";
@@ -81,8 +102,12 @@ function createHarness() {
     sendToServer: () => {},
     handleServerMessage: async () => {},
     // Returning null skips the connection-check / healthcheck fetches so the
-    // probe goes straight to opening the (faked) socket.
-    buildConnectionCheckUrl: () => null,
+    // probe goes straight to opening the (faked) socket. Opt into the
+    // connection-check fetch to exercise the in-flight probe-abort window.
+    buildConnectionCheckUrl: () =>
+      options.withProbeFetch
+        ? "https://localhost:9999/api/connection-check"
+        : null,
     buildHealthcheckUrl: () => null,
     onOpen: () => {},
     onAdminSessionReset: (reason) => {
@@ -240,6 +265,74 @@ test("socket controller still applies an admin reset from a superseded socket", 
     assert.equal(secondSocket.closeCalls, 1);
     assert.equal(firstSocket.closeCalls, 0);
     assert.equal(harness.runtimeState.connection.socket, null);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a CLOSING-window reconnect clears the stale connected flag for the CONNECTING replacement", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+
+    await harness.controller.connect();
+    const firstSocket = createdSockets[0];
+    // The old connection was online; its socket is now CLOSING but the close
+    // event has not dispatched, so `connected` still reads the stale true.
+    harness.runtimeState.connection.connected = true;
+    firstSocket.readyState = FakeWebSocket.CLOSING;
+
+    await harness.controller.connect();
+    const secondSocket = createdSockets[1];
+
+    assert.notEqual(secondSocket, firstSocket);
+    assert.equal(harness.runtimeState.connection.socket, secondSocket);
+    // The replacement is only CONNECTING; until its `open` fires the connection
+    // is not writable. `connected` must be cleared so requestCreateRoom /
+    // requestJoinRoom (which gate on `connected` after `await connect()`) do not
+    // hand room:create / room:join to a non-OPEN socket that drops them.
+    assert.equal(secondSocket.readyState, FakeWebSocket.CONNECTING);
+    assert.equal(harness.runtimeState.connection.connected, false);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("an admin reset aborts an in-flight reconnect probe instead of opening a ghost socket", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness({ withProbeFetch: true });
+
+    // First connect: the connection-check fetch resolves immediately and opens
+    // the live socket.
+    await harness.controller.connect();
+    const firstSocket = createdSockets[0];
+    harness.runtimeState.connection.connected = true;
+    firstSocket.readyState = FakeWebSocket.CLOSING;
+
+    // A CLOSING-window reconnect starts but its connection-check fetch now hangs,
+    // so the probe is parked before it can create the replacement socket.
+    blockFetch = true;
+    const probe = harness.controller.connect();
+
+    // The admin kick lands on the old socket while the probe is still awaiting.
+    firstSocket.emit("close", closeEvent("Admin kicked member"));
+
+    // Releasing the fetch lets the probe resume; it must detect the abort and
+    // bail out rather than open a room-less ghost connection.
+    releaseFetch?.();
+    await probe;
+
+    assert.deepEqual(harness.adminResets, ["Admin kicked member"]);
+    // No replacement socket was created, and the live ref stays torn down so the
+    // admin reason is not cleared by a stray `open`.
+    assert.equal(createdSockets.length, 1);
+    assert.equal(harness.runtimeState.connection.socket, null);
+    assert.equal(harness.runtimeState.connection.connected, false);
   } finally {
     harness?.controller.clearReconnectTimer();
     globals.restore();
