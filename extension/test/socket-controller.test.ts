@@ -98,6 +98,8 @@ function createHarness(options: { withProbeFetch?: boolean } = {}) {
     clearPendingLocalShare: (reason) => {
       clearPendingLocalShareReasons.push(reason);
     },
+    getPendingLocalShareGeneration: () =>
+      runtimeState.share.pendingLocalShareGeneration,
     sendJoinRequest: () => {},
     sendToServer: () => {},
     handleServerMessage: async () => {},
@@ -257,11 +259,12 @@ test("a superseded socket close clears a direct-send marker that will not be re-
     assert.equal(harness.runtimeState.connection.socket, secondSocket);
 
     harness.runtimeState.connection.connected = true;
-    // A share was sent directly on the now-dead old socket (not queued for
-    // re-flush): nothing will reconfirm it, so its marker must be cleared rather
-    // than suppress the post-reconnect room state until the 10s timeout.
+    // A share was sent directly on the now-dead old socket (generation 1, not
+    // queued for re-flush): nothing will reconfirm it, so its marker must be
+    // cleared rather than suppress the post-reconnect room state until timeout.
     harness.runtimeState.room.pendingSharedVideo = null;
     harness.runtimeState.room.shareReflushPending = false;
+    harness.runtimeState.share.pendingLocalShareGeneration = 1;
 
     firstSocket.emit("close", closeEvent());
 
@@ -270,6 +273,37 @@ test("a superseded socket close clears a direct-send marker that will not be re-
     ]);
     // The live replacement connection is untouched.
     assert.equal(harness.runtimeState.connection.connected, true);
+    assert.equal(harness.runtimeState.connection.socket, secondSocket);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a superseded socket close keeps a direct-send marker owned by a newer connection", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+
+    await harness.controller.connect();
+    const firstSocket = createdSockets[0];
+    firstSocket.readyState = FakeWebSocket.CLOSING;
+    await harness.controller.connect();
+    const secondSocket = createdSockets[1];
+    assert.equal(harness.runtimeState.connection.socket, secondSocket);
+
+    harness.runtimeState.connection.connected = true;
+    // The user sent a fresh direct share on the NEW connection (generation 2)
+    // after the old socket was superseded. The old socket's late close must NOT
+    // clear that newer marker, even though it is a direct send (not a re-flush).
+    harness.runtimeState.room.pendingSharedVideo = null;
+    harness.runtimeState.room.shareReflushPending = false;
+    harness.runtimeState.share.pendingLocalShareGeneration = 2;
+
+    firstSocket.emit("close", closeEvent());
+
+    assert.deepEqual(harness.clearPendingLocalShareReasons, []);
     assert.equal(harness.runtimeState.connection.socket, secondSocket);
   } finally {
     harness?.controller.clearReconnectTimer();

@@ -33,6 +33,14 @@ export interface ConnectionState {
   lastError: string | null;
   connectProbe: Promise<void> | null;
   /**
+   * Monotonic id incremented every time a new WebSocket is opened. The
+   * pending-local-share marker records the generation that created it
+   * (`ShareState.pendingLocalShareGeneration`) so a superseded socket's late
+   * close only clears a direct-send marker it owns, never one a newer
+   * connection set for a share it is still confirming.
+   */
+  socketGeneration: number;
+  /**
    * Abort generation for the in-flight connect probe. `openSocketWithProbe`
    * awaits connection-check/healthcheck fetches before opening the socket; an
    * authoritative teardown during that window (admin session reset, or an
@@ -89,6 +97,13 @@ export interface ShareState {
   pendingLocalShareUrl: string | null;
   pendingLocalShareExpiresAt: number | null;
   pendingLocalShareTimer: number | null;
+  /**
+   * `ConnectionState.socketGeneration` of the socket that was live when this
+   * marker was set, i.e. which connection owns it. Lets a superseded socket's
+   * late close clear only the direct-send marker it created, not one a newer
+   * connection set for a share still awaiting confirmation. Null when no marker.
+   */
+  pendingLocalShareGeneration: number | null;
   pendingShareToast:
     | (SharedVideoToastPayload & { expiresAt: number; roomCode: string })
     | null;
@@ -126,6 +141,7 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       connected: false,
       lastError: null,
       connectProbe: null,
+      socketGeneration: 0,
       connectEpoch: 0,
       reconnectTimer: null,
       reconnectAttempt: 0,
@@ -152,6 +168,7 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       lastOpenedSharedUrl: null,
       openingSharedUrl: null,
       pendingLocalShareUrl: null,
+      pendingLocalShareGeneration: null,
       pendingLocalShareExpiresAt: null,
       pendingLocalShareTimer: null,
       pendingShareToast: null,

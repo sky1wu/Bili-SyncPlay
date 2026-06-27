@@ -264,8 +264,9 @@ export function createShareController(args: {
 
   function clearPendingLocalShare(reason: string): void {
     // The marker is being torn down (confirmed, timed out, disconnect, etc.), so
-    // no re-flush is pending against it any more.
+    // no re-flush is pending against it any more and it no longer has an owner.
     args.roomSessionState.shareReflushPending = false;
+    args.shareState.pendingLocalShareGeneration = null;
     const cleanup = preparePendingLocalShareCleanup({
       pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
       pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
@@ -315,6 +316,10 @@ export function createShareController(args: {
     // re-flush. Reset it here so a direct send that reuses the marker is never
     // mistaken for a re-flush by a superseded socket's close.
     args.roomSessionState.shareReflushPending = false;
+    // Record which connection owns this marker so a superseded socket's late
+    // close only clears the marker it created, not one set by a newer connection.
+    args.shareState.pendingLocalShareGeneration =
+      args.connectionState.socketGeneration;
     args.shareState.pendingLocalShareUrl = url;
     args.shareState.pendingLocalShareExpiresAt = createPendingLocalShareExpiry(
       Date.now(),

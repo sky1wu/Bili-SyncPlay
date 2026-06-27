@@ -36,6 +36,7 @@ export function createSocketController(args: {
   syncClock: () => void;
   startClockSyncTimer: () => void;
   clearPendingLocalShare: (reason: string) => void;
+  getPendingLocalShareGeneration: () => number | null;
   sendJoinRequest: (targetRoomCode: string, targetJoinToken: string) => void;
   sendToServer: (message: ClientMessage) => void;
   handleServerMessage: (message: ServerMessage) => Promise<void>;
@@ -191,6 +192,10 @@ export function createSocketController(args: {
     }
 
     const socket = new WebSocket(serverUrlResult.normalizedUrl);
+    // Tag this socket with a fresh generation so its handlers can tell a marker
+    // it owns from one a newer connection set (see the superseded close below).
+    args.connectionState.socketGeneration += 1;
+    const socketGeneration = args.connectionState.socketGeneration;
     // A reconnect opened in the CLOSING micro-window replaces a socket whose
     // `connected` is still the stale `true` of the dying connection, but this
     // new socket is only CONNECTING until its `open` fires. Reflect that now:
@@ -328,9 +333,15 @@ export function createSocketController(args: {
       // `shareReflushPending` distinguishes that from a re-flush marker the
       // replacement is still confirming (`flushPendingShare` nulls
       // `pendingSharedVideo` right after rejoin, so `pendingSharedVideo` alone
-      // can no longer tell the two apart). Clear only the direct-send marker.
+      // can no longer tell the two apart). The generation check ensures we only
+      // clear a marker THIS socket created: after it was superseded the user may
+      // have sent a fresh direct share on the new connection (also
+      // `shareReflushPending === false`), and that newer marker must survive.
       if (isSuperseded()) {
-        if (!args.roomSessionState.shareReflushPending) {
+        if (
+          !args.roomSessionState.shareReflushPending &&
+          args.getPendingLocalShareGeneration() === socketGeneration
+        ) {
           args.clearPendingLocalShare(
             "superseded socket closed before share confirmation",
           );
