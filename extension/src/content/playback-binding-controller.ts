@@ -239,6 +239,40 @@ export function createPlaybackBindingController(args: {
     return true;
   }
 
+  /**
+   * Arm broadcast suppression when the local *sharer's* own shared video reaches
+   * its natural end. Unlike the non-sharer hold this does not pause the player —
+   * the sharer must keep playing to autoplay into the next episode — it only
+   * stops the end `pause` (and the next-episode seek-to-0 emitted while the page
+   * URL still resolves the old video) from being broadcast as updates against
+   * the still-shared old video. Without it every peer would briefly see
+   * "{sharer} paused the video" and "{sharer} jumped to 0:00" right before the
+   * auto-share of the next video lands. The suppression is released by
+   * {@link createSyncController}'s broadcast gate once the next share confirms, a
+   * fresh user gesture replays it, the page moves on, or the timeout elapses.
+   */
+  function armSharerSharedVideoEndSuppression(): boolean {
+    if (
+      !args.runtimeState.activeRoomCode ||
+      !args.runtimeState.activeSharedUrl ||
+      !args.runtimeState.localMemberId ||
+      !args.runtimeState.activeSharedByMemberId ||
+      !isLocalSharedSource() ||
+      !isCurrentVideoShared(args.getSharedVideo())
+    ) {
+      return false;
+    }
+
+    args.runtimeState.sharerEndedSuppressionUrl =
+      args.runtimeState.activeSharedUrl;
+    args.runtimeState.sharerEndedSuppressionUntil =
+      nowOf() + args.initialRoomStatePauseHoldMs;
+    args.debugLog(
+      `Suppressed sharer end-of-video broadcasts to keep autoplay-next handoff quiet`,
+    );
+    return true;
+  }
+
   function shouldReapplyHoldAfterSharedVideoEnd(
     video: HTMLVideoElement,
     currentVideo: SharedVideo | null,
@@ -578,6 +612,13 @@ export function createPlaybackBindingController(args: {
         if (video.ended && holdNonSharerAtSharedVideoEnd(video)) {
           return;
         }
+        // Same natural-end window for the sharer: do not pause (autoplay-next
+        // must continue) but suppress this end `pause` broadcast so peers are not
+        // shown a spurious "paused"/"jumped to 0:00" against the old video before
+        // the next auto-share lands. See armSharerSharedVideoEndSuppression.
+        if (video.ended && armSharerSharedVideoEndSuppression()) {
+          return;
+        }
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "pause");
         }
@@ -691,7 +732,9 @@ export function createPlaybackBindingController(args: {
         scheduleBroadcast(video, "ratechange", 120);
       },
       onEnded: () => {
-        holdNonSharerAtSharedVideoEnd(video);
+        if (!holdNonSharerAtSharedVideoEnd(video)) {
+          armSharerSharedVideoEndSuppression();
+        }
       },
       onTimeUpdate: () => {
         args.maintainActiveSoftApply(video);

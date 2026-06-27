@@ -1301,6 +1301,137 @@ test("sync controller releases post-navigation anchor and broadcasts once resolv
   );
 });
 
+test("sync controller suppresses broadcast while sharer end-of-video marker matches the shared url", async () => {
+  const harness = createControllerHarness();
+  const sharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  const sharedVideo: SharedVideo = {
+    videoId: "BVshared:p1",
+    url: sharedUrl,
+    title: "Shared Video",
+  };
+  const video = createVideo({ paused: false, currentTime: 0 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedUrl;
+  harness.runtimeState.sharerEndedSuppressionUrl = sharedUrl;
+  harness.runtimeState.sharerEndedSuppressionUntil = 23_000;
+  harness.runtimeState.lastUserGestureAt = 0;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+
+  // The natural-end pause for the old shared video must not leak out as a
+  // "paused the video" against it during the autoplay-next handoff.
+  await harness.controller.broadcastPlayback(video, "pause");
+
+  assert.equal(harness.runtimeMessages.length, 0);
+  assert.equal(
+    harness.runtimeState.sharerEndedSuppressionUrl,
+    sharedUrl,
+    "marker must remain set while still suppressing the ended shared url",
+  );
+  assert.equal(
+    harness.debugLogs.some((message) =>
+      message.includes("sharer-ended-handoff"),
+    ),
+    true,
+  );
+});
+
+test("sync controller releases sharer end-of-video marker after timeout", async () => {
+  const harness = createControllerHarness();
+  const sharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  const sharedVideo: SharedVideo = {
+    videoId: "BVshared:p1",
+    url: sharedUrl,
+    title: "Shared Video",
+  };
+  const video = createVideo({ paused: false, currentTime: 0 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedUrl;
+  harness.runtimeState.sharerEndedSuppressionUrl = sharedUrl;
+  harness.runtimeState.sharerEndedSuppressionUntil = 19_000;
+  harness.runtimeState.lastUserGestureAt = 0;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  assert.equal(harness.runtimeState.sharerEndedSuppressionUrl, null);
+  assert.equal(harness.runtimeState.sharerEndedSuppressionUntil, 0);
+  assert.equal(harness.runtimeMessages.length >= 1, true);
+});
+
+test("sync controller releases sharer end-of-video marker on a fresh user replay gesture", async () => {
+  const harness = createControllerHarness();
+  const sharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  const sharedVideo: SharedVideo = {
+    videoId: "BVshared:p1",
+    url: sharedUrl,
+    title: "Shared Video",
+  };
+  const video = createVideo({ paused: false, currentTime: 0 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedUrl;
+  harness.runtimeState.sharerEndedSuppressionUrl = sharedUrl;
+  harness.runtimeState.sharerEndedSuppressionUntil = 23_000;
+  // The sharer manually replays the ended video within the gesture grace window.
+  harness.runtimeState.lastUserGestureAt = 19_900;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  assert.equal(harness.runtimeState.sharerEndedSuppressionUrl, null);
+  assert.equal(harness.runtimeMessages.length >= 1, true);
+});
+
+test("sync controller releases sharer end-of-video marker once the resolved url moves on", async () => {
+  const harness = createControllerHarness();
+  const oldUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  const newUrl = "https://www.bilibili.com/video/BVshared?p=2";
+  const newSharedVideo: SharedVideo = {
+    videoId: "BVshared:p2",
+    url: newUrl,
+    title: "Shared Video Part 2",
+  };
+  const video = createVideo({ paused: false, currentTime: 3 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  // The room has not confirmed the next share yet, so activeSharedUrl is still
+  // the old video; the resolved page url already moved to the next episode.
+  harness.runtimeState.activeSharedUrl = oldUrl;
+  harness.runtimeState.sharerEndedSuppressionUrl = oldUrl;
+  harness.runtimeState.sharerEndedSuppressionUntil = 23_000;
+  harness.runtimeState.lastUserGestureAt = 0;
+  harness.setSharedVideo(newSharedVideo);
+  harness.setCurrentPlaybackVideo(newSharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  // The marker is released; the broadcast for the new (not-yet-shared) url is
+  // then handled by the existing non-shared-video guard, so no message leaks.
+  assert.equal(harness.runtimeState.sharerEndedSuppressionUrl, null);
+  assert.equal(harness.runtimeState.sharerEndedSuppressionUntil, 0);
+});
+
 test("sync controller broadcasts buffering when active pause is classified as buffer", async () => {
   const harness = createControllerHarness();
   const sharedVideo = {

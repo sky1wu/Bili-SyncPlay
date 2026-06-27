@@ -129,6 +129,21 @@ export interface ContentRuntimeState {
    */
   postNavigationAnchorSharedUrl: string | null;
   postNavigationAnchorSetAt: number;
+  /**
+   * Set when the local sharer's *own* shared video reaches its natural end.
+   * While set, playback broadcasts for this (still the room's) shared URL are
+   * suppressed so the autoplay-next handoff does not relay a misleading
+   * "paused"/"jumped to 0:00" against the old video to every peer: at a natural
+   * end the browser emits an end `pause`, and when Bilibili autoplays the next
+   * episode into the same element before the page URL refreshes, a `seek` back
+   * to 0 while the page bridge still resolves the old URL. The next auto-share
+   * lands moments later; suppressing this transition keeps peers from seeing
+   * those two spurious notifications before "shared a new video". Cleared when
+   * the next share confirms (via [[resetPlaybackSyncState]]), a fresh user
+   * gesture replays it, the page moves on, or [[sharerEndedSuppressionUntil]].
+   */
+  sharerEndedSuppressionUrl: string | null;
+  sharerEndedSuppressionUntil: number;
   festivalSnapshot: FestivalVideoSnapshot | null;
   /**
    * Timestamp of the most recent `waiting`/`stalled` event from the local
@@ -218,6 +233,8 @@ export function createContentRuntimeState(): ContentRuntimeState {
     lastNonSharedGuardUrl: null,
     postNavigationAnchorSharedUrl: null,
     postNavigationAnchorSetAt: 0,
+    sharerEndedSuppressionUrl: null,
+    sharerEndedSuppressionUntil: 0,
     festivalSnapshot: null,
     lastBufferSignalAt: 0,
     pauseStartedAt: 0,
