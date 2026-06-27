@@ -97,3 +97,14 @@ test("disconnectSocket bumps connectEpoch even when no socket has been created y
   assert.equal(harness.runtimeState.connection.connectEpoch, epochBefore + 1);
   assert.equal(harness.runtimeState.connection.connected, false);
 });
+
+test("disconnectSocket nulls connectProbe so a later connect does not reuse it", () => {
+  const harness = createHarness();
+  // Simulate an in-flight probe parked on its connection-check fetch.
+  harness.runtimeState.connection.connectProbe = Promise.resolve();
+
+  harness.run();
+
+  // The doomed probe must not be reused by a subsequent create/join `connect()`.
+  assert.equal(harness.runtimeState.connection.connectProbe, null);
+});

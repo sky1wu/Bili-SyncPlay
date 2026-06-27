@@ -226,16 +226,89 @@ test("socket controller ignores the close of a superseded socket", async () => {
     assert.equal(harness.runtimeState.connection.socket, secondSocket);
 
     harness.runtimeState.connection.connected = true;
-    // Even with nothing queued (which on the current socket would clear the
-    // marker), the superseded socket's close must not touch the live state:
-    // after `flushPendingShare` nulls `pendingSharedVideo`, a late old close
-    // would otherwise drop the marker the new connection is still confirming.
+    // A re-flush marker: `flushPendingShare` already nulled `pendingSharedVideo`
+    // after rejoin but the replacement is still confirming the re-sent share, so
+    // `shareReflushPending` stays true. A late close on the old socket must not
+    // touch the live state nor drop the marker the new connection is confirming.
     harness.runtimeState.room.pendingSharedVideo = null;
+    harness.runtimeState.room.shareReflushPending = true;
 
     firstSocket.emit("close", closeEvent());
 
     assert.deepEqual(harness.clearPendingLocalShareReasons, []);
     assert.equal(harness.runtimeState.connection.connected, true);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a superseded socket close clears a direct-send marker that will not be re-flushed", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+
+    await harness.controller.connect();
+    const firstSocket = createdSockets[0];
+    firstSocket.readyState = FakeWebSocket.CLOSING;
+    await harness.controller.connect();
+    const secondSocket = createdSockets[1];
+    assert.equal(harness.runtimeState.connection.socket, secondSocket);
+
+    harness.runtimeState.connection.connected = true;
+    // A share was sent directly on the now-dead old socket (not queued for
+    // re-flush): nothing will reconfirm it, so its marker must be cleared rather
+    // than suppress the post-reconnect room state until the 10s timeout.
+    harness.runtimeState.room.pendingSharedVideo = null;
+    harness.runtimeState.room.shareReflushPending = false;
+
+    firstSocket.emit("close", closeEvent());
+
+    assert.deepEqual(harness.clearPendingLocalShareReasons, [
+      "superseded socket closed before share confirmation",
+    ]);
+    // The live replacement connection is untouched.
+    assert.equal(harness.runtimeState.connection.connected, true);
+    assert.equal(harness.runtimeState.connection.socket, secondSocket);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("an aborted in-flight probe is not reused by a later connect", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness({ withProbeFetch: true });
+
+    await harness.controller.connect();
+    const firstSocket = createdSockets[0];
+    harness.runtimeState.connection.connected = true;
+    firstSocket.readyState = FakeWebSocket.CLOSING;
+
+    // A CLOSING-window reconnect parks on its hanging connection-check fetch.
+    blockFetch = true;
+    const doomed = harness.controller.connect();
+    const parkedRelease = releaseFetch;
+
+    // An admin kick aborts that probe and must also null `connectProbe` so it is
+    // not reused.
+    firstSocket.emit("close", closeEvent("Admin kicked member"));
+    assert.equal(harness.runtimeState.connection.connectProbe, null);
+
+    // A fresh connect must open a new socket instead of awaiting the doomed
+    // probe (which would never open a connection).
+    blockFetch = false;
+    await harness.controller.connect();
+    assert.equal(createdSockets.length, 2);
+    assert.equal(harness.runtimeState.connection.socket, createdSockets[1]);
+
+    // Releasing the doomed probe must not clobber the fresh probe's bookkeeping.
+    parkedRelease?.();
+    await doomed;
+    assert.equal(harness.runtimeState.connection.socket, createdSockets[1]);
   } finally {
     harness?.controller.clearReconnectTimer();
     globals.restore();

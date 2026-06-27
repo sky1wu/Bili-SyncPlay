@@ -184,17 +184,25 @@ export function createShareController(args: {
       return { ok: true };
     }
 
-    // CLOSING micro-window: the socket can no longer be written but the session
-    // is otherwise valid (`connected` still true, room + member token present).
-    // Queue the share for the reconnect flush and open the replacement
-    // connection WITHOUT tearing down the session — keep the member token so the
-    // rejoin re-attaches as the same member. Dropping it (as the fully-offline
-    // branch below does) makes the server assign a new memberId and can surface
-    // a duplicate member until the old socket leaves. The superseded old socket's
-    // close is ignored by the socket controller, so this marker survives until
-    // the re-flushed share is confirmed.
+    // CLOSING micro-window / reconnect in progress: the socket can no longer be
+    // written but the session is otherwise valid (room + member token present).
+    // This covers both the CLOSING window (`connected` still true, close event
+    // not dispatched) and the window after a previous queued share already
+    // swapped in a CONNECTING replacement socket (which clears `connected`); a
+    // second manual share in that window must NOT fall through to the offline
+    // branch and drop the member token. Queue the share for the reconnect flush
+    // and open/await the replacement WITHOUT tearing down the session — keep the
+    // member token so the rejoin re-attaches as the same member. Dropping it (as
+    // the fully-offline branch below does) makes the server assign a new memberId
+    // and can surface a duplicate member until the old socket leaves. The
+    // superseded old socket's close is ignored by the socket controller, so this
+    // marker survives (flagged as a re-flush) until the re-flushed share is
+    // confirmed.
+    const reconnectInProgress =
+      args.connectionState.socket !== null &&
+      args.connectionState.socket.readyState === WebSocket.CONNECTING;
     if (
-      args.connectionState.connected &&
+      (args.connectionState.connected || reconnectInProgress) &&
       args.roomSessionState.roomCode &&
       args.roomSessionState.memberToken
     ) {
@@ -207,6 +215,7 @@ export function createShareController(args: {
             actorId: args.roomSessionState.memberId ?? payload.playback.actorId,
           }
         : null;
+      args.roomSessionState.shareReflushPending = true;
       await args.connect();
       return { ok: true };
     }
@@ -220,6 +229,9 @@ export function createShareController(args: {
           actorId: args.roomSessionState.memberId ?? payload.playback.actorId,
         }
       : null;
+    // The reconnect rejoin (or room:create) flushes this queued share, so the
+    // marker is re-flush-backed: keep it across a superseded socket's late close.
+    args.roomSessionState.shareReflushPending = true;
 
     if (args.roomSessionState.roomCode) {
       args.roomSessionState.memberToken = null;
@@ -251,6 +263,9 @@ export function createShareController(args: {
   }
 
   function clearPendingLocalShare(reason: string): void {
+    // The marker is being torn down (confirmed, timed out, disconnect, etc.), so
+    // no re-flush is pending against it any more.
+    args.roomSessionState.shareReflushPending = false;
     const cleanup = preparePendingLocalShareCleanup({
       pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
       pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
@@ -295,6 +310,11 @@ export function createShareController(args: {
 
   function setPendingLocalShare(url: string): void {
     clearPendingLocalShareTimer();
+    // A fresh marker defaults to a plain direct send; the CLOSING/offline queue
+    // branches set `shareReflushPending = true` afterwards when they queue a
+    // re-flush. Reset it here so a direct send that reuses the marker is never
+    // mistaken for a re-flush by a superseded socket's close.
+    args.roomSessionState.shareReflushPending = false;
     args.shareState.pendingLocalShareUrl = url;
     args.shareState.pendingLocalShareExpiresAt = createPendingLocalShareExpiry(
       Date.now(),

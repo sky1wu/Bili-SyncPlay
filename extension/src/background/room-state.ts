@@ -125,6 +125,7 @@ export interface TransientShareLifecycleState {
 export interface TransientRoomSessionLifecycleState {
   pendingSharedVideo: unknown;
   pendingSharedPlayback: unknown;
+  shareReflushPending: boolean;
 }
 
 export function resetRoomLifecycleTransientState(
@@ -159,4 +160,5 @@ export function resetRoomLifecycleTransientState(
   args.shareState.pendingShareToast = null;
   args.roomSessionState.pendingSharedVideo = null;
   args.roomSessionState.pendingSharedPlayback = null;
+  args.roomSessionState.shareReflushPending = false;
 }

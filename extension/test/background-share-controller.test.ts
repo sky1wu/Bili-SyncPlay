@@ -174,6 +174,53 @@ test("background share controller queues the share for reconnect when the socket
   }
 });
 
+test("background share controller keeps the member token for a second share during the reconnect window", async () => {
+  const selfHarness = installSelfStub();
+  const harness = createControllerHarness();
+  // A previous CLOSING-window share already swapped in a CONNECTING replacement
+  // socket, which clears `connected`. The session is still valid.
+  harness.runtimeState.connection.connected = false;
+  setSocketReadyState(harness.runtimeState, WebSocket.CONNECTING);
+  harness.runtimeState.room.roomCode = "ROOM01";
+  harness.runtimeState.room.memberToken = "member-token-1";
+  harness.runtimeState.room.memberId = "member-1";
+  harness.runtimeState.room.pendingSharedVideo = {
+    videoId: "BVfirst",
+    url: "https://www.bilibili.com/video/BVfirst",
+    title: "First Video",
+  };
+
+  try {
+    const result = await harness.controller.queueOrSendSharedVideo(
+      {
+        video: {
+          videoId: "BV199W9zEEcH",
+          url: "https://www.bilibili.com/video/BV199W9zEEcH",
+          title: "New Video",
+        },
+        playback: null,
+      },
+      123,
+    );
+
+    assert.deepEqual(result, { ok: true });
+    // Not sent over the not-yet-OPEN socket; queued for the reconnect flush.
+    assert.deepEqual(harness.sendToServerCalls, []);
+    // The queued video is replaced with the latest share.
+    assert.deepEqual(harness.runtimeState.room.pendingSharedVideo, {
+      videoId: "BV199W9zEEcH",
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+      title: "New Video",
+    });
+    // The member token MUST survive (do not fall through to the offline branch
+    // that nulls it, which would spawn a duplicate member on rejoin).
+    assert.equal(harness.runtimeState.room.memberToken, "member-token-1");
+    assert.equal(harness.runtimeState.room.shareReflushPending, true);
+  } finally {
+    selfHarness.restore();
+  }
+});
+
 test("background share controller sends create request with protocolVersion when sharing outside a room", async () => {
   const selfHarness = installSelfStub();
   const harness = createControllerHarness();

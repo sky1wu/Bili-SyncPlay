@@ -70,13 +70,19 @@ export function createSocketController(args: {
 
     clearReconnectTimer();
     args.log("background", `Connecting to ${serverUrlResult.normalizedUrl}`);
-    args.connectionState.connectProbe = openSocketWithProbe(
-      serverUrlResult.normalizedUrl,
-    );
+    const probe = openSocketWithProbe(serverUrlResult.normalizedUrl);
+    args.connectionState.connectProbe = probe;
     try {
-      await args.connectionState.connectProbe;
+      await probe;
     } finally {
-      args.connectionState.connectProbe = null;
+      // Only clear if this is still the active probe. An authoritative teardown
+      // (admin reset / leave) can abort this probe AND null `connectProbe` so a
+      // subsequent `connect()` starts fresh instead of awaiting this doomed
+      // promise; an unconditional clear here would then wipe that newer probe's
+      // reference when this aborted one finally settles.
+      if (args.connectionState.connectProbe === probe) {
+        args.connectionState.connectProbe = null;
+      }
     }
   }
 
@@ -298,8 +304,12 @@ export function createSocketController(args: {
         // a CLOSING-window reconnect was still awaiting connection-check /
         // healthcheck (the replacement socket is not created yet, so closing
         // `liveSocket` cannot reach it), the resuming probe would otherwise open
-        // a room-less ghost connection and clear this reset's `lastError`.
+        // a room-less ghost connection and clear this reset's `lastError`. Also
+        // null `connectProbe`: the aborted probe will short-circuit, but leaving
+        // its promise in place would make a later create/join reuse it (and
+        // never open a connection).
         args.connectionState.connectEpoch += 1;
+        args.connectionState.connectProbe = null;
         if (liveSocket && liveSocket !== socket) {
           liveSocket.close();
         }
@@ -310,12 +320,21 @@ export function createSocketController(args: {
       }
 
       // A superseded socket's close belongs to a connection the replacement has
-      // already taken over. Acting here would clear a share-confirmation marker
-      // the new connection is still confirming (`flushPendingShare` nulls
-      // `pendingSharedVideo` right after rejoin, so the queued-share check below
-      // can no longer tell a re-flushed share from a lost one), flip `connected`
-      // false on the live socket, and schedule a redundant reconnect.
+      // already taken over, so it must not flip `connected` false on the live
+      // socket or schedule a redundant reconnect. It must still tidy the marker
+      // though: a share sent directly on THIS now-dead socket (not queued for
+      // re-flush) will never be reconfirmed by the replacement, so its marker
+      // would suppress the post-reconnect `room:state` until the 10s timeout.
+      // `shareReflushPending` distinguishes that from a re-flush marker the
+      // replacement is still confirming (`flushPendingShare` nulls
+      // `pendingSharedVideo` right after rejoin, so `pendingSharedVideo` alone
+      // can no longer tell the two apart). Clear only the direct-send marker.
       if (isSuperseded()) {
+        if (!args.roomSessionState.shareReflushPending) {
+          args.clearPendingLocalShare(
+            "superseded socket closed before share confirmation",
+          );
+        }
         return;
       }
 
