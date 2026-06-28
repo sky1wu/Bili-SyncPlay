@@ -99,6 +99,7 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     toastSwitchedRate: "{name} 切换到 {rate}",
     toastSeekedTo: "{name} 跳转到 {time}",
     toastSharedNewVideo: "{name} 共享了新视频：{title}",
+    toastAutoSharedNextVideo: "已自动连播并共享下一个视频：{title}",
   },
   en: {
     popupTitle: "Bili SyncPlay",
@@ -198,6 +199,8 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     toastSwitchedRate: "{name} switched to {rate}",
     toastSeekedTo: "{name} jumped to {time}",
     toastSharedNewVideo: "{name} shared a new video: {title}",
+    toastAutoSharedNextVideo:
+      "Auto-continued and shared the next video: {title}",
   },
 };
 

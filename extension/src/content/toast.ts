@@ -301,6 +301,14 @@ export function getSharedVideoToastMessage(args: {
   lastSharedVideoToastKey: string | null;
   normalizedToastUrl: string | null;
   normalizedSharedUrl: string | null;
+  /**
+   * The normalized URL the local sharer is auto-continuing to (set while a
+   * sharer-autoplay auto-share is pending confirmation). When the confirmed
+   * shared video is the local member's own and matches this URL, surface a
+   * dedicated "auto-continued" toast instead of staying silent — unlike a
+   * manual share, the sharer did not explicitly act, so a hint is warranted.
+   */
+  localAutoShareTargetUrl?: string | null;
 }): {
   message: string | null;
   nextSharedVideoToastKey: string | null;
@@ -323,8 +331,20 @@ export function getSharedVideoToastMessage(args: {
     };
   }
 
+  if (args.toast.actorId === args.localMemberId) {
+    const isLocalAutoShareContinuation =
+      args.localAutoShareTargetUrl != null &&
+      args.normalizedToastUrl === args.localAutoShareTargetUrl;
+    return {
+      message: isLocalAutoShareContinuation
+        ? t("toastAutoSharedNextVideo", { title: args.toast.title })
+        : null,
+      nextSharedVideoToastKey: args.toast.key,
+    };
+  }
+
   const actorName = getMemberName(args.state, args.toast.actorId);
-  if (!actorName || args.toast.actorId === args.localMemberId) {
+  if (!actorName) {
     return {
       message: null,
       nextSharedVideoToastKey: args.toast.key,

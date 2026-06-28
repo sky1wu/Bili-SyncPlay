@@ -75,6 +75,7 @@ export function createRoomStateController(args: {
       lastSharedVideoToastKey: args.toastState.lastSharedVideoToastKey,
       normalizedToastUrl: args.normalizeUrl(toast?.videoUrl),
       normalizedSharedUrl: args.normalizeUrl(state.sharedVideo?.url),
+      localAutoShareTargetUrl: args.runtimeState.pendingAutoShareTargetUrl,
     });
     args.toastState.lastSharedVideoToastKey = plan.nextSharedVideoToastKey;
     if (plan.message) {
