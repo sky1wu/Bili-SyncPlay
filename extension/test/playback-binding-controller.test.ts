@@ -2078,6 +2078,14 @@ test("playback binding controller suppresses the natural-end pause broadcast for
     );
     assert.equal(runtimeState.sharerEndedSuppressionUntil, 8_000);
     assert.equal(runtimeState.sharerEndedSuppressionArmedAt, 5_000);
+    // The durable natural-end timestamp is recorded so the navigation controller
+    // can recognise the autoplay-next even after the suppression marker above is
+    // cleared by the broadcast gate.
+    assert.equal(
+      runtimeState.sharedVideoNaturalEndUrl,
+      "https://www.bilibili.com/video/BVshared",
+    );
+    assert.equal(runtimeState.sharedVideoNaturalEndAt, 5_000);
   } finally {
     dom.video.pause = originalPause;
     dom.restore();

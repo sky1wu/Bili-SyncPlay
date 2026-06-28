@@ -153,6 +153,20 @@ export interface ContentRuntimeState {
    * "jumped to 0:00" noise this suppression exists to hide.
    */
   sharerEndedSuppressionArmedAt: number;
+  /**
+   * The shared video URL that most recently reached its natural end on this
+   * page, and when. Unlike [[sharerEndedSuppressionUrl]] /
+   * [[suppressedLocalEndPauseUrl]] (which the broadcast gate and
+   * `resetUserGestureState` clear eagerly, often before the navigation watcher
+   * runs), this pair is a durable "the shared video just ended here" signal that
+   * only [[resetPlaybackSyncState]] / room teardown clears. The navigation
+   * controller reads it to recognise an autoplay-next even when the address-bar
+   * URL form differs (bangumi season pages) or a recent seek-to-the-end leaves
+   * the gesture window warm — both of which would otherwise misclassify the
+   * advance as a manual switch and skip the auto-share / non-sharer hold.
+   */
+  sharedVideoNaturalEndUrl: string | null;
+  sharedVideoNaturalEndAt: number;
   festivalSnapshot: FestivalVideoSnapshot | null;
   /**
    * Timestamp of the most recent `waiting`/`stalled` event from the local
@@ -245,6 +259,8 @@ export function createContentRuntimeState(): ContentRuntimeState {
     sharerEndedSuppressionUrl: null,
     sharerEndedSuppressionUntil: 0,
     sharerEndedSuppressionArmedAt: 0,
+    sharedVideoNaturalEndUrl: null,
+    sharedVideoNaturalEndAt: 0,
     festivalSnapshot: null,
     lastBufferSignalAt: 0,
     pauseStartedAt: 0,

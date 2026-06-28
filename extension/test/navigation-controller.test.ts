@@ -284,12 +284,11 @@ test("navigation controller schedules auto-share when a bangumi season page auto
     "https://www.bilibili.com/bangumi/play/ep249469";
   runtimeState.activeSharedByMemberId = "member-1";
   runtimeState.localMemberId = "member-1";
-  // The shared episode just naturally ended on this page (the sharer marker is
-  // still set and unexpired — it is cleared later by the broadcast gate /
-  // shared-url reset).
-  runtimeState.sharerEndedSuppressionUrl =
+  // The shared episode just naturally ended on this page (durable timestamp,
+  // within the hold window of getNow 10_000 / initialRoomStatePauseHoldMs 1_500).
+  runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
-  runtimeState.sharerEndedSuppressionUntil = 12_000; // > getNow (10_000)
+  runtimeState.sharedVideoNaturalEndAt = 9_000;
 
   // The address bar is the SEASON url while playing the shared episode.
   let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
@@ -351,11 +350,11 @@ test("navigation controller holds a non-sharer when a bangumi season page autopl
   // The shared video belongs to another member: the local member is a non-sharer.
   runtimeState.activeSharedByMemberId = "member-2";
   runtimeState.localMemberId = "member-1";
-  // The non-sharer was held at the shared episode's natural end (its end-pause
-  // hold marker still points at the shared episode and is unexpired).
-  runtimeState.suppressedLocalEndPauseUrl =
+  // The shared episode naturally ended on this page (durable timestamp, within
+  // the hold window); it is shared by another member, so this is a non-sharer.
+  runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
-  runtimeState.suppressedLocalEndPauseUntil = 12_000; // > getNow (10_000)
+  runtimeState.sharedVideoNaturalEndAt = 9_000;
 
   let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
   let pauseCalls = 0;
@@ -412,12 +411,12 @@ test("navigation controller does not treat an expired end marker as a season-pag
     "https://www.bilibili.com/bangumi/play/ep249469";
   runtimeState.activeSharedByMemberId = "member-2";
   runtimeState.localMemberId = "member-1";
-  // A non-sharer end-pause marker that was never cleared and is now EXPIRED
-  // (its hold window elapsed). A later unrelated navigation must not be
-  // misread as the shared episode's autoplay-next.
-  runtimeState.suppressedLocalEndPauseUrl =
+  // A natural-end timestamp that is now EXPIRED (older than the hold window:
+  // getNow 10_000 − 8_000 = 2_000 > 1_500). A later unrelated navigation must
+  // not be misread as the shared episode's autoplay-next.
+  runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
-  runtimeState.suppressedLocalEndPauseUntil = 9_000; // < getNow (10_000)
+  runtimeState.sharedVideoNaturalEndAt = 8_000;
 
   let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
   let pauseCalls = 0;
@@ -470,10 +469,10 @@ test("navigation controller schedules auto-share on a natural-end autoplay despi
   // The sharer dragged to the last few seconds of the shared episode: the seek
   // gesture is still inside the grace window when it auto-advances.
   runtimeState.lastUserGestureAt = 9_800; // getNow 10_000, grace 300 → recent
-  // The shared episode then naturally ended, arming the (unexpired) end marker.
-  runtimeState.sharerEndedSuppressionUrl =
+  // The shared episode then naturally ended (durable timestamp, within window).
+  runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
-  runtimeState.sharerEndedSuppressionUntil = 12_000;
+  runtimeState.sharedVideoNaturalEndAt = 9_000;
 
   let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
   const autoShareRequests: Array<{

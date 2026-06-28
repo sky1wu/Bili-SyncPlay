@@ -192,6 +192,26 @@ export function createPlaybackBindingController(args: {
     );
   }
 
+  /**
+   * Record that the room's shared video reached its natural end on this page.
+   * This durable timestamp (cleared only by a shared-url change / room teardown)
+   * lets the navigation controller recognise the autoplay-next that follows,
+   * independent of the broadcast-suppression markers it clears eagerly. Set for
+   * both roles — the sharer uses it to auto-share, a non-sharer to hold.
+   */
+  function markSharedVideoNaturalEnd(): void {
+    if (
+      !args.runtimeState.activeRoomCode ||
+      !args.runtimeState.activeSharedUrl ||
+      !isCurrentVideoShared(args.getSharedVideo())
+    ) {
+      return;
+    }
+    args.runtimeState.sharedVideoNaturalEndUrl =
+      args.runtimeState.activeSharedUrl;
+    args.runtimeState.sharedVideoNaturalEndAt = nowOf();
+  }
+
   function isLocalSharedSource(): boolean {
     return Boolean(
       args.runtimeState.localMemberId &&
@@ -679,10 +699,15 @@ export function createPlaybackBindingController(args: {
       onPause: () => {
         const currentVideo = args.getSharedVideo();
         // At a natural end the browser dispatches `pause` immediately before
-        // `ended`. Arm the non-sharer end-hold here (idempotent with the `ended`
-        // handler) and skip the broadcast: otherwise this end `pause` is sent to
-        // the room before `onEnded` establishes the suppression marker, flipping
-        // the room to paused and disrupting the sharer's autoplay-next advance.
+        // `ended`. Record the durable natural-end timestamp (for both roles)
+        // before any early return, then arm the non-sharer end-hold here
+        // (idempotent with the `ended` handler) and skip the broadcast:
+        // otherwise this end `pause` is sent to the room before `onEnded`
+        // establishes the suppression marker, flipping the room to paused and
+        // disrupting the sharer's autoplay-next advance.
+        if (video.ended) {
+          markSharedVideoNaturalEnd();
+        }
         if (video.ended && holdNonSharerAtSharedVideoEnd(video)) {
           return;
         }
@@ -812,6 +837,7 @@ export function createPlaybackBindingController(args: {
         args.debugLog(
           `onEnded fired (ended=${video.ended} currentTime=${video.currentTime.toFixed(2)} resolved=${args.normalizeUrl(args.getSharedVideo()?.url)})`,
         );
+        markSharedVideoNaturalEnd();
         if (!holdNonSharerAtSharedVideoEnd(video)) {
           armSharerSharedVideoEndSuppression();
         }
