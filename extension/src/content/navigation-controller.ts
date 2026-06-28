@@ -76,14 +76,22 @@ export function createNavigationController(args: {
     // is itself a sharer autoplay-next.
     const previousPendingAutoShareTargetUrl =
       args.runtimeState.pendingAutoShareTargetUrl;
-    // End-of-shared-video markers, captured before `resetUserGestureState` below
-    // clears the non-sharer one (`suppressedLocalEndPauseUrl`). They let the
+    // End-of-shared-video markers (with their expiry), captured before
+    // `resetUserGestureState` below clears the non-sharer one
+    // (`suppressedLocalEndPauseUrl` / `...Until`). They let the
     // autoplay-from-shared check recognise a season-page autoplay whose previous
-    // page URL is the season URL rather than the shared episode URL.
+    // page URL is the season URL rather than the shared episode URL. The expiry
+    // matters because these markers are cleared lazily: a stale one left past
+    // its hold window must not turn a later unrelated navigation (still on the
+    // same `activeSharedUrl`) into a misclassified autoplay-next.
     const previousSharerEndedSuppressionUrl =
       args.runtimeState.sharerEndedSuppressionUrl;
+    const previousSharerEndedSuppressionUntil =
+      args.runtimeState.sharerEndedSuppressionUntil;
     const previousSuppressedLocalEndPauseUrl =
       args.runtimeState.suppressedLocalEndPauseUrl;
+    const previousSuppressedLocalEndPauseUntil =
+      args.runtimeState.suppressedLocalEndPauseUntil;
     lastObservedPageUrl = nextPageUrl;
     lastObservedNormalizedPageUrl = nextNormalizedPageUrl;
     args.clearFestivalSnapshot();
@@ -190,8 +198,10 @@ export function createNavigationController(args: {
       // change / room reset, so they cannot leak into an unrelated navigation.
       const navigatedFromSharedVideoEnd =
         activeSharedUrl !== null &&
-        (previousSharerEndedSuppressionUrl === activeSharedUrl ||
-          previousSuppressedLocalEndPauseUrl === activeSharedUrl);
+        ((previousSharerEndedSuppressionUrl === activeSharedUrl &&
+          now < previousSharerEndedSuppressionUntil) ||
+          (previousSuppressedLocalEndPauseUrl === activeSharedUrl &&
+            now < previousSuppressedLocalEndPauseUntil));
       const navigatedFromSharedVideo =
         navigatedFromSharedVideoEnd ||
         (previousNormalizedPageUrl !== null &&

@@ -285,9 +285,11 @@ test("navigation controller schedules auto-share when a bangumi season page auto
   runtimeState.activeSharedByMemberId = "member-1";
   runtimeState.localMemberId = "member-1";
   // The shared episode just naturally ended on this page (the sharer marker is
-  // still set — it is cleared later by the broadcast gate / shared-url reset).
+  // still set and unexpired — it is cleared later by the broadcast gate /
+  // shared-url reset).
   runtimeState.sharerEndedSuppressionUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.sharerEndedSuppressionUntil = 12_000; // > getNow (10_000)
 
   // The address bar is the SEASON url while playing the shared episode.
   let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
@@ -350,9 +352,10 @@ test("navigation controller holds a non-sharer when a bangumi season page autopl
   runtimeState.activeSharedByMemberId = "member-2";
   runtimeState.localMemberId = "member-1";
   // The non-sharer was held at the shared episode's natural end (its end-pause
-  // hold marker still points at the shared episode).
+  // hold marker still points at the shared episode and is unexpired).
   runtimeState.suppressedLocalEndPauseUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.suppressedLocalEndPauseUntil = 12_000; // > getNow (10_000)
 
   let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
   let pauseCalls = 0;
@@ -395,6 +398,61 @@ test("navigation controller holds a non-sharer when a bangumi season page autopl
       "https://www.bilibili.com/bangumi/play/ep249470",
     );
     assert.deepEqual(autoShareRequests, []);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller does not treat an expired end marker as a season-page autoplay", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeSharedByMemberId = "member-2";
+  runtimeState.localMemberId = "member-1";
+  // A non-sharer end-pause marker that was never cleared and is now EXPIRED
+  // (its hold window elapsed). A later unrelated navigation must not be
+  // misread as the shared episode's autoplay-next.
+  runtimeState.suppressedLocalEndPauseUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.suppressedLocalEndPauseUntil = 9_000; // < getNow (10_000)
+
+  let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
+  let pauseCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestBangumiPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/bangumi/play/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: () => {},
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    currentUrl =
+      "https://www.bilibili.com/bangumi/play/ep249480?from_spmid=666.25.episode.0";
+    windowHarness.intervals[0]?.();
+
+    // The expired marker is ignored: this is treated as an ordinary navigation,
+    // so the non-sharer is not force-paused and no autoplay hold is armed.
+    assert.equal(pauseCalls, 0);
+    assert.equal(runtimeState.nonSharerAutoplayHoldUrl, null);
   } finally {
     windowHarness.restore();
   }
