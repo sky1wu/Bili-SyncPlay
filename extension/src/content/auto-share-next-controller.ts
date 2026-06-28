@@ -141,6 +141,9 @@ export function createAutoShareNextController(args: {
         targetNormalizedUrl: pending.targetNormalizedUrl,
       },
     };
+    args.debugLog(
+      `Auto-share sending to background target=${pending.targetNormalizedUrl} from=${previousSharedUrl} attempt=${pending.attempt}/${maxAttempts} gen=${pending.generation}`,
+    );
     const response =
       await args.runtimeSendMessage<ShareCurrentVideoResponse>(message);
 
@@ -148,6 +151,9 @@ export function createAutoShareNextController(args: {
     // generation, even if it targets the same URL). Abandon this stale request
     // so its retry cannot cancel the newer navigation's pending timer.
     if (pending.generation !== scheduleGeneration) {
+      args.debugLog(
+        `Auto-share response ignored: superseded gen ${pending.generation} != ${scheduleGeneration} target=${pending.targetNormalizedUrl}`,
+      );
       return;
     }
 
@@ -182,6 +188,14 @@ export function createAutoShareNextController(args: {
       args.debugLog(
         `Auto-share next video gave up after ${maxAttempts} attempts${response.error ? `: ${response.error}` : ""}`,
       );
+    } else {
+      // ok:true (or a null response) — the background either shared the next
+      // video or intentionally skipped it (moved-on / not the source tab).
+      // Either way the request was delivered, so a "no auto-share happened"
+      // report can be told apart from "the request was never sent".
+      args.debugLog(
+        `Auto-share accepted by background (ok=${response?.ok ?? "null"}) target=${pending.targetNormalizedUrl} from=${previousSharedUrl}`,
+      );
     }
   }
 
@@ -197,6 +211,9 @@ export function createAutoShareNextController(args: {
     previousAutoShareTargetUrl?: string | null;
   }): void {
     if (input.previousSharedUrl === input.nextNormalizedPageUrl) {
+      args.debugLog(
+        `Auto-share schedule skipped: target equals previous shared url ${input.nextNormalizedPageUrl}`,
+      );
       return;
     }
     // A fresh (non-chained) auto-share starts a new lineage: the room cannot be
@@ -218,10 +235,16 @@ export function createAutoShareNextController(args: {
       pendingNormalizedUrl === input.nextNormalizedPageUrl &&
       pendingPreviousSharedUrl === input.previousSharedUrl
     ) {
+      args.debugLog(
+        `Auto-share schedule coalesced into the pending request for ${input.nextNormalizedPageUrl} (from ${input.previousSharedUrl})`,
+      );
       return;
     }
 
     scheduleGeneration += 1;
+    args.debugLog(
+      `Auto-share scheduled target=${input.nextNormalizedPageUrl} from=${input.previousSharedUrl} chained=${input.previousAutoShareTargetUrl != null} gen=${scheduleGeneration} delayMs=${args.settleDelayMs}`,
+    );
     scheduleRequest(
       {
         previousSharedUrl: input.previousSharedUrl,
@@ -234,6 +257,12 @@ export function createAutoShareNextController(args: {
   }
 
   function cancelPending(): void {
+    // DIAGNOSTIC: capture whether a request was actually pending/in-flight
+    // before we tear it down, so a cancel that drops a legitimately-scheduled
+    // auto-share (e.g. a follow-up navigation tick firing before the settle
+    // delay elapses) is visible rather than silent.
+    const hadTimer = pendingTimer !== null;
+    const pendingTarget = pendingNormalizedUrl;
     clearPendingTimer();
     pendingNormalizedUrl = null;
     pendingPreviousSharedUrl = null;
@@ -241,6 +270,11 @@ export function createAutoShareNextController(args: {
     // rescheduling — a manual/non-autoplay navigation must fully invalidate a
     // pending auto-share, including one already awaiting the background.
     scheduleGeneration += 1;
+    if (hadTimer || pendingTarget !== null) {
+      args.debugLog(
+        `Auto-share cancelled (hadPendingTimer=${hadTimer} pendingTarget=${pendingTarget}); generation bumped to ${scheduleGeneration}`,
+      );
+    }
   }
 
   function destroy(): void {

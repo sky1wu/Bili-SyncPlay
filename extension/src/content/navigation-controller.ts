@@ -93,6 +93,17 @@ export function createNavigationController(args: {
       !args.runtimeState.activeRoomCode ||
       !args.isSupportedVideoPage(nextPageUrl)
     ) {
+      // DIAGNOSTIC: this early bail runs *after* cancelAutoShareNextVideo above,
+      // so a transient non-video URL (e.g. a mid-SPA redirect during bangumi
+      // autoplay) silently cancels a still-pending auto-share without logging.
+      // Surface it so we can confirm whether it is what drops the auto-share.
+      args.debugLog(
+        `Navigation to ${nextPageUrl} bailed early (activeRoom=${Boolean(
+          args.runtimeState.activeRoomCode,
+        )} supportedVideoPage=${args.isSupportedVideoPage(
+          nextPageUrl,
+        )}); any pending auto-share was cancelled`,
+      );
       return;
     }
 
@@ -237,10 +248,24 @@ export function createNavigationController(args: {
       if (!shouldPauseNonSharerAutoplay) {
         args.runtimeState.pauseHoldUntil = 0;
       }
+      // DIAGNOSTIC: the previous single message could not tell whether the
+      // auto-share branch actually ran (it logged "skipping autoplay
+      // suppression" for both the scheduled-auto-share case and the
+      // user-driven/no-op case). Spell out the decision inputs so a failed
+      // auto-continue can be traced to the exact false condition.
+      const navOutcome = shouldPauseNonSharerAutoplay
+        ? "holding paused state (non-sharer autoplay)"
+        : shouldTreatAsAutoplay && isLocalSharedSource
+          ? "scheduled auto-share"
+          : isUserDrivenLocalNavigation
+            ? "user-driven local navigation, no auto-share"
+            : "no autoplay branch taken, no auto-share";
       args.debugLog(
-        shouldPauseNonSharerAutoplay
-          ? `Detected non-sharer autoplay to ${nextPageUrl}, holding paused state`
-          : `Detected in-room navigation to non-shared video ${nextPageUrl}, skipping autoplay suppression`,
+        `Nav decision to ${nextPageUrl}: ${navOutcome} ` +
+          `[autoplay=${shouldTreatAsAutoplay} localSharer=${isLocalSharedSource} ` +
+          `navFromShared=${navigatedFromSharedVideo} recentGesture=${hadRecentUserGesture} ` +
+          `prevPage=${previousNormalizedPageUrl} activeShared=${activeSharedUrl} ` +
+          `prevAutoShareTarget=${previousPendingAutoShareTargetUrl}]`,
       );
       void args.hydrateRoomState();
       return;

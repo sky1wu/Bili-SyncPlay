@@ -77,7 +77,12 @@ test("auto-share next controller sends a request after the navigation settles", 
         },
       },
     ]);
-    assert.deepEqual(debugLogs, []);
+    // Diagnostic logs trace the full happy path: schedule → send → accepted.
+    assert.deepEqual(debugLogs, [
+      "Auto-share scheduled target=https://www.bilibili.com/video/BV1NextVideo from=https://www.bilibili.com/video/BV1OldVideo chained=false gen=1 delayMs=900",
+      "Auto-share sending to background target=https://www.bilibili.com/video/BV1NextVideo from=https://www.bilibili.com/video/BV1OldVideo attempt=1/4 gen=1",
+      "Auto-share accepted by background (ok=true) target=https://www.bilibili.com/video/BV1NextVideo from=https://www.bilibili.com/video/BV1OldVideo",
+    ]);
   } finally {
     currentUrl = "";
     controller.destroy();
@@ -303,7 +308,13 @@ test("auto-share next controller skips a settled request when the page moved aga
     await Promise.resolve();
 
     assert.deepEqual(sentMessages, []);
-    assert.equal(debugLogs.length, 1);
+    // The schedule diagnostic plus the moved-page skip diagnostic.
+    assert.equal(debugLogs.length, 2);
+    assert.match(debugLogs[0], /^Auto-share scheduled /);
+    assert.match(
+      debugLogs[1],
+      /^Skipped auto-share next video because page moved /,
+    );
   } finally {
     controller.destroy();
     windowHarness.restore();
