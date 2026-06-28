@@ -109,9 +109,12 @@ export function createNavigationController(args: {
 
     const activeSharedUrl = args.runtimeState.activeSharedUrl;
     const now = nowOf();
+    // Captured before `resetUserGestureState` below zeroes it, so the
+    // natural-end check can tell whether a gesture postdates the natural end.
+    const lastUserGestureAt = args.runtimeState.lastUserGestureAt;
     const hadRecentUserGesture =
-      args.runtimeState.lastUserGestureAt > 0 &&
-      now - args.runtimeState.lastUserGestureAt <= args.userGestureGraceMs;
+      lastUserGestureAt > 0 &&
+      now - lastUserGestureAt <= args.userGestureGraceMs;
     // We can only positively confirm the navigated page is a *different*
     // (non-shared) video when the room's shared URL and the navigated page URL
     // are both present, stable (not a festival / bangumi-season identity), and
@@ -182,11 +185,19 @@ export function createNavigationController(args: {
       // often before this watcher runs — whereas this one survives until the
       // shared URL changes. Bounded by the hold window so a stale end cannot turn
       // a later unrelated navigation into a misclassified autoplay.
+      //
+      // Crucially, require that no user gesture postdates the natural end
+      // (`lastUserGestureAt <= sharedVideoNaturalEndAt`). The autoplay-next
+      // follows the end with no intervening interaction — the only recent
+      // gesture is the seek that *preceded* the end. A manual click on another
+      // episode within the hold window postdates the end, so it stays a manual
+      // navigation and is not auto-shared / does not force-pause a non-sharer.
       const navigatedFromSharedVideoEnd =
         activeSharedUrl !== null &&
         args.runtimeState.sharedVideoNaturalEndUrl === activeSharedUrl &&
         now - args.runtimeState.sharedVideoNaturalEndAt <
-          args.initialRoomStatePauseHoldMs;
+          args.initialRoomStatePauseHoldMs &&
+        lastUserGestureAt <= args.runtimeState.sharedVideoNaturalEndAt;
       const navigatedFromSharedVideo =
         navigatedFromSharedVideoEnd ||
         (previousNormalizedPageUrl !== null &&

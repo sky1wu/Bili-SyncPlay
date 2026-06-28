@@ -466,13 +466,14 @@ test("navigation controller schedules auto-share on a natural-end autoplay despi
     "https://www.bilibili.com/bangumi/play/ep249469";
   runtimeState.activeSharedByMemberId = "member-1";
   runtimeState.localMemberId = "member-1";
-  // The sharer dragged to the last few seconds of the shared episode: the seek
+  // The sharer dragged to the last seconds of the shared episode: the seek
   // gesture is still inside the grace window when it auto-advances.
   runtimeState.lastUserGestureAt = 9_800; // getNow 10_000, grace 300 → recent
-  // The shared episode then naturally ended (durable timestamp, within window).
+  // The shared episode then naturally ended just AFTER that seek (so the gesture
+  // precedes the end), durable timestamp within the hold window.
   runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
-  runtimeState.sharedVideoNaturalEndAt = 9_000;
+  runtimeState.sharedVideoNaturalEndAt = 9_900;
 
   let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
   const autoShareRequests: Array<{
@@ -517,6 +518,61 @@ test("navigation controller schedules auto-share on a natural-end autoplay despi
         previousAutoShareTargetUrl: null,
       },
     ]);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller does not auto-share a manual switch that postdates the natural end", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+  // The shared episode ended (no autoplay-next followed), and within the still
+  // -live hold window the user MANUALLY clicked another episode: the gesture
+  // postdates the natural end.
+  runtimeState.sharedVideoNaturalEndUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.sharedVideoNaturalEndAt = 9_500; // within window of getNow 10_000
+  runtimeState.lastUserGestureAt = 9_800; // recent AND after the natural end
+
+  let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
+  const autoShareRequests: unknown[] = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestBangumiPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/bangumi/play/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    currentUrl =
+      "https://www.bilibili.com/bangumi/play/ep249470?from_spmid=666.25.episode.0";
+    windowHarness.intervals[0]?.();
+
+    // The gesture postdates the natural end → it is a manual switch, not an
+    // autoplay-next, so it must not be auto-shared.
+    assert.deepEqual(autoShareRequests, []);
   } finally {
     windowHarness.restore();
   }
