@@ -144,6 +144,15 @@ export interface ContentRuntimeState {
    */
   sharerEndedSuppressionUrl: string | null;
   sharerEndedSuppressionUntil: number;
+  /**
+   * Timestamp at which [[sharerEndedSuppressionUrl]] was armed. A user replay
+   * gesture only releases the suppression when it postdates this; an older
+   * gesture (e.g. the sharer dragging to the end or pressing play moments
+   * before the natural end) must not be mistaken for a fresh replay, otherwise
+   * the next-episode seek-to-0 it precedes would leak out as the very
+   * "jumped to 0:00" noise this suppression exists to hide.
+   */
+  sharerEndedSuppressionArmedAt: number;
   festivalSnapshot: FestivalVideoSnapshot | null;
   /**
    * Timestamp of the most recent `waiting`/`stalled` event from the local
@@ -235,6 +244,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     postNavigationAnchorSetAt: 0,
     sharerEndedSuppressionUrl: null,
     sharerEndedSuppressionUntil: 0,
+    sharerEndedSuppressionArmedAt: 0,
     festivalSnapshot: null,
     lastBufferSignalAt: 0,
     pauseStartedAt: 0,

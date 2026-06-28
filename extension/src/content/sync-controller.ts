@@ -255,6 +255,7 @@ export function createSyncController(args: {
     args.runtimeState.postNavigationAnchorSetAt = 0;
     args.runtimeState.sharerEndedSuppressionUrl = null;
     args.runtimeState.sharerEndedSuppressionUntil = 0;
+    args.runtimeState.sharerEndedSuppressionArmedAt = 0;
     args.debugLog(`Reset playback sync state: ${reason}`);
   }
 
@@ -751,9 +752,23 @@ export function createSyncController(args: {
     if (sharerEndedUrl) {
       const expired = now >= args.runtimeState.sharerEndedSuppressionUntil;
       const movedOn = normalizedCurrentVideoUrl !== sharerEndedUrl;
+      // Only a gesture that postdates the arming counts as a fresh replay. An
+      // older gesture (the sharer dragging to the end / pressing play just
+      // before the natural end) precedes the next-episode seek-to-0 we are
+      // suppressing, so treating it as a replay would leak that seek out.
       const userReplayed =
-        now - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs;
-      if (!expired && !movedOn && !userReplayed) {
+        now - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
+        args.runtimeState.lastUserGestureAt >
+          args.runtimeState.sharerEndedSuppressionArmedAt;
+      // Once the local member is no longer the sharer of this URL (e.g. another
+      // member re-shared the same URL, which updates the sharer id without
+      // changing the URL and so does not run resetPlaybackSyncState), the
+      // suppression must release so the new sharer's takeover can be reported.
+      const ownershipLost =
+        !args.runtimeState.localMemberId ||
+        args.runtimeState.activeSharedByMemberId !==
+          args.runtimeState.localMemberId;
+      if (!expired && !movedOn && !userReplayed && !ownershipLost) {
         if (shouldLogSuppressedBroadcastDetail(eventSource)) {
           args.debugLog(
             `Skip broadcast ${formatPlaybackDiagnostic({
@@ -788,8 +803,9 @@ export function createSyncController(args: {
       }
       args.runtimeState.sharerEndedSuppressionUrl = null;
       args.runtimeState.sharerEndedSuppressionUntil = 0;
+      args.runtimeState.sharerEndedSuppressionArmedAt = 0;
       args.debugLog(
-        `Cleared sharer end-of-video suppression (was ${sharerEndedUrl}, expired=${expired} movedOn=${movedOn} userReplayed=${userReplayed})`,
+        `Cleared sharer end-of-video suppression (was ${sharerEndedUrl}, expired=${expired} movedOn=${movedOn} userReplayed=${userReplayed} ownershipLost=${ownershipLost})`,
       );
     }
     // Post-navigation settle gate.
