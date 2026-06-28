@@ -248,3 +248,86 @@ test("builds English toast messages when the UI language is English", () => {
   assert.equal(sharedVideo.message, "Alice shared a new video: New Video");
   setLocaleForTests(null);
 });
+
+test("stays silent for the local member's own manual share", () => {
+  setLocaleForTests("zh-CN");
+  const state = createRoomState({
+    members: [{ id: "self", name: "Me" }],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=2",
+  });
+
+  const result = getSharedVideoToastMessage({
+    toast: {
+      key: "toast-self-1",
+      actorId: "self",
+      title: "My Video",
+      videoUrl: "https://www.bilibili.com/video/BV1?p=2",
+    },
+    state,
+    localMemberId: "self",
+    lastSharedVideoToastKey: null,
+    normalizedToastUrl: "https://www.bilibili.com/video/BV1?p=2",
+    normalizedSharedUrl: "https://www.bilibili.com/video/BV1?p=2",
+    // No pending auto-share: a manual self-share must stay silent.
+    localAutoShareTargetUrl: null,
+  });
+
+  assert.equal(result.message, null);
+  assert.equal(result.nextSharedVideoToastKey, "toast-self-1");
+  setLocaleForTests(null);
+});
+
+test("surfaces an auto-continue toast for the local sharer's autoplay-next share", () => {
+  setLocaleForTests("zh-CN");
+  const state = createRoomState({
+    members: [{ id: "self", name: "Me" }],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=2",
+  });
+
+  const result = getSharedVideoToastMessage({
+    toast: {
+      key: "toast-self-auto-1",
+      actorId: "self",
+      title: "第 2 集",
+      videoUrl: "https://www.bilibili.com/video/BV1?p=2",
+    },
+    state,
+    localMemberId: "self",
+    lastSharedVideoToastKey: null,
+    normalizedToastUrl: "https://www.bilibili.com/video/BV1?p=2",
+    normalizedSharedUrl: "https://www.bilibili.com/video/BV1?p=2",
+    // The room confirmed the very video this sharer auto-continued to.
+    localAutoShareTargetUrl: "https://www.bilibili.com/video/BV1?p=2",
+  });
+
+  assert.equal(result.message, "已自动连播并共享下一个视频：第 2 集");
+  assert.equal(result.nextSharedVideoToastKey, "toast-self-auto-1");
+  setLocaleForTests(null);
+});
+
+test("does not auto-continue toast when the pending target is a different video", () => {
+  setLocaleForTests("en");
+  const state = createRoomState({
+    members: [{ id: "self", name: "Me" }],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=2",
+  });
+
+  const result = getSharedVideoToastMessage({
+    toast: {
+      key: "toast-self-auto-2",
+      actorId: "self",
+      title: "Episode 2",
+      videoUrl: "https://www.bilibili.com/video/BV1?p=2",
+    },
+    state,
+    localMemberId: "self",
+    lastSharedVideoToastKey: null,
+    normalizedToastUrl: "https://www.bilibili.com/video/BV1?p=2",
+    normalizedSharedUrl: "https://www.bilibili.com/video/BV1?p=2",
+    // A stale pending target for a different episode must not trigger the toast.
+    localAutoShareTargetUrl: "https://www.bilibili.com/video/BV1?p=3",
+  });
+
+  assert.equal(result.message, null);
+  setLocaleForTests(null);
+});
