@@ -76,22 +76,6 @@ export function createNavigationController(args: {
     // is itself a sharer autoplay-next.
     const previousPendingAutoShareTargetUrl =
       args.runtimeState.pendingAutoShareTargetUrl;
-    // End-of-shared-video markers (with their expiry), captured before
-    // `resetUserGestureState` below clears the non-sharer one
-    // (`suppressedLocalEndPauseUrl` / `...Until`). They let the
-    // autoplay-from-shared check recognise a season-page autoplay whose previous
-    // page URL is the season URL rather than the shared episode URL. The expiry
-    // matters because these markers are cleared lazily: a stale one left past
-    // its hold window must not turn a later unrelated navigation (still on the
-    // same `activeSharedUrl`) into a misclassified autoplay-next.
-    const previousSharerEndedSuppressionUrl =
-      args.runtimeState.sharerEndedSuppressionUrl;
-    const previousSharerEndedSuppressionUntil =
-      args.runtimeState.sharerEndedSuppressionUntil;
-    const previousSuppressedLocalEndPauseUrl =
-      args.runtimeState.suppressedLocalEndPauseUrl;
-    const previousSuppressedLocalEndPauseUntil =
-      args.runtimeState.suppressedLocalEndPauseUntil;
     lastObservedPageUrl = nextPageUrl;
     lastObservedNormalizedPageUrl = nextNormalizedPageUrl;
     args.clearFestivalSnapshot();
@@ -125,9 +109,12 @@ export function createNavigationController(args: {
 
     const activeSharedUrl = args.runtimeState.activeSharedUrl;
     const now = nowOf();
+    // Captured before `resetUserGestureState` below zeroes it, so the
+    // natural-end check can tell whether a gesture postdates the natural end.
+    const lastUserGestureAt = args.runtimeState.lastUserGestureAt;
     const hadRecentUserGesture =
-      args.runtimeState.lastUserGestureAt > 0 &&
-      now - args.runtimeState.lastUserGestureAt <= args.userGestureGraceMs;
+      lastUserGestureAt > 0 &&
+      now - lastUserGestureAt <= args.userGestureGraceMs;
     // We can only positively confirm the navigated page is a *different*
     // (non-shared) video when the room's shared URL and the navigated page URL
     // are both present, stable (not a festival / bangumi-season identity), and
@@ -184,31 +171,49 @@ export function createNavigationController(args: {
       // C would never be shared, stranding the room behind the sharer. (The
       // background still defers/skips if the room is not actually behind our
       // share, so a stale target cannot force an out-of-turn share.)
-      // A bangumi season page keeps the season URL (`/bangumi/play/ss<season>`)
-      // in the address bar while it actually plays a resolved episode, and the
-      // room shares the resolved episode URL (`/bangumi/play/ep<id>`). So the
-      // previous *page* URL (the season URL) never equals `activeSharedUrl` (the
-      // episode), and a season-page autoplay would be misclassified as a local
-      // detour — the sharer would never auto-share the next episode, and a
-      // non-sharer would never be held. The end-of-shared-video markers give a
-      // URL-form-independent signal that the shared video just naturally ended on
-      // this page: the sharer's broadcast-suppression marker, or the non-sharer's
-      // end-pause hold marker, still pointing at `activeSharedUrl` means this
-      // navigation is that video's autoplay-next. Both are cleared on a shared-url
-      // change / room reset, so they cannot leak into an unrelated navigation.
+      // A URL-form-independent signal that the shared video just naturally ended
+      // on this page, so this navigation is its autoplay-next. It covers two
+      // cases the page-URL comparison misses:
+      //   - bangumi season pages keep the season URL (`/bangumi/play/ss<id>`) in
+      //     the address bar while playing the resolved episode the room shares
+      //     (`/bangumi/play/ep<id>`), so the previous page URL never equals
+      //     `activeSharedUrl`;
+      //   - a seek to the last seconds leaves the gesture window warm at the
+      //     autoplay, which would otherwise look like a manual switch.
+      // The durable `sharedVideoNaturalEnd*` timestamp is used (not the
+      // broadcast-suppression markers) because the gate clears those eagerly —
+      // often before this watcher runs — whereas this one survives until the
+      // shared URL changes. Bounded by the hold window so a stale end cannot turn
+      // a later unrelated navigation into a misclassified autoplay. This is the
+      // `navFromShared` half (it recognises a season-page autoplay even when no
+      // gesture is involved), so it deliberately does NOT depend on the gesture.
       const navigatedFromSharedVideoEnd =
         activeSharedUrl !== null &&
-        ((previousSharerEndedSuppressionUrl === activeSharedUrl &&
-          now < previousSharerEndedSuppressionUntil) ||
-          (previousSuppressedLocalEndPauseUrl === activeSharedUrl &&
-            now < previousSuppressedLocalEndPauseUntil));
+        args.runtimeState.sharedVideoNaturalEndUrl === activeSharedUrl &&
+        now - args.runtimeState.sharedVideoNaturalEndAt <
+          args.initialRoomStatePauseHoldMs;
       const navigatedFromSharedVideo =
         navigatedFromSharedVideoEnd ||
         (previousNormalizedPageUrl !== null &&
           (previousNormalizedPageUrl === activeSharedUrl ||
             previousNormalizedPageUrl === previousPendingAutoShareTargetUrl));
+      // The ONLY recent gesture that should not block autoplay classification is
+      // a seek-to-end: the sharer dragged to the last seconds and let the video
+      // auto-advance. Two conditions together:
+      //   - the end itself was recorded as preceded by a seek
+      //     (`sharedVideoNaturalEndAfterSeek`), so a manual click that records no
+      //     fresh seek — even one the watcher polls just after the old video
+      //     fires `ended` — does not qualify; and
+      //   - no gesture postdates the natural end (`lastUserGestureAt <=
+      //     sharedVideoNaturalEndAt`), so a click on another episode *after* a
+      //     genuine seek-to-end (the flag is still set from that earlier end)
+      //     stays a manual navigation rather than reusing the stale flag.
+      const recentGestureIsSeekToEnd =
+        navigatedFromSharedVideoEnd &&
+        args.runtimeState.sharedVideoNaturalEndAfterSeek &&
+        lastUserGestureAt <= args.runtimeState.sharedVideoNaturalEndAt;
       const shouldTreatAsAutoplay =
-        !hadRecentUserGesture &&
+        (!hadRecentUserGesture || recentGestureIsSeekToEnd) &&
         navigatedFromSharedVideo &&
         activeSharedUrl !== null &&
         nextNormalizedPageUrl !== null;
@@ -298,7 +303,7 @@ export function createNavigationController(args: {
       args.debugLog(
         `Nav decision to ${nextPageUrl}: ${navOutcome} ` +
           `[autoplay=${shouldTreatAsAutoplay} localSharer=${isLocalSharedSource} ` +
-          `navFromShared=${navigatedFromSharedVideo} navFromSharedEnd=${navigatedFromSharedVideoEnd} recentGesture=${hadRecentUserGesture} ` +
+          `navFromShared=${navigatedFromSharedVideo} navFromSharedEnd=${navigatedFromSharedVideoEnd} seekToEnd=${recentGestureIsSeekToEnd} recentGesture=${hadRecentUserGesture} ` +
           `prevPage=${previousNormalizedPageUrl} activeShared=${activeSharedUrl} ` +
           `prevAutoShareTarget=${previousPendingAutoShareTargetUrl}]`,
       );

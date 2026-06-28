@@ -153,6 +153,30 @@ export interface ContentRuntimeState {
    * "jumped to 0:00" noise this suppression exists to hide.
    */
   sharerEndedSuppressionArmedAt: number;
+  /**
+   * The shared video URL that most recently reached its natural end on this
+   * page, and when. Unlike [[sharerEndedSuppressionUrl]] /
+   * [[suppressedLocalEndPauseUrl]] (which the broadcast gate and
+   * `resetUserGestureState` clear eagerly, often before the navigation watcher
+   * runs), this pair is a durable "the shared video just ended here" signal that
+   * only [[resetPlaybackSyncState]] / room teardown clears. The navigation
+   * controller reads it to recognise an autoplay-next even when the address-bar
+   * URL form differs (bangumi season pages) or a recent seek-to-the-end leaves
+   * the gesture window warm — both of which would otherwise misclassify the
+   * advance as a manual switch and skip the auto-share / non-sharer hold.
+   */
+  sharedVideoNaturalEndUrl: string | null;
+  sharedVideoNaturalEndAt: number;
+  /**
+   * Whether the most recent shared-video natural end was preceded by a user
+   * *seek* (the sharer dragging to the last seconds) rather than reached with no
+   * recent interaction or a non-seek gesture. Captured at the natural end —
+   * before the next page's `play` can overwrite the action state — so the
+   * navigation controller can relax the recent-gesture gate *only* for a genuine
+   * seek-to-end → autoplay, not for a manual click on another episode that the
+   * watcher happens to poll just after the old video fires `ended`.
+   */
+  sharedVideoNaturalEndAfterSeek: boolean;
   festivalSnapshot: FestivalVideoSnapshot | null;
   /**
    * Timestamp of the most recent `waiting`/`stalled` event from the local
@@ -245,6 +269,9 @@ export function createContentRuntimeState(): ContentRuntimeState {
     sharerEndedSuppressionUrl: null,
     sharerEndedSuppressionUntil: 0,
     sharerEndedSuppressionArmedAt: 0,
+    sharedVideoNaturalEndUrl: null,
+    sharedVideoNaturalEndAt: 0,
+    sharedVideoNaturalEndAfterSeek: false,
     festivalSnapshot: null,
     lastBufferSignalAt: 0,
     pauseStartedAt: 0,

@@ -192,6 +192,36 @@ export function createPlaybackBindingController(args: {
     );
   }
 
+  /**
+   * Record that the room's shared video reached its natural end on this page.
+   * This durable timestamp (cleared only by a shared-url change / room teardown)
+   * lets the navigation controller recognise the autoplay-next that follows,
+   * independent of the broadcast-suppression markers it clears eagerly. Set for
+   * both roles — the sharer uses it to auto-share, a non-sharer to hold.
+   */
+  function markSharedVideoNaturalEnd(): void {
+    if (
+      !args.runtimeState.activeRoomCode ||
+      !args.runtimeState.activeSharedUrl ||
+      !isCurrentVideoShared(args.getSharedVideo())
+    ) {
+      return;
+    }
+    args.runtimeState.sharedVideoNaturalEndUrl =
+      args.runtimeState.activeSharedUrl;
+    args.runtimeState.sharedVideoNaturalEndAt = nowOf();
+    // Whether this end was reached right after an in-video seek (seek-to-end),
+    // captured now while the old page's action state is still intact (the next
+    // page's `play` has not yet overwritten it). The navigation controller only
+    // relaxes the recent-gesture gate for this case — a manual click on another
+    // episode does not record a fresh seek, so it stays a manual navigation.
+    const lastAction = args.runtimeState.lastExplicitUserAction;
+    args.runtimeState.sharedVideoNaturalEndAfterSeek = Boolean(
+      lastAction?.kind === "seek" &&
+      args.runtimeState.lastUserGestureAt <= lastAction.at,
+    );
+  }
+
   function isLocalSharedSource(): boolean {
     return Boolean(
       args.runtimeState.localMemberId &&
@@ -273,6 +303,23 @@ export function createPlaybackBindingController(args: {
       !isLocalSharedSource() ||
       !isCurrentVideoShared(args.getSharedVideo())
     ) {
+      // DIAGNOSTIC: report which condition blocked arming so a missed
+      // autoplay-next (e.g. a seek to the very end advancing without it) can be
+      // traced. `currentVideoShared` is the common suspect when the page bridge
+      // resolves the next part before the end fires.
+      args.debugLog(
+        `Sharer end-of-video suppression not armed (room=${Boolean(
+          args.runtimeState.activeRoomCode,
+        )} sharedUrl=${Boolean(
+          args.runtimeState.activeSharedUrl,
+        )} localMember=${Boolean(
+          args.runtimeState.localMemberId,
+        )} sharedBy=${Boolean(
+          args.runtimeState.activeSharedByMemberId,
+        )} localSharer=${isLocalSharedSource()} currentVideoShared=${isCurrentVideoShared(
+          args.getSharedVideo(),
+        )} resolved=${args.normalizeUrl(args.getSharedVideo()?.url)} active=${args.runtimeState.activeSharedUrl})`,
+      );
       return false;
     }
 
@@ -662,10 +709,15 @@ export function createPlaybackBindingController(args: {
       onPause: () => {
         const currentVideo = args.getSharedVideo();
         // At a natural end the browser dispatches `pause` immediately before
-        // `ended`. Arm the non-sharer end-hold here (idempotent with the `ended`
-        // handler) and skip the broadcast: otherwise this end `pause` is sent to
-        // the room before `onEnded` establishes the suppression marker, flipping
-        // the room to paused and disrupting the sharer's autoplay-next advance.
+        // `ended`. Record the durable natural-end timestamp (for both roles)
+        // before any early return, then arm the non-sharer end-hold here
+        // (idempotent with the `ended` handler) and skip the broadcast:
+        // otherwise this end `pause` is sent to the room before `onEnded`
+        // establishes the suppression marker, flipping the room to paused and
+        // disrupting the sharer's autoplay-next advance.
+        if (video.ended) {
+          markSharedVideoNaturalEnd();
+        }
         if (video.ended && holdNonSharerAtSharedVideoEnd(video)) {
           return;
         }
@@ -789,6 +841,13 @@ export function createPlaybackBindingController(args: {
         scheduleBroadcast(video, "ratechange", 120);
       },
       onEnded: () => {
+        // DIAGNOSTIC: confirm the natural-end event actually fires. A seek to
+        // the very end can make Bilibili's multipart player advance to the next
+        // part without an `ended`, so the end-suppression marker is never armed.
+        args.debugLog(
+          `onEnded fired (ended=${video.ended} currentTime=${video.currentTime.toFixed(2)} resolved=${args.normalizeUrl(args.getSharedVideo()?.url)})`,
+        );
+        markSharedVideoNaturalEnd();
         if (!holdNonSharerAtSharedVideoEnd(video)) {
           armSharerSharedVideoEndSuppression();
         }
