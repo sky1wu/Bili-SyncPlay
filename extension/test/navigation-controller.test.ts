@@ -469,11 +469,11 @@ test("navigation controller schedules auto-share on a natural-end autoplay despi
   // The sharer dragged to the last seconds of the shared episode: the seek
   // gesture is still inside the grace window when it auto-advances.
   runtimeState.lastUserGestureAt = 9_800; // getNow 10_000, grace 300 → recent
-  // The shared episode then naturally ended just AFTER that seek (so the gesture
-  // precedes the end), durable timestamp within the hold window.
+  // The shared episode then naturally ended, recorded as preceded by a seek.
   runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
   runtimeState.sharedVideoNaturalEndAt = 9_900;
+  runtimeState.sharedVideoNaturalEndAfterSeek = true;
 
   let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
   const autoShareRequests: Array<{
@@ -523,7 +523,7 @@ test("navigation controller schedules auto-share on a natural-end autoplay despi
   }
 });
 
-test("navigation controller does not auto-share a manual switch that postdates the natural end", () => {
+test("navigation controller does not auto-share a manual click even when its gesture predates the natural end", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
@@ -532,13 +532,15 @@ test("navigation controller does not auto-share a manual switch that postdates t
     "https://www.bilibili.com/bangumi/play/ep249469";
   runtimeState.activeSharedByMemberId = "member-1";
   runtimeState.localMemberId = "member-1";
-  // The shared episode ended (no autoplay-next followed), and within the still
-  // -live hold window the user MANUALLY clicked another episode: the gesture
-  // postdates the natural end.
+  // The user clicked another episode in the shared video's last moments; the old
+  // video then fired `ended` (recorded WITHOUT a preceding seek) a beat later,
+  // so the click gesture predates the natural-end timestamp. The seek-only flag
+  // keeps this a manual navigation rather than a misclassified autoplay-next.
   runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
-  runtimeState.sharedVideoNaturalEndAt = 9_500; // within window of getNow 10_000
-  runtimeState.lastUserGestureAt = 9_800; // recent AND after the natural end
+  runtimeState.sharedVideoNaturalEndAt = 9_900; // within window; AFTER the gesture
+  runtimeState.lastUserGestureAt = 9_800; // recent, and predates the natural end
+  runtimeState.sharedVideoNaturalEndAfterSeek = false; // it was a click, not a seek
 
   let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
   const autoShareRequests: unknown[] = [];

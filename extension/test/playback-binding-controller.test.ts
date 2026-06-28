@@ -2086,6 +2086,67 @@ test("playback binding controller suppresses the natural-end pause broadcast for
       "https://www.bilibili.com/video/BVshared",
     );
     assert.equal(runtimeState.sharedVideoNaturalEndAt, 5_000);
+    // No seek preceded this end, so the seek-to-end flag stays false.
+    assert.equal(runtimeState.sharedVideoNaturalEndAfterSeek, false);
+  } finally {
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller records the seek-to-end flag when a seek preceded the natural end", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedUrl = "https://www.bilibili.com/video/BVshared";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedUrl;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  // The sharer seeked to the last seconds (the most recent gesture is that seek,
+  // no newer gesture since), then the video played out to its natural end.
+  runtimeState.lastUserGestureAt = 4_800;
+  runtimeState.lastExplicitUserAction = { kind: "seek", at: 4_850 };
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared",
+      url: sharedUrl,
+      title: "Shared Video",
+      sharedByMemberId: "member-1",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 5_000,
+  });
+
+  dom.video.pause = () => {
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+
+    assert.equal(runtimeState.sharedVideoNaturalEndUrl, sharedUrl);
+    assert.equal(runtimeState.sharedVideoNaturalEndAfterSeek, true);
   } finally {
     dom.video.pause = originalPause;
     dom.restore();

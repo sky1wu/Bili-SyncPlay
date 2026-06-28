@@ -184,33 +184,30 @@ export function createNavigationController(args: {
       // broadcast-suppression markers) because the gate clears those eagerly —
       // often before this watcher runs — whereas this one survives until the
       // shared URL changes. Bounded by the hold window so a stale end cannot turn
-      // a later unrelated navigation into a misclassified autoplay.
-      //
-      // Crucially, require that no user gesture postdates the natural end
-      // (`lastUserGestureAt <= sharedVideoNaturalEndAt`). The autoplay-next
-      // follows the end with no intervening interaction — the only recent
-      // gesture is the seek that *preceded* the end. A manual click on another
-      // episode within the hold window postdates the end, so it stays a manual
-      // navigation and is not auto-shared / does not force-pause a non-sharer.
+      // a later unrelated navigation into a misclassified autoplay. This is the
+      // `navFromShared` half (it recognises a season-page autoplay even when no
+      // gesture is involved), so it deliberately does NOT depend on the gesture.
       const navigatedFromSharedVideoEnd =
         activeSharedUrl !== null &&
         args.runtimeState.sharedVideoNaturalEndUrl === activeSharedUrl &&
         now - args.runtimeState.sharedVideoNaturalEndAt <
-          args.initialRoomStatePauseHoldMs &&
-        lastUserGestureAt <= args.runtimeState.sharedVideoNaturalEndAt;
+          args.initialRoomStatePauseHoldMs;
       const navigatedFromSharedVideo =
         navigatedFromSharedVideoEnd ||
         (previousNormalizedPageUrl !== null &&
           (previousNormalizedPageUrl === activeSharedUrl ||
             previousNormalizedPageUrl === previousPendingAutoShareTargetUrl));
+      // The ONLY recent gesture that should not block autoplay classification is
+      // a seek-to-end: the sharer dragged to the last seconds and let the video
+      // auto-advance. That is recorded at the natural end itself
+      // (`sharedVideoNaturalEndAfterSeek`), so a manual click on another episode
+      // — which records no fresh seek, even if the watcher polls it just after
+      // the old video fires `ended` — stays a manual navigation.
+      const recentGestureIsSeekToEnd =
+        navigatedFromSharedVideoEnd &&
+        args.runtimeState.sharedVideoNaturalEndAfterSeek;
       const shouldTreatAsAutoplay =
-        // A recent gesture normally marks a manual navigation. But when the
-        // shared video *genuinely ended* on this page (navigatedFromSharedVideoEnd,
-        // which requires an unexpired end marker), this is its autoplay-next even
-        // if the gesture window is still warm — e.g. the sharer dragged to the
-        // last few seconds and let it auto-advance. A bare seek is in-video
-        // scrubbing, not a manual switch, so it must not block the auto-share.
-        (navigatedFromSharedVideoEnd || !hadRecentUserGesture) &&
+        (!hadRecentUserGesture || recentGestureIsSeekToEnd) &&
         navigatedFromSharedVideo &&
         activeSharedUrl !== null &&
         nextNormalizedPageUrl !== null;
@@ -300,7 +297,7 @@ export function createNavigationController(args: {
       args.debugLog(
         `Nav decision to ${nextPageUrl}: ${navOutcome} ` +
           `[autoplay=${shouldTreatAsAutoplay} localSharer=${isLocalSharedSource} ` +
-          `navFromShared=${navigatedFromSharedVideo} navFromSharedEnd=${navigatedFromSharedVideoEnd} recentGesture=${hadRecentUserGesture} ` +
+          `navFromShared=${navigatedFromSharedVideo} navFromSharedEnd=${navigatedFromSharedVideoEnd} seekToEnd=${recentGestureIsSeekToEnd} recentGesture=${hadRecentUserGesture} ` +
           `prevPage=${previousNormalizedPageUrl} activeShared=${activeSharedUrl} ` +
           `prevAutoShareTarget=${previousPendingAutoShareTargetUrl}]`,
       );
