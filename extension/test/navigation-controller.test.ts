@@ -458,6 +458,71 @@ test("navigation controller does not treat an expired end marker as a season-pag
   }
 });
 
+test("navigation controller schedules auto-share on a natural-end autoplay despite a recent seek gesture", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+  // The sharer dragged to the last few seconds of the shared episode: the seek
+  // gesture is still inside the grace window when it auto-advances.
+  runtimeState.lastUserGestureAt = 9_800; // getNow 10_000, grace 300 → recent
+  // The shared episode then naturally ended, arming the (unexpired) end marker.
+  runtimeState.sharerEndedSuppressionUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.sharerEndedSuppressionUntil = 12_000;
+
+  let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
+  const autoShareRequests: Array<{
+    previousSharedUrl: string;
+    nextNormalizedPageUrl: string;
+    previousAutoShareTargetUrl: string | null;
+  }> = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestBangumiPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/bangumi/play/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    currentUrl =
+      "https://www.bilibili.com/bangumi/play/ep249470?from_spmid=666.25.episode.0";
+    windowHarness.intervals[0]?.();
+
+    // The recent seek must NOT mark this as a manual switch: the unexpired end
+    // marker proves it is the shared episode's autoplay-next, so it is shared.
+    assert.deepEqual(autoShareRequests, [
+      {
+        previousSharedUrl: "https://www.bilibili.com/bangumi/play/ep249469",
+        nextNormalizedPageUrl: "https://www.bilibili.com/bangumi/play/ep249470",
+        previousAutoShareTargetUrl: null,
+      },
+    ]);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller chains the next auto-share before the room confirms the previous one", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();

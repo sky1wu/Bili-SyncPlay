@@ -208,7 +208,13 @@ export function createNavigationController(args: {
           (previousNormalizedPageUrl === activeSharedUrl ||
             previousNormalizedPageUrl === previousPendingAutoShareTargetUrl));
       const shouldTreatAsAutoplay =
-        !hadRecentUserGesture &&
+        // A recent gesture normally marks a manual navigation. But when the
+        // shared video *genuinely ended* on this page (navigatedFromSharedVideoEnd,
+        // which requires an unexpired end marker), this is its autoplay-next even
+        // if the gesture window is still warm — e.g. the sharer dragged to the
+        // last few seconds and let it auto-advance. A bare seek is in-video
+        // scrubbing, not a manual switch, so it must not block the auto-share.
+        (navigatedFromSharedVideoEnd || !hadRecentUserGesture) &&
         navigatedFromSharedVideo &&
         activeSharedUrl !== null &&
         nextNormalizedPageUrl !== null;

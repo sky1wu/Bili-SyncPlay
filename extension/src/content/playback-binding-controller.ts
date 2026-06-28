@@ -273,6 +273,23 @@ export function createPlaybackBindingController(args: {
       !isLocalSharedSource() ||
       !isCurrentVideoShared(args.getSharedVideo())
     ) {
+      // DIAGNOSTIC: report which condition blocked arming so a missed
+      // autoplay-next (e.g. a seek to the very end advancing without it) can be
+      // traced. `currentVideoShared` is the common suspect when the page bridge
+      // resolves the next part before the end fires.
+      args.debugLog(
+        `Sharer end-of-video suppression not armed (room=${Boolean(
+          args.runtimeState.activeRoomCode,
+        )} sharedUrl=${Boolean(
+          args.runtimeState.activeSharedUrl,
+        )} localMember=${Boolean(
+          args.runtimeState.localMemberId,
+        )} sharedBy=${Boolean(
+          args.runtimeState.activeSharedByMemberId,
+        )} localSharer=${isLocalSharedSource()} currentVideoShared=${isCurrentVideoShared(
+          args.getSharedVideo(),
+        )} resolved=${args.normalizeUrl(args.getSharedVideo()?.url)} active=${args.runtimeState.activeSharedUrl})`,
+      );
       return false;
     }
 
@@ -789,6 +806,12 @@ export function createPlaybackBindingController(args: {
         scheduleBroadcast(video, "ratechange", 120);
       },
       onEnded: () => {
+        // DIAGNOSTIC: confirm the natural-end event actually fires. A seek to
+        // the very end can make Bilibili's multipart player advance to the next
+        // part without an `ended`, so the end-suppression marker is never armed.
+        args.debugLog(
+          `onEnded fired (ended=${video.ended} currentTime=${video.currentTime.toFixed(2)} resolved=${args.normalizeUrl(args.getSharedVideo()?.url)})`,
+        );
         if (!holdNonSharerAtSharedVideoEnd(video)) {
           armSharerSharedVideoEndSuppression();
         }
