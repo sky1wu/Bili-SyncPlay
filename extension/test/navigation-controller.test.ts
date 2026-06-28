@@ -580,6 +580,61 @@ test("navigation controller does not auto-share a manual click even when its ges
   }
 });
 
+test("navigation controller does not reuse a stale seek-to-end flag for a later manual click", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+  // A genuine seek-to-end happened (flag set), no autoplay-next followed, and the
+  // timestamp is still within the hold window. Then the user MANUALLY clicked
+  // another episode: the click postdates the natural end, so the still-set flag
+  // must not be reused to treat the click as an autoplay-next.
+  runtimeState.sharedVideoNaturalEndUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.sharedVideoNaturalEndAt = 9_500;
+  runtimeState.sharedVideoNaturalEndAfterSeek = true;
+  runtimeState.lastUserGestureAt = 9_800; // recent click, AFTER the natural end
+
+  let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
+  const autoShareRequests: unknown[] = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestBangumiPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/bangumi/play/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    currentUrl =
+      "https://www.bilibili.com/bangumi/play/ep249470?from_spmid=666.25.episode.0";
+    windowHarness.intervals[0]?.();
+
+    assert.deepEqual(autoShareRequests, []);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller chains the next auto-share before the room confirms the previous one", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();

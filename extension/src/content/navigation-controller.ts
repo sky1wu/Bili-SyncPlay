@@ -199,13 +199,19 @@ export function createNavigationController(args: {
             previousNormalizedPageUrl === previousPendingAutoShareTargetUrl));
       // The ONLY recent gesture that should not block autoplay classification is
       // a seek-to-end: the sharer dragged to the last seconds and let the video
-      // auto-advance. That is recorded at the natural end itself
-      // (`sharedVideoNaturalEndAfterSeek`), so a manual click on another episode
-      // — which records no fresh seek, even if the watcher polls it just after
-      // the old video fires `ended` — stays a manual navigation.
+      // auto-advance. Two conditions together:
+      //   - the end itself was recorded as preceded by a seek
+      //     (`sharedVideoNaturalEndAfterSeek`), so a manual click that records no
+      //     fresh seek — even one the watcher polls just after the old video
+      //     fires `ended` — does not qualify; and
+      //   - no gesture postdates the natural end (`lastUserGestureAt <=
+      //     sharedVideoNaturalEndAt`), so a click on another episode *after* a
+      //     genuine seek-to-end (the flag is still set from that earlier end)
+      //     stays a manual navigation rather than reusing the stale flag.
       const recentGestureIsSeekToEnd =
         navigatedFromSharedVideoEnd &&
-        args.runtimeState.sharedVideoNaturalEndAfterSeek;
+        args.runtimeState.sharedVideoNaturalEndAfterSeek &&
+        lastUserGestureAt <= args.runtimeState.sharedVideoNaturalEndAt;
       const shouldTreatAsAutoplay =
         (!hadRecentUserGesture || recentGestureIsSeekToEnd) &&
         navigatedFromSharedVideo &&
