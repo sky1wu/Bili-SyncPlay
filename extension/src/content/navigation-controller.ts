@@ -76,6 +76,22 @@ export function createNavigationController(args: {
     // is itself a sharer autoplay-next.
     const previousPendingAutoShareTargetUrl =
       args.runtimeState.pendingAutoShareTargetUrl;
+    // End-of-shared-video markers (with their expiry), captured before
+    // `resetUserGestureState` below clears the non-sharer one
+    // (`suppressedLocalEndPauseUrl` / `...Until`). They let the
+    // autoplay-from-shared check recognise a season-page autoplay whose previous
+    // page URL is the season URL rather than the shared episode URL. The expiry
+    // matters because these markers are cleared lazily: a stale one left past
+    // its hold window must not turn a later unrelated navigation (still on the
+    // same `activeSharedUrl`) into a misclassified autoplay-next.
+    const previousSharerEndedSuppressionUrl =
+      args.runtimeState.sharerEndedSuppressionUrl;
+    const previousSharerEndedSuppressionUntil =
+      args.runtimeState.sharerEndedSuppressionUntil;
+    const previousSuppressedLocalEndPauseUrl =
+      args.runtimeState.suppressedLocalEndPauseUrl;
+    const previousSuppressedLocalEndPauseUntil =
+      args.runtimeState.suppressedLocalEndPauseUntil;
     lastObservedPageUrl = nextPageUrl;
     lastObservedNormalizedPageUrl = nextNormalizedPageUrl;
     args.clearFestivalSnapshot();
@@ -93,6 +109,17 @@ export function createNavigationController(args: {
       !args.runtimeState.activeRoomCode ||
       !args.isSupportedVideoPage(nextPageUrl)
     ) {
+      // DIAGNOSTIC: this early bail runs *after* cancelAutoShareNextVideo above,
+      // so a transient non-video URL (e.g. a mid-SPA redirect during bangumi
+      // autoplay) silently cancels a still-pending auto-share without logging.
+      // Surface it so we can confirm whether it is what drops the auto-share.
+      args.debugLog(
+        `Navigation to ${nextPageUrl} bailed early (activeRoom=${Boolean(
+          args.runtimeState.activeRoomCode,
+        )} supportedVideoPage=${args.isSupportedVideoPage(
+          nextPageUrl,
+        )}); any pending auto-share was cancelled`,
+      );
       return;
     }
 
@@ -157,10 +184,29 @@ export function createNavigationController(args: {
       // C would never be shared, stranding the room behind the sharer. (The
       // background still defers/skips if the room is not actually behind our
       // share, so a stale target cannot force an out-of-turn share.)
+      // A bangumi season page keeps the season URL (`/bangumi/play/ss<season>`)
+      // in the address bar while it actually plays a resolved episode, and the
+      // room shares the resolved episode URL (`/bangumi/play/ep<id>`). So the
+      // previous *page* URL (the season URL) never equals `activeSharedUrl` (the
+      // episode), and a season-page autoplay would be misclassified as a local
+      // detour — the sharer would never auto-share the next episode, and a
+      // non-sharer would never be held. The end-of-shared-video markers give a
+      // URL-form-independent signal that the shared video just naturally ended on
+      // this page: the sharer's broadcast-suppression marker, or the non-sharer's
+      // end-pause hold marker, still pointing at `activeSharedUrl` means this
+      // navigation is that video's autoplay-next. Both are cleared on a shared-url
+      // change / room reset, so they cannot leak into an unrelated navigation.
+      const navigatedFromSharedVideoEnd =
+        activeSharedUrl !== null &&
+        ((previousSharerEndedSuppressionUrl === activeSharedUrl &&
+          now < previousSharerEndedSuppressionUntil) ||
+          (previousSuppressedLocalEndPauseUrl === activeSharedUrl &&
+            now < previousSuppressedLocalEndPauseUntil));
       const navigatedFromSharedVideo =
-        previousNormalizedPageUrl !== null &&
-        (previousNormalizedPageUrl === activeSharedUrl ||
-          previousNormalizedPageUrl === previousPendingAutoShareTargetUrl);
+        navigatedFromSharedVideoEnd ||
+        (previousNormalizedPageUrl !== null &&
+          (previousNormalizedPageUrl === activeSharedUrl ||
+            previousNormalizedPageUrl === previousPendingAutoShareTargetUrl));
       const shouldTreatAsAutoplay =
         !hadRecentUserGesture &&
         navigatedFromSharedVideo &&
@@ -237,10 +283,24 @@ export function createNavigationController(args: {
       if (!shouldPauseNonSharerAutoplay) {
         args.runtimeState.pauseHoldUntil = 0;
       }
+      // DIAGNOSTIC: the previous single message could not tell whether the
+      // auto-share branch actually ran (it logged "skipping autoplay
+      // suppression" for both the scheduled-auto-share case and the
+      // user-driven/no-op case). Spell out the decision inputs so a failed
+      // auto-continue can be traced to the exact false condition.
+      const navOutcome = shouldPauseNonSharerAutoplay
+        ? "holding paused state (non-sharer autoplay)"
+        : shouldTreatAsAutoplay && isLocalSharedSource
+          ? "scheduled auto-share"
+          : isUserDrivenLocalNavigation
+            ? "user-driven local navigation, no auto-share"
+            : "no autoplay branch taken, no auto-share";
       args.debugLog(
-        shouldPauseNonSharerAutoplay
-          ? `Detected non-sharer autoplay to ${nextPageUrl}, holding paused state`
-          : `Detected in-room navigation to non-shared video ${nextPageUrl}, skipping autoplay suppression`,
+        `Nav decision to ${nextPageUrl}: ${navOutcome} ` +
+          `[autoplay=${shouldTreatAsAutoplay} localSharer=${isLocalSharedSource} ` +
+          `navFromShared=${navigatedFromSharedVideo} navFromSharedEnd=${navigatedFromSharedVideoEnd} recentGesture=${hadRecentUserGesture} ` +
+          `prevPage=${previousNormalizedPageUrl} activeShared=${activeSharedUrl} ` +
+          `prevAutoShareTarget=${previousPendingAutoShareTargetUrl}]`,
       );
       void args.hydrateRoomState();
       return;
