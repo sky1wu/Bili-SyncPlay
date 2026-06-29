@@ -2,7 +2,10 @@ import {
   resetUserGestureState,
   type ContentRuntimeState,
 } from "./runtime-state";
-import { isUnstableSharedVideoUrl } from "./video-identity";
+import {
+  isAddressBarOpaqueVideoUrl,
+  isUnstableSharedVideoUrl,
+} from "./video-identity";
 
 export interface NavigationController {
   start(): void;
@@ -77,18 +80,21 @@ export function createNavigationController(args: {
   function handlePotentialNavigation(): void {
     const rawPageUrl = args.getCurrentPageUrl();
     const resolvedVideoUrl = args.getResolvedVideoUrl?.() ?? null;
-    // On an unstable route (festival) the address bar never reflects the
+    // On an address-bar-opaque page (festival) the URL never reflects the
     // in-player video, so the page-bridge snapshot is the only reliable identity.
     // While it has not resolved yet — including the brief window right after a
-    // same-page autoplay clears it — defer instead of falling back to the bare
-    // route: that route normalizes to an unstable id and would masquerade as a
-    // navigation away from the resolved video, spuriously pausing it. A real
-    // navigation to a *different* path is still handled immediately so autoplay
-    // there stays suppressed until room state confirms.
+    // same-page autoplay clears it — defer instead of falling back to the address
+    // bar: that URL would masquerade as a navigation away from the resolved video
+    // and spuriously cancel the just-scheduled auto-share / pause it. Detect the
+    // page by its `/festival/` pathname, NOT by whether the normalized URL is
+    // unstable: a festival page opened from a share link keeps a frozen
+    // `?bvid=A&cid=...` that normalizes to a *stable* old `/video/...`, which the
+    // unstable check would miss. A real navigation to a different path is still
+    // handled immediately so autoplay there stays suppressed until room state.
     if (
       resolvedVideoUrl === null &&
       args.getResolvedVideoUrl !== undefined &&
-      isUnstableSharedVideoUrl(args.normalizeVideoPageUrl(rawPageUrl)) &&
+      isAddressBarOpaqueVideoUrl(rawPageUrl) &&
       samePathname(rawPageUrl, lastObservedPageUrl)
     ) {
       return;
@@ -125,19 +131,28 @@ export function createNavigationController(args: {
     // never silently swallowed here.
     //
     // Restricted to the discovery of a video we cannot confirm as *different* from
-    // the room's share: either it equals `activeSharedUrl`, or there is no shared
-    // url to compare against yet. If the very first resolution is already a
-    // confirmably different video — the shared video ended and the player
-    // auto-advanced before the snapshot resolved — fall through to the normal
-    // navigation path so the sharer still schedules the auto-share and a
-    // non-sharer is still paused, instead of silently adopting the new video.
+    // the room's share. We can confirm "different" only against a stable, known,
+    // different shared url; treat as discovery when:
+    //   - there is no shared url to compare against yet, or
+    //   - the resolved video equals `activeSharedUrl`, or
+    //   - `activeSharedUrl` is itself an unstable route on this same page (e.g. a
+    //     manual share whose page bridge failed fell back to the bare
+    //     `/festival/<id>` url) — the route may well resolve to this very video,
+    //     so resolving it is discovery, not a switch.
+    // If the very first resolution is already a confirmably different video — the
+    // shared video ended and the player auto-advanced before the snapshot
+    // resolved — fall through to the normal navigation path so the sharer still
+    // schedules the auto-share and a non-sharer is still paused.
+    const sharedUrlForDiscovery = args.runtimeState.activeSharedUrl;
     if (
       resolvedVideoUrl !== null &&
       isUnstableSharedVideoUrl(previousNormalizedPageUrl) &&
       nextNormalizedPageUrl !== null &&
       !isUnstableSharedVideoUrl(nextNormalizedPageUrl) &&
-      (args.runtimeState.activeSharedUrl === null ||
-        nextNormalizedPageUrl === args.runtimeState.activeSharedUrl)
+      (sharedUrlForDiscovery === null ||
+        nextNormalizedPageUrl === sharedUrlForDiscovery ||
+        (isUnstableSharedVideoUrl(sharedUrlForDiscovery) &&
+          samePathname(sharedUrlForDiscovery, nextPageUrl)))
     ) {
       lastObservedPageUrl = nextPageUrl;
       lastObservedNormalizedPageUrl = nextNormalizedPageUrl;
