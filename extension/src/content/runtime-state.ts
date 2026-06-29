@@ -105,6 +105,19 @@ export interface ContentRuntimeState {
    * confirms it (or another member takes over the share) and on room teardown.
    */
   pendingAutoShareTargetUrl: string | null;
+  /**
+   * The resolved `/video/...` identity of the room's current shared video when
+   * that share is an address-bar-opaque *route* (a festival page shared by its
+   * bare `/festival/<id>` url because the page bridge failed to resolve a
+   * `bvid`/`cid`). In that state `activeSharedUrl` is itself unstable, so a
+   * same-page autoplay to the next video could not be classified or auto-shared.
+   * The navigation controller records the resolved identity here when it first
+   * discovers the bare-route share's concrete video, then uses it as the stable
+   * "from" anchor for the subsequent autoplay. Cleared when the shared url changes
+   * (the room confirmed a concrete next video), on leaving the page, and on room
+   * teardown.
+   */
+  resolvedSharedVideoUrl: string | null;
   lastForcedPauseAt: number;
   pauseHoldUntil: number;
   pendingPlaybackApplication: PlaybackState | null;
@@ -251,6 +264,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     suppressedLocalEndPauseUntil: 0,
     nonSharerAutoplayHoldUrl: null,
     pendingAutoShareTargetUrl: null,
+    resolvedSharedVideoUrl: null,
     lastForcedPauseAt: 0,
     pauseHoldUntil: 0,
     pendingPlaybackApplication: null,

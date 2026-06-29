@@ -87,6 +87,7 @@ export function createRoomStateController(args: {
     args.runtimeState.activeSharedUrl = null;
     args.runtimeState.activeSharedByMemberId = null;
     args.runtimeState.pendingAutoShareTargetUrl = null;
+    args.runtimeState.resolvedSharedVideoUrl = null;
     args.runtimeState.explicitNonSharedPlaybackUrl = null;
     args.runtimeState.suppressedLocalEndPauseUrl = null;
     args.runtimeState.suppressedLocalEndPauseUntil = 0;

@@ -199,6 +199,9 @@ export function createRoomStateApplyController(args: {
       return;
     }
     args.runtimeState.activeSharedUrl = normalizedSharedUrl ?? null;
+    // The room moved to a different shared video, so any resolved identity tracked
+    // for a previous bare-route festival share no longer applies.
+    args.runtimeState.resolvedSharedVideoUrl = null;
     args.resetPlaybackSyncState(
       `shared url changed to ${sharedVideoUrl ?? "none"}`,
     );
@@ -482,6 +485,7 @@ export function createRoomStateApplyController(args: {
       args.runtimeState.activeSharedUrl = null;
       args.runtimeState.activeSharedByMemberId = null;
       args.runtimeState.pendingAutoShareTargetUrl = null;
+      args.runtimeState.resolvedSharedVideoUrl = null;
       args.runtimeState.suppressedLocalEndPauseUrl = null;
       args.runtimeState.suppressedLocalEndPauseUntil = 0;
       args.runtimeState.nonSharerAutoplayHoldUrl = null;
