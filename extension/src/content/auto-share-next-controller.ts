@@ -49,6 +49,15 @@ export function createAutoShareNextController(args: {
   getCurrentPageUrl: () => string;
   normalizeVideoPageUrl: (url: string) => string | null;
   /**
+   * The in-player video URL resolved from the page-bridge snapshot for an
+   * address-bar-opaque (festival) page, or `null` when it has not resolved (or on
+   * non-opaque pages). Lets the pre-send self-check tell a *trustworthy* current
+   * video (the snapshot resolved a concrete `/video/...`) from the untrustworthy
+   * address-bar fallback (bare route / frozen `?bvid=`): only the latter is
+   * treated as "cannot tell". Optional; when absent the address bar is used.
+   */
+  getResolvedVideoUrl?: () => string | null;
+  /**
    * The room's *currently* confirmed shared video, read fresh when a request is
    * about to be sent. Used to re-anchor `previousSharedUrl` so a chained autoplay
    * that confirms an intermediate step during the settle window is not sent with
@@ -100,19 +109,20 @@ export function createAutoShareNextController(args: {
     const currentPageUrl = args.getCurrentPageUrl();
     const currentNormalizedUrl = args.normalizeVideoPageUrl(currentPageUrl);
     // Skip when the page has left the scheduled target — a manual detour during
-    // the settle window must cancel the auto-share. The ONE exception is an
-    // address-bar-opaque page (festival): there the snapshot can be momentarily
-    // cleared or stale, so `getCurrentPageUrl()` falls back to the address bar
-    // (the bare `/festival/<id>` route, or a frozen `?bvid=A&cid=...` that
-    // normalizes to a stale `/video/A`) — an untrustworthy current-video signal.
-    // Only for such pages do we treat a non-matching URL as "cannot tell" and
-    // proceed, letting the background's authoritative, retrying tab-resolution
-    // check decide. On every other page (including a `null` normalization, i.e.
-    // the user left to a non-video page) a non-matching URL means the page genuinely
-    // moved on, so skip rather than risk firing a stale auto-share if the user
-    // returns within the background's retry window.
+    // the settle window must cancel the auto-share. We treat a non-matching URL as
+    // "cannot tell" (and proceed, letting the background's authoritative, retrying
+    // tab-resolution check decide) ONLY when the current-video signal is genuinely
+    // untrustworthy: an address-bar-opaque (festival) page whose page-bridge
+    // snapshot has NOT resolved, so `getCurrentPageUrl()` fell back to the address
+    // bar (bare `/festival/<id>` route, or a frozen `?bvid=A&cid=...` normalizing
+    // to a stale `/video/A`). When the snapshot HAS resolved a concrete video
+    // (`getResolvedVideoUrl()` is non-null), that URL is trustworthy — including a
+    // manual same-page jump to another video — so a mismatch must still skip.
+    const cannotTellCurrentVideo =
+      (args.getResolvedVideoUrl?.() ?? null) === null &&
+      isAddressBarOpaqueVideoUrl(currentPageUrl);
     if (
-      !isAddressBarOpaqueVideoUrl(currentPageUrl) &&
+      !cannotTellCurrentVideo &&
       currentNormalizedUrl !== pending.targetNormalizedUrl
     ) {
       args.debugLog(

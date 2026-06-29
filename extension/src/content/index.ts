@@ -66,6 +66,10 @@ const autoShareNextController = createAutoShareNextController({
   getCurrentPageUrl: () =>
     festivalBridge.resolveVideoUrlForPage(window.location.pathname) ??
     window.location.href.split("#")[0],
+  // Lets the self-check distinguish a trustworthy resolved current video from the
+  // untrustworthy address-bar fallback on opaque festival pages.
+  getResolvedVideoUrl: () =>
+    festivalBridge.resolveVideoUrlForPage(window.location.pathname),
   normalizeVideoPageUrl: (url) => normalizeSharedVideoUrl(url),
   getActiveSharedUrl: () => runtimeState.activeSharedUrl,
   runtimeSendMessage,
