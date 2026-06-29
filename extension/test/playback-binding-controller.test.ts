@@ -1191,7 +1191,7 @@ test("playback binding controller does not pause an unmarked non-shared page rea
   }
 });
 
-test("playback binding controller allows a gesture-driven manual play and keeps it alive once the bridge resolves the video", async () => {
+test("playback binding controller holds a play while the page bridge is resolving, then allows manual play once the video resolves", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
@@ -1204,7 +1204,9 @@ test("playback binding controller allows a gesture-driven manual play and keeps 
   runtimeState.pauseHoldUntil = 25_000;
   runtimeState.nonSharerAutoplayHoldUrl =
     "https://www.bilibili.com/video/BVother?p=1";
-  // The user just clicked play (a fresh gesture, after the forced pause).
+  // A recent gesture that postdates the forced pause. In the bridge-resolving
+  // window we cannot tell a real play press from a stray document-level gesture
+  // followed by the page's own autoplay, so the play is still held.
   runtimeState.lastForcedPauseAt = 19_000;
   runtimeState.lastUserGestureAt = 19_500;
   let pausedByGuard = 0;
@@ -1250,33 +1252,35 @@ test("playback binding controller allows a gesture-driven manual play and keeps 
     dom.listeners.get("play")?.(new Event("play"));
     await Promise.resolve();
 
-    // A fresh gesture marks this as the user's own manual play, not an autoplay
-    // resume — it is not re-paused while the context is still unconfirmed, and the
-    // autoplay hold is released so resolution cannot re-pause it later.
-    assert.equal(pausedByGuard, 0);
-    assert.equal(runtimeState.nonSharerAutoplayHoldUrl, null);
+    // Bridge still resolving → the play is held regardless of the recent gesture.
+    assert.equal(pausedByGuard, 1);
+    assert.equal(
+      runtimeState.nonSharerAutoplayHoldUrl,
+      "https://www.bilibili.com/video/BVother?p=1",
+    );
 
-    // The bridge resolves the URL well past the gesture grace, then a delayed
-    // `playing` fires. With the hold released, the user's playback survives.
+    // The bridge resolves the URL and the user clicks play again (a fresh gesture
+    // after the hold's forced pause). Now there is a concrete non-shared video to
+    // anchor the authorization, so the manual play is honored: explicit auth is
+    // recorded, the autoplay hold is dropped and the pause hold released.
     resolvedVideo = {
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
       title: "Other Video",
     };
-    now = 25_000;
+    now = 21_000;
+    runtimeState.lastUserGestureAt = 21_000;
     dom.video.paused = false;
-    dom.listeners.get("playing")?.(new Event("playing"));
+    dom.listeners.get("play")?.(new Event("play"));
     await Promise.resolve();
 
-    assert.equal(pausedByGuard, 0);
-    // Resolution promotes the durable marker into an explicit authorization so a
-    // later autoplay-next off this manually-played video is classified as a
-    // user-driven local navigation; the marker is consumed.
+    assert.equal(pausedByGuard, 1);
     assert.equal(
       runtimeState.explicitNonSharedPlaybackUrl,
       "https://www.bilibili.com/video/BVother?p=1",
     );
-    assert.equal(runtimeState.manualNonSharedPlayWhileResolvingAt, 0);
+    assert.equal(runtimeState.nonSharerAutoplayHoldUrl, null);
+    assert.equal(runtimeState.pauseHoldUntil, 0);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;
@@ -1347,21 +1351,30 @@ test("playback binding controller holds a delayed non-sharer autoplay once the p
   }
 });
 
-test("playback binding controller keeps a manual play alive when a delayed playing fires while the bridge is still resolving past the gesture grace", async () => {
+test("playback binding controller does not re-pause an authorized non-shared play when the bridge briefly blips back to null", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
   runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
   runtimeState.pendingRoomStateHydration = false;
   runtimeState.intendedPlayState = "paused";
+  // Load-paused arrival: hold armed and the target marked as a non-sharer
+  // autoplay hold.
   runtimeState.pauseHoldUntil = 25_000;
   runtimeState.nonSharerAutoplayHoldUrl =
     "https://www.bilibili.com/video/BVother?p=1";
-  // Fresh gesture, after the forced pause.
+  // The bridge has resolved the video and the user clicks play (fresh gesture
+  // after the forced pause).
   runtimeState.lastForcedPauseAt = 19_000;
-  runtimeState.lastUserGestureAt = 19_500;
+  runtimeState.lastUserGestureAt = 20_000;
+  const resolvedVideo: SharedVideo = {
+    videoId: "BVother:p1",
+    url: "https://www.bilibili.com/video/BVother?p=1",
+    title: "Other Video",
+  };
   let pausedByGuard = 0;
   let now = 20_000;
+  let currentVideo: SharedVideo | null = resolvedVideo;
   const originalSetTimeout = globalThis.window.setTimeout;
   const originalPause = dom.video.pause;
 
@@ -1370,9 +1383,7 @@ test("playback binding controller keeps a manual play alive when a delayed playi
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
-    // The page bridge never resolves during this test — `currentVideo` stays null
-    // through both the play and the delayed playing.
-    getSharedVideo: () => null,
+    getSharedVideo: () => currentVideo,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
     getLastBroadcastAt: () => 0,
@@ -1403,15 +1414,21 @@ test("playback binding controller keeps a manual play alive when a delayed playi
     dom.listeners.get("play")?.(new Event("play"));
     await Promise.resolve();
 
-    // Manual play within grace → allowed, hold released, durable marker recorded.
+    // Resolved + manual play → authorized: explicit recorded, autoplay-hold
+    // marker dropped and the pause hold released.
     assert.equal(pausedByGuard, 0);
+    assert.equal(
+      runtimeState.explicitNonSharedPlaybackUrl,
+      "https://www.bilibili.com/video/BVother?p=1",
+    );
     assert.equal(runtimeState.nonSharerAutoplayHoldUrl, null);
-    assert.equal(runtimeState.manualNonSharedPlayWhileResolvingAt, 20_000);
+    assert.equal(runtimeState.pauseHoldUntil, 0);
 
-    // A delayed `playing` arrives well past the gesture grace while the bridge is
-    // STILL resolving (`currentVideo` null). The durable marker keeps the manual
-    // play exempt, so it is not re-paused.
-    now = 24_000;
+    // The player rebuilds / buffer recovers: the bridge briefly returns null and a
+    // gesture-less `playing` fires. The released hold + cleared marker keep the
+    // user's authorized playback alive — it is not re-paused.
+    currentVideo = null;
+    now = 23_000;
     dom.video.paused = false;
     dom.listeners.get("playing")?.(new Event("playing"));
     await Promise.resolve();
@@ -1420,6 +1437,73 @@ test("playback binding controller keeps a manual play alive when a delayed playi
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller preserves the explicit non-shared authorization at a natural end but clears it on a manual pause", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "playing";
+  // The user explicitly authorized this non-shared video earlier.
+  runtimeState.explicitNonSharedPlaybackUrl =
+    "https://www.bilibili.com/video/BVother?p=1";
+  const currentVideo: SharedVideo = {
+    videoId: "BVother:p1",
+    url: "https://www.bilibili.com/video/BVother?p=1",
+    title: "Other Video",
+  };
+  const originalSetTimeout = globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => currentVideo,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 20_000,
+  });
+
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  try {
+    controller.attachPlaybackListeners();
+
+    // Natural end: the browser fires `pause` with `ended === true` right before
+    // autoplaying the next episode. The authorization must survive so the
+    // navigation controller can classify that autoplay-next as user-driven.
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+    assert.equal(
+      runtimeState.explicitNonSharedPlaybackUrl,
+      "https://www.bilibili.com/video/BVother?p=1",
+    );
+
+    // A genuine manual mid-video pause (not ended) still deauthorizes it.
+    (dom.video as { ended?: boolean }).ended = false;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+    assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
     dom.restore();
   }
 });

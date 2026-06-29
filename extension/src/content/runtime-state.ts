@@ -95,20 +95,6 @@ export interface ContentRuntimeState {
    */
   nonSharerAutoplayHoldUrl: string | null;
   /**
-   * Timestamp of a *manual* play the user issued on a freshly opened non-shared
-   * page whose page bridge has not yet resolved `currentVideo` (the
-   * bridge-resolving window). The recent-gesture exemption in
-   * `shouldReapplyPauseHoldForUnconfirmedSharedVideo` only clears the play event
-   * that carries the gesture; once the gesture ages past `userGestureGraceMs`,
-   * a delayed `playing` that still finds `currentVideo === null` would be
-   * re-paused. This durable marker keeps that manual play authorized across the
-   * grace boundary until the bridge resolves. Required to postdate
-   * `lastForcedPauseAt` (so a later forced pause / navigation invalidates it) and
-   * zeroed by `resetUserGestureState` on every navigation, exactly like
-   * `nonSharerAutoplayHoldUrl`.
-   */
-  manualNonSharedPlayWhileResolvingAt: number;
-  /**
    * Normalized URL the local sharer auto-shared as the next video but whose
    * authoritative `room:state` has not arrived yet (`activeSharedUrl` still lags
    * behind it). Lets chained autoplay (A→B→C) keep scheduling: when the player
@@ -253,7 +239,6 @@ export function resetUserGestureState(state: ContentRuntimeState): void {
   state.suppressedLocalEndPauseUrl = null;
   state.suppressedLocalEndPauseUntil = 0;
   state.nonSharerAutoplayHoldUrl = null;
-  state.manualNonSharedPlayWhileResolvingAt = 0;
 }
 
 export function createContentRuntimeState(): ContentRuntimeState {
@@ -278,7 +263,6 @@ export function createContentRuntimeState(): ContentRuntimeState {
     suppressedLocalEndPauseUrl: null,
     suppressedLocalEndPauseUntil: 0,
     nonSharerAutoplayHoldUrl: null,
-    manualNonSharedPlayWhileResolvingAt: 0,
     pendingAutoShareTargetUrl: null,
     resolvedSharedVideoUrl: null,
     lastForcedPauseAt: 0,

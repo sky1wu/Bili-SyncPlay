@@ -95,7 +95,6 @@ export function createRoomStateController(args: {
     args.runtimeState.sharedVideoNaturalEndAt = 0;
     args.runtimeState.sharedVideoNaturalEndAfterSeek = false;
     args.runtimeState.nonSharerAutoplayHoldUrl = null;
-    args.runtimeState.manualNonSharedPlayWhileResolvingAt = 0;
     args.runtimeState.lastNonSharedGuardUrl = null;
     args.runtimeState.postNavigationAnchorSharedUrl = null;
     args.runtimeState.postNavigationAnchorSetAt = 0;

@@ -453,63 +453,15 @@ export function createPlaybackBindingController(args: {
 
     rememberExplicitPlaybackAction("playing");
     args.runtimeState.explicitNonSharedPlaybackUrl = normalizedCurrentUrl;
-  }
-
-  /**
-   * Reconcile a manual play the user issued on a freshly opened non-shared page
-   * across the page-bridge resolution boundary.
-   *
-   * While the bridge has not produced `currentVideo`, a manual play (a fresh
-   * gesture that postdates the forced pause) releases the still-armed
-   * `nonSharerAutoplayHoldUrl` and records a durable
-   * `manualNonSharedPlayWhileResolvingAt`. The recent-gesture exemption in
-   * `shouldReapplyPauseHoldForUnconfirmedSharedVideo` only covers the play event
-   * carrying the gesture; the timestamp keeps the manual play exempt past
-   * `userGestureGraceMs` until the URL resolves (`preAuthorizeExplicitNonSharedPlay`
-   * cannot record the authorization yet because the URL is unknown).
-   *
-   * Once the bridge resolves to a stable non-shared URL, promote that durable
-   * marker into a real `explicitNonSharedPlaybackUrl` authorization. Without this,
-   * the explicit auth is never (re)established — the original gesture has expired
-   * and `forcePauseOnNonSharedPage` never writes it for an autoplay — so a later
-   * autoplay-next off this manually-played video would not be recognised by the
-   * navigation controller (via `previousExplicitNonSharedPlaybackUrl`) as a
-   * user-driven local navigation, and the next episode would autoplay instead of
-   * loading paused.
-   */
-  function reconcileManualNonSharedPlayAcrossResolution(): void {
-    const currentVideo = args.getSharedVideo();
-    if (currentVideo === null) {
-      if (
-        args.runtimeState.nonSharerAutoplayHoldUrl !== null &&
-        hasRecentUserGesture() &&
-        args.runtimeState.lastUserGestureAt >
-          args.runtimeState.lastForcedPauseAt
-      ) {
-        args.runtimeState.nonSharerAutoplayHoldUrl = null;
-        args.runtimeState.manualNonSharedPlayWhileResolvingAt = nowOf();
-      }
-      return;
+    // The user has taken control of this resolved non-shared video, so the
+    // "load paused" hold has done its job. Drop the autoplay-hold marker for it
+    // and release the pause hold so a later transient `currentVideo === null`
+    // blip (player rebuild / buffer recovery) cannot re-pause the playback the
+    // user just authorized.
+    if (args.runtimeState.nonSharerAutoplayHoldUrl === normalizedCurrentUrl) {
+      args.runtimeState.nonSharerAutoplayHoldUrl = null;
     }
-
-    // Bridge resolved. If the user manually played during the resolving window
-    // (the durable marker still postdates the last forced pause) and the resolved
-    // identity is a known non-shared video, promote the marker into an explicit
-    // authorization so a subsequent autoplay-next off it is classified as a
-    // user-driven local navigation (load paused). The marker is consumed either
-    // way so it cannot linger past resolution.
-    if (
-      args.runtimeState.manualNonSharedPlayWhileResolvingAt >
-      args.runtimeState.lastForcedPauseAt
-    ) {
-      if (isKnownNonSharedVideo(currentVideo)) {
-        const normalizedCurrentUrl = args.normalizeUrl(currentVideo.url);
-        if (normalizedCurrentUrl) {
-          args.runtimeState.explicitNonSharedPlaybackUrl = normalizedCurrentUrl;
-        }
-      }
-      args.runtimeState.manualNonSharedPlayWhileResolvingAt = 0;
-    }
+    args.runtimeState.pauseHoldUntil = 0;
   }
 
   function forcePauseWhileWaitingForInitialRoomState(
@@ -561,42 +513,15 @@ export function createPlaybackBindingController(args: {
       return false;
     }
 
-    // While the page bridge has not yet produced `currentVideo`, a play carrying a
-    // fresh user gesture is the user's own manual play, not an unexpected autoplay
-    // resume — don't re-pause it (mirrors the recent-gesture exemption the sibling
-    // resume guards apply). `preAuthorizeExplicitNonSharedPlay` cannot run yet
-    // (`isKnownNonSharedVideo` needs a resolved video), so without this a user who
-    // clicks play on a just-opened non-shared video would be re-paused throughout
-    // the initial load window, defeating the "load paused but manual play stays
-    // available" behavior. The navigation reset zeroes `lastUserGestureAt`, so an
-    // unsolicited page-load autoplay (no gesture) is still held. Scoped to the
-    // `currentVideo === null` (bridge-not-ready) case: a *present* but unstable
-    // identity (a festival/season page that may BE the shared video) must still
-    // re-pause to stay in sync with the room, even with a recent gesture. The
-    // gesture must also postdate the forced pause (mirrors the explicit-action
-    // checks), so a stale pre-pause gesture cannot wave through a browser
-    // auto-resume that carries no new play intent.
-    //
-    // A play's own gesture only covers the play event that carries it; when the
-    // bridge stays unresolved past `userGestureGraceMs`, a delayed `playing`
-    // would otherwise be re-paused even though the user already authorized this
-    // playback. `manualNonSharedPlayWhileResolvingAt`, set when the user manually
-    // played during this same null window, durably extends the exemption across
-    // the grace boundary. It too must postdate the forced pause, and
-    // `resetUserGestureState` zeroes it on navigation, so it cannot leak into a
-    // later page's autoplay.
-    if (
-      currentVideo === null &&
-      ((nowOf() - args.runtimeState.lastUserGestureAt <
-        args.userGestureGraceMs &&
-        args.runtimeState.lastUserGestureAt >
-          args.runtimeState.lastForcedPauseAt) ||
-        args.runtimeState.manualNonSharedPlayWhileResolvingAt >
-          args.runtimeState.lastForcedPauseAt)
-    ) {
-      return false;
-    }
-
+    // While the page bridge has not yet produced `currentVideo`, every play —
+    // including one carrying a fresh user gesture — is re-paused. We cannot
+    // distinguish a real play-button press from a stray document-level gesture
+    // (the tracker records any `pointerdown`/`click`/`keydown`) followed by the
+    // page's own delayed autoplay, and there is no resolved video to anchor an
+    // authorization on. So the "load paused" hold stays in force until the bridge
+    // resolves the URL; manual play is honored only afterwards, via
+    // `preAuthorizeExplicitNonSharedPlay`, which has a concrete
+    // `isKnownNonSharedVideo` anchor.
     return hasUnconfirmedSharedVideoContext(currentVideo);
   }
 
@@ -748,24 +673,23 @@ export function createPlaybackBindingController(args: {
         args.runtimeState.activeRoomCode &&
         currentVideo === null &&
         args.runtimeState.nonSharerAutoplayHoldUrl !== null &&
-        !hasRecentUserGesture() &&
         (args.runtimeState.intendedPlayState === "paused" ||
           args.runtimeState.intendedPlayState === "buffering")
       ) {
-        // The page-load autoplay into a non-sharer's next episode fired so late
-        // (slow SPA load/ad) that the pause hold already expired AND the page
-        // bridge has still not resolved `currentVideo`.
-        // `shouldReapplyPauseHoldForUnconfirmedSharedVideo` bailed on the expired
-        // hold, and `forcePauseOnNonSharedPage` bails immediately when
-        // `currentVideo` is null — so without this neither would stop the delayed
-        // autoplay and it would start playing, bypassing the "non-shared arrival
-        // loads paused" semantics. The still-armed `nonSharerAutoplayHoldUrl` (a
-        // manual play would have released it via
-        // `reconcileManualNonSharedPlayAcrossResolution`) plus the absence of a
-        // fresh gesture identifies this as the unsolicited autoplay we must hold,
-        // independent of the pause-hold window.
+        // A play fired on a non-shared page the navigation controller armed a hold
+        // for (`nonSharerAutoplayHoldUrl`) while the page bridge has still not
+        // resolved `currentVideo`. This may be a slow page-load autoplay or a
+        // gesture-adjacent play, but in the bridge-unresolved window we cannot
+        // anchor an authorization (no resolved video) and cannot tell a real play
+        // press from a stray document-level gesture, so the "load paused" hold
+        // stays in force and we pause it regardless of any recent gesture.
+        // `shouldReapplyPauseHoldForUnconfirmedSharedVideo` bails once the pause
+        // hold expires and `forcePauseOnNonSharedPage` bails on the null current
+        // video, so this independent guard is what holds a late autoplay. Manual
+        // play is honored only after the bridge resolves (`preAuthorize...` clears
+        // this marker and releases the hold).
         args.debugLog(
-          "Forced pause for delayed non-sharer autoplay while page bridge unresolved",
+          "Forced pause for play on non-shared page while page bridge unresolved",
         );
         args.runtimeState.lastForcedPauseAt = nowOf();
         window.setTimeout(() => {
@@ -821,7 +745,6 @@ export function createPlaybackBindingController(args: {
         if (shouldPreRecordNonSharedExplicitPlay()) {
           preAuthorizeExplicitNonSharedPlay();
         }
-        reconcileManualNonSharedPlayAcrossResolution();
         if (guardUnexpectedResume()) {
           return;
         }
@@ -904,7 +827,17 @@ export function createPlaybackBindingController(args: {
         }
         rememberExplicitPlaybackAction("paused");
         rememberExplicitUserAction("pause");
+        // Deauthorize the non-shared video the user paused — UNLESS this `pause`
+        // is the natural end of the video (the browser fires `pause` immediately
+        // before `ended`). At a natural end the player is about to autoplay the
+        // next episode; the navigation controller classifies that autoplay-next as
+        // a user-driven local navigation (load paused) via
+        // `previousExplicitNonSharedPlaybackUrl`, but it only sees the SPA URL
+        // change AFTER this handler runs. Clearing the authorization here would
+        // make that classification fail and let the next episode autoplay, so keep
+        // it until the navigation reset replaces it.
         if (
+          !video.ended &&
           currentVideo &&
           args.normalizeUrl(currentVideo.url) ===
             args.runtimeState.explicitNonSharedPlaybackUrl
@@ -936,7 +869,6 @@ export function createPlaybackBindingController(args: {
         if (shouldPreRecordNonSharedExplicitPlay()) {
           preAuthorizeExplicitNonSharedPlay();
         }
-        reconcileManualNonSharedPlayAcrossResolution();
         if (guardUnexpectedResume()) {
           return;
         }
