@@ -251,6 +251,7 @@ export function createSyncController(args: {
     args.runtimeState.suppressedLocalEndPauseUrl = null;
     args.runtimeState.suppressedLocalEndPauseUntil = 0;
     args.runtimeState.nonSharerAutoplayHoldUrl = null;
+    args.runtimeState.manualNonSharedPlayWhileResolvingAt = 0;
     args.runtimeState.postNavigationAnchorSharedUrl = null;
     args.runtimeState.postNavigationAnchorSetAt = 0;
     args.runtimeState.sharerEndedSuppressionUrl = null;
