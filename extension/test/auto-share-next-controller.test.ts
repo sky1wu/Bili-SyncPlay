@@ -374,6 +374,46 @@ test("auto-share next controller still sends when a festival snapshot is cleared
   }
 });
 
+test("auto-share next controller skips when a non-festival page leaves to an unsupported page", async () => {
+  const windowHarness = installWindowStub();
+  const sentMessages: unknown[] = [];
+  const debugLogs: string[] = [];
+  // The user navigated off to a non-video page during settle: it normalizes to
+  // null. On a normal (non-opaque) page this means the page genuinely left the
+  // target, so the auto-share must be cancelled — not deferred to the background
+  // where it could still fire if the user returns within the retry window.
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    getCurrentPageUrl: () => "https://www.bilibili.com/account/history",
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      return { ok: true };
+    },
+    debugLog: (message) => {
+      debugLogs.push(message);
+    },
+  });
+
+  try {
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BV1OldVideo",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BV1NextVideo",
+    });
+    windowHarness.runTimers();
+    await Promise.resolve();
+
+    assert.deepEqual(sentMessages, []);
+    assert.match(
+      debugLogs[debugLogs.length - 1],
+      /^Skipped auto-share next video because page moved /,
+    );
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
 test("auto-share next controller still sends when a festival address bar keeps a frozen bvid", async () => {
   const windowHarness = installWindowStub();
   const sentMessages: unknown[] = [];
