@@ -390,12 +390,11 @@ export function createNavigationController(args: {
       const shouldPauseNonSharerAutoplay =
         shouldTreatAsAutoplay && !isLocalSharedSource;
       // User-driven local browsing that lands on a non-shared video: either the
-      // user manually navigated here (recent gesture), or a local detour the
-      // user was already explicitly watching auto-advanced to the next video.
-      // Mark the target as explicit local playback so the paused-room autoplay
-      // guard lets the user watch it — the navigation reset above clears
-      // `lastUserGestureAt`, so without this the later `play` event would look
-      // like an autoplay and be paused.
+      // user manually navigated here (recent gesture), or a local detour the user
+      // was already explicitly watching auto-advanced to the next video. The fresh
+      // page is still suppressed (load paused) like any non-shared arrival — the
+      // navigation gesture is intent to *open* the page, not to start playback —
+      // and the user's own later play gesture is what re-authorises it.
       const isUserDrivenLocalNavigation =
         !shouldTreatAsAutoplay &&
         (hadRecentUserGesture ||
@@ -444,28 +443,35 @@ export function createNavigationController(args: {
         ) {
           args.runtimeState.resolvedSharedVideoUrl = nextNormalizedPageUrl;
         }
-      } else if (shouldPauseNonSharerAutoplay) {
+      } else if (shouldPauseNonSharerAutoplay || isUserDrivenLocalNavigation) {
+        // Arriving at a non-shared video while in a room: suppress the page-load
+        // autoplay so the tab does not run off playing a video the room is not on.
+        // This covers both a non-sharer's autoplay-next AND the user manually
+        // opening/clicking a non-shared video (recent gesture, or an auto-advance
+        // off a non-shared video they were already watching) — in every case the
+        // fresh page should load PAUSED. Deliberately do NOT pre-authorise it as
+        // explicit local playback: a subsequent *manual* play (a new gesture on
+        // this page) is still allowed via `preAuthorizeExplicitNonSharedPlay` in
+        // the binding, so the user keeps full control; only the unsolicited
+        // auto-start is held. Mark the page so the binding also force-pauses a
+        // delayed `play` here after the pause hold expires (slow SPA load/ad).
         args.runtimeState.intendedPlayState = "paused";
-        // Mark this as a non-sharer autoplay page so the playback binding will
-        // force-pause a delayed `play` here even after the pause hold expires.
-        // Only pages reached through this in-SPA autoplay get the marker, so a
-        // video the user manually opens via full-page navigation stays playable.
         args.runtimeState.nonSharerAutoplayHoldUrl = nextNormalizedPageUrl;
         args.activatePauseHold(args.initialRoomStatePauseHoldMs);
         const video = args.getVideoElement();
         if (video && !video.paused) {
           args.runtimeState.lastForcedPauseAt = now;
-          args.debugLog(`Suppressed non-sharer autoplay to ${nextPageUrl}`);
+          args.debugLog(
+            `Suppressed autoplay to non-shared video ${nextPageUrl}`,
+          );
           args.pauseVideo(video);
         }
-      } else if (isUserDrivenLocalNavigation) {
-        args.runtimeState.explicitNonSharedPlaybackUrl = nextNormalizedPageUrl;
       }
-      // For manual non-shared navigation and local-sharer autoplay, clear any
-      // pause hold inherited from the previously shared video. For non-sharer
-      // autoplay, keep the freshly armed pause hold so a delayed play event is
-      // still stopped.
-      if (!shouldPauseNonSharerAutoplay) {
+      // For the local-sharer auto-share and the unclassified case, clear any pause
+      // hold inherited from the previously shared video. The suppression branch
+      // above (non-sharer autoplay / user-driven arrival) keeps the freshly armed
+      // hold so a delayed play event is still stopped.
+      if (!shouldPauseNonSharerAutoplay && !isUserDrivenLocalNavigation) {
         args.runtimeState.pauseHoldUntil = 0;
       }
       // DIAGNOSTIC: the previous single message could not tell whether the
@@ -478,7 +484,7 @@ export function createNavigationController(args: {
         : shouldTreatAsAutoplay && isLocalSharedSource
           ? "scheduled auto-share"
           : isUserDrivenLocalNavigation
-            ? "user-driven local navigation, no auto-share"
+            ? "holding paused state (user-driven non-shared navigation)"
             : "no autoplay branch taken, no auto-share";
       args.debugLog(
         `Nav decision to ${nextPageUrl}: ${navOutcome} ` +

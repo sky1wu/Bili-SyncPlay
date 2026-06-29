@@ -141,7 +141,7 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
   }
 });
 
-test("navigation controller hydrates without pausing or suppressing when switching to a non-shared video", () => {
+test("navigation controller suppresses autoplay (load paused) when switching to a non-shared video", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
@@ -149,7 +149,7 @@ test("navigation controller hydrates without pausing or suppressing when switchi
   runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
   runtimeState.activeSharedByMemberId = "member-1";
   runtimeState.localMemberId = "member-2";
-  // The user is actively watching this confirmed non-shared video.
+  // The user clicks through to a confirmed non-shared video (recent gesture).
   runtimeState.intendedPlayState = "playing";
   runtimeState.lastUserGestureAt = 9_800;
 
@@ -192,13 +192,19 @@ test("navigation controller hydrates without pausing or suppressing when switchi
     windowHarness.intervals[0]?.();
 
     assert.equal(hydrateCalls, 1);
-    assert.equal(pauseCalls, 0);
-    // A confirmed different, stable non-shared video must not engage autoplay
-    // suppression. Otherwise the binding guards would re-pause it once it
-    // autoplays while the page bridge has not yet produced `currentVideo`.
-    assert.equal(pauseHoldCalls, 0);
+    // Arriving at a non-shared video while in a room loads it PAUSED: suppress the
+    // page-load autoplay and arm the hold so a later autoplay is also caught. The
+    // user's own play gesture re-authorises it (handled in the playback binding).
+    assert.equal(pauseCalls, 1);
+    assert.equal(pauseHoldCalls, 1);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+    assert.equal(
+      runtimeState.nonSharerAutoplayHoldUrl,
+      "https://www.bilibili.com/video/BV1Em421N7uU",
+    );
+    // Not pre-authorised as explicit local playback — only a manual play does that.
+    assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
     assert.equal(runtimeState.pendingRoomStateHydration, false);
-    assert.equal(runtimeState.intendedPlayState, "playing");
   } finally {
     windowHarness.restore();
   }
@@ -822,7 +828,7 @@ test("navigation controller cancels a pending auto-share on a manual non-autopla
   }
 });
 
-test("navigation controller marks a manual navigation to a non-shared video as explicit local playback", () => {
+test("navigation controller suppresses autoplay and does not auto-share a manual navigation to a non-shared video", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
@@ -873,14 +879,18 @@ test("navigation controller marks a manual navigation to a non-shared video as e
     currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
     windowHarness.intervals[0]?.();
 
-    // It is not auto-shared (manual) and the non-sharer is not force-paused; the
-    // target is recorded as explicit local playback so the user can watch it.
+    // It is not auto-shared (manual), and the page loads PAUSED: the target is
+    // marked as a non-shared autoplay hold (so a delayed autoplay is also held)
+    // rather than pre-authorised as explicit playback. A later manual play
+    // gesture is what re-authorises it.
     assert.deepEqual(autoShareRequests, []);
-    assert.equal(pauseCalls, 0);
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.intendedPlayState, "paused");
     assert.equal(
-      runtimeState.explicitNonSharedPlaybackUrl,
+      runtimeState.nonSharerAutoplayHoldUrl,
       "https://www.bilibili.com/video/BV1Em421N7uU",
     );
+    assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
   } finally {
     windowHarness.restore();
   }
@@ -1013,7 +1023,7 @@ test("navigation controller pauses non-sharer autoplay to a different video", ()
   }
 });
 
-test("navigation controller does not engage autoplay suppression for a non-shared video that is not playing yet", () => {
+test("navigation controller arms autoplay suppression for a non-shared video that is not playing yet", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
@@ -1038,9 +1048,9 @@ test("navigation controller does not engage autoplay suppression for a non-share
     isSupportedVideoPage: (url) => url.includes("/video/"),
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
-    // The element has not started playing yet at navigation detection time;
-    // its autoplay fires later. The fix must not leave pending hydration /
-    // pause-hold state that would force-pause that later autoplay.
+    // The element has not started playing yet at navigation detection time; its
+    // autoplay fires later. The hold (pause-hold + `nonSharerAutoplayHoldUrl`)
+    // must be armed so the binding force-pauses that later page-load autoplay.
     getVideoElement: () =>
       ({
         paused: true,
@@ -1064,8 +1074,15 @@ test("navigation controller does not engage autoplay suppression for a non-share
     windowHarness.intervals[0]?.();
 
     assert.equal(hydrateCalls, 1);
+    // Nothing to pause yet (still paused), but the hold is armed for the later
+    // page-load autoplay.
     assert.equal(pauseCalls, 0);
-    assert.equal(pauseHoldCalls, 0);
+    assert.equal(pauseHoldCalls, 1);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+    assert.equal(
+      runtimeState.nonSharerAutoplayHoldUrl,
+      "https://www.bilibili.com/video/BV1Em421N7uU",
+    );
     assert.equal(runtimeState.pendingRoomStateHydration, false);
   } finally {
     windowHarness.restore();
@@ -1130,7 +1147,7 @@ test("navigation controller suppresses autoplay when navigating through an unsta
   }
 });
 
-test("navigation controller clears an inherited pause hold when switching to a non-shared video", () => {
+test("navigation controller keeps autoplay suppression armed when switching to a non-shared video", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
@@ -1177,12 +1194,17 @@ test("navigation controller clears an inherited pause hold when switching to a n
     currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
     windowHarness.intervals[0]?.();
 
-    // The inherited pause hold must be cleared so the binding guards do not
-    // re-pause this confirmed non-shared video once it autoplays before the
-    // page bridge produces `currentVideo`.
-    assert.equal(runtimeState.pauseHoldUntil, 0);
-    assert.equal(pauseHoldCalls, 0);
+    // Arriving at a non-shared video keeps autoplay suppressed: the inherited
+    // hold is NOT cleared and a fresh hold is armed so the later page-load
+    // autoplay is force-paused until the user manually plays.
+    assert.equal(runtimeState.pauseHoldUntil, 99_999);
+    assert.equal(pauseHoldCalls, 1);
     assert.equal(pauseCalls, 0);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+    assert.equal(
+      runtimeState.nonSharerAutoplayHoldUrl,
+      "https://www.bilibili.com/video/BV1Em421N7uU",
+    );
     assert.equal(runtimeState.pendingRoomStateHydration, false);
   } finally {
     windowHarness.restore();
@@ -2401,9 +2423,11 @@ test("navigation controller does not auto-share a gesture-driven first festival 
     windowHarness.intervals[0]?.();
 
     // The recent-gesture gate keeps a manual navigation from being misread as the
-    // shared video's autoplay.
+    // shared video's autoplay, so it is not auto-shared. It is still held paused
+    // like any non-shared arrival until the user manually plays.
     assert.deepEqual(autoShareRequests, []);
-    assert.equal(pauseCalls, 0);
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.intendedPlayState, "paused");
   } finally {
     windowHarness.restore();
   }
