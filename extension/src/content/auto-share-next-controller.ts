@@ -2,7 +2,10 @@ import type {
   ContentToBackgroundMessage,
   ShareCurrentVideoResponse,
 } from "../shared/messages";
-import { isUnstableSharedVideoUrl } from "./video-identity";
+import {
+  isAddressBarOpaqueVideoUrl,
+  isUnstableSharedVideoUrl,
+} from "./video-identity";
 
 export interface AutoShareNextController {
   scheduleForNavigation(args: {
@@ -97,21 +100,25 @@ export function createAutoShareNextController(args: {
   }
 
   async function requestAutoShare(pending: PendingAutoShare): Promise<void> {
-    const currentNormalizedUrl = args.normalizeVideoPageUrl(
-      args.getCurrentPageUrl(),
-    );
+    const currentPageUrl = args.getCurrentPageUrl();
+    const currentNormalizedUrl = args.normalizeVideoPageUrl(currentPageUrl);
     // Only skip when we can POSITIVELY confirm the page is now on a *different,
     // concrete* video. On festival pages the resolved-video snapshot can be
     // momentarily cleared or stale during the settle window — the navigation
     // handler clears it right before scheduling, and the next page-bridge refresh
-    // may not have landed yet — so `currentNormalizedUrl` falls back to the bare
-    // `/festival/<id>` route (unstable) or null. Treating that as "page moved"
-    // here would drop a valid festival auto-share *without retrying*. Instead
-    // proceed: the background runs the authoritative, retrying tab-resolution
-    // check against the target, so a genuine moved-on page is still caught there.
+    // may not have landed yet — so `getCurrentPageUrl()` falls back to the address
+    // bar. That can be the bare `/festival/<id>` route (unstable) OR, when the
+    // page was opened from a share link, a frozen `?bvid=A&cid=...` that
+    // normalizes to a *stable* but stale `/video/A`. Either way the address bar is
+    // not a trustworthy current-video signal here, so treating it as "page moved"
+    // would drop a valid festival auto-share *without retrying*. Detect such pages
+    // by their `/festival/` pathname (not just URL instability) and proceed: the
+    // background runs the authoritative, retrying tab-resolution check against the
+    // target, so a genuine moved-on page is still caught there.
     if (
       currentNormalizedUrl !== null &&
       !isUnstableSharedVideoUrl(currentNormalizedUrl) &&
+      !isAddressBarOpaqueVideoUrl(currentPageUrl) &&
       currentNormalizedUrl !== pending.targetNormalizedUrl
     ) {
       args.debugLog(
