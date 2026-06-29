@@ -32,8 +32,17 @@ export interface FestivalBridgeController {
    * snapshot's resolved share URL (with `bvid`/`cid`) when the cached snapshot
    * belongs to `pathname`, otherwise `null` (non-festival page, or no/stale
    * matching snapshot — callers fall back to the address bar).
+   *
+   * When `maxAgeMs` is provided, a snapshot older than it is treated as stale and
+   * `null` is returned: a cached video the user may already have left must not be
+   * reported as the *trustworthy current* video (it would let the auto-share
+   * self-check confirm a now-wrong target). Omit `maxAgeMs` to accept any cached
+   * snapshot regardless of age.
    */
-  resolveVideoUrlForPage: (pathname: string) => string | null;
+  resolveVideoUrlForPage: (
+    pathname: string,
+    maxAgeMs?: number,
+  ) => string | null;
   refreshSnapshot: (args: {
     pathname: string;
     pageUrl: string;
@@ -158,7 +167,10 @@ export function createFestivalBridgeController(): FestivalBridgeController {
       festivalSnapshot = null;
     },
     getSnapshot: () => festivalSnapshot,
-    resolveVideoUrlForPage: (pathname: string): string | null => {
+    resolveVideoUrlForPage: (
+      pathname: string,
+      maxAgeMs?: number,
+    ): string | null => {
       if (!pathname.startsWith("/festival/")) {
         return null;
       }
@@ -166,6 +178,16 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         !festivalSnapshot?.pathname?.startsWith("/festival/") ||
         normalizeCachedPagePathname(festivalSnapshot.pathname) !==
           normalizeCachedPagePathname(pathname)
+      ) {
+        return null;
+      }
+      // A snapshot older than the freshness bound may no longer reflect the page
+      // (the user could have moved to another video within the same festival route
+      // without the snapshot being refreshed). Don't report it as the current
+      // video, so the auto-share self-check cannot confirm a stale target.
+      if (
+        maxAgeMs !== undefined &&
+        Date.now() - festivalSnapshot.updatedAt >= maxAgeMs
       ) {
         return null;
       }
@@ -196,9 +218,15 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         pageUrl,
       );
       if (!nextSnapshot) {
+        // Mirror the fast-path freshness gate above: when a fresh read fails, only
+        // fall back to the cached snapshot while it is still within `maxAgeMs`.
+        // Without the TTL bound a read failure could resurrect an arbitrarily stale
+        // snapshot for the authoritative auto-share target validation, sharing a
+        // video the user has already left.
         return !isBangumiPage &&
           festivalSnapshot &&
-          canUseCachedFestivalSnapshot(pathname)
+          canUseCachedFestivalSnapshot(pathname) &&
+          Date.now() - festivalSnapshot.updatedAt < maxAgeMs
           ? {
               videoId: festivalSnapshot.videoId,
               url: festivalSnapshot.url,

@@ -229,6 +229,72 @@ test("festival bridge resolves the cached video url for the matching festival pa
   }
 });
 
+test("festival bridge treats a stale cached snapshot as unresolved when a max age is given", async () => {
+  const dom = installBridgeDomStub([
+    {
+      bvid: "BVfestival",
+      cid: 123,
+      title: "Festival Episode",
+    },
+  ]);
+  const controller = createFestivalBridgeController();
+
+  try {
+    await controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl: "https://www.bilibili.com/festival/demo",
+      maxAgeMs: 0,
+    });
+
+    const url =
+      "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123";
+    // Within the freshness bound (and with no bound) the snapshot resolves.
+    assert.equal(
+      controller.resolveVideoUrlForPage("/festival/demo", 60_000),
+      url,
+    );
+    assert.equal(controller.resolveVideoUrlForPage("/festival/demo"), url);
+    // Older than the bound: treated as stale so a possibly-left video is not
+    // reported as the trustworthy current one.
+    assert.equal(controller.resolveVideoUrlForPage("/festival/demo", 0), null);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("festival bridge does not fall back to a stale cached snapshot on read failure", async () => {
+  const dom = installBridgeDomStub([
+    {
+      bvid: "BVfestival",
+      cid: 123,
+      title: "Festival Episode",
+    },
+    null,
+  ]);
+  const controller = createFestivalBridgeController();
+
+  try {
+    const firstSnapshot = await controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl: "https://www.bilibili.com/festival/demo",
+      maxAgeMs: 0,
+    });
+    assert.equal(firstSnapshot?.videoId, "BVfestival:123");
+
+    // Fast-path skipped (cache is older than maxAgeMs) and the fresh read fails;
+    // the cache must not be resurrected for the authoritative target validation.
+    const staleRead = await controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl: "https://www.bilibili.com/festival/demo",
+      maxAgeMs: 0,
+    });
+
+    assert.equal(staleRead, null);
+  } finally {
+    dom.restore();
+  }
+});
+
 test("festival bridge does not fall back to another festival page snapshot", async () => {
   const dom = installBridgeDomStub([
     {
