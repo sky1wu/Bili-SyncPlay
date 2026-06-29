@@ -1032,6 +1032,12 @@ test("navigation controller arms autoplay suppression for a non-shared video tha
   runtimeState.activeSharedByMemberId = "member-1";
   runtimeState.localMemberId = "member-2";
   runtimeState.lastUserGestureAt = 9_800;
+  // A stale explicit-playback authorization for the very URL we are arriving at,
+  // left over from an earlier visit. The fresh "load paused" arrival must not
+  // inherit it, otherwise the binding would treat the page-load autoplay as a
+  // pre-authorized manual play and let it run.
+  runtimeState.explicitNonSharedPlaybackUrl =
+    "https://www.bilibili.com/video/BV1Em421N7uU";
 
   let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
   let hydrateCalls = 0;
@@ -1083,6 +1089,8 @@ test("navigation controller arms autoplay suppression for a non-shared video tha
       runtimeState.nonSharerAutoplayHoldUrl,
       "https://www.bilibili.com/video/BV1Em421N7uU",
     );
+    // The stale authorization for this URL is dropped so the load stays paused.
+    assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
     assert.equal(runtimeState.pendingRoomStateHydration, false);
   } finally {
     windowHarness.restore();

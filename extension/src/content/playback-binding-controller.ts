@@ -468,6 +468,12 @@ export function createPlaybackBindingController(args: {
    * what keeps the manual play alive across resolution. The hold is only released
    * for a play with a fresh gesture that postdates the forced pause, so an
    * unsolicited page-load autoplay keeps its hold.
+   *
+   * Clearing the hold covers `forcePauseOnNonSharedPage`'s delayed-autoplay path,
+   * but not `shouldReapplyPauseHoldForUnconfirmedSharedVideo`, which re-pauses any
+   * play while `currentVideo` is still null once the gesture ages past the grace
+   * window. Record a durable timestamp so that guard keeps exempting this manual
+   * play across the grace boundary until the bridge finally resolves the URL.
    */
   function releaseAutoplayHoldForManualNonSharedPlayWhileResolving(): void {
     if (
@@ -477,6 +483,7 @@ export function createPlaybackBindingController(args: {
       args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
     ) {
       args.runtimeState.nonSharerAutoplayHoldUrl = null;
+      args.runtimeState.manualNonSharedPlayWhileResolvingAt = nowOf();
     }
   }
 
@@ -544,10 +551,23 @@ export function createPlaybackBindingController(args: {
     // gesture must also postdate the forced pause (mirrors the explicit-action
     // checks), so a stale pre-pause gesture cannot wave through a browser
     // auto-resume that carries no new play intent.
+    //
+    // A play's own gesture only covers the play event that carries it; when the
+    // bridge stays unresolved past `userGestureGraceMs`, a delayed `playing`
+    // would otherwise be re-paused even though the user already authorized this
+    // playback. `manualNonSharedPlayWhileResolvingAt`, set when the user manually
+    // played during this same null window, durably extends the exemption across
+    // the grace boundary. It too must postdate the forced pause, and
+    // `resetUserGestureState` zeroes it on navigation, so it cannot leak into a
+    // later page's autoplay.
     if (
       currentVideo === null &&
-      nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
-      args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
+      ((nowOf() - args.runtimeState.lastUserGestureAt <
+        args.userGestureGraceMs &&
+        args.runtimeState.lastUserGestureAt >
+          args.runtimeState.lastForcedPauseAt) ||
+        args.runtimeState.manualNonSharedPlayWhileResolvingAt >
+          args.runtimeState.lastForcedPauseAt)
     ) {
       return false;
     }

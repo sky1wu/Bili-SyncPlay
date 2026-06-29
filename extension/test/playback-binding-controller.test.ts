@@ -1276,6 +1276,83 @@ test("playback binding controller allows a gesture-driven manual play and keeps 
   }
 });
 
+test("playback binding controller keeps a manual play alive when a delayed playing fires while the bridge is still resolving past the gesture grace", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.pauseHoldUntil = 25_000;
+  runtimeState.nonSharerAutoplayHoldUrl =
+    "https://www.bilibili.com/video/BVother?p=1";
+  // Fresh gesture, after the forced pause.
+  runtimeState.lastForcedPauseAt = 19_000;
+  runtimeState.lastUserGestureAt = 19_500;
+  let pausedByGuard = 0;
+  let now = 20_000;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    // The page bridge never resolves during this test — `currentVideo` stays null
+    // through both the play and the delayed playing.
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => now,
+  });
+
+  dom.video.pause = () => {
+    pausedByGuard += 1;
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+    await Promise.resolve();
+
+    // Manual play within grace → allowed, hold released, durable marker recorded.
+    assert.equal(pausedByGuard, 0);
+    assert.equal(runtimeState.nonSharerAutoplayHoldUrl, null);
+    assert.equal(runtimeState.manualNonSharedPlayWhileResolvingAt, 20_000);
+
+    // A delayed `playing` arrives well past the gesture grace while the bridge is
+    // STILL resolving (`currentVideo` null). The durable marker keeps the manual
+    // play exempt, so it is not re-paused.
+    now = 24_000;
+    dom.video.paused = false;
+    dom.listeners.get("playing")?.(new Event("playing"));
+    await Promise.resolve();
+
+    assert.equal(pausedByGuard, 0);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
 test("playback binding controller re-pauses a pre-pause stale gesture while the page bridge is resolving the video", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();

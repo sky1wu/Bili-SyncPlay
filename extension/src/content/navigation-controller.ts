@@ -457,6 +457,15 @@ export function createNavigationController(args: {
         // delayed `play` here after the pause hold expires (slow SPA load/ad).
         args.runtimeState.intendedPlayState = "paused";
         args.runtimeState.nonSharerAutoplayHoldUrl = nextNormalizedPageUrl;
+        // Drop any stale explicit-playback authorization for this URL from an
+        // earlier visit. The navigation reset above (`explicitNonSharedPlaybackUrl
+        // = null`) already clears it on the way in, so this is belt-and-suspenders:
+        // it keeps the "fresh arrival loads paused, never pre-authorized" invariant
+        // local to this branch, so a leftover authorization can never let
+        // `forcePauseOnNonSharedPage` wave through the page-load autoplay once the
+        // bridge resolves this URL. A subsequent *manual* play re-authorizes via
+        // the binding's gesture path.
+        args.runtimeState.explicitNonSharedPlaybackUrl = null;
         args.activatePauseHold(args.initialRoomStatePauseHoldMs);
         const video = args.getVideoElement();
         if (video && !video.paused) {
