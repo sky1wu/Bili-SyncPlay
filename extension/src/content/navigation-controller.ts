@@ -123,11 +123,21 @@ export function createNavigationController(args: {
     // Gated on the identity coming from the snapshot (`resolvedVideoUrl`) so a
     // bangumi season→episode navigation, whose address bar genuinely changes, is
     // never silently swallowed here.
+    //
+    // Restricted to the discovery of a video we cannot confirm as *different* from
+    // the room's share: either it equals `activeSharedUrl`, or there is no shared
+    // url to compare against yet. If the very first resolution is already a
+    // confirmably different video — the shared video ended and the player
+    // auto-advanced before the snapshot resolved — fall through to the normal
+    // navigation path so the sharer still schedules the auto-share and a
+    // non-sharer is still paused, instead of silently adopting the new video.
     if (
       resolvedVideoUrl !== null &&
       isUnstableSharedVideoUrl(previousNormalizedPageUrl) &&
       nextNormalizedPageUrl !== null &&
-      !isUnstableSharedVideoUrl(nextNormalizedPageUrl)
+      !isUnstableSharedVideoUrl(nextNormalizedPageUrl) &&
+      (args.runtimeState.activeSharedUrl === null ||
+        nextNormalizedPageUrl === args.runtimeState.activeSharedUrl)
     ) {
       lastObservedPageUrl = nextPageUrl;
       lastObservedNormalizedPageUrl = nextNormalizedPageUrl;

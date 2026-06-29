@@ -2,6 +2,7 @@ import type {
   ContentToBackgroundMessage,
   ShareCurrentVideoResponse,
 } from "../shared/messages";
+import { isUnstableSharedVideoUrl } from "./video-identity";
 
 export interface AutoShareNextController {
   scheduleForNavigation(args: {
@@ -99,9 +100,22 @@ export function createAutoShareNextController(args: {
     const currentNormalizedUrl = args.normalizeVideoPageUrl(
       args.getCurrentPageUrl(),
     );
-    if (currentNormalizedUrl !== pending.targetNormalizedUrl) {
+    // Only skip when we can POSITIVELY confirm the page is now on a *different,
+    // concrete* video. On festival pages the resolved-video snapshot can be
+    // momentarily cleared or stale during the settle window — the navigation
+    // handler clears it right before scheduling, and the next page-bridge refresh
+    // may not have landed yet — so `currentNormalizedUrl` falls back to the bare
+    // `/festival/<id>` route (unstable) or null. Treating that as "page moved"
+    // here would drop a valid festival auto-share *without retrying*. Instead
+    // proceed: the background runs the authoritative, retrying tab-resolution
+    // check against the target, so a genuine moved-on page is still caught there.
+    if (
+      currentNormalizedUrl !== null &&
+      !isUnstableSharedVideoUrl(currentNormalizedUrl) &&
+      currentNormalizedUrl !== pending.targetNormalizedUrl
+    ) {
       args.debugLog(
-        `Skipped auto-share next video because page moved from ${pending.targetNormalizedUrl} to ${currentNormalizedUrl ?? "unknown"}`,
+        `Skipped auto-share next video because page moved from ${pending.targetNormalizedUrl} to ${currentNormalizedUrl}`,
       );
       return;
     }

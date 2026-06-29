@@ -321,6 +321,59 @@ test("auto-share next controller skips a settled request when the page moved aga
   }
 });
 
+test("auto-share next controller still sends when a festival snapshot is cleared during settle", async () => {
+  const windowHarness = installWindowStub();
+  const sentMessages: unknown[] = [];
+  // The navigation handler clears the festival snapshot before scheduling, so by
+  // the time the settle timer fires the page resolves only to the bare
+  // `/festival/<id>` route (unstable) — not the scheduled `/video/...` target.
+  function normalizeFestivalAwareUrl(url: string): string | null {
+    if (url.includes("/festival/")) {
+      const bvid = url.match(/[?&]bvid=([^&]+)/);
+      const cid = url.match(/[?&]cid=([^&]+)/);
+      if (bvid && cid) {
+        return `https://www.bilibili.com/video/${bvid[1]}?cid=${cid[1]}`;
+      }
+      return "https://www.bilibili.com/festival/MyMuji";
+    }
+    return normalizeTestVideoPageUrl(url);
+  }
+  const controller = createAutoShareNextController({
+    settleDelayMs: 900,
+    getCurrentPageUrl: () => "https://www.bilibili.com/festival/MyMuji",
+    normalizeVideoPageUrl: normalizeFestivalAwareUrl,
+    runtimeSendMessage: async (message) => {
+      sentMessages.push(message);
+      return { ok: true };
+    },
+    debugLog: () => {},
+  });
+
+  try {
+    controller.scheduleForNavigation({
+      previousSharedUrl: "https://www.bilibili.com/video/BVa?cid=1",
+      nextNormalizedPageUrl: "https://www.bilibili.com/video/BVb?cid=2",
+    });
+    windowHarness.runTimers();
+    await Promise.resolve();
+
+    // The unstable route is "cannot tell", not a confirmed move-on, so the
+    // request must be sent (the background performs the authoritative check)
+    // rather than silently dropped without a retry.
+    assert.equal(sentMessages.length, 1);
+    assert.deepEqual(sentMessages[0], {
+      type: "content:auto-share-next-video",
+      payload: {
+        previousSharedUrl: "https://www.bilibili.com/video/BVa?cid=1",
+        targetNormalizedUrl: "https://www.bilibili.com/video/BVb?cid=2",
+      },
+    });
+  } finally {
+    controller.destroy();
+    windowHarness.restore();
+  }
+});
+
 test("auto-share next controller retries when the background reports the page is not ready", async () => {
   const windowHarness = installWindowStub();
   const sentMessages: unknown[] = [];
