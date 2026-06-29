@@ -455,6 +455,31 @@ export function createPlaybackBindingController(args: {
     args.runtimeState.explicitNonSharedPlaybackUrl = normalizedCurrentUrl;
   }
 
+  /**
+   * Release the non-sharer autoplay hold when the user *manually* plays a freshly
+   * opened non-shared video whose page bridge has not resolved `currentVideo` yet.
+   *
+   * The recent-gesture exemption in `shouldReapplyPauseHoldForUnconfirmedSharedVideo`
+   * only clears the *current* play event. Once the bridge resolves the URL —
+   * possibly past `userGestureGraceMs` — `forcePauseOnNonSharedPage` would match the
+   * still-armed `nonSharerAutoplayHoldUrl` and, finding no fresh gesture, re-pause
+   * the user's own playback. `preAuthorizeExplicitNonSharedPlay` cannot record the
+   * authorization yet (the URL is unknown), so durably releasing the hold here is
+   * what keeps the manual play alive across resolution. The hold is only released
+   * for a play with a fresh gesture that postdates the forced pause, so an
+   * unsolicited page-load autoplay keeps its hold.
+   */
+  function releaseAutoplayHoldForManualNonSharedPlayWhileResolving(): void {
+    if (
+      args.getSharedVideo() === null &&
+      args.runtimeState.nonSharerAutoplayHoldUrl !== null &&
+      hasRecentUserGesture() &&
+      args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
+    ) {
+      args.runtimeState.nonSharerAutoplayHoldUrl = null;
+    }
+  }
+
   function forcePauseWhileWaitingForInitialRoomState(
     video: HTMLVideoElement,
   ): boolean {
@@ -515,10 +540,14 @@ export function createPlaybackBindingController(args: {
     // unsolicited page-load autoplay (no gesture) is still held. Scoped to the
     // `currentVideo === null` (bridge-not-ready) case: a *present* but unstable
     // identity (a festival/season page that may BE the shared video) must still
-    // re-pause to stay in sync with the room, even with a recent gesture.
+    // re-pause to stay in sync with the room, even with a recent gesture. The
+    // gesture must also postdate the forced pause (mirrors the explicit-action
+    // checks), so a stale pre-pause gesture cannot wave through a browser
+    // auto-resume that carries no new play intent.
     if (
       currentVideo === null &&
-      nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs
+      nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
+      args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
     ) {
       return false;
     }
@@ -717,6 +746,7 @@ export function createPlaybackBindingController(args: {
         if (shouldPreRecordNonSharedExplicitPlay()) {
           preAuthorizeExplicitNonSharedPlay();
         }
+        releaseAutoplayHoldForManualNonSharedPlayWhileResolving();
         if (guardUnexpectedResume()) {
           return;
         }
@@ -831,6 +861,7 @@ export function createPlaybackBindingController(args: {
         if (shouldPreRecordNonSharedExplicitPlay()) {
           preAuthorizeExplicitNonSharedPlay();
         }
+        releaseAutoplayHoldForManualNonSharedPlayWhileResolving();
         if (guardUnexpectedResume()) {
           return;
         }
