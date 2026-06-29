@@ -100,10 +100,6 @@ export function createNavigationController(args: {
       return;
     }
     const nextPageUrl = resolvedVideoUrl ?? rawPageUrl;
-    if (nextPageUrl === lastObservedPageUrl) {
-      return;
-    }
-
     const nextNormalizedPageUrl = args.normalizeVideoPageUrl(nextPageUrl);
 
     // The room shares THIS page by its bare (unstable) festival route — the page
@@ -116,18 +112,28 @@ export function createNavigationController(args: {
     // The first snapshot resolution of a bare-route festival share to its concrete
     // stable `/video/...`. Record it as the stable "from" anchor for the next
     // same-page autoplay (`activeSharedUrl` itself stays the unstable route until
-    // the room confirms a concrete video). This must run even when the resolved URL
-    // is unchanged from the baseline: a festival page opened from a share link
-    // keeps a frozen `?bvid=A&cid=...` whose baseline already normalizes to the
-    // same stable `/video/A`, so the resolution hits the "normalized unchanged"
-    // short-circuit below before reaching the discovery guard further down —
-    // without this it would never anchor and the later A→B autoplay could not be
-    // classified as the room share's autoplay.
+    // the room confirms a concrete video). Computed before the no-op short-circuits
+    // below and recorded inside *each* of them — but never on the fall-through
+    // navigation path, where overwriting the anchor with the *new* video would
+    // defeat the `effectiveSharedUrl` classification of the very autoplay it is
+    // meant to enable. A festival page opened from a share link keeps a frozen
+    // `?bvid=A&cid=...`; depending on whether the resolved URL's query order
+    // matches the address bar, this discovery hits either the exact-URL no-op or
+    // the normalized no-op, so both must anchor it (otherwise the later A→B
+    // autoplay cannot be classified as the room share's autoplay and falls into
+    // hydration/pause instead of scheduling the auto-share).
     const isBareRouteShareResolution =
       resolvedVideoUrl !== null &&
       nextNormalizedPageUrl !== null &&
       !isUnstableSharedVideoUrl(nextNormalizedPageUrl) &&
       sharedIsUnstableSamePageRoute;
+
+    if (nextPageUrl === lastObservedPageUrl) {
+      if (isBareRouteShareResolution) {
+        args.runtimeState.resolvedSharedVideoUrl = nextNormalizedPageUrl;
+      }
+      return;
+    }
 
     if (
       nextNormalizedPageUrl !== null &&
