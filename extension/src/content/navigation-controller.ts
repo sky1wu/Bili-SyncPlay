@@ -133,23 +133,27 @@ export function createNavigationController(args: {
     // Restricted to the discovery of a video we cannot confirm as *different* from
     // the room's share. We can confirm "different" only against a stable, known,
     // different shared url; treat as discovery when:
-    //   - there is no shared url to compare against yet, or
+    //   - we are not in a room (no room state governs playback), or
     //   - the resolved video equals `activeSharedUrl`, or
     //   - `activeSharedUrl` is itself an unstable route on this same page (e.g. a
     //     manual share whose page bridge failed fell back to the bare
     //     `/festival/<id>` url) — the route may well resolve to this very video,
     //     so resolving it is discovery, not a switch.
-    // If the very first resolution is already a confirmably different video — the
-    // shared video ended and the player auto-advanced before the snapshot
-    // resolved — fall through to the normal navigation path so the sharer still
-    // schedules the auto-share and a non-sharer is still paused.
+    // Deliberately NOT a discovery when we are in a room but `activeSharedUrl` is
+    // still null (joined but the initial `room:state` has not arrived): fall
+    // through to the in-room hydration/pause path so a festival video already
+    // playing is suppressed until the room's actual shared video is known. If the
+    // first resolution is already a confirmably different video — the shared video
+    // ended and the player auto-advanced before the snapshot resolved — likewise
+    // fall through so the sharer still schedules the auto-share and a non-sharer
+    // is still paused.
     const sharedUrlForDiscovery = args.runtimeState.activeSharedUrl;
     if (
       resolvedVideoUrl !== null &&
       isUnstableSharedVideoUrl(previousNormalizedPageUrl) &&
       nextNormalizedPageUrl !== null &&
       !isUnstableSharedVideoUrl(nextNormalizedPageUrl) &&
-      (sharedUrlForDiscovery === null ||
+      (!args.runtimeState.activeRoomCode ||
         nextNormalizedPageUrl === sharedUrlForDiscovery ||
         (isUnstableSharedVideoUrl(sharedUrlForDiscovery) &&
           samePathname(sharedUrlForDiscovery, nextPageUrl)))

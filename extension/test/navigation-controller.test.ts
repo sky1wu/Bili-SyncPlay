@@ -1707,6 +1707,59 @@ test("navigation controller pauses when the first festival resolution is a diffe
   }
 });
 
+test("navigation controller suppresses a first festival resolution while a joined room has no shared url yet", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  // Joined a room, but the initial room:state has not arrived yet.
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = null;
+
+  let resolved: string | null = null;
+  let pauseCalls = 0;
+  let hydrateCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => FESTIVAL_ROUTE,
+    normalizeVideoPageUrl: normalizeFestivalPageUrl,
+    getResolvedVideoUrl: () => resolved,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1";
+    windowHarness.intervals[0]?.();
+
+    // Not a discovery: in a room with an unknown shared url, the first resolution
+    // must engage the initial pause protection until room state confirms, instead
+    // of letting the local festival video keep playing.
+    assert.equal(pauseCalls, 1);
+    assert.equal(hydrateCalls, 1);
+    assert.equal(runtimeState.pendingRoomStateHydration, true);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller adopts a first festival resolution without pausing the shared video", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
