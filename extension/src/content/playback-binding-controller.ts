@@ -504,6 +504,25 @@ export function createPlaybackBindingController(args: {
       return false;
     }
 
+    // While the page bridge has not yet produced `currentVideo`, a play carrying a
+    // fresh user gesture is the user's own manual play, not an unexpected autoplay
+    // resume — don't re-pause it (mirrors the recent-gesture exemption the sibling
+    // resume guards apply). `preAuthorizeExplicitNonSharedPlay` cannot run yet
+    // (`isKnownNonSharedVideo` needs a resolved video), so without this a user who
+    // clicks play on a just-opened non-shared video would be re-paused throughout
+    // the initial load window, defeating the "load paused but manual play stays
+    // available" behavior. The navigation reset zeroes `lastUserGestureAt`, so an
+    // unsolicited page-load autoplay (no gesture) is still held. Scoped to the
+    // `currentVideo === null` (bridge-not-ready) case: a *present* but unstable
+    // identity (a festival/season page that may BE the shared video) must still
+    // re-pause to stay in sync with the room, even with a recent gesture.
+    if (
+      currentVideo === null &&
+      nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs
+    ) {
+      return false;
+    }
+
     return hasUnconfirmedSharedVideoContext(currentVideo);
   }
 
