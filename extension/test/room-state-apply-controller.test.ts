@@ -417,6 +417,87 @@ test("clears the pending auto-share target when another member takes over the sh
   assert.equal(harness.runtimeState.pendingAutoShareTargetUrl, null);
 });
 
+test("clears the resolved bare-route anchor when another member re-shares the same festival route", async () => {
+  const harness = createController({ now: 10_000, currentVideo: null });
+
+  // We are a follower; member-1 originally shared this festival page by its bare
+  // route and our snapshot resolved its concrete video as the anchor.
+  harness.runtimeState.localMemberId = "member-2";
+  harness.runtimeState.activeSharedByMemberId = "member-1";
+  harness.runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/festival/MyMuji";
+  harness.runtimeState.resolvedSharedVideoUrl =
+    "https://www.bilibili.com/video/BVa?cid=1";
+  harness.runtimeState.pendingRoomStateHydration = false;
+
+  await harness.controller.applyRoomState({
+    roomCode: "ROOM01",
+    // Same bare festival route, but a different member now owns the share.
+    sharedVideo: {
+      videoId: "MyMuji",
+      url: "https://www.bilibili.com/festival/MyMuji",
+      title: "别人重新分享的",
+      sharedByMemberId: "member-2",
+    },
+    playback: {
+      url: "https://www.bilibili.com/festival/MyMuji",
+      playState: "playing",
+      currentTime: 0,
+      playbackRate: 1,
+      actorId: "member-2",
+      seq: 1,
+      serverTime: 1_000,
+    },
+    members: [
+      { id: "member-1", name: "Alice" },
+      { id: "member-2", name: "Bob" },
+    ],
+  });
+
+  // The previous sharer's resolved `/video/A` anchor must not survive the
+  // ownership transfer, or a later same-page A→B autoplay would be misclassified.
+  assert.equal(harness.runtimeState.resolvedSharedVideoUrl, null);
+});
+
+test("keeps the resolved bare-route anchor when the same member re-applies the same festival route", async () => {
+  const harness = createController({ now: 10_000, currentVideo: null });
+
+  harness.runtimeState.localMemberId = "member-1";
+  harness.runtimeState.activeSharedByMemberId = "member-1";
+  harness.runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/festival/MyMuji";
+  harness.runtimeState.resolvedSharedVideoUrl =
+    "https://www.bilibili.com/video/BVa?cid=1";
+  harness.runtimeState.pendingRoomStateHydration = false;
+
+  await harness.controller.applyRoomState({
+    roomCode: "ROOM01",
+    sharedVideo: {
+      videoId: "MyMuji",
+      url: "https://www.bilibili.com/festival/MyMuji",
+      title: "同一人的房间状态",
+      sharedByMemberId: "member-1",
+    },
+    playback: {
+      url: "https://www.bilibili.com/festival/MyMuji",
+      playState: "playing",
+      currentTime: 0,
+      playbackRate: 1,
+      actorId: "member-1",
+      seq: 1,
+      serverTime: 1_000,
+    },
+    members: [{ id: "member-1", name: "Alice" }],
+  });
+
+  // Unchanged URL and owner: the anchor recorded for the still-active bare-route
+  // share must survive so a same-page autoplay can still chain.
+  assert.equal(
+    harness.runtimeState.resolvedSharedVideoUrl,
+    "https://www.bilibili.com/video/BVa?cid=1",
+  );
+});
+
 test("pauses video when gesture age exactly equals the grace window boundary", async () => {
   const video = createStubVideo(false);
   const harness = createController({
