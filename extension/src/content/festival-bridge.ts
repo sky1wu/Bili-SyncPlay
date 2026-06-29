@@ -24,6 +24,16 @@ interface PageVideoSnapshot extends SharedVideo {
 export interface FestivalBridgeController {
   clearSnapshot: () => void;
   getSnapshot: () => FestivalSnapshot | null;
+  /**
+   * Resolves the in-player video URL for an address-bar-opaque festival page from
+   * the cached snapshot. Festival pages keep a fixed `/festival/<id>` route while
+   * the player swaps videos, so this is the only reliable way for the navigation
+   * watcher and auto-share self-check to observe the current video. Returns the
+   * snapshot's resolved share URL (with `bvid`/`cid`) when the cached snapshot
+   * belongs to `pathname`, otherwise `null` (non-festival page, or no/stale
+   * matching snapshot — callers fall back to the address bar).
+   */
+  resolveVideoUrlForPage: (pathname: string) => string | null;
   refreshSnapshot: (args: {
     pathname: string;
     pageUrl: string;
@@ -148,6 +158,19 @@ export function createFestivalBridgeController(): FestivalBridgeController {
       festivalSnapshot = null;
     },
     getSnapshot: () => festivalSnapshot,
+    resolveVideoUrlForPage: (pathname: string): string | null => {
+      if (!pathname.startsWith("/festival/")) {
+        return null;
+      }
+      if (
+        !festivalSnapshot?.pathname?.startsWith("/festival/") ||
+        normalizeCachedPagePathname(festivalSnapshot.pathname) !==
+          normalizeCachedPagePathname(pathname)
+      ) {
+        return null;
+      }
+      return festivalSnapshot.url;
+    },
     refreshSnapshot: async ({ pathname, pageUrl, maxAgeMs }) => {
       const isBangumiPage = pathname.startsWith("/bangumi/play/");
       if (!pathname.startsWith("/festival/") && !isBangumiPage) {

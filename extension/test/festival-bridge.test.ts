@@ -189,6 +189,46 @@ test("festival bridge reuses cached festival snapshot across trailing slash path
   }
 });
 
+test("festival bridge resolves the cached video url for the matching festival page", async () => {
+  const dom = installBridgeDomStub([
+    {
+      bvid: "BVfestival",
+      cid: 123,
+      title: "Festival Episode",
+    },
+  ]);
+  const controller = createFestivalBridgeController();
+
+  try {
+    // No snapshot yet.
+    assert.equal(controller.resolveVideoUrlForPage("/festival/demo"), null);
+
+    await controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl: "https://www.bilibili.com/festival/demo",
+      maxAgeMs: 0,
+    });
+
+    // Same page (incl. trailing-slash variant) resolves to the snapshot url.
+    assert.equal(
+      controller.resolveVideoUrlForPage("/festival/demo"),
+      "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
+    );
+    assert.equal(
+      controller.resolveVideoUrlForPage("/festival/demo/"),
+      "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
+    );
+    // A different festival page or a non-festival page does not match.
+    assert.equal(controller.resolveVideoUrlForPage("/festival/other"), null);
+    assert.equal(controller.resolveVideoUrlForPage("/video/BVx"), null);
+
+    controller.clearSnapshot();
+    assert.equal(controller.resolveVideoUrlForPage("/festival/demo"), null);
+  } finally {
+    dom.restore();
+  }
+});
+
 test("festival bridge does not fall back to another festival page snapshot", async () => {
   const dom = installBridgeDomStub([
     {

@@ -64,7 +64,8 @@ const autoShareNextController = createAutoShareNextController({
   // check matches the scheduled `/video/...` target rather than the bare
   // `/festival/<id>` route (which would wrongly skip the auto-share).
   getCurrentPageUrl: () =>
-    resolveFestivalVideoUrl() ?? window.location.href.split("#")[0],
+    festivalBridge.resolveVideoUrlForPage(window.location.pathname) ??
+    window.location.href.split("#")[0],
   normalizeVideoPageUrl: (url) => normalizeSharedVideoUrl(url),
   getActiveSharedUrl: () => runtimeState.activeSharedUrl,
   runtimeSendMessage,
@@ -146,7 +147,8 @@ const navigationController = createNavigationController({
   // Festival pages keep a fixed `/festival/<id>` route in the address bar while
   // the player swaps videos, so the navigation watcher can only observe an
   // autoplay-next through the page-bridge snapshot's resolved share URL.
-  getResolvedVideoUrl: resolveFestivalVideoUrl,
+  getResolvedVideoUrl: () =>
+    festivalBridge.resolveVideoUrlForPage(window.location.pathname),
   isSupportedVideoPage: (url) => Boolean(normalizeSharedVideoUrl(url)),
   clearFestivalSnapshot: () => {
     festivalBridge.clearSnapshot();
@@ -170,28 +172,6 @@ const pageShareButtonController = createPageShareButtonController({
 });
 
 void init();
-
-// Festival pages keep a fixed `/festival/<id>` route in the address bar while the
-// player swaps videos, so `window.location.href` never reflects the in-player
-// video. This resolves the page-bridge snapshot's share URL (with `bvid`/`cid`)
-// for the current festival page, or `null` on other pages (whose address bar
-// already tracks the video) and before the snapshot resolves. Both the
-// navigation watcher and the auto-share self-check rely on it so a festival
-// autoplay-next is observed and not skipped as "page moved".
-function resolveFestivalVideoUrl(): string | null {
-  const pathname = window.location.pathname;
-  if (!pathname.startsWith("/festival/")) {
-    return null;
-  }
-  const snapshot = festivalBridge.getSnapshot();
-  if (
-    !snapshot?.pathname?.startsWith("/festival/") ||
-    snapshot.pathname.replace(/\/+$/, "") !== pathname.replace(/\/+$/, "")
-  ) {
-    return null;
-  }
-  return snapshot.url;
-}
 
 function debugLog(message: string): void {
   void runtimeSendMessage({
