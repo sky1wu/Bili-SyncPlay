@@ -1,6 +1,127 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { startUserGestureTracking } from "../src/content/gesture-tracker";
+import {
+  isGestureInsidePlayer,
+  startUserGestureTracking,
+} from "../src/content/gesture-tracker";
+
+class FakeElement {
+  constructor(
+    private readonly matchedSelectors: Record<string, boolean> = {},
+  ) {}
+  closest(selector: string): FakeElement | null {
+    return this.matchedSelectors[selector] ? this : null;
+  }
+}
+
+const PLAYER_SELECTOR = ".bpx-player-container, #bilibili-player";
+const EDITABLE_SELECTOR =
+  'input, textarea, select, [contenteditable=""], [contenteditable="true"]';
+
+function withElementStub(run: () => void): void {
+  const originalElement = (globalThis as { Element?: unknown }).Element;
+  (globalThis as { Element?: unknown }).Element = FakeElement;
+  try {
+    run();
+  } finally {
+    (globalThis as { Element?: unknown }).Element = originalElement;
+  }
+}
+
+function fakeEvent(type: string, target: unknown, key?: string): Event {
+  return { type, target, key } as unknown as Event;
+}
+
+test("isGestureInsidePlayer recognises pointer gestures inside the player only", () => {
+  withElementStub(() => {
+    const inPlayer = new FakeElement({ [PLAYER_SELECTOR]: true });
+    const blank = new FakeElement({});
+    assert.equal(
+      isGestureInsidePlayer(fakeEvent("pointerdown", inPlayer)),
+      true,
+    );
+    assert.equal(isGestureInsidePlayer(fakeEvent("click", blank)), false);
+  });
+});
+
+test("isGestureInsidePlayer rejects gestures on editable fields even inside the player", () => {
+  withElementStub(() => {
+    const danmakuInput = new FakeElement({
+      [PLAYER_SELECTOR]: true,
+      [EDITABLE_SELECTOR]: true,
+    });
+    assert.equal(
+      isGestureInsidePlayer(fakeEvent("click", danmakuInput)),
+      false,
+    );
+  });
+});
+
+test("isGestureInsidePlayer treats only play-toggle keys as in-player intent", () => {
+  withElementStub(() => {
+    const body = new FakeElement({});
+    assert.equal(isGestureInsidePlayer(fakeEvent("keydown", body, " ")), true);
+    assert.equal(isGestureInsidePlayer(fakeEvent("keydown", body, "k")), true);
+    assert.equal(
+      isGestureInsidePlayer(fakeEvent("keydown", body, "Escape")),
+      false,
+    );
+  });
+});
+
+test("isGestureInsidePlayer returns false for a non-element target", () => {
+  withElementStub(() => {
+    assert.equal(isGestureInsidePlayer(fakeEvent("keydown", null, " ")), false);
+  });
+});
+
+test("startUserGestureTracking reports whether each gesture was inside the player", () => {
+  const originalDocument = globalThis.document;
+  const originalWindow = globalThis.window;
+  const listeners: Array<{ type: string; handler: (event: Event) => void }> =
+    [];
+  Object.assign(globalThis, {
+    document: {
+      addEventListener(type: string, handler: (event: Event) => void) {
+        listeners.push({ type, handler });
+      },
+    },
+    window: {
+      addEventListener(type: string, handler: (event: Event) => void) {
+        listeners.push({ type, handler });
+      },
+    },
+  });
+  const reports: boolean[] = [];
+
+  try {
+    withElementStub(() => {
+      startUserGestureTracking((insidePlayer) => {
+        reports.push(insidePlayer);
+      });
+      const clickHandler = listeners.find(
+        (entry) => entry.type === "click",
+      )?.handler;
+      assert.ok(clickHandler);
+      clickHandler?.(
+        fakeEvent("click", new FakeElement({ [PLAYER_SELECTOR]: true })),
+      );
+      clickHandler?.(fakeEvent("click", new FakeElement({})));
+      const popstateHandler = listeners.find(
+        (entry) => entry.type === "popstate",
+      )?.handler;
+      popstateHandler?.(fakeEvent("popstate", null));
+    });
+
+    // in-player click → true, blank click → false, popstate → false.
+    assert.deepEqual(reports, [true, false, false]);
+  } finally {
+    Object.assign(globalThis, {
+      document: originalDocument,
+      window: originalWindow,
+    });
+  }
+});
 
 interface RegisteredListener {
   type: string;

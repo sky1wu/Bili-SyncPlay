@@ -105,6 +105,14 @@ export function createPlaybackBindingController(args: {
   };
   const hasRecentUserGesture = () =>
     nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs;
+  // A genuine intent to control the player (pointer inside the player container
+  // or a play-toggle key), as opposed to any document-level gesture. Authorizing
+  // playback on a "load paused" non-shared page requires this stronger signal so
+  // a stray click on blank space / a popup cannot wave the page-load autoplay
+  // through.
+  const hasRecentUserGestureInPlayer = () =>
+    nowOf() - args.runtimeState.lastUserGestureInPlayerAt <
+    args.userGestureGraceMs;
   const getRecentExplicitSeekWithoutNewGestureAt = (): number | null => {
     const explicitAction = args.runtimeState.lastExplicitUserAction;
     if (
@@ -418,9 +426,13 @@ export function createPlaybackBindingController(args: {
 
   function shouldPreRecordNonSharedExplicitPlay(): boolean {
     const currentVideo = args.getSharedVideo();
+    // Require an in-player gesture (not just any document-level one) that
+    // postdates the forced pause: this is what authorizes manual play of a
+    // non-shared video on a load-paused page, so a stray click elsewhere followed
+    // by the page-load autoplay is not mistaken for the user pressing play.
     if (
-      !hasRecentUserGesture() ||
-      args.runtimeState.lastUserGestureAt <=
+      !hasRecentUserGestureInPlayer() ||
+      args.runtimeState.lastUserGestureInPlayerAt <=
         args.runtimeState.lastForcedPauseAt ||
       !isKnownNonSharedVideo(currentVideo)
     ) {
@@ -690,24 +702,25 @@ export function createPlaybackBindingController(args: {
 
       if (forcePauseOnNonSharedPage(video)) {
         // `forcePauseOnNonSharedPage` only suppresses the broadcast; it does not
-        // stop the local element. A play with a recent user gesture is the
+        // stop the local element. A play with a recent IN-PLAYER gesture is the
         // user's own non-shared playback and is left to run (broadcast still
-        // suppressed). A play with no recent gesture on a page the navigation
-        // controller flagged as a non-sharer autoplay (`nonSharerAutoplayHoldUrl`)
-        // is autoplay into the next episode: we must actually pause it, otherwise
-        // it keeps playing while the room stays on the shared video. Gate on the
-        // marker (and absence of a gesture) rather than on the pause hold still
-        // being active, because a slow SPA load/ad can delay the `play`/`playing`
-        // event past `initialRoomStatePauseHoldMs`. Requiring the marker also
-        // avoids pausing a non-shared video the user manually opened via full-page
-        // navigation (address bar/bookmark/direct link): that page was never
-        // reached through an in-SPA autoplay, so it carries no marker and is left
-        // playable.
+        // suppressed). A play without one on a page the navigation controller
+        // flagged as a non-sharer autoplay (`nonSharerAutoplayHoldUrl`) is
+        // autoplay into the next episode: we must actually pause it, otherwise it
+        // keeps playing while the room stays on the shared video. The gesture must
+        // be in-player (not any document-level click) so a stray click on blank
+        // space / a popup cannot leave the page-load autoplay running. Gate on the
+        // marker rather than on the pause hold still being active, because a slow
+        // SPA load/ad can delay the `play`/`playing` event past
+        // `initialRoomStatePauseHoldMs`. Requiring the marker also avoids pausing
+        // a non-shared video the user manually opened via full-page navigation
+        // (address bar/bookmark/direct link): that page was never reached through
+        // an in-SPA autoplay, so it carries no marker and is left playable.
         const normalizedCurrentUrl = args.normalizeUrl(
           args.getSharedVideo()?.url,
         );
         if (
-          !hasRecentUserGesture() &&
+          !hasRecentUserGestureInPlayer() &&
           (args.runtimeState.intendedPlayState === "paused" ||
             args.runtimeState.intendedPlayState === "buffering") &&
           normalizedCurrentUrl !== null &&

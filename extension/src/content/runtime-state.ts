@@ -81,6 +81,15 @@ export interface ContentRuntimeState {
   lastLocalIntentAt: number;
   lastLocalIntentPlayState: PlaybackState["playState"] | null;
   lastUserGestureAt: number;
+  /**
+   * Timestamp of the most recent user gesture that lands inside the video player
+   * (a pointer/touch on the player container, or a play-toggle key) — a genuine
+   * intent to control playback, as opposed to a stray click on blank space / a
+   * popup that the document-level `lastUserGestureAt` also records. Used to
+   * authorize manual playback of a non-shared video on a "load paused" page so a
+   * stray gesture cannot wave the page-load autoplay through.
+   */
+  lastUserGestureInPlayerAt: number;
   lastExplicitPlaybackAction: ExplicitPlaybackAction | null;
   explicitNonSharedPlaybackUrl: string | null;
   suppressedLocalEndPauseUrl: string | null;
@@ -232,6 +241,7 @@ export interface ContentRuntimeState {
  */
 export function resetUserGestureState(state: ContentRuntimeState): void {
   state.lastUserGestureAt = 0;
+  state.lastUserGestureInPlayerAt = 0;
   state.lastExplicitPlaybackAction = null;
   state.lastExplicitUserAction = null;
   state.lastNonSharedGuardUrl = null;
@@ -258,6 +268,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     lastLocalIntentAt: 0,
     lastLocalIntentPlayState: null,
     lastUserGestureAt: 0,
+    lastUserGestureInPlayerAt: 0,
     lastExplicitPlaybackAction: null,
     explicitNonSharedPlaybackUrl: null,
     suppressedLocalEndPauseUrl: null,

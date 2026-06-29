@@ -211,8 +211,12 @@ function activatePauseHold(durationMs = PAUSE_HOLD_MS): void {
 }
 
 async function init(): Promise<void> {
-  startUserGestureTracking(() => {
-    runtimeState.lastUserGestureAt = Date.now();
+  startUserGestureTracking((insidePlayer) => {
+    const now = Date.now();
+    runtimeState.lastUserGestureAt = now;
+    if (insidePlayer) {
+      runtimeState.lastUserGestureInPlayerAt = now;
+    }
   });
   pageShareButtonController.start();
   void hydratePageShareButtonSettings();

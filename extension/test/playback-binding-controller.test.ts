@@ -791,13 +791,108 @@ test("playback binding controller allows manual play after a newer gesture follo
   }
 });
 
+test("playback binding controller holds a page-load autoplay authorized only by a stray document gesture, then honors an in-player play", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  // Load-paused arrival on the resolved non-shared page: hold + marker armed.
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.pauseHoldUntil = 25_000;
+  runtimeState.nonSharerAutoplayHoldUrl =
+    "https://www.bilibili.com/video/BVother?p=1";
+  runtimeState.lastForcedPauseAt = 19_000;
+  // The user clicked blank space / dismissed a popup — a document-level gesture
+  // that is NOT inside the player.
+  runtimeState.lastUserGestureAt = 20_000;
+  let pausedByGuard = 0;
+  let now = 20_050;
+  const events: string[] = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => ({
+      videoId: "BVother:p1",
+      url: "https://www.bilibili.com/video/BVother?p=1",
+      title: "Other Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      events.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => now,
+  });
+
+  dom.video.pause = () => {
+    pausedByGuard += 1;
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  try {
+    controller.attachPlaybackListeners();
+
+    // The page-load autoplay fires while only a stray (non-player) gesture is
+    // recent. It must NOT be treated as a manual play: the marker holds it and no
+    // explicit authorization is recorded.
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+    await Promise.resolve();
+    assert.equal(pausedByGuard, 1);
+    assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
+    assert.equal(
+      runtimeState.nonSharerAutoplayHoldUrl,
+      "https://www.bilibili.com/video/BVother?p=1",
+    );
+
+    // Now the user actually presses play inside the player: it is authorized.
+    now = 21_000;
+    runtimeState.lastUserGestureAt = 21_000;
+    runtimeState.lastUserGestureInPlayerAt = 21_000;
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+    await Promise.resolve();
+    assert.equal(pausedByGuard, 1);
+    assert.equal(
+      runtimeState.explicitNonSharedPlaybackUrl,
+      "https://www.bilibili.com/video/BVother?p=1",
+    );
+    assert.equal(runtimeState.nonSharerAutoplayHoldUrl, null);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
 test("playback binding controller allows explicit play on a non-shared page", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
   runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
   runtimeState.pendingRoomStateHydration = false;
+  // A genuine play press inside the player authorizes the non-shared playback.
   runtimeState.lastUserGestureAt = 1_000;
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
   const events: string[] = [];
 
   const controller = createPlaybackBindingController({
@@ -1270,6 +1365,7 @@ test("playback binding controller holds a play while the page bridge is resolvin
     };
     now = 21_000;
     runtimeState.lastUserGestureAt = 21_000;
+    runtimeState.lastUserGestureInPlayerAt = 21_000;
     dom.video.paused = false;
     dom.listeners.get("play")?.(new Event("play"));
     await Promise.resolve();
@@ -1366,10 +1462,11 @@ test("playback binding controller does not re-pause an authorized non-shared pla
   runtimeState.pauseHoldUntil = 25_000;
   runtimeState.nonSharerAutoplayHoldUrl =
     "https://www.bilibili.com/video/BVother?p=1";
-  // The bridge has resolved the video and the user clicks play (fresh gesture
-  // after the forced pause).
+  // The bridge has resolved the video and the user clicks play in the player
+  // (fresh gesture after the forced pause).
   runtimeState.lastForcedPauseAt = 19_000;
   runtimeState.lastUserGestureAt = 20_000;
+  runtimeState.lastUserGestureInPlayerAt = 20_000;
   const resolvedVideo: SharedVideo = {
     videoId: "BVother:p1",
     url: "https://www.bilibili.com/video/BVother?p=1",
@@ -1706,8 +1803,9 @@ test("playback binding controller allows manual play on non-shared page after au
     await Promise.resolve();
     assert.equal(pausedByGuard, 0);
 
-    // User manually clicks play after the suppressed auto-resume.
+    // User manually clicks play (in the player) after the suppressed auto-resume.
     runtimeState.lastUserGestureAt = 1_500;
+    runtimeState.lastUserGestureInPlayerAt = 1_500;
     now = 1_550;
     dom.video.paused = false;
     dom.listeners.get("play")?.(new Event("play"));
