@@ -2088,7 +2088,7 @@ test("navigation controller auto-shares a same-page autoplay off a bare-route fe
   }
 });
 
-test("navigation controller auto-shares when the first festival resolution already advanced past the shared video without an end marker", () => {
+test("navigation controller does not auto-share a first festival resolution to a different video without a natural-end marker", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
@@ -2096,7 +2096,9 @@ test("navigation controller auto-shares when the first festival resolution alrea
   runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVa?cid=1";
   runtimeState.activeSharedByMemberId = "member-1";
   runtimeState.localMemberId = "member-1";
-  // No natural-end marker was recorded (the snapshot was unresolved when A ended).
+  // No natural-end marker, and the previous identity is the bare festival route:
+  // a slow-resolving manual detour is indistinguishable from an autoplay past the
+  // shared video, so it must NOT be auto-shared (no proof it came from the share).
   runtimeState.sharedVideoNaturalEndUrl = null;
 
   let resolved: string | null = null;
@@ -2134,26 +2136,20 @@ test("navigation controller auto-shares when the first festival resolution alrea
 
   try {
     controller.start();
-    // The page bridge resolves only after the player auto-advanced to B; the
-    // previous identity is still the bare festival route and there is no end
-    // marker, yet this must still be recognised as the shared video's autoplay.
+    // The page bridge resolves to a different video B with only the bare route as
+    // the previous identity and no end marker. Without provable shared-source
+    // evidence this is treated as a (possible) manual detour, not auto-shared.
     resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVb&cid=2";
     windowHarness.intervals[0]?.();
 
     assert.equal(pauseCalls, 0);
-    assert.deepEqual(autoShareRequests, [
-      {
-        previousSharedUrl: "https://www.bilibili.com/video/BVa?cid=1",
-        nextNormalizedPageUrl: "https://www.bilibili.com/video/BVb?cid=2",
-        previousAutoShareTargetUrl: null,
-      },
-    ]);
+    assert.deepEqual(autoShareRequests, []);
   } finally {
     windowHarness.restore();
   }
 });
 
-test("navigation controller pauses a non-sharer when the first festival resolution advanced past the shared video", () => {
+test("navigation controller does not pause a non-sharer on a first festival resolution to a different video without a natural-end marker", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM01";
@@ -2194,8 +2190,10 @@ test("navigation controller pauses a non-sharer when the first festival resoluti
     resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVb&cid=2";
     windowHarness.intervals[0]?.();
 
-    assert.equal(pauseCalls, 1);
-    assert.equal(runtimeState.intendedPlayState, "paused");
+    // Without proof the advance came from the shared video, a follower's first
+    // resolution to a different video is left alone (it may be a manual detour);
+    // the room corrects them via room state if it was a genuine sharer advance.
+    assert.equal(pauseCalls, 0);
   } finally {
     windowHarness.restore();
   }

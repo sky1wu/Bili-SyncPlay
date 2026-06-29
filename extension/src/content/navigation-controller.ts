@@ -320,25 +320,24 @@ export function createNavigationController(args: {
         args.runtimeState.sharedVideoNaturalEndUrl === activeSharedUrl &&
         now - args.runtimeState.sharedVideoNaturalEndAt <
           args.initialRoomStatePauseHoldMs;
-      // The page bridge resolved this address-bar-opaque (festival) page for the
-      // first time only *after* the player had already auto-advanced past the
-      // shared video: the previous identity is still the page's bare (unresolved)
-      // route and the old video's `ended` never recorded a natural-end marker
-      // (there was no matching snapshot then). With `canConfirmDifferentVideo`
-      // already true (the room's share is a known, stable, different video) and no
-      // recent gesture (gated below), the most likely explanation is the shared
-      // video's autoplay-next — so the sharer still schedules the auto-share and a
-      // non-sharer is still paused, rather than leaving the room behind. The
-      // recent-gesture gate keeps a genuine manual navigation to a festival page
-      // from being misread as this case.
-      const navigatedFromUnresolvedFestivalPage =
-        isAddressBarOpaqueVideoUrl(rawPageUrl) &&
-        previousNormalizedPageUrl !== null &&
-        isUnstableSharedVideoUrl(previousNormalizedPageUrl) &&
-        samePathname(previousNormalizedPageUrl, rawPageUrl);
+      // Classify as the shared video's autoplay only on *provable* evidence that
+      // the advance came from the room's shared video:
+      //   - a durable natural-end marker for it (`navigatedFromSharedVideoEnd`), or
+      //   - the previous page equals the shared anchor — either `activeSharedUrl`
+      //     directly, the resolved identity of a bare-route festival share
+      //     (`effectiveSharedUrl`), or our own in-flight chained target.
+      // We deliberately do NOT infer it from "the first resolution of this festival
+      // page landed on some different video": when the page bridge resolves a
+      // manually opened/clicked festival page slowly (past `userGestureGraceMs`, or
+      // when the navigation was not gesture-tracked), the previous identity is
+      // still the bare route and that heuristic would auto-share a manual detour
+      // (and pause non-sharers) without proof it came from the shared video. The
+      // cost is that an autoplay-next whose page bridge resolves only after the
+      // player already advanced past the shared video — and which left no natural-
+      // end marker — is not auto-shared; that ambiguous case is indistinguishable
+      // from a manual detour, so we err on the side of not hijacking the room.
       const navigatedFromSharedVideo =
         navigatedFromSharedVideoEnd ||
-        navigatedFromUnresolvedFestivalPage ||
         (previousNormalizedPageUrl !== null &&
           (previousNormalizedPageUrl === effectiveSharedUrl ||
             previousNormalizedPageUrl === previousPendingAutoShareTargetUrl));
