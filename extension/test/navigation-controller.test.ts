@@ -1496,3 +1496,212 @@ test("navigation controller clears stale gesture state on in-room navigation", (
     windowHarness.restore();
   }
 });
+
+// Festival pages keep a fixed `/festival/<id>` route in the address bar while the
+// player swaps videos, so the navigation watcher observes the in-player video
+// only through the resolved page-bridge snapshot URL. The route itself
+// normalizes to an unstable id; a `?bvid=&cid=` snapshot URL normalizes to the
+// resolved `/video/...` page.
+const FESTIVAL_ROUTE = "https://www.bilibili.com/festival/MyMuji";
+function normalizeFestivalPageUrl(url: string): string | null {
+  if (url.includes("/festival/")) {
+    const bvid = url.match(/[?&]bvid=([^&]+)/);
+    const cid = url.match(/[?&]cid=([^&]+)/);
+    if (bvid && cid) {
+      return `https://www.bilibili.com/video/${bvid[1]}?cid=${cid[1]}`;
+    }
+    return FESTIVAL_ROUTE;
+  }
+  return normalizeTestVideoPageUrl(url);
+}
+
+test("navigation controller schedules auto-share when a festival page autoplays to the next video", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  // The room shares the resolved `/video/...` form of the festival video.
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVa?cid=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+
+  let resolved: string | null = null;
+  let pauseCalls = 0;
+  const autoShareRequests: Array<{
+    previousSharedUrl: string;
+    nextNormalizedPageUrl: string;
+    previousAutoShareTargetUrl: string | null;
+  }> = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => FESTIVAL_ROUTE,
+    normalizeVideoPageUrl: normalizeFestivalPageUrl,
+    getResolvedVideoUrl: () => resolved,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    // The snapshot first resolves to the *shared* video A — this is discovery of
+    // the already-playing video, not an autoplay, so it must not pause or share.
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1";
+    windowHarness.intervals[0]?.();
+    assert.equal(pauseCalls, 0);
+    assert.deepEqual(autoShareRequests, []);
+
+    // The festival player autoplays to the next video B; the address bar stays on
+    // the festival route, but the resolved snapshot now points at B.
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVb&cid=2";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(pauseCalls, 0);
+    assert.deepEqual(autoShareRequests, [
+      {
+        previousSharedUrl: "https://www.bilibili.com/video/BVa?cid=1",
+        nextNormalizedPageUrl: "https://www.bilibili.com/video/BVb?cid=2",
+        previousAutoShareTargetUrl: null,
+      },
+    ]);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller adopts a first festival resolution without pausing the shared video", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVa?cid=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+
+  let resolved: string | null = null;
+  let pauseCalls = 0;
+  let hydrateCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => FESTIVAL_ROUTE,
+    normalizeVideoPageUrl: normalizeFestivalPageUrl,
+    getResolvedVideoUrl: () => resolved,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1";
+    windowHarness.intervals[0]?.();
+
+    // The shared video that just resolved must not be paused, re-hydrated, or
+    // flipped into a pending-hydration/paused state.
+    assert.equal(pauseCalls, 0);
+    assert.equal(hydrateCalls, 0);
+    assert.equal(runtimeState.pendingRoomStateHydration, false);
+    assert.equal(runtimeState.intendedPlayState, "playing");
+
+    // A redundant re-resolution of the same video is a no-op (identity adopted).
+    windowHarness.intervals[0]?.();
+    assert.equal(pauseCalls, 0);
+    assert.equal(hydrateCalls, 0);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller does not flip-flop when a festival snapshot is briefly cleared", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVa?cid=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+
+  let resolved: string | null = null;
+  let pauseCalls = 0;
+  let hydrateCalls = 0;
+  const autoShareRequests: unknown[] = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => FESTIVAL_ROUTE,
+    normalizeVideoPageUrl: normalizeFestivalPageUrl,
+    getResolvedVideoUrl: () => resolved,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {
+      hydrateCalls += 1;
+    },
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1";
+    windowHarness.intervals[0]?.();
+
+    // The snapshot is momentarily cleared (as the nav handler does after a real
+    // navigation). The watcher must defer, not treat the bare route as a switch
+    // to a non-video page and pause the still-playing shared video.
+    resolved = null;
+    windowHarness.intervals[0]?.();
+    windowHarness.intervals[0]?.();
+
+    assert.equal(pauseCalls, 0);
+    assert.equal(hydrateCalls, 0);
+    assert.deepEqual(autoShareRequests, []);
+    assert.equal(runtimeState.pendingRoomStateHydration, false);
+  } finally {
+    windowHarness.restore();
+  }
+});
