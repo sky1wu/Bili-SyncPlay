@@ -113,6 +113,16 @@ export function createPlaybackBindingController(args: {
   const hasRecentUserGestureInPlayer = () =>
     nowOf() - args.runtimeState.lastUserGestureInPlayerAt <
     args.userGestureGraceMs;
+  // A FRESH in-player play intent: an in-player gesture that also postdates the
+  // last forced pause. While the page bridge resolves, the unconfirmed-context
+  // hold force-pauses (updating `lastForcedPauseAt`); the SAME click that
+  // triggered that pause must not then authorize the delayed `play`/`playing`
+  // once the bridge resolves — only a gesture made AFTER the forced pause counts
+  // as a new play intent (mirrors `shouldPreRecordNonSharedExplicitPlay`).
+  const hasFreshInPlayerPlayIntent = () =>
+    hasRecentUserGestureInPlayer() &&
+    args.runtimeState.lastUserGestureInPlayerAt >
+      args.runtimeState.lastForcedPauseAt;
   const getRecentExplicitSeekWithoutNewGestureAt = (): number | null => {
     const explicitAction = args.runtimeState.lastExplicitUserAction;
     if (
@@ -426,16 +436,11 @@ export function createPlaybackBindingController(args: {
 
   function shouldPreRecordNonSharedExplicitPlay(): boolean {
     const currentVideo = args.getSharedVideo();
-    // Require an in-player gesture (not just any document-level one) that
-    // postdates the forced pause: this is what authorizes manual play of a
+    // Require a FRESH in-player gesture (not just any document-level one, and one
+    // that postdates the forced pause): this is what authorizes manual play of a
     // non-shared video on a load-paused page, so a stray click elsewhere followed
     // by the page-load autoplay is not mistaken for the user pressing play.
-    if (
-      !hasRecentUserGestureInPlayer() ||
-      args.runtimeState.lastUserGestureInPlayerAt <=
-        args.runtimeState.lastForcedPauseAt ||
-      !isKnownNonSharedVideo(currentVideo)
-    ) {
+    if (!hasFreshInPlayerPlayIntent() || !isKnownNonSharedVideo(currentVideo)) {
       return false;
     }
 
@@ -720,7 +725,7 @@ export function createPlaybackBindingController(args: {
           args.getSharedVideo()?.url,
         );
         if (
-          !hasRecentUserGestureInPlayer() &&
+          !hasFreshInPlayerPlayIntent() &&
           (args.runtimeState.intendedPlayState === "paused" ||
             args.runtimeState.intendedPlayState === "buffering") &&
           normalizedCurrentUrl !== null &&
