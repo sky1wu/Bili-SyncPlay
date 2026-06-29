@@ -2088,6 +2088,87 @@ test("navigation controller auto-shares a same-page autoplay off a bare-route fe
   }
 });
 
+test("navigation controller anchors a bare-route festival share even when the address bar keeps a frozen bvid", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  // The room shares this festival page by its bare route, so `activeSharedUrl` is
+  // unstable — but this tab opened the page from a share link whose address bar
+  // keeps a frozen `?bvid=BVa&cid=1`, so the baseline normalizes to a *stable*
+  // `/video/BVa`. The first snapshot resolution to the same A therefore lands on
+  // the "normalized unchanged" short-circuit, not the discovery guard.
+  runtimeState.activeSharedUrl = FESTIVAL_ROUTE;
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+
+  let resolved: string | null = null;
+  let pauseCalls = 0;
+  const autoShareRequests: Array<{
+    previousSharedUrl: string;
+    nextNormalizedPageUrl: string;
+    previousAutoShareTargetUrl: string | null;
+  }> = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    // Frozen address bar: keeps the bvid of the video the page was opened on.
+    getCurrentPageUrl: () =>
+      "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1",
+    normalizeVideoPageUrl: normalizeFestivalPageUrl,
+    getResolvedVideoUrl: () => resolved,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    // First resolution discovers the bare-route share's concrete video A. Its
+    // string differs from the frozen address bar (query order) but normalizes to
+    // the same stable `/video/BVa`, so it hits the "normalized unchanged" branch —
+    // which must still record the resolved anchor.
+    resolved = "https://www.bilibili.com/festival/MyMuji?cid=1&bvid=BVa";
+    windowHarness.intervals[0]?.();
+    assert.deepEqual(autoShareRequests, []);
+    assert.equal(
+      runtimeState.resolvedSharedVideoUrl,
+      "https://www.bilibili.com/video/BVa?cid=1",
+    );
+
+    // Same-page autoplay to B is then classified via the recorded anchor and
+    // auto-shared with the room's bare route as `previousSharedUrl`.
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVb&cid=2";
+    windowHarness.intervals[0]?.();
+
+    assert.equal(pauseCalls, 0);
+    assert.deepEqual(autoShareRequests, [
+      {
+        previousSharedUrl: FESTIVAL_ROUTE,
+        nextNormalizedPageUrl: "https://www.bilibili.com/video/BVb?cid=2",
+        previousAutoShareTargetUrl: null,
+      },
+    ]);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller does not auto-share a first festival resolution to a different video without a natural-end marker", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();

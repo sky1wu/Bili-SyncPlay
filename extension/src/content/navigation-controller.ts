@@ -105,10 +105,37 @@ export function createNavigationController(args: {
     }
 
     const nextNormalizedPageUrl = args.normalizeVideoPageUrl(nextPageUrl);
+
+    // The room shares THIS page by its bare (unstable) festival route — the page
+    // bridge could not resolve a `bvid`/`cid` when it was shared. Resolving it now
+    // is discovery of that share's concrete video.
+    const sharedUrlForDiscovery = args.runtimeState.activeSharedUrl;
+    const sharedIsUnstableSamePageRoute =
+      isUnstableSharedVideoUrl(sharedUrlForDiscovery) &&
+      samePathname(sharedUrlForDiscovery, nextPageUrl);
+    // The first snapshot resolution of a bare-route festival share to its concrete
+    // stable `/video/...`. Record it as the stable "from" anchor for the next
+    // same-page autoplay (`activeSharedUrl` itself stays the unstable route until
+    // the room confirms a concrete video). This must run even when the resolved URL
+    // is unchanged from the baseline: a festival page opened from a share link
+    // keeps a frozen `?bvid=A&cid=...` whose baseline already normalizes to the
+    // same stable `/video/A`, so the resolution hits the "normalized unchanged"
+    // short-circuit below before reaching the discovery guard further down —
+    // without this it would never anchor and the later A→B autoplay could not be
+    // classified as the room share's autoplay.
+    const isBareRouteShareResolution =
+      resolvedVideoUrl !== null &&
+      nextNormalizedPageUrl !== null &&
+      !isUnstableSharedVideoUrl(nextNormalizedPageUrl) &&
+      sharedIsUnstableSamePageRoute;
+
     if (
       nextNormalizedPageUrl !== null &&
       nextNormalizedPageUrl === lastObservedNormalizedPageUrl
     ) {
+      if (isBareRouteShareResolution) {
+        args.runtimeState.resolvedSharedVideoUrl = nextNormalizedPageUrl;
+      }
       lastObservedPageUrl = nextPageUrl;
       return;
     }
@@ -147,13 +174,6 @@ export function createNavigationController(args: {
     // ended and the player auto-advanced before the snapshot resolved — likewise
     // fall through so the sharer still schedules the auto-share and a non-sharer
     // is still paused.
-    const sharedUrlForDiscovery = args.runtimeState.activeSharedUrl;
-    // The room shares THIS page by its bare (unstable) festival route — the page
-    // bridge could not resolve a `bvid`/`cid` when it was shared. Resolving it now
-    // is discovery of that share's concrete video.
-    const sharedIsUnstableSamePageRoute =
-      isUnstableSharedVideoUrl(sharedUrlForDiscovery) &&
-      samePathname(sharedUrlForDiscovery, nextPageUrl);
     if (
       resolvedVideoUrl !== null &&
       isUnstableSharedVideoUrl(previousNormalizedPageUrl) &&
