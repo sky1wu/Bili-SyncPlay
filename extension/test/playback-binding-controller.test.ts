@@ -1288,18 +1288,20 @@ test("playback binding controller holds a play while the page bridge is resolvin
   }
 });
 
-test("playback binding controller holds a delayed non-sharer autoplay once the pause hold expired while the bridge is still resolving", async () => {
+test("playback binding controller stops force-pausing an unresolved non-shared page once the pause hold has expired", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
   runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
   runtimeState.pendingRoomStateHydration = false;
   runtimeState.intendedPlayState = "paused";
-  // The pause hold has already expired by the time the delayed autoplay fires.
+  // The pause hold has already expired and the page bridge has STILL not resolved
+  // a current video (e.g. the bridge is stuck or failed). Holding forever would
+  // trap the user with no way to manually play this local video, so the hold is
+  // bounded: once `pauseHoldUntil` elapses we no longer force-pause the play.
   runtimeState.pauseHoldUntil = 10_000;
   runtimeState.nonSharerAutoplayHoldUrl =
     "https://www.bilibili.com/video/BVother?p=1";
-  // No gesture — this is an unsolicited page-load autoplay, not a manual play.
   runtimeState.lastUserGestureAt = 0;
   let pausedByGuard = 0;
   const originalSetTimeout = globalThis.window.setTimeout;
@@ -1310,7 +1312,7 @@ test("playback binding controller holds a delayed non-sharer autoplay once the p
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
-    // Page bridge still has not resolved the URL when the autoplay arrives.
+    // Page bridge still has not resolved the URL when the play arrives.
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -1342,8 +1344,9 @@ test("playback binding controller holds a delayed non-sharer autoplay once the p
     dom.listeners.get("play")?.(new Event("play"));
     await Promise.resolve();
 
-    // Hold expired + bridge unresolved + armed marker + no gesture → still paused.
-    assert.equal(pausedByGuard, 1);
+    // Hold expired + bridge still unresolved → the bounded hold lifts (escape
+    // hatch), so the play is not force-paused.
+    assert.equal(pausedByGuard, 0);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;
@@ -1434,6 +1437,12 @@ test("playback binding controller does not re-pause an authorized non-shared pla
     await Promise.resolve();
 
     assert.equal(pausedByGuard, 0);
+    // The authorization survives the transient null so a later autoplay-next off
+    // this video can still be classified as a user-driven local navigation.
+    assert.equal(
+      runtimeState.explicitNonSharedPlaybackUrl,
+      "https://www.bilibili.com/video/BVother?p=1",
+    );
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;

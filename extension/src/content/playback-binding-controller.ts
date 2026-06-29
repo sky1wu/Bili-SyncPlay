@@ -541,7 +541,14 @@ export function createPlaybackBindingController(args: {
     const currentVideo = args.getSharedVideo();
     const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
     if (!currentVideo) {
-      args.runtimeState.explicitNonSharedPlaybackUrl = null;
+      // The page bridge transiently returns no current video (player rebuild /
+      // buffer recovery) without any real navigation. Do NOT clear
+      // `explicitNonSharedPlaybackUrl` here: dropping the authorization on such a
+      // blip would let a later autoplay-next off this manually-played video go
+      // unclassified by the navigation controller (no
+      // `previousExplicitNonSharedPlaybackUrl`), autoplaying the next episode. A
+      // genuine navigation clears it via the navigation reset; a manual pause
+      // clears it in `onPause`.
       return false;
     }
     if (!hasStableSharedVideoIdentity(currentVideo)) {
@@ -669,34 +676,17 @@ export function createPlaybackBindingController(args: {
         return true;
       }
 
-      if (
-        args.runtimeState.activeRoomCode &&
-        currentVideo === null &&
-        args.runtimeState.nonSharerAutoplayHoldUrl !== null &&
-        (args.runtimeState.intendedPlayState === "paused" ||
-          args.runtimeState.intendedPlayState === "buffering")
-      ) {
-        // A play fired on a non-shared page the navigation controller armed a hold
-        // for (`nonSharerAutoplayHoldUrl`) while the page bridge has still not
-        // resolved `currentVideo`. This may be a slow page-load autoplay or a
-        // gesture-adjacent play, but in the bridge-unresolved window we cannot
-        // anchor an authorization (no resolved video) and cannot tell a real play
-        // press from a stray document-level gesture, so the "load paused" hold
-        // stays in force and we pause it regardless of any recent gesture.
-        // `shouldReapplyPauseHoldForUnconfirmedSharedVideo` bails once the pause
-        // hold expires and `forcePauseOnNonSharedPage` bails on the null current
-        // video, so this independent guard is what holds a late autoplay. Manual
-        // play is honored only after the bridge resolves (`preAuthorize...` clears
-        // this marker and releases the hold).
-        args.debugLog(
-          "Forced pause for play on non-shared page while page bridge unresolved",
-        );
-        args.runtimeState.lastForcedPauseAt = nowOf();
-        window.setTimeout(() => {
-          pauseVideo(video);
-        }, 0);
-        return true;
-      }
+      // While the page bridge has not resolved `currentVideo`, a play on a held
+      // non-shared page is force-paused by
+      // `shouldReapplyPauseHoldForUnconfirmedSharedVideo` — but only while the
+      // pause hold (`pauseHoldUntil`, ~`initialRoomStatePauseHoldMs`) is still
+      // active. We deliberately do NOT keep pausing past that bound: if the bridge
+      // never produces a current video (script/ad stage stuck or bridge failure),
+      // an unbounded hold would trap the user in "load paused" forever with no way
+      // to manually play this local video. After the hold window elapses we stop
+      // forcing pause on the still-unresolved page, accepting that a late
+      // page-load autoplay may then start — that is the bounded escape hatch for a
+      // genuine manual play the user makes once the hold has expired.
 
       if (forcePauseOnNonSharedPage(video)) {
         // `forcePauseOnNonSharedPage` only suppresses the broadcast; it does not
