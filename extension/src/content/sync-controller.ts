@@ -206,7 +206,18 @@ export function createSyncController(args: {
     reason: "pending" | "apply",
     actorId = "system",
   ): void {
-    args.runtimeState.programmaticApplySignature = signature;
+    // Normalize the signature url at the single write point so every consumer
+    // (programmatic-event guard, programmatic-paused window, programmatic
+    // ratechange detection) compares it against the equally normalized current
+    // url. The raw playback url can differ from its normalized form (e.g.
+    // festival/watchlater shares resolve to /video/...), and a mismatch would
+    // make our own programmatic rate/seek echoes look like genuine user actions.
+    const normalizedSignatureUrl =
+      args.normalizeUrl(signature.url) ?? signature.url;
+    args.runtimeState.programmaticApplySignature = {
+      ...signature,
+      url: normalizedSignatureUrl,
+    };
     args.runtimeState.programmaticApplyUntil =
       nowOf() + args.programmaticApplyWindowMs;
     args.debugLog(

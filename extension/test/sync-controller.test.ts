@@ -2048,3 +2048,94 @@ test("sync controller abandons a rate-only catch-up to broadcast a real stall wi
     windowHarness.restore();
   }
 });
+
+test("programmatic apply signature stores the normalized url for mismatched (festival) shares", async () => {
+  const windowHarness = installWindowStub();
+  const harness = createControllerHarness();
+  // A festival/watchlater-style share whose raw url normalizes to /video/...
+  const rawUrl = "https://www.bilibili.com/festival/x?bvid=BV1xx411c7mD&cid=2";
+  const normalizedUrl = "https://www.bilibili.com/video/BV1xx411c7mD";
+  const normalizeUrl = (url: string | undefined | null) =>
+    url == null
+      ? null
+      : url.includes("bvid=BV1xx411c7mD")
+        ? normalizedUrl
+        : url;
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: rawUrl,
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: false,
+    readyState: 4,
+    currentTime: 24,
+    playbackRate: 1,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.hasReceivedInitialRoomState = true;
+  harness.runtimeState.localMemberId = "local-member";
+
+  harness.controller = createSyncController({
+    runtimeState: harness.runtimeState,
+    lastAppliedVersionByActor: new Map(),
+    broadcastLogState: { key: null, at: 0 },
+    ignoredSelfPlaybackLogState: { key: null, at: 0 },
+    localIntentGuardMs: 500,
+    pauseHoldMs: 1_000,
+    initialRoomStatePauseHoldMs: 1_500,
+    remoteEchoSuppressionMs: 800,
+    remotePlayTransitionGuardMs: 500,
+    remoteFollowPlayingWindowMs: 3_000,
+    programmaticApplyWindowMs: 700,
+    userGestureGraceMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    remotePauseDebounceMs: 0,
+    nextSeq: () => 1,
+    markBroadcastAt: () => {},
+    getNow: () => 20_000,
+    debugLog: (message) => harness.debugLogs.push(message),
+    shouldLogHeartbeat: () => true,
+    runtimeSendMessage: async (message) => {
+      harness.runtimeMessages.push(message);
+      return null;
+    },
+    getHydrateRetryTimer: () => null,
+    setHydrateRetryTimer: () => {},
+    getVideoElement: () => video,
+    getCurrentPlaybackVideo: async () => sharedVideo,
+    getSharedVideo: () => sharedVideo,
+    normalizeUrl,
+    notifyRoomStateToasts: () => {},
+    maybeShowSharedVideoToast: () => {},
+  });
+
+  try {
+    await harness.controller.applyRoomState({
+      roomCode: "ROOM01",
+      sharedVideo,
+      playback: {
+        url: rawUrl,
+        currentTime: 24.8,
+        playState: "playing",
+        playbackRate: 1,
+        updatedAt: 1,
+        serverTime: 19_900,
+        actorId: "remote-member",
+        seq: 10,
+      },
+      members: [],
+    });
+
+    // The armed signature must carry the normalized url, so our own programmatic
+    // rate/seek echoes are not misclassified as genuine user actions.
+    assert.equal(
+      harness.runtimeState.programmaticApplySignature?.url,
+      normalizedUrl,
+    );
+  } finally {
+    windowHarness.restore();
+  }
+});

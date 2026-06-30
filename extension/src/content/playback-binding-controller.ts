@@ -950,13 +950,15 @@ export function createPlaybackBindingController(args: {
         if (!shouldTreatRateChangeAsProgrammatic(video)) {
           rememberExplicitUserAction("ratechange");
           // Drop the rate-catch-up session (without restoring its stale snapshot
-          // rate) only on a genuine user gesture, mirroring onSeeked. The
-          // programmatic-classification check alone can false-negative when the
-          // shared url needs normalization (e.g. festival shares), so relying on
-          // it would let our OWN catch-up ratechange be mistaken for a user
-          // takeover — cancelling the self-restore and leaving the temporary
-          // rate stuck. A real speed change carries a recent user gesture.
-          if (hasRecentUserGesture()) {
+          // rate) only on a genuine IN-PLAYER gesture. shouldTreatRateChange...
+          // is now reliable (signature urls are normalized), but as defense in
+          // depth we still require strong rate-change evidence: a document-level
+          // gesture (lastUserGestureAt — refreshed by any page click / popstate)
+          // does not mean the user changed speed, whereas an in-player gesture
+          // (pointer in the player / play-toggle key, as the speed menu is) does.
+          // This prevents a stray page click near our own catch-up ratechange
+          // from cancelling the self-restore and leaving the temporary rate stuck.
+          if (hasRecentUserGestureInPlayer()) {
             args.cancelActiveSoftApply(video, "user-ratechange");
           }
         }
