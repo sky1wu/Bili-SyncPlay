@@ -346,6 +346,10 @@ test("sync controller uses rate-only reconcile for medium playing drift", async 
       ),
       true,
     );
+    // A rate-only catch-up must NOT arm the soft-apply cooldown on convergence,
+    // otherwise the next genuine remote reconcile would be suppressed and the
+    // residual drift would persist.
+    assert.equal(harness.runtimeState.softApplyCooldownUntil, 0);
   } finally {
     windowHarness.restore();
   }

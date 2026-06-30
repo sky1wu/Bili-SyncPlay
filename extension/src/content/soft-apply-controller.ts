@@ -27,6 +27,7 @@ export interface SoftApplyController {
   upsertActiveSoftApply(
     playback: PlaybackState,
     remainingDriftSeconds: number,
+    armCooldownOnConverge?: boolean,
   ): void;
   shouldCancelActiveSoftApplyForPlayback(
     playback: PlaybackState | null,
@@ -65,6 +66,11 @@ export function createSoftApplyController(args: {
     targetTime: number;
     restorePlaybackRate: number;
     deadlineAt: number;
+    // Whether converging this session should arm the soft-apply cooldown. Only
+    // true soft-apply sessions (which seek the playhead) warrant the cooldown;
+    // a rate-only catch-up merely nudges the rate, so arming a cooldown for it
+    // would wrongly suppress the next genuine remote reconcile and leave drift.
+    armCooldownOnConverge: boolean;
   } | null = null;
   let activeSoftApplyTimer: number | null = null;
 
@@ -136,7 +142,10 @@ export function createSoftApplyController(args: {
         "apply",
       );
     }
-    if (reason === "converged" || reason === "apply-hard-seek") {
+    if (
+      session.armCooldownOnConverge &&
+      (reason === "converged" || reason === "apply-hard-seek")
+    ) {
       armSoftApplyCooldown(session.normalizedUrl, reason);
     } else if (
       args.runtimeState.softApplyCooldownUrl === session.normalizedUrl
@@ -169,6 +178,7 @@ export function createSoftApplyController(args: {
   function upsertActiveSoftApply(
     playback: PlaybackState,
     remainingDriftSeconds: number,
+    armCooldownOnConverge = true,
   ): void {
     const normalizedUrl = args.normalizeUrl(playback.url);
     if (!normalizedUrl) {
@@ -176,19 +186,28 @@ export function createSoftApplyController(args: {
       return;
     }
     const timeoutMs = computeSoftApplyTimeoutMs(remainingDriftSeconds);
-    const restorePlaybackRate =
-      activeSoftApply && activeSoftApply.normalizedUrl === normalizedUrl
-        ? activeSoftApply.restorePlaybackRate
-        : playback.playbackRate;
+    const sameSession =
+      activeSoftApply !== null &&
+      activeSoftApply.normalizedUrl === normalizedUrl;
+    const restorePlaybackRate = sameSession
+      ? activeSoftApply!.restorePlaybackRate
+      : playback.playbackRate;
+    // The cooldown flag is sticky within a session: once a real soft-apply has
+    // run on this url, keep arming the cooldown even if a later rate-only nudge
+    // re-upserts the same session.
+    const nextArmCooldownOnConverge =
+      (sameSession && activeSoftApply!.armCooldownOnConverge) ||
+      armCooldownOnConverge;
     activeSoftApply = {
       normalizedUrl,
       targetTime: playback.currentTime,
       restorePlaybackRate,
       deadlineAt: nowOf() + timeoutMs,
+      armCooldownOnConverge: nextArmCooldownOnConverge,
     };
     scheduleActiveSoftApplyTimeout();
     args.debugLog(
-      `Started soft apply url=${normalizedUrl} target=${playback.currentTime.toFixed(2)} rate=${restorePlaybackRate.toFixed(2)} timeout=${timeoutMs}`,
+      `Started soft apply url=${normalizedUrl} target=${playback.currentTime.toFixed(2)} rate=${restorePlaybackRate.toFixed(2)} timeout=${timeoutMs} cooldown=${nextArmCooldownOnConverge}`,
     );
   }
 
