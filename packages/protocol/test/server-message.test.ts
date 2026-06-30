@@ -244,6 +244,64 @@ test("rejects room:state when playback userInitiated is non-boolean", () => {
   );
 });
 
+test("accepts room:state when playback carries naturalEnd:true", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: {
+        roomCode: "ABC123",
+        sharedVideo: {
+          videoId: "BV1xx411c7mD",
+          url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+          title: "Video",
+        },
+        playback: {
+          url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+          currentTime: 262.5,
+          playState: "paused",
+          naturalEnd: true,
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 1,
+          actorId: "member-1",
+          seq: 1,
+        },
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    }),
+    true,
+  );
+});
+
+test("rejects room:state when playback naturalEnd is non-boolean", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: {
+        roomCode: "ABC123",
+        sharedVideo: {
+          videoId: "BV1xx411c7mD",
+          url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+          title: "Video",
+        },
+        playback: {
+          url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+          currentTime: 262.5,
+          playState: "paused",
+          naturalEnd: "yes",
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 1,
+          actorId: "member-1",
+          seq: 1,
+        },
+        members: [{ id: "member-1", name: "Alice" }],
+      },
+    }),
+    false,
+  );
+});
+
 test("rejects room:state when playback sync intent is invalid", () => {
   assert.equal(
     isServerMessage({

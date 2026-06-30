@@ -48,6 +48,7 @@ export interface SyncController {
   broadcastPlayback(
     video: HTMLVideoElement,
     eventSource?: LocalPlaybackEventSource,
+    naturalEnd?: boolean,
   ): Promise<void>;
   applyRoomState(
     state: RoomState,
@@ -659,6 +660,7 @@ export function createSyncController(args: {
   async function broadcastPlayback(
     video: HTMLVideoElement,
     eventSource: LocalPlaybackEventSource = "manual",
+    naturalEnd?: boolean,
   ): Promise<void> {
     const now = nowOf();
     if (!args.runtimeState.hydrationReady) {
@@ -1253,6 +1255,7 @@ export function createSyncController(args: {
         now,
         userGestureGraceMs: args.userGestureGraceMs,
       }),
+      naturalEnd,
       userInitiated: deriveUserInitiatedPause({
         eventSource,
         playState,

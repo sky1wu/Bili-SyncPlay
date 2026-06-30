@@ -210,7 +210,12 @@ export function getRoomStateToastMessages(args: {
   if (
     args.pendingRoomStateHydration ||
     sharedVideoChanged ||
-    !args.isCurrentPageShowingSharedVideo
+    !args.isCurrentPageShowingSharedVideo ||
+    // The sharer's shared video reached its natural end. The flushed terminal
+    // paused state must be applied silently — surfacing a "paused" / "jumped to
+    // <end>" toast here is misleading (the video ended on its own) and noisy
+    // moments before the autoplay-next share lands.
+    args.nextState.playback?.naturalEnd === true
   ) {
     return { messages, nextSeekToastByActor };
   }

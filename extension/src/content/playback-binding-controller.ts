@@ -47,6 +47,7 @@ export function createPlaybackBindingController(args: {
   broadcastPlayback: (
     video: HTMLVideoElement,
     eventSource?: LocalPlaybackEventSource,
+    naturalEnd?: boolean,
   ) => Promise<void>;
   cancelActiveSoftApply: (
     video: HTMLVideoElement | null,
@@ -392,7 +393,11 @@ export function createPlaybackBindingController(args: {
     args.debugLog(
       `Flushed sharer end-of-video paused state after no autoplay-next followed`,
     );
-    void args.broadcastPlayback(video, "pause");
+    // Tag the terminal paused as a natural end so peers update their state
+    // without surfacing a misleading "paused" / "jumped to <end>" toast. This
+    // also covers the slow-handoff case where the autoplay-next eventually
+    // lands after the flush window (e.g. a recommend-autoplay countdown).
+    void args.broadcastPlayback(video, "pause", true);
   }
 
   function shouldReapplyHoldAfterSharedVideoEnd(

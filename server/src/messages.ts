@@ -34,4 +34,4 @@ export const UNSUPPORTED_PROTOCOL_VERSION_MESSAGE =
 export const MIN_PROTOCOL_VERSION = 1;
 
 /** Current protocol version this server implements. */
-export const CURRENT_PROTOCOL_VERSION = 2;
+export const CURRENT_PROTOCOL_VERSION = 3;

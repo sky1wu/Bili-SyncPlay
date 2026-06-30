@@ -57,6 +57,7 @@ export function createPlaybackBroadcastPayload(args: {
   playState: PlaybackState["playState"];
   syncIntent?: PlaybackState["syncIntent"];
   userInitiated?: boolean;
+  naturalEnd?: boolean;
   playbackRate: number;
   actorId: string;
   seq: number;
@@ -73,10 +74,13 @@ export function createPlaybackBroadcastPayload(args: {
     actorId: args.actorId,
     seq: args.seq,
   };
-  // Omit the field entirely (instead of serializing `false`) when not set, so
+  // Omit these flags entirely (instead of serializing `false`) when not set, so
   // we stay byte-identical to legacy senders on the wire for non-user pauses.
   if (args.userInitiated) {
     payload.userInitiated = true;
+  }
+  if (args.naturalEnd) {
+    payload.naturalEnd = true;
   }
   return payload;
 }

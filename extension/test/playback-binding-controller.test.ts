@@ -3070,8 +3070,10 @@ test("playback binding controller flushes the sharer's terminal paused state whe
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
     getLastBroadcastAt: () => 0,
-    broadcastPlayback: async (_video, eventSource) => {
-      events.push(eventSource ?? "manual");
+    broadcastPlayback: async (_video, eventSource, naturalEnd) => {
+      events.push(
+        `${eventSource ?? "manual"}:${naturalEnd ? "natural-end" : "none"}`,
+      );
     },
     cancelActiveSoftApply: () => {},
     maintainActiveSoftApply: () => {},
@@ -3097,11 +3099,12 @@ test("playback binding controller flushes the sharer's terminal paused state whe
     );
 
     // The window elapses with the player still parked at the end (no
-    // autoplay-next): the terminal paused state is flushed and the marker cleared.
+    // autoplay-next): the terminal paused state is flushed (tagged as a natural
+    // end so peers stay quiet) and the marker cleared.
     flush?.cb();
     await Promise.resolve();
 
-    assert.deepEqual(events, ["pause"]);
+    assert.deepEqual(events, ["pause:natural-end"]);
     assert.equal(runtimeState.sharerEndedSuppressionUrl, null);
     assert.equal(runtimeState.sharerEndedSuppressionUntil, 0);
     assert.equal(runtimeState.sharerEndedSuppressionArmedAt, 0);

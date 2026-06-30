@@ -135,6 +135,60 @@ test("builds seek and rate toast messages for remote playback changes", () => {
   assert.deepEqual(result.messages, ["Alice 切换到 1.5x", "Alice 跳转到 0:42"]);
 });
 
+test("suppresses playback toasts for a natural-end paused state", () => {
+  setLocaleForTests("zh-CN");
+  const previousState = createRoomState({
+    members: [
+      { id: "self", name: "Me" },
+      { id: "remote", name: "Alice" },
+    ],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=1",
+    playback: {
+      url: "https://www.bilibili.com/video/BV1?p=1",
+      currentTime: 250,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 1,
+      serverTime: 1000,
+      actorId: "remote",
+      seq: 1,
+    },
+  });
+  // The sharer's shared video reached its natural end: a paused state parked at
+  // the end, flagged natural-end. It must apply silently — no "paused" and no
+  // "jumped to <end>" toast (the playing→paused jump would otherwise trip both).
+  const nextState = createRoomState({
+    members: [
+      { id: "self", name: "Me" },
+      { id: "remote", name: "Alice" },
+    ],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=1",
+    playback: {
+      url: "https://www.bilibili.com/video/BV1?p=1",
+      currentTime: 262.5,
+      playState: "paused",
+      naturalEnd: true,
+      playbackRate: 1,
+      updatedAt: 2,
+      serverTime: 7000,
+      actorId: "remote",
+      seq: 2,
+    },
+  });
+
+  const result = getRoomStateToastMessages({
+    previousState,
+    nextState,
+    localMemberId: "self",
+    pendingRoomStateHydration: false,
+    isCurrentPageShowingSharedVideo: true,
+    now: 1000,
+    lastSeekToastByActor: new Map(),
+  });
+
+  assert.deepEqual(result.messages, []);
+});
+
 test("builds shared video toast for another member only once", () => {
   setLocaleForTests("zh-CN");
   const state = createRoomState({

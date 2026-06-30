@@ -43,6 +43,16 @@ export interface PlaybackState {
    * backward-compatibility: legacy senders omit it; legacy receivers ignore it.
    */
   userInitiated?: boolean;
+  /**
+   * Hint that this paused state was produced because the sharer's shared video
+   * reached its *natural* end (the sharer flushes a terminal paused once no
+   * autoplay-next followed within the suppression window, or it followed too
+   * slowly — e.g. behind a recommend-autoplay countdown). Receivers apply the
+   * paused state but must not surface a misleading "paused" / "jumped to <end>"
+   * toast for it. Additive and optional: legacy senders omit it; legacy
+   * receivers ignore the unknown field and keep their prior toast behaviour.
+   */
+  naturalEnd?: boolean;
   playbackRate: number;
   updatedAt: number;
   serverTime: number;
