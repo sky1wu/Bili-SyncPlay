@@ -34,7 +34,15 @@ export function isGestureInsidePlayer(event: Event): boolean {
     return false;
   }
   if (event.type === "keydown") {
-    return PLAY_TOGGLE_KEYS.has((event as KeyboardEvent).key);
+    const keyboardEvent = event as KeyboardEvent;
+    // Auto-repeat keydowns from holding the key are not discrete play intents.
+    // Counting them would keep refreshing `lastUserGestureInPlayerAt` past a
+    // forced pause, letting a single held press masquerade as a NEW post-pause
+    // gesture and wrongly release the load hold without the user pressing again.
+    if (keyboardEvent.repeat) {
+      return false;
+    }
+    return PLAY_TOGGLE_KEYS.has(keyboardEvent.key);
   }
   return target.closest(PLAYER_CONTAINER_SELECTOR) !== null;
 }

@@ -959,6 +959,85 @@ test("playback binding controller still holds the delayed autoplay when the only
   }
 });
 
+test("playback binding controller authorizes a held non-shared play preceded by a progress-restore seek", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.nonSharerAutoplayHoldUrl =
+    "https://www.bilibili.com/video/BVother?p=1";
+  // The page-bridge hold paused the page at 19_800, then the user pressed play
+  // inside the player at 20_500 (a FRESH in-player gesture postdating that pause).
+  runtimeState.lastForcedPauseAt = 19_800;
+  runtimeState.lastUserGestureAt = 20_500;
+  runtimeState.lastUserGestureInPlayerAt = 20_500;
+  // A leftover pause hold that authorization must clear so a later blip can't
+  // re-pause the just-authorized playback.
+  runtimeState.pauseHoldUntil = 25_000;
+  let pausedByGuard = 0;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => ({
+      videoId: "BVother:p1",
+      url: "https://www.bilibili.com/video/BVother?p=1",
+      title: "Other Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 20_500,
+  });
+
+  dom.video.pause = () => {
+    pausedByGuard += 1;
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.video.paused = false;
+    // Bilibili restores the saved progress with a `seeking` before the `play`, so
+    // the pre-record path's seek guard suppresses authorization there. The marker
+    // block must still authorize this genuine in-player play and release the hold.
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+    dom.listeners.get("play")?.(new Event("play"));
+    await Promise.resolve();
+
+    assert.equal(pausedByGuard, 0);
+    assert.equal(
+      runtimeState.explicitNonSharedPlaybackUrl,
+      "https://www.bilibili.com/video/BVother?p=1",
+    );
+    assert.equal(runtimeState.nonSharerAutoplayHoldUrl, null);
+    assert.equal(runtimeState.pauseHoldUntil, 0);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
 test("playback binding controller allows explicit play on a non-shared page", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();

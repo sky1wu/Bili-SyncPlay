@@ -724,20 +724,33 @@ export function createPlaybackBindingController(args: {
         const normalizedCurrentUrl = args.normalizeUrl(
           args.getSharedVideo()?.url,
         );
-        if (
-          !hasFreshInPlayerPlayIntent() &&
+        const onHeldNonSharedPage =
           (args.runtimeState.intendedPlayState === "paused" ||
             args.runtimeState.intendedPlayState === "buffering") &&
           normalizedCurrentUrl !== null &&
-          normalizedCurrentUrl === args.runtimeState.nonSharerAutoplayHoldUrl
-        ) {
-          args.debugLog(
-            "Forced pause for delayed non-sharer autoplay into non-shared video",
-          );
-          args.runtimeState.lastForcedPauseAt = nowOf();
-          window.setTimeout(() => {
-            pauseVideo(video);
-          }, 0);
+          normalizedCurrentUrl === args.runtimeState.nonSharerAutoplayHoldUrl;
+        if (onHeldNonSharedPage) {
+          if (hasFreshInPlayerPlayIntent()) {
+            // The user genuinely pressed play in-player on this held page, so we
+            // do NOT pause it. But the pre-record path may have suppressed the
+            // authorization on the way in — e.g. a progress-restore `seeking`
+            // fired before this `play`, so `shouldPreRecordNonSharedExplicitPlay`'s
+            // seek guard returned false and `explicitNonSharedPlaybackUrl`/the hold
+            // marker were never updated. Promote it to explicit local playback and
+            // release the hold here, otherwise a later buffer recovery or a
+            // transient `currentVideo === null` blip would re-pause the playback
+            // the user just authorized, and the autoplay-next off it would lose its
+            // `previousExplicitNonSharedPlaybackUrl` classification.
+            preAuthorizeExplicitNonSharedPlay();
+          } else {
+            args.debugLog(
+              "Forced pause for delayed non-sharer autoplay into non-shared video",
+            );
+            args.runtimeState.lastForcedPauseAt = nowOf();
+            window.setTimeout(() => {
+              pauseVideo(video);
+            }, 0);
+          }
         }
         return true;
       }

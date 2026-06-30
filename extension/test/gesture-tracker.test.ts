@@ -29,8 +29,13 @@ function withElementStub(run: () => void): void {
   }
 }
 
-function fakeEvent(type: string, target: unknown, key?: string): Event {
-  return { type, target, key } as unknown as Event;
+function fakeEvent(
+  type: string,
+  target: unknown,
+  key?: string,
+  repeat = false,
+): Event {
+  return { type, target, key, repeat } as unknown as Event;
 }
 
 test("isGestureInsidePlayer recognises pointer gestures inside the player only", () => {
@@ -95,6 +100,22 @@ test("isGestureInsidePlayer treats only play-toggle keys as in-player intent", (
     assert.equal(isGestureInsidePlayer(fakeEvent("keydown", body, "k")), true);
     assert.equal(
       isGestureInsidePlayer(fakeEvent("keydown", body, "Escape")),
+      false,
+    );
+  });
+});
+
+test("isGestureInsidePlayer ignores auto-repeat keydowns from a held play key", () => {
+  withElementStub(() => {
+    const body = new FakeElement({});
+    // First discrete press counts; the auto-repeat events while held do not, so a
+    // single held press cannot keep refreshing the in-player gesture timestamp.
+    assert.equal(
+      isGestureInsidePlayer(fakeEvent("keydown", body, " ", false)),
+      true,
+    );
+    assert.equal(
+      isGestureInsidePlayer(fakeEvent("keydown", body, " ", true)),
       false,
     );
   });
