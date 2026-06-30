@@ -949,10 +949,16 @@ export function createPlaybackBindingController(args: {
       onRateChange: () => {
         if (!shouldTreatRateChangeAsProgrammatic(video)) {
           rememberExplicitUserAction("ratechange");
-          // The user just took over the rate; drop any active rate-catch-up
-          // session without restoring its stale snapshot rate, otherwise the
-          // session deadline would later silently revert the user's change.
-          args.cancelActiveSoftApply(video, "user-ratechange");
+          // Drop the rate-catch-up session (without restoring its stale snapshot
+          // rate) only on a genuine user gesture, mirroring onSeeked. The
+          // programmatic-classification check alone can false-negative when the
+          // shared url needs normalization (e.g. festival shares), so relying on
+          // it would let our OWN catch-up ratechange be mistaken for a user
+          // takeover — cancelling the self-restore and leaving the temporary
+          // rate stuck. A real speed change carries a recent user gesture.
+          if (hasRecentUserGesture()) {
+            args.cancelActiveSoftApply(video, "user-ratechange");
+          }
         }
         scheduleBroadcast(video, "ratechange", 120);
       },

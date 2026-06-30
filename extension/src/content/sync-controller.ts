@@ -593,8 +593,17 @@ export function createSyncController(args: {
     playbackRate: number;
     currentVideoUrl: string;
     eventSource: LocalPlaybackEventSource;
+    playState: PlaybackState["playState"];
     now: number;
   }): boolean {
+    // This guard only exists to stop a temporary rate-catch-up speed from being
+    // broadcast as the steady *playing* rate. A genuine buffering/paused state
+    // must always reach peers, even while the catch-up rate is still applied —
+    // otherwise a real stall mid-catch-up would be silently swallowed.
+    if (input.playState !== "playing") {
+      return false;
+    }
+
     const hasRecentExplicitUserAction =
       Boolean(args.runtimeState.lastExplicitUserAction) &&
       input.now - (args.runtimeState.lastExplicitUserAction?.at ?? 0) <
@@ -1123,6 +1132,7 @@ export function createSyncController(args: {
         playbackRate: video.playbackRate,
         currentVideoUrl: currentVideo.url,
         eventSource,
+        playState,
         now,
       })
     ) {

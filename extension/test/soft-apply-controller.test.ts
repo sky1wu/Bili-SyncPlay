@@ -20,6 +20,13 @@ function installWindowStub() {
   };
   Object.assign(globalThis, { window: windowStub });
   return {
+    flushTimers() {
+      const pending = Array.from(timers.values());
+      timers.clear();
+      for (const callback of pending) {
+        callback();
+      }
+    },
     restore() {
       Object.assign(globalThis, { window: originalWindow });
     },
@@ -289,6 +296,52 @@ test("rate-only session suppresses only rate echoes, not buffering/pause broadca
         `expected ${eventSource} not to be suppressed for a rate-only session`,
       );
     }
+  } finally {
+    windowStub.restore();
+  }
+});
+
+test("relative-drift session settling via the timer still honors a sticky cooldown", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const video = createVideo({ currentTime: 24, playbackRate: 1 });
+    let now = 10_000;
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => now,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    // Real soft-apply first (sticky cooldown), then taken over by a rate-only
+    // nudge on the same url.
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25, playbackRate: 1 }),
+      1,
+    );
+    now = 10_200;
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25.1, playbackRate: 1 }),
+      1,
+      {
+        armCooldownOnConverge: false,
+        relativeDriftClose: { driftSeconds: 1, rateOffsetSeconds: 0.12 },
+      },
+    );
+
+    // Settle through the scheduled timer (no maintain call), as happens when no
+    // timeupdate fires right after the deadline.
+    now = 30_000;
+    windowStub.flushTimers();
+    assert.ok(
+      runtimeState.softApplyCooldownUntil > now,
+      `expected cooldown armed via timer, got ${runtimeState.softApplyCooldownUntil}`,
+    );
   } finally {
     windowStub.restore();
   }

@@ -193,7 +193,13 @@ export function createSoftApplyController(args: {
         return;
       }
       const video = args.getVideoElement();
-      cancelActiveSoftApply(video, "timeout");
+      // Mirror maintainActiveSoftApply: a relative-drift session reaching its
+      // deadline via the timer (no timeupdate happened to fire first) must still
+      // settle through the drift-closed path so a sticky cooldown is honored.
+      cancelActiveSoftApply(
+        video,
+        activeSoftApply.convergeByRelativeDrift ? "drift-closed" : "timeout",
+      );
     }, delayMs);
   }
 
