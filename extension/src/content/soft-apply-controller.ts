@@ -20,6 +20,10 @@ const SOFT_APPLY_TIMEOUT_PER_SECOND_MS = 900;
 const SOFT_APPLY_RTT_TIMEOUT_FACTOR = 2.5;
 const SOFT_APPLY_TARGET_SHIFT_CANCEL_THRESHOLD_SECONDS = 0.6;
 const SOFT_APPLY_COOLDOWN_MS = 2_500;
+// Bounds for the rate-only relative-drift restore window (see
+// computeRelativeDriftCloseMs).
+const RATE_ONLY_MIN_RESTORE_MS = 600;
+const RATE_ONLY_MAX_RESTORE_MS = 8_000;
 
 export interface SoftApplyController {
   cancelActiveSoftApply(video: HTMLVideoElement | null, reason: string): void;
@@ -27,7 +31,10 @@ export interface SoftApplyController {
   upsertActiveSoftApply(
     playback: PlaybackState,
     remainingDriftSeconds: number,
-    armCooldownOnConverge?: boolean,
+    options?: {
+      armCooldownOnConverge?: boolean;
+      relativeDriftClose?: { driftSeconds: number; rateOffsetSeconds: number };
+    },
   ): void;
   shouldCancelActiveSoftApplyForPlayback(
     playback: PlaybackState | null,
@@ -71,6 +78,11 @@ export function createSoftApplyController(args: {
     // a rate-only catch-up merely nudges the rate, so arming a cooldown for it
     // would wrongly suppress the next genuine remote reconcile and leave drift.
     armCooldownOnConverge: boolean;
+    // Rate-only sessions restore by elapsed time (the rate offset absorbing the
+    // initial drift) rather than by the playhead reaching the snapshot target:
+    // the remote head keeps advancing, so converging on the stale target would
+    // restore the base rate too early and leave residual drift behind.
+    convergeByRelativeDrift: boolean;
   } | null = null;
   let activeSoftApplyTimer: number | null = null;
 
@@ -175,17 +187,40 @@ export function createSoftApplyController(args: {
     }, delayMs);
   }
 
+  // Real time needed for the rate offset to absorb the initial drift while the
+  // remote head keeps advancing: closing the *relative* drift takes
+  // drift / rateOffset seconds. Bounded so a tiny offset cannot keep the rate
+  // elevated forever and a large one still nudges for a perceptible moment.
+  function computeRelativeDriftCloseMs(input: {
+    driftSeconds: number;
+    rateOffsetSeconds: number;
+  }): number {
+    const offset = Math.max(0.01, Math.abs(input.rateOffsetSeconds));
+    const closeMs = (Math.abs(input.driftSeconds) / offset) * 1_000;
+    return Math.min(
+      RATE_ONLY_MAX_RESTORE_MS,
+      Math.max(RATE_ONLY_MIN_RESTORE_MS, Math.round(closeMs)),
+    );
+  }
+
   function upsertActiveSoftApply(
     playback: PlaybackState,
     remainingDriftSeconds: number,
-    armCooldownOnConverge = true,
+    options: {
+      armCooldownOnConverge?: boolean;
+      relativeDriftClose?: { driftSeconds: number; rateOffsetSeconds: number };
+    } = {},
   ): void {
+    const armCooldownOnConverge = options.armCooldownOnConverge ?? true;
+    const convergeByRelativeDrift = options.relativeDriftClose !== undefined;
     const normalizedUrl = args.normalizeUrl(playback.url);
     if (!normalizedUrl) {
       clearActiveSoftApplyState();
       return;
     }
-    const timeoutMs = computeSoftApplyTimeoutMs(remainingDriftSeconds);
+    const timeoutMs = options.relativeDriftClose
+      ? computeRelativeDriftCloseMs(options.relativeDriftClose)
+      : computeSoftApplyTimeoutMs(remainingDriftSeconds);
     const sameSession =
       activeSoftApply !== null &&
       activeSoftApply.normalizedUrl === normalizedUrl;
@@ -204,10 +239,11 @@ export function createSoftApplyController(args: {
       restorePlaybackRate,
       deadlineAt: nowOf() + timeoutMs,
       armCooldownOnConverge: nextArmCooldownOnConverge,
+      convergeByRelativeDrift,
     };
     scheduleActiveSoftApplyTimeout();
     args.debugLog(
-      `Started soft apply url=${normalizedUrl} target=${playback.currentTime.toFixed(2)} rate=${restorePlaybackRate.toFixed(2)} timeout=${timeoutMs} cooldown=${nextArmCooldownOnConverge}`,
+      `Started soft apply url=${normalizedUrl} target=${playback.currentTime.toFixed(2)} rate=${restorePlaybackRate.toFixed(2)} timeout=${timeoutMs} cooldown=${nextArmCooldownOnConverge} relativeDrift=${convergeByRelativeDrift}`,
     );
   }
 
@@ -256,7 +292,16 @@ export function createSoftApplyController(args: {
       return;
     }
     if (nowOf() >= activeSoftApply.deadlineAt) {
-      cancelActiveSoftApply(video, "timeout");
+      cancelActiveSoftApply(
+        video,
+        activeSoftApply.convergeByRelativeDrift ? "drift-closed" : "timeout",
+      );
+      return;
+    }
+    // Rate-only sessions never converge on the stale snapshot target — the
+    // remote head has moved on. They restore once the relative-drift close
+    // deadline above elapses.
+    if (activeSoftApply.convergeByRelativeDrift) {
       return;
     }
     if (

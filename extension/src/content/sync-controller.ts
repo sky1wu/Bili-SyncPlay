@@ -309,14 +309,25 @@ export function createSyncController(args: {
           )} wroteTime=${adjustment.didWriteCurrentTime} wroteRate=${adjustment.didWritePlaybackRate} targetTime=${adjustment.targetTime.toFixed(2)} appliedTime=${adjustment.currentTime.toFixed(2)} appliedRate=${adjustment.playbackRate.toFixed(2)} restoreRate=${adjustment.restorePlaybackRate.toFixed(2)}`,
         );
         if (isSelfRestoringRateAdjust) {
-          // A rate-only catch-up only nudges the rate and must NOT arm the
-          // soft-apply cooldown on convergence: doing so would suppress the
-          // next genuine remote reconcile and leave residual drift behind.
-          softApply.upsertActiveSoftApply(
-            playback,
-            Math.abs(adjustment.targetTime - adjustment.currentTime),
-            adjustment.mode === "soft-apply",
+          const driftSeconds = Math.abs(
+            adjustment.targetTime - adjustment.currentTime,
           );
+          const isSoftApply = adjustment.mode === "soft-apply";
+          // A rate-only catch-up only nudges the rate, so unlike a real
+          // soft-apply it must NOT arm the soft-apply cooldown (doing so would
+          // suppress the next genuine remote reconcile and leave residual drift
+          // behind), and it must restore by relative-drift closure rather than
+          // by reaching the now-stale snapshot target.
+          softApply.upsertActiveSoftApply(playback, driftSeconds, {
+            armCooldownOnConverge: isSoftApply,
+            relativeDriftClose: isSoftApply
+              ? undefined
+              : {
+                  driftSeconds,
+                  rateOffsetSeconds:
+                    adjustment.playbackRate - adjustment.restorePlaybackRate,
+                },
+          });
           return;
         }
         softApply.cancelActiveSoftApply(

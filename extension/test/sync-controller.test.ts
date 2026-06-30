@@ -333,22 +333,31 @@ test("sync controller uses rate-only reconcile for medium playing drift", async 
       true,
     );
 
-    // Once the local playhead catches up to the target, the base rate is
-    // restored instead of running ahead forever.
+    // Reaching the stale snapshot target must NOT restore the base rate early:
+    // the remote head keeps advancing, so converging on the old target would
+    // leave residual drift. The drift (0.8s) at a 0.12x offset needs ~6.7s to
+    // close, well beyond the moment the playhead passes the snapshot target.
     video.currentTime = 24.8;
+    harness.setNow(20_500);
+    harness.controller.maintainActiveSoftApply(video);
+    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+
+    // Once enough real time has elapsed for the rate offset to absorb the drift,
+    // the base rate is restored instead of running ahead forever.
+    harness.setNow(27_500);
     harness.controller.maintainActiveSoftApply(video);
     assert.ok(Math.abs(video.playbackRate - 1) < 0.001);
     assert.equal(
       harness.debugLogs.some(
         (message) =>
           message.includes("Cancelled soft apply") &&
-          message.includes("result=converged"),
+          message.includes("result=drift-closed"),
       ),
       true,
     );
-    // A rate-only catch-up must NOT arm the soft-apply cooldown on convergence,
-    // otherwise the next genuine remote reconcile would be suppressed and the
-    // residual drift would persist.
+    // A rate-only catch-up must NOT arm the soft-apply cooldown, otherwise the
+    // next genuine remote reconcile would be suppressed and the residual drift
+    // would persist.
     assert.equal(harness.runtimeState.softApplyCooldownUntil, 0);
   } finally {
     windowHarness.restore();
