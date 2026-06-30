@@ -8,6 +8,7 @@ import {
 class FakeElement {
   constructor(
     private readonly matchedSelectors: Record<string, boolean> = {},
+    readonly isContentEditable = false,
   ) {}
   closest(selector: string): FakeElement | null {
     return this.matchedSelectors[selector] ? this : null;
@@ -16,7 +17,7 @@ class FakeElement {
 
 const PLAYER_SELECTOR = ".bpx-player-container, #bilibili-player";
 const EDITABLE_SELECTOR =
-  'input, textarea, select, [contenteditable=""], [contenteditable="true"]';
+  'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
 
 function withElementStub(run: () => void): void {
   const originalElement = (globalThis as { Element?: unknown }).Element;
@@ -52,6 +53,36 @@ test("isGestureInsidePlayer rejects gestures on editable fields even inside the 
     });
     assert.equal(
       isGestureInsidePlayer(fakeEvent("click", danmakuInput)),
+      false,
+    );
+  });
+});
+
+test("isGestureInsidePlayer rejects non-`false` contenteditable variants (e.g. plaintext-only)", () => {
+  withElementStub(() => {
+    // A rich danmaku/comment box using contenteditable="plaintext-only" matches
+    // the broadened `[contenteditable]:not([contenteditable="false"])` selector.
+    const plaintextOnlyBox = new FakeElement({
+      [PLAYER_SELECTOR]: true,
+      [EDITABLE_SELECTOR]: true,
+    });
+    assert.equal(
+      isGestureInsidePlayer(fakeEvent("keydown", plaintextOnlyBox, " ")),
+      false,
+    );
+  });
+});
+
+test("isGestureInsidePlayer rejects targets that inherit editability", () => {
+  withElementStub(() => {
+    // A node nested inside a contenteditable host: no selector match on itself,
+    // but `isContentEditable` is true.
+    const inheritedEditable = new FakeElement(
+      { [PLAYER_SELECTOR]: true },
+      true,
+    );
+    assert.equal(
+      isGestureInsidePlayer(fakeEvent("keydown", inheritedEditable, "k")),
       false,
     );
   });

@@ -4,9 +4,12 @@
 const PLAYER_CONTAINER_SELECTOR = ".bpx-player-container, #bilibili-player";
 
 // Editable targets (the danmaku / comment input) are never a play intent, even
-// when nested inside the player container.
+// when nested inside the player container. The `[contenteditable]` clause
+// excludes only the explicit `false` value so every truly editable variant
+// (empty string, `true`, `plaintext-only`, …) is covered; `isContentEditable`
+// below additionally catches targets that inherit editability from an ancestor.
 const EDITABLE_SELECTOR =
-  'input, textarea, select, [contenteditable=""], [contenteditable="true"]';
+  'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
 
 // Keys that toggle playback on Bilibili. A keydown only counts as an in-player
 // play intent for these (so Esc/Tab/typing do not authorize playback).
@@ -24,7 +27,10 @@ export function isGestureInsidePlayer(event: Event): boolean {
   if (!(target instanceof Element)) {
     return false;
   }
-  if (target.closest(EDITABLE_SELECTOR)) {
+  if (
+    target.closest(EDITABLE_SELECTOR) ||
+    (target as HTMLElement).isContentEditable
+  ) {
     return false;
   }
   if (event.type === "keydown") {
