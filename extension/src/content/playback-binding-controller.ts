@@ -1,4 +1,4 @@
-import type { PlaybackState, SharedVideo } from "@bili-syncplay/protocol";
+import type { SharedVideo } from "@bili-syncplay/protocol";
 import {
   bindVideoElement,
   getVideoElement,
@@ -47,7 +47,7 @@ export function createPlaybackBindingController(args: {
   broadcastPlayback: (
     video: HTMLVideoElement,
     eventSource?: LocalPlaybackEventSource,
-    syncIntentOverride?: PlaybackState["syncIntent"],
+    naturalEnd?: boolean,
   ) => Promise<void>;
   cancelActiveSoftApply: (
     video: HTMLVideoElement | null,
@@ -397,7 +397,7 @@ export function createPlaybackBindingController(args: {
     // without surfacing a misleading "paused" / "jumped to <end>" toast. This
     // also covers the slow-handoff case where the autoplay-next eventually
     // lands after the flush window (e.g. a recommend-autoplay countdown).
-    void args.broadcastPlayback(video, "pause", "natural-end");
+    void args.broadcastPlayback(video, "pause", true);
   }
 
   function shouldReapplyHoldAfterSharedVideoEnd(

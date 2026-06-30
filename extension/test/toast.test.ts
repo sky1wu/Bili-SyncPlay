@@ -167,7 +167,7 @@ test("suppresses playback toasts for a natural-end paused state", () => {
       url: "https://www.bilibili.com/video/BV1?p=1",
       currentTime: 262.5,
       playState: "paused",
-      syncIntent: "natural-end",
+      naturalEnd: true,
       playbackRate: 1,
       updatedAt: 2,
       serverTime: 7000,

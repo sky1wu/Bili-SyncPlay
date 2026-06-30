@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RoomState, ServerMessage } from "@bili-syncplay/protocol";
+import {
+  PROTOCOL_VERSION,
+  type RoomState,
+  type ServerMessage,
+} from "@bili-syncplay/protocol";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
 import { createRoomSessionController } from "../src/background/room-session-controller";
 import { setLocaleForTests } from "../src/shared/i18n";
@@ -114,7 +118,7 @@ test("room session controller sends create request with protocolVersion", async 
     type: "room:create",
     payload: {
       displayName: "Bob",
-      protocolVersion: 2,
+      protocolVersion: PROTOCOL_VERSION,
     },
   });
 });
@@ -190,7 +194,7 @@ test("room session controller sends join request after connect and normalizes pe
       roomCode: "ROOM01",
       joinToken: "token-1",
       displayName: "Alice",
-      protocolVersion: 2,
+      protocolVersion: PROTOCOL_VERSION,
     },
   });
   assert.equal(harness.persistReasons.length, 1);

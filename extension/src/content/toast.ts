@@ -215,7 +215,7 @@ export function getRoomStateToastMessages(args: {
     // paused state must be applied silently — surfacing a "paused" / "jumped to
     // <end>" toast here is misleading (the video ended on its own) and noisy
     // moments before the autoplay-next share lands.
-    args.nextState.playback?.syncIntent === "natural-end"
+    args.nextState.playback?.naturalEnd === true
   ) {
     return { messages, nextSeekToastByActor };
   }

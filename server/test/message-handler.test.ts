@@ -784,7 +784,7 @@ test("message handler accepts room:create without protocolVersion (legacy client
   assert.ok(events.includes("room_created"));
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:created");
-  assert.equal(sent[0].serverProtocolVersion, 2);
+  assert.equal(sent[0].serverProtocolVersion, 3);
   assert.equal(sent[1].type, "room:state");
 });
 
@@ -977,13 +977,95 @@ test("message handler accepts room:join with matching protocolVersion and return
     payload: {
       roomCode: "ROOM01",
       joinToken: "join-token-1",
-      protocolVersion: 2,
+      protocolVersion: 3,
     },
   });
 
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 2);
+  assert.equal(sent[0].serverProtocolVersion, 3);
+  assert.equal(sent[1].type, "room:state");
+});
+
+test("message handler accepts room:join from a still-supported older protocol version", async () => {
+  // v2 clients (below CURRENT but >= MIN) stay in the compatibility window: the
+  // server accepts them and advertises its CURRENT version. The v3 `naturalEnd`
+  // playback flag is additive, so these older clients simply ignore it.
+  const sent: Array<{ type: string; serverProtocolVersion?: number }> = [];
+  const session = createSession("older-joiner");
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = "ROOM-O1";
+        currentSession.memberId = "member-o1";
+        currentSession.memberToken = "member-token-o1";
+        return {
+          room: { code: "ROOM-O1" },
+          memberToken: "member-token-o1",
+        };
+      },
+      async leaveRoomForSession() {
+        return { room: null };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        return {
+          roomCode: "ROOM-O1",
+          sharedVideo: null,
+          playback: null,
+          members: [{ id: "member-o1", name: "Bob" }],
+        };
+      },
+    },
+    logEvent() {},
+    send(_socket, message) {
+      if (
+        "payload" in message &&
+        message.payload &&
+        "serverProtocolVersion" in message.payload
+      ) {
+        sent.push({
+          type: message.type,
+          serverProtocolVersion: (
+            message.payload as { serverProtocolVersion?: number }
+          ).serverProtocolVersion,
+        });
+      } else {
+        sent.push({ type: message.type });
+      }
+    },
+    sendError() {
+      throw new Error("sendError should not be called");
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+
+  assert.equal(session.protocolVersion, 2);
+  assert.equal(sent[0].type, "room:joined");
+  assert.equal(sent[0].serverProtocolVersion, 3);
   assert.equal(sent[1].type, "room:state");
 });
 

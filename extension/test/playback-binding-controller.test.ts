@@ -2893,8 +2893,10 @@ test("playback binding controller flushes the sharer's terminal paused state whe
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
     getLastBroadcastAt: () => 0,
-    broadcastPlayback: async (_video, eventSource, syncIntentOverride) => {
-      events.push(`${eventSource ?? "manual"}:${syncIntentOverride ?? "none"}`);
+    broadcastPlayback: async (_video, eventSource, naturalEnd) => {
+      events.push(
+        `${eventSource ?? "manual"}:${naturalEnd ? "natural-end" : "none"}`,
+      );
     },
     cancelActiveSoftApply: () => {},
     maintainActiveSoftApply: () => {},

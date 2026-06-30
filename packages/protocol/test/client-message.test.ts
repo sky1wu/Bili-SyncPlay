@@ -622,6 +622,52 @@ test("rejects playback:update with non-boolean userInitiated", () => {
   );
 });
 
+test("accepts playback:update carrying naturalEnd:true", () => {
+  assert.equal(
+    isClientMessage({
+      type: "playback:update",
+      payload: {
+        memberToken: VALID_TOKEN,
+        playback: {
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          currentTime: 262.5,
+          playState: "paused",
+          naturalEnd: true,
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 1,
+          actorId: "member-1",
+          seq: 1,
+        },
+      },
+    }),
+    true,
+  );
+});
+
+test("rejects playback:update with non-boolean naturalEnd", () => {
+  assert.equal(
+    isClientMessage({
+      type: "playback:update",
+      payload: {
+        memberToken: VALID_TOKEN,
+        playback: {
+          url: "https://www.bilibili.com/video/BV1xx411c7mD",
+          currentTime: 262.5,
+          playState: "paused",
+          naturalEnd: 1,
+          playbackRate: 1,
+          updatedAt: 1,
+          serverTime: 1,
+          actorId: "member-1",
+          seq: 1,
+        },
+      },
+    }),
+    false,
+  );
+});
+
 test("accepts a valid room:join message", () => {
   assert.equal(
     isClientMessage({
