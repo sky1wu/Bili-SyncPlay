@@ -1153,9 +1153,11 @@ test("playback binding controller suppresses auto-resumed non-shared broadcast a
 
     await Promise.resolve();
 
-    // The auto-played non-shared video should keep playing locally.
-    assert.equal(pausedByGuard, 0);
-    // The seeking event is broadcast (non-shared page), but play should be blocked.
+    // In a room the auto-resumed non-shared video is held paused: a stray
+    // document-level click is not an in-player play intent, so this counts as an
+    // unsolicited autoplay and is paused (load paused).
+    assert.equal(pausedByGuard, 1);
+    // The seeking event is broadcast (non-shared page), but play stays blocked.
     assert.deepEqual(events, ["seeking"]);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
@@ -1374,16 +1376,17 @@ test("playback binding controller lets the user watch an explicitly opened local
   }
 });
 
-test("playback binding controller does not pause an unmarked non-shared page reached by full-page navigation", async () => {
+test("playback binding controller pauses an unmarked non-shared page reached by full-page navigation", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
   runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
   runtimeState.pendingRoomStateHydration = false;
-  // The user opened a different local video via the address bar/bookmark. The
-  // content script reloaded, so there was no in-SPA navigation event to flag it
-  // as a non-sharer autoplay page (nonSharerAutoplayHoldUrl stays null) and no
-  // recent in-page gesture. Hydration reset the room intent to paused.
+  // The user opened a different local video via a new tab / address bar / bookmark.
+  // The content script reloaded, so there was no in-SPA navigation event to arm a
+  // non-sharer autoplay marker (nonSharerAutoplayHoldUrl stays null) and no recent
+  // in-page gesture. In a room every non-shared video must still load PAUSED, so
+  // this autoplay is held even without the marker.
   runtimeState.intendedPlayState = "paused";
   let pausedByGuard = 0;
   const originalSetTimeout = globalThis.window.setTimeout;
@@ -1430,9 +1433,14 @@ test("playback binding controller does not pause an unmarked non-shared page rea
 
     await Promise.resolve();
 
-    // Without the non-sharer autoplay marker, the manually opened local video is
-    // left playable (its broadcast is still suppressed by the non-shared guard).
-    assert.equal(pausedByGuard, 0);
+    // Even without the SPA marker, a non-shared video that autoplays on a fresh
+    // page load is paused (load paused) and the marker is armed for the held-page
+    // machinery; its broadcast stays suppressed by the non-shared guard.
+    assert.equal(pausedByGuard, 1);
+    assert.equal(
+      runtimeState.nonSharerAutoplayHoldUrl,
+      "https://www.bilibili.com/video/BVother?p=1",
+    );
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;
@@ -1955,9 +1963,10 @@ test("playback binding controller allows manual play on non-shared page after au
     dom.listeners.get("play")?.(new Event("play"));
 
     await Promise.resolve();
-    assert.equal(pausedByGuard, 0);
+    // The auto-resume (no in-player gesture) is held paused in a room.
+    assert.equal(pausedByGuard, 1);
 
-    // User manually clicks play (in the player) after the suppressed auto-resume.
+    // User manually clicks play (in the player) after the held auto-resume.
     runtimeState.lastUserGestureAt = 1_500;
     runtimeState.lastUserGestureInPlayerAt = 1_500;
     now = 1_550;
@@ -1966,8 +1975,9 @@ test("playback binding controller allows manual play on non-shared page after au
 
     await Promise.resolve();
 
-    // Manual play should NOT be blocked — it's a new gesture after the auto-resume.
-    assert.equal(pausedByGuard, 0);
+    // Manual play should NOT be blocked — it's a fresh in-player gesture after the
+    // held auto-resume, so no additional pause beyond the first.
+    assert.equal(pausedByGuard, 1);
     assert.ok(events.includes("play"));
     // The first play event should come from the manual click, not the auto-resume
     const playIndex = events.indexOf("play");
@@ -2038,8 +2048,10 @@ test("playback binding controller suppresses non-shared autoplay replayed after 
 
     await Promise.resolve();
 
+    // The same-gesture replay after the forced pause is not a fresh in-player play
+    // intent, so the non-shared autoplay is held paused (and not broadcast).
     assert.deepEqual(events, []);
-    assert.equal(pausedByGuard, 0);
+    assert.equal(pausedByGuard, 1);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;
