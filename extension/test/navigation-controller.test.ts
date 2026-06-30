@@ -210,6 +210,62 @@ test("navigation controller suppresses autoplay (load paused) when switching to 
   }
 });
 
+test("navigation controller suppresses a non-shared SPA navigation immediately via notifyNavigation", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-2";
+  runtimeState.intendedPlayState = "playing";
+  runtimeState.lastUserGestureAt = 9_800;
+
+  let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
+  let pauseCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestVideoPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/video/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () =>
+      ({
+        paused: false,
+      }) as HTMLVideoElement,
+    pauseVideo: () => {
+      pauseCalls += 1;
+    },
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    // The SPA pushState fires; the page-bridge navigation signal calls
+    // notifyNavigation BEFORE the next poll interval would have run. The hold must
+    // already be armed so the page-load autoplay is suppressed without the gap.
+    currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
+    controller.notifyNavigation();
+
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.intendedPlayState, "paused");
+    assert.equal(
+      runtimeState.nonSharerAutoplayHoldUrl,
+      "https://www.bilibili.com/video/BV1Em421N7uU",
+    );
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller schedules auto-share when a shared source autoplays to a different video", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();

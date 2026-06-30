@@ -60,6 +60,9 @@ function installBridgeDomStub(details: Array<PageBridgeDetail | null>): {
   Object.assign(globalThis, {
     window: windowStub,
     document: {
+      querySelector() {
+        return null;
+      },
       createElement() {
         return { dataset: {} };
       },

@@ -9,6 +9,13 @@ import {
 
 export interface NavigationController {
   start(): void;
+  /**
+   * Runs the navigation check immediately, outside the poll cadence. Wired to the
+   * page-world SPA navigation signal so a non-shared page's load autoplay is
+   * suppressed the instant the URL changes instead of up to one poll interval
+   * later. Idempotent — a redundant call on an unchanged URL is a no-op.
+   */
+  notifyNavigation(): void;
   destroy(): void;
 }
 
@@ -537,6 +544,9 @@ export function createNavigationController(args: {
           args.intervalMs,
         );
       }
+    },
+    notifyNavigation() {
+      handlePotentialNavigation();
     },
     destroy() {
       if (navigationWatchTimer !== null) {

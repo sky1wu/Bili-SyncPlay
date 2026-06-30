@@ -23,6 +23,15 @@ interface PageVideoSnapshot extends SharedVideo {
 
 export interface FestivalBridgeController {
   clearSnapshot: () => void;
+  /**
+   * Injects the page-world bridge script if it is not already present. Festival
+   * snapshot reads inject it lazily, but the bridge also installs the SPA
+   * navigation hooks (`history.pushState`/`replaceState`/`popstate`), which must
+   * be armed on every page — including plain `/video/` pages that never read a
+   * festival snapshot — so the content script learns about a navigation the
+   * instant it happens rather than at the next poll tick.
+   */
+  ensureBridgeInjected: () => void;
   getSnapshot: () => FestivalSnapshot | null;
   /**
    * Resolves the in-player video URL for an address-bar-opaque festival page from
@@ -153,18 +162,30 @@ export function createFestivalBridgeController(): FestivalBridgeController {
     if (festivalBridgeReady) {
       return;
     }
-
+    festivalBridgeReady = true;
+    // The bridge may already be in the DOM from an earlier eager injection (the
+    // navigation hooks are armed at content init). Re-injecting would evaluate a
+    // second copy of the script; the page-world hook install is itself guarded,
+    // but skip the redundant work here too.
+    if (
+      document.querySelector('script[data-bili-syncplay-bridge="true"]') !==
+      null
+    ) {
+      return;
+    }
     const script = document.createElement("script");
     script.src = chrome.runtime.getURL("page-bridge.js");
     script.async = false;
     script.dataset.biliSyncplayBridge = "true";
     (document.head || document.documentElement).appendChild(script);
-    festivalBridgeReady = true;
   }
 
   return {
     clearSnapshot: () => {
       festivalSnapshot = null;
+    },
+    ensureBridgeInjected: () => {
+      ensureFestivalBridge();
     },
     getSnapshot: () => festivalSnapshot,
     resolveVideoUrlForPage: (

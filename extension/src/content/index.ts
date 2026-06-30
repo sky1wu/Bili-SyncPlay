@@ -7,6 +7,7 @@ import { startUserGestureTracking } from "./gesture-tracker";
 import { getVideoElement, pauseVideo } from "./player-binding";
 import { createContentStateStore } from "./content-store";
 import { createNavigationController } from "./navigation-controller";
+import { startNavigationSignalListener } from "./navigation-signal";
 import { createPageShareButtonController } from "./page-share-button";
 import { resolvePageShareButtonSettingsHydration } from "./page-share-button-settings";
 import { createPlaybackBindingController } from "./playback-binding-controller";
@@ -50,6 +51,7 @@ const festivalBridge = createFestivalBridgeController();
 const broadcastLogState = { key: null as string | null, at: 0 };
 const ignoredSelfPlaybackLogState = { key: null as string | null, at: 0 };
 let pageShareButtonSettingsHydrationTimer: number | null = null;
+let navigationSignalUnsubscribe: (() => void) | null = null;
 const shareController = createShareController({
   runtimeState,
   festivalSnapshotTtlMs: FESTIVAL_SNAPSHOT_TTL_MS,
@@ -222,9 +224,19 @@ async function init(): Promise<void> {
   void hydratePageShareButtonSettings();
   playbackBindingController.start();
   navigationController.start();
+  // Inject the page-world bridge eagerly so its SPA navigation hooks are armed on
+  // every page (not just festival pages that read a snapshot), and route the
+  // resulting navigation signal into an immediate navigation check so a
+  // non-shared page's load autoplay is suppressed without waiting for the poll.
+  festivalBridge.ensureBridgeInjected();
+  navigationSignalUnsubscribe = startNavigationSignalListener(() => {
+    navigationController.notifyNavigation();
+  });
   window.addEventListener("pagehide", (event) => {
     if (!event.persisted) {
       clearPageShareButtonSettingsHydrationTimer();
+      navigationSignalUnsubscribe?.();
+      navigationSignalUnsubscribe = null;
       pageShareButtonController.destroy();
       autoShareNextController.destroy();
       syncController.destroy();

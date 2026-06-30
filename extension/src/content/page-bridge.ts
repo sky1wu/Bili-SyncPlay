@@ -4,9 +4,20 @@ import {
   type PagePlayInfo,
   type PlayerInput,
 } from "./page-bridge-detail";
+import {
+  installHistoryNavigationHooks,
+  type NavigationHookTarget,
+} from "./page-bridge-navigation";
 
 const REQUEST_TYPE = "bili-syncplay:get-festival-video";
 const RESPONSE_TYPE = "bili-syncplay:festival-video";
+
+// SPA navigations (clicking a related video, a festival/bangumi autoplay-next)
+// update the URL through `history.pushState`/`replaceState` without reloading the
+// document, and the isolated content world cannot observe those calls. Hook them
+// here in the page world so the content script can suppress a non-shared page's
+// load autoplay immediately instead of waiting for the next navigation poll tick.
+installHistoryNavigationHooks(window as unknown as NavigationHookTarget);
 
 window.addEventListener("message", (event) => {
   if (event.source !== window || event.data?.type !== REQUEST_TYPE) {
