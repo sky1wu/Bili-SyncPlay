@@ -1977,44 +1977,74 @@ test("sync controller clears non-shared authorization on reset when no longer on
   assert.equal(harness.runtimeState.nonSharerAutoplayHoldUrl, null);
 });
 
-test("sync controller still broadcasts buffering while a rate catch-up is in flight", async () => {
+test("sync controller abandons a rate-only catch-up to broadcast a real stall with the base rate", async () => {
+  const windowHarness = installWindowStub();
   const harness = createControllerHarness();
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
     url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
     title: "Video",
   };
-  // Mid-catch-up: the local rate is still the temporary value while the intended
-  // (steady) rate is the base rate.
   const video = createVideo({
     paused: false,
-    readyState: 2,
-    currentTime: 30,
-    playbackRate: 1.12,
+    readyState: 4,
+    currentTime: 24,
+    playbackRate: 1,
   });
 
   harness.runtimeState.hydrationReady = true;
   harness.runtimeState.pendingRoomStateHydration = false;
   harness.runtimeState.hasReceivedInitialRoomState = true;
   harness.runtimeState.localMemberId = "local-member";
-  harness.runtimeState.intendedPlayState = "playing";
-  harness.runtimeState.intendedPlaybackRate = 1;
   harness.setSharedVideo(sharedVideo);
   harness.setCurrentPlaybackVideo(sharedVideo);
   harness.setVideoElement(video);
   harness.setNow(20_000);
 
-  await harness.controller.broadcastPlayback(video, "waiting");
+  try {
+    // A medium drift registers a pure rate-only catch-up (rate bumped to 1.12)
+    // and arms the remote-follow window by following the remote playing state.
+    await harness.controller.applyRoomState(
+      createRoomState({
+        actorId: "remote-member",
+        seq: 10,
+        serverTime: 19_900,
+        currentTime: 24.8,
+        playState: "playing",
+        playbackRate: 1,
+      }),
+    );
+    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
 
-  assert.equal(harness.runtimeMessages.length, 1);
-  const payload = (
-    harness.runtimeMessages[0] as { payload: { playState: string } }
-  ).payload;
-  assert.equal(payload.playState, "buffering");
-  assert.equal(
-    harness.debugLogs.some((message) =>
-      message.includes("unexpected-rate-suppress"),
-    ),
-    false,
-  );
+    // A genuine stall interrupts the catch-up after the 700ms programmatic
+    // window (so it is not mistaken for the rate-apply echo) but well within the
+    // ~6.7s relative-drift window and the 3s remote-follow window.
+    harness.setNow(21_000);
+    video.readyState = 2;
+    await harness.controller.broadcastPlayback(video, "waiting");
+
+    assert.equal(harness.runtimeMessages.length, 1);
+    const payload = (
+      harness.runtimeMessages[0] as {
+        payload: { playState: string; playbackRate: number };
+      }
+    ).payload;
+    // The real buffering reaches peers, carrying the base rate (not 1.12), and
+    // the catch-up is abandoned (rate restored, no rate-suppress).
+    assert.equal(payload.playState, "buffering");
+    assert.ok(
+      Math.abs(payload.playbackRate - 1) < 0.001,
+      `expected base rate in payload, got ${payload.playbackRate}`,
+    );
+    assert.ok(Math.abs(video.playbackRate - 1) < 0.001);
+    assert.equal(
+      harness.debugLogs.some((message) =>
+        message.includes("Abandoned rate-only catch-up"),
+      ),
+      true,
+    );
+    assert.equal(harness.runtimeState.softApplyCooldownUntil, 0);
+  } finally {
+    windowHarness.restore();
+  }
 });

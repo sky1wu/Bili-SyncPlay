@@ -247,7 +247,7 @@ test("drift-closed honors the sticky cooldown of a soft-apply taken over by a ra
   }
 });
 
-test("rate-only session suppresses only rate echoes, not buffering/pause broadcasts", () => {
+test("isActiveRateOnlyCatchUp flags pure rate-only sessions but not real soft-apply", () => {
   const windowStub = installWindowStub();
   try {
     const runtimeState = createContentRuntimeState();
@@ -264,6 +264,8 @@ test("rate-only session suppresses only rate echoes, not buffering/pause broadca
     });
 
     const url = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+
+    // A pure rate-only catch-up is flagged for the matching url only.
     controller.upsertActiveSoftApply(
       createPlayback({ currentTime: 25, playbackRate: 1 }),
       1,
@@ -272,30 +274,25 @@ test("rate-only session suppresses only rate echoes, not buffering/pause broadca
         relativeDriftClose: { driftSeconds: 1, rateOffsetSeconds: 0.12 },
       },
     );
+    assert.equal(controller.isActiveRateOnlyCatchUp(url), true);
+    assert.equal(controller.isActiveRateOnlyCatchUp("other"), false);
+    assert.equal(controller.isActiveRateOnlyCatchUp(null), false);
 
-    // Rate-driven echoes stay suppressed during the catch-up.
-    assert.equal(
-      controller.shouldSuppressActiveSoftApplyBroadcast({
-        normalizedCurrentUrl: url,
-        playState: "playing",
-        eventSource: "timeupdate",
-        now: 10_100,
-      }),
-      true,
+    // A real soft-apply (writes currentTime, sticky cooldown) is NOT a pure
+    // rate-only catch-up even after a rate-only nudge re-upserts the session.
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25, playbackRate: 1 }),
+      1,
     );
-    // Genuine stall/pause events must NOT be swallowed.
-    for (const eventSource of ["waiting", "pause", "stalled"] as const) {
-      assert.equal(
-        controller.shouldSuppressActiveSoftApplyBroadcast({
-          normalizedCurrentUrl: url,
-          playState: "buffering",
-          eventSource,
-          now: 10_100,
-        }),
-        false,
-        `expected ${eventSource} not to be suppressed for a rate-only session`,
-      );
-    }
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25.1, playbackRate: 1 }),
+      1,
+      {
+        armCooldownOnConverge: false,
+        relativeDriftClose: { driftSeconds: 1, rateOffsetSeconds: 0.12 },
+      },
+    );
+    assert.equal(controller.isActiveRateOnlyCatchUp(url), false);
   } finally {
     windowStub.restore();
   }

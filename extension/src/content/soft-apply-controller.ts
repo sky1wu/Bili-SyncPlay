@@ -45,6 +45,7 @@ export interface SoftApplyController {
     eventSource: LocalPlaybackEventSource;
     now: number;
   }): boolean;
+  isActiveRateOnlyCatchUp(normalizedUrl: string | null): boolean;
   shouldSuppressByCooldown(
     video: HTMLVideoElement,
     playback: PlaybackState,
@@ -351,21 +352,24 @@ export function createSoftApplyController(args: {
       return false;
     }
 
-    // A rate-only relative-drift session only manipulates the playback rate, so
-    // it must suppress just the rate-driven timeupdate/ratechange echoes — not
-    // genuine buffering/pause/seek events. Otherwise a real stall mid-catch-up
-    // (which can outlast the 700ms programmatic window) would be silently
-    // swallowed for up to the full relative-drift window instead of broadcasting
-    // buffering/paused.
-    if (
-      activeSoftApply.convergeByRelativeDrift &&
-      input.eventSource !== "timeupdate" &&
-      input.eventSource !== "ratechange"
-    ) {
-      return false;
-    }
-
     return true;
+  }
+
+  // A *pure* rate-only catch-up session for this url: it only nudged the rate
+  // (never wrote currentTime, hence armCooldownOnConverge=false) and restores by
+  // relative drift. A genuine stall/pause during such a session is real local
+  // evidence, so the broadcast layer abandons the catch-up instead of letting it
+  // suppress / pollute the authoritative state. A session that ran a real
+  // soft-apply (sticky armCooldownOnConverge=true) is excluded: its delayed
+  // seek echoes must still be suppressed.
+  function isActiveRateOnlyCatchUp(normalizedUrl: string | null): boolean {
+    return (
+      activeSoftApply !== null &&
+      activeSoftApply.convergeByRelativeDrift &&
+      !activeSoftApply.armCooldownOnConverge &&
+      normalizedUrl !== null &&
+      normalizedUrl === activeSoftApply.normalizedUrl
+    );
   }
 
   function shouldSuppressByCooldown(
@@ -418,6 +422,7 @@ export function createSoftApplyController(args: {
     upsertActiveSoftApply,
     shouldCancelActiveSoftApplyForPlayback,
     shouldSuppressActiveSoftApplyBroadcast,
+    isActiveRateOnlyCatchUp,
     shouldSuppressByCooldown,
     clearSoftApplyCooldown,
     destroy,

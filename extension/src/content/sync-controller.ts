@@ -593,17 +593,8 @@ export function createSyncController(args: {
     playbackRate: number;
     currentVideoUrl: string;
     eventSource: LocalPlaybackEventSource;
-    playState: PlaybackState["playState"];
     now: number;
   }): boolean {
-    // This guard only exists to stop a temporary rate-catch-up speed from being
-    // broadcast as the steady *playing* rate. A genuine buffering/paused state
-    // must always reach peers, even while the catch-up rate is still applied —
-    // otherwise a real stall mid-catch-up would be silently swallowed.
-    if (input.playState !== "playing") {
-      return false;
-    }
-
     const hasRecentExplicitUserAction =
       Boolean(args.runtimeState.lastExplicitUserAction) &&
       input.now - (args.runtimeState.lastExplicitUserAction?.at ?? 0) <
@@ -1093,6 +1084,24 @@ export function createSyncController(args: {
         `Allowed explicit user event actor=${args.runtimeState.localMemberId ?? "local"} playState=${playState} url=${currentVideo.url} delta=n/a result=${eventSource}`,
       );
     }
+    // A genuine non-playing state (real stall / pause) interrupting a *pure*
+    // rate-only catch-up: abandon the catch-up before any suppression runs. This
+    // restores the base rate so the authoritative payload carries the steady
+    // rate (not the temporary catch-up rate), drops the active session so it
+    // can no longer suppress the broadcast, and clears the remote-follow window
+    // since a real local stall is positive evidence, not a follow echo. Without
+    // this the buffering/paused would be swallowed and/or leak the catch-up rate
+    // into room state.
+    if (
+      playState !== "playing" &&
+      softApply.isActiveRateOnlyCatchUp(normalizedCurrentVideoUrl)
+    ) {
+      softApply.cancelActiveSoftApply(video, "buffer-interrupt");
+      clearRemoteFollowPlayingWindow();
+      args.debugLog(
+        `Abandoned rate-only catch-up for real ${playState} url=${currentVideo.url} source=${eventSource}`,
+      );
+    }
     if (
       softApply.shouldSuppressActiveSoftApplyBroadcast({
         normalizedCurrentUrl: normalizedCurrentVideoUrl,
@@ -1132,7 +1141,6 @@ export function createSyncController(args: {
         playbackRate: video.playbackRate,
         currentVideoUrl: currentVideo.url,
         eventSource,
-        playState,
         now,
       })
     ) {
