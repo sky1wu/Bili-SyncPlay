@@ -48,6 +48,7 @@ export interface SyncController {
   broadcastPlayback(
     video: HTMLVideoElement,
     eventSource?: LocalPlaybackEventSource,
+    syncIntentOverride?: PlaybackState["syncIntent"],
   ): Promise<void>;
   applyRoomState(
     state: RoomState,
@@ -647,6 +648,7 @@ export function createSyncController(args: {
   async function broadcastPlayback(
     video: HTMLVideoElement,
     eventSource: LocalPlaybackEventSource = "manual",
+    syncIntentOverride?: PlaybackState["syncIntent"],
   ): Promise<void> {
     const now = nowOf();
     if (!args.runtimeState.hydrationReady) {
@@ -1234,13 +1236,15 @@ export function createSyncController(args: {
       currentVideo,
       currentTime: video.currentTime,
       playState,
-      syncIntent: derivePlaybackSyncIntent({
-        eventSource,
-        lastExplicitUserAction: args.runtimeState.lastExplicitUserAction,
-        lastForcedPauseAt: args.runtimeState.lastForcedPauseAt,
-        now,
-        userGestureGraceMs: args.userGestureGraceMs,
-      }),
+      syncIntent:
+        syncIntentOverride ??
+        derivePlaybackSyncIntent({
+          eventSource,
+          lastExplicitUserAction: args.runtimeState.lastExplicitUserAction,
+          lastForcedPauseAt: args.runtimeState.lastForcedPauseAt,
+          now,
+          userGestureGraceMs: args.userGestureGraceMs,
+        }),
       userInitiated: deriveUserInitiatedPause({
         eventSource,
         playState,

@@ -3,6 +3,12 @@ import type { PlaybackPlayState, RoomCode } from "./common.js";
 export const PLAYBACK_SYNC_INTENTS = [
   "explicit-seek",
   "explicit-ratechange",
+  // The shared video reached its natural end on the sharer. Carried on the
+  // terminal paused state the sharer flushes once no autoplay-next followed
+  // within the suppression window (or it followed too slowly, e.g. behind a
+  // recommend-autoplay countdown). Peers apply the paused state but must not
+  // surface a misleading "paused" / "jumped to <end>" toast for it.
+  "natural-end",
 ] as const;
 
 export type PlaybackSyncIntent = (typeof PLAYBACK_SYNC_INTENTS)[number];
