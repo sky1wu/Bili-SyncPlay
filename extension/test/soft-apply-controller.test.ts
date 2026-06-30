@@ -148,3 +148,148 @@ test("upsertActiveSoftApply for a different url starts a fresh restore rate", ()
     windowStub.restore();
   }
 });
+
+test("explicit user ratechange cancels a rate-only session without reverting the user rate", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const video = createVideo({ currentTime: 24, playbackRate: 1 });
+    let now = 10_000;
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => now,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    // Rate-only catch-up bumps the rate; restore snapshot is the base rate 1.
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25, playbackRate: 1 }),
+      1,
+      {
+        armCooldownOnConverge: false,
+        relativeDriftClose: { driftSeconds: 1, rateOffsetSeconds: 0.12 },
+      },
+    );
+    video.playbackRate = 1.12;
+
+    // The user then sets their own rate mid-window.
+    video.playbackRate = 2;
+    controller.cancelActiveSoftApply(video, "user-ratechange");
+    assert.ok(
+      Math.abs(video.playbackRate - 2) < 0.001,
+      `expected user rate 2 to survive, got ${video.playbackRate}`,
+    );
+
+    // The session is gone, so a later deadline cannot revert the user's rate.
+    now = 30_000;
+    controller.maintainActiveSoftApply(video);
+    assert.ok(Math.abs(video.playbackRate - 2) < 0.001);
+  } finally {
+    windowStub.restore();
+  }
+});
+
+test("drift-closed honors the sticky cooldown of a soft-apply taken over by a rate-only nudge", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const video = createVideo({ currentTime: 24, playbackRate: 1 });
+    let now = 10_000;
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => now,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    // A real soft-apply runs first (arms cooldown on converge by default).
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25, playbackRate: 1 }),
+      1,
+    );
+    // A small (<=0.6s) remote shift re-upserts the same url as a rate-only nudge
+    // that on its own would not arm the cooldown.
+    now = 10_200;
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25.1, playbackRate: 1 }),
+      1,
+      {
+        armCooldownOnConverge: false,
+        relativeDriftClose: { driftSeconds: 1, rateOffsetSeconds: 0.12 },
+      },
+    );
+
+    // Once the relative-drift deadline elapses, the sticky cooldown must arm.
+    now = 30_000;
+    controller.maintainActiveSoftApply(video);
+    assert.ok(
+      runtimeState.softApplyCooldownUntil > now,
+      `expected cooldown to be armed, got ${runtimeState.softApplyCooldownUntil}`,
+    );
+  } finally {
+    windowStub.restore();
+  }
+});
+
+test("rate-only session suppresses only rate echoes, not buffering/pause broadcasts", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const video = createVideo({ currentTime: 24, playbackRate: 1 });
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => 10_000,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    const url = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25, playbackRate: 1 }),
+      1,
+      {
+        armCooldownOnConverge: false,
+        relativeDriftClose: { driftSeconds: 1, rateOffsetSeconds: 0.12 },
+      },
+    );
+
+    // Rate-driven echoes stay suppressed during the catch-up.
+    assert.equal(
+      controller.shouldSuppressActiveSoftApplyBroadcast({
+        normalizedCurrentUrl: url,
+        playState: "playing",
+        eventSource: "timeupdate",
+        now: 10_100,
+      }),
+      true,
+    );
+    // Genuine stall/pause events must NOT be swallowed.
+    for (const eventSource of ["waiting", "pause", "stalled"] as const) {
+      assert.equal(
+        controller.shouldSuppressActiveSoftApplyBroadcast({
+          normalizedCurrentUrl: url,
+          playState: "buffering",
+          eventSource,
+          now: 10_100,
+        }),
+        false,
+        `expected ${eventSource} not to be suppressed for a rate-only session`,
+      );
+    }
+  } finally {
+    windowStub.restore();
+  }
+});

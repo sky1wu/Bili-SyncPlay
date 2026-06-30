@@ -139,7 +139,11 @@ export function createSoftApplyController(args: {
 
     const session = activeSoftApply;
     clearActiveSoftApplyState();
+    // When the user explicitly changes the playback rate, they have taken over
+    // the rate — restoring the stale snapshot rate here would silently undo
+    // their change once the session deadline elapses, so skip the restore.
     if (
+      reason !== "user-ratechange" &&
       video &&
       Math.abs(video.playbackRate - session.restorePlaybackRate) > 0.01
     ) {
@@ -156,8 +160,14 @@ export function createSoftApplyController(args: {
     }
     if (
       session.armCooldownOnConverge &&
-      (reason === "converged" || reason === "apply-hard-seek")
+      (reason === "converged" ||
+        reason === "apply-hard-seek" ||
+        reason === "drift-closed")
     ) {
+      // `drift-closed` is the relative-drift restore path. A pure rate-only
+      // session has armCooldownOnConverge=false so it still won't arm here, but
+      // a real soft-apply that wrote currentTime and was later re-upserted as a
+      // rate-only nudge keeps the sticky flag and must still arm the cooldown.
       armSoftApplyCooldown(session.normalizedUrl, reason);
     } else if (
       args.runtimeState.softApplyCooldownUrl === session.normalizedUrl
@@ -331,6 +341,20 @@ export function createSoftApplyController(args: {
       args.runtimeState.lastExplicitUserAction &&
       input.now - args.runtimeState.lastExplicitUserAction.at <
         args.userGestureGraceMs
+    ) {
+      return false;
+    }
+
+    // A rate-only relative-drift session only manipulates the playback rate, so
+    // it must suppress just the rate-driven timeupdate/ratechange echoes — not
+    // genuine buffering/pause/seek events. Otherwise a real stall mid-catch-up
+    // (which can outlast the 700ms programmatic window) would be silently
+    // swallowed for up to the full relative-drift window instead of broadcasting
+    // buffering/paused.
+    if (
+      activeSoftApply.convergeByRelativeDrift &&
+      input.eventSource !== "timeupdate" &&
+      input.eventSource !== "ratechange"
     ) {
       return false;
     }
