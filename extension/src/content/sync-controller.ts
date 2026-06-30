@@ -247,10 +247,22 @@ export function createSyncController(args: {
     args.runtimeState.intendedPlaybackRate = 1;
     args.runtimeState.lastNonSharedGuardUrl = null;
     args.runtimeState.lastExplicitPlaybackAction = null;
-    args.runtimeState.explicitNonSharedPlaybackUrl = null;
+    // Preserve the user's authorization to keep watching a non-shared local video
+    // they manually started when this reset is a remote shared-url switch and they
+    // are STILL on that very video. Otherwise the periodic non-shared load-pause
+    // guard would re-pause an active local watch just because another member moved
+    // the room to a different shared video. A genuine navigation away still clears
+    // it (the navigation reset), and on the shared/other page it is harmless.
+    const resolvedCurrentUrl = args.normalizeUrl(args.getSharedVideo()?.url);
+    const keepNonSharedAuthorization =
+      resolvedCurrentUrl !== null &&
+      resolvedCurrentUrl === args.runtimeState.explicitNonSharedPlaybackUrl;
+    if (!keepNonSharedAuthorization) {
+      args.runtimeState.explicitNonSharedPlaybackUrl = null;
+      args.runtimeState.nonSharerAutoplayHoldUrl = null;
+    }
     args.runtimeState.suppressedLocalEndPauseUrl = null;
     args.runtimeState.suppressedLocalEndPauseUntil = 0;
-    args.runtimeState.nonSharerAutoplayHoldUrl = null;
     args.runtimeState.postNavigationAnchorSharedUrl = null;
     args.runtimeState.postNavigationAnchorSetAt = 0;
     args.runtimeState.sharerEndedSuppressionUrl = null;

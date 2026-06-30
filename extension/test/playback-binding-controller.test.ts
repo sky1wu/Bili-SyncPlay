@@ -965,7 +965,7 @@ test("playback binding controller still holds the delayed autoplay when the only
   }
 });
 
-test("playback binding controller authorizes a held non-shared play preceded by a progress-restore seek", async () => {
+test("playback binding controller holds a seek-triggered non-shared autoplay, then authorizes a distinct play press", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "ROOM42";
@@ -974,14 +974,14 @@ test("playback binding controller authorizes a held non-shared play preceded by 
   runtimeState.intendedPlayState = "paused";
   runtimeState.nonSharerAutoplayHoldUrl =
     "https://www.bilibili.com/video/BVother?p=1";
-  // The page-bridge hold paused the page at 19_800, then the user pressed play
-  // inside the player at 20_500 (a FRESH in-player gesture postdating that pause).
+  // A page-bridge hold paused the page at 19_800. Then an in-player gesture at
+  // 20_500 drags the progress bar (a SEEK, not a play press): we cannot tell it
+  // apart from a play click preceded by a restore seek, so a seek-triggered
+  // autoplay must stay held — only a genuine play press releases.
   runtimeState.lastForcedPauseAt = 19_800;
   runtimeState.lastUserGestureAt = 20_500;
   runtimeState.lastUserGestureInPlayerAt = 20_500;
-  // A leftover pause hold that authorization must clear so a later blip can't
-  // re-pause the just-authorized playback.
-  runtimeState.pauseHoldUntil = 25_000;
+  let now = 20_500;
   let pausedByGuard = 0;
   const originalSetTimeout = globalThis.window.setTimeout;
   const originalPause = dom.video.pause;
@@ -1003,9 +1003,11 @@ test("playback binding controller authorizes a held non-shared play preceded by 
     cancelActiveSoftApply: () => {},
     maintainActiveSoftApply: () => {},
     applyPendingPlaybackApplication: () => {},
-    activatePauseHold: () => {},
+    activatePauseHold: (durationMs = 3_000) => {
+      runtimeState.pauseHoldUntil = now + durationMs;
+    },
     debugLog: () => {},
-    getNow: () => 20_500,
+    getNow: () => now,
   });
 
   dom.video.pause = () => {
@@ -1023,14 +1025,25 @@ test("playback binding controller authorizes a held non-shared play preceded by 
   try {
     controller.attachPlaybackListeners();
     dom.video.paused = false;
-    // Bilibili restores the saved progress with a `seeking` before the `play`, so
-    // the pre-record path's seek guard suppresses authorization there. The marker
-    // block must still authorize this genuine in-player play and release the hold.
+    // The seek belongs to the current in-player gesture (no newer gesture after
+    // it), so the post-seek autoplay is held, not authorized.
     dom.listeners.get("seeking")?.(new Event("seeking"));
     dom.listeners.get("play")?.(new Event("play"));
     await Promise.resolve();
 
-    assert.equal(pausedByGuard, 0);
+    assert.equal(pausedByGuard, 1);
+    assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
+
+    // A DISTINCT in-player play press afterwards (a fresh gesture postdating the
+    // seek) is authorized and releases the hold.
+    now = 21_000;
+    runtimeState.lastUserGestureAt = 21_000;
+    runtimeState.lastUserGestureInPlayerAt = 21_000;
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+    await Promise.resolve();
+
+    assert.equal(pausedByGuard, 1);
     assert.equal(
       runtimeState.explicitNonSharedPlaybackUrl,
       "https://www.bilibili.com/video/BVother?p=1",

@@ -488,14 +488,20 @@ export function createPlaybackBindingController(args: {
    * bookmark / direct link (no marker, because the navigation watcher only sees
    * the initial URL as its baseline and never arms one). Pauses only when the
    * resolved `isKnownNonSharedVideo` identity is playing WITHOUT authorization — a
-   * matching `explicitNonSharedPlaybackUrl` or a fresh in-player play gesture means
-   * the user took control, so it is left running. Deliberately NOT gated on
-   * `intendedPlayState`: even if the room's own playing intent leaked onto this
-   * non-shared page, the page is still not the shared video and must be held.
+   * matching `explicitNonSharedPlaybackUrl` leaves it running. Deliberately NOT
+   * gated on `intendedPlayState`: even if the room's own playing intent leaked onto
+   * this non-shared page, the page is still not the shared video and must be held.
    *
-   * Arms the marker AND the pause hold so the transient-`null` re-pause guard
-   * (`shouldReapplyPauseHoldForUnconfirmedSharedVideo`) keeps holding through a
-   * brief player rebuild / bridge blip. Returns whether it paused.
+   * A genuine in-player PLAY gesture (`shouldPreRecordNonSharedExplicitPlay`, which
+   * requires a fresh in-player gesture AND excludes a seek-triggered autoplay)
+   * authorizes it: persist that via `preAuthorizeExplicitNonSharedPlay` so a later
+   * tick past the gesture grace does not re-pause the playback the user just
+   * started. A bare in-player gesture that is actually a SEEK (dragging the
+   * progress bar) does not qualify, so its post-seek autoplay is still held.
+   *
+   * Otherwise it arms the marker AND the pause hold so the transient-`null`
+   * re-pause guard (`shouldReapplyPauseHoldForUnconfirmedSharedVideo`) keeps holding
+   * through a brief player rebuild / bridge blip. Returns whether it paused.
    *
    * Invoked both on the `play`/`playing` event (immediate) and from the periodic
    * binding tick (so a non-shared video that was already playing before the room
@@ -517,9 +523,15 @@ export function createPlaybackBindingController(args: {
     const normalizedCurrentUrl = args.normalizeUrl(currentVideo?.url);
     if (
       normalizedCurrentUrl === null ||
-      args.runtimeState.explicitNonSharedPlaybackUrl === normalizedCurrentUrl ||
-      hasFreshInPlayerPlayIntent()
+      args.runtimeState.explicitNonSharedPlaybackUrl === normalizedCurrentUrl
     ) {
+      return false;
+    }
+    if (shouldPreRecordNonSharedExplicitPlay()) {
+      // A genuine in-player play press (not a seek-triggered autoplay). Persist the
+      // authorization so a later tick — once the gesture grace lapses — does not
+      // re-pause the local video the user just started.
+      preAuthorizeExplicitNonSharedPlay();
       return false;
     }
 
@@ -762,23 +774,13 @@ export function createPlaybackBindingController(args: {
 
       if (forcePauseOnNonSharedPage(video)) {
         // `forcePauseOnNonSharedPage` only suppresses the broadcast; it does not
-        // stop the local element. A fresh in-player play gesture authorizes the
-        // local playback (covering the case where a progress-restore `seeking`
-        // fired before this `play`, so `shouldPreRecordNonSharedExplicitPlay`'s
-        // seek guard suppressed the pre-record authorization — promote it here so a
-        // later buffer recovery / transient `currentVideo === null` blip cannot
-        // re-pause it and the autoplay-next keeps its
-        // `previousExplicitNonSharedPlaybackUrl` classification). Otherwise hold the
-        // non-shared video paused (load paused).
-        const currentVideo = args.getSharedVideo();
-        if (
-          isKnownNonSharedVideo(currentVideo) &&
-          hasFreshInPlayerPlayIntent()
-        ) {
-          preAuthorizeExplicitNonSharedPlay();
-        } else {
-          enforceNonSharedLoadPause(video);
-        }
+        // stop the local element. Hold the non-shared video paused (load paused) —
+        // unless a genuine in-player PLAY gesture authorizes it, which
+        // `enforceNonSharedLoadPause` persists via `preAuthorizeExplicitNonSharedPlay`.
+        // It uses `shouldPreRecordNonSharedExplicitPlay` (fresh in-player gesture AND
+        // not a seek-triggered autoplay), so a progress-bar drag whose `seeking`
+        // preceded this `play` is NOT mistaken for a play press and stays held.
+        enforceNonSharedLoadPause(video);
         return true;
       }
       if (forcePauseWhileWaitingForInitialRoomState(video)) {

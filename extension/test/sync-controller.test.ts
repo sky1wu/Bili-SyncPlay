@@ -1901,3 +1901,42 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
   assert.equal(payload.playState, "paused");
   assert.equal(payload.userInitiated, undefined);
 });
+
+test("sync controller keeps non-shared authorization on reset while still on that local video", () => {
+  const harness = createControllerHarness();
+  const localUrl = "https://www.bilibili.com/video/BVlocal?p=1";
+  harness.setSharedVideo({
+    videoId: "BVlocal:p1",
+    url: localUrl,
+    title: "Local Video",
+  });
+  harness.runtimeState.explicitNonSharedPlaybackUrl = localUrl;
+  harness.runtimeState.nonSharerAutoplayHoldUrl = localUrl;
+
+  // A remote member switches the room's shared video while the user is still
+  // watching their manually-started local video. Its authorization must survive,
+  // otherwise the periodic load-pause guard would re-pause an active local watch.
+  harness.controller.resetPlaybackSyncState("shared url changed");
+
+  assert.equal(harness.runtimeState.explicitNonSharedPlaybackUrl, localUrl);
+});
+
+test("sync controller clears non-shared authorization on reset when no longer on that video", () => {
+  const harness = createControllerHarness();
+  harness.setSharedVideo({
+    videoId: "BVcurrent:p1",
+    url: "https://www.bilibili.com/video/BVcurrent?p=1",
+    title: "Current Video",
+  });
+  // The user left the previously-authorized local video, so the stale
+  // authorization for a different URL is cleared by the reset.
+  harness.runtimeState.explicitNonSharedPlaybackUrl =
+    "https://www.bilibili.com/video/BVother?p=1";
+  harness.runtimeState.nonSharerAutoplayHoldUrl =
+    "https://www.bilibili.com/video/BVother?p=1";
+
+  harness.controller.resetPlaybackSyncState("shared url changed");
+
+  assert.equal(harness.runtimeState.explicitNonSharedPlaybackUrl, null);
+  assert.equal(harness.runtimeState.nonSharerAutoplayHoldUrl, null);
+});
