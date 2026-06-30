@@ -138,8 +138,8 @@ const playbackBindingController = createPlaybackBindingController({
     syncController.hasRecentRemoteStopIntent(currentVideoUrl),
   normalizeUrl,
   getLastBroadcastAt: () => lastBroadcastAt,
-  broadcastPlayback: (video, eventSource) =>
-    syncController.broadcastPlayback(video, eventSource),
+  broadcastPlayback: (video, eventSource, syncIntentOverride) =>
+    syncController.broadcastPlayback(video, eventSource, syncIntentOverride),
   cancelActiveSoftApply: (video, reason) =>
     syncController.cancelActiveSoftApply(video, reason),
   maintainActiveSoftApply: (video) =>
