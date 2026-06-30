@@ -33,6 +33,12 @@ function installDomStub() {
       setInterval() {
         return 1;
       },
+      clearInterval() {
+        return undefined;
+      },
+      clearTimeout() {
+        return undefined;
+      },
     },
   });
 
@@ -1409,7 +1415,9 @@ test("playback binding controller pauses an unmarked non-shared page reached by 
     cancelActiveSoftApply: () => {},
     maintainActiveSoftApply: () => {},
     applyPendingPlaybackApplication: () => {},
-    activatePauseHold: () => {},
+    activatePauseHold: (durationMs = 3_000) => {
+      runtimeState.pauseHoldUntil = 20_000 + durationMs;
+    },
     debugLog: () => {},
     getNow: () => 20_000,
   });
@@ -1441,9 +1449,153 @@ test("playback binding controller pauses an unmarked non-shared page reached by 
       runtimeState.nonSharerAutoplayHoldUrl,
       "https://www.bilibili.com/video/BVother?p=1",
     );
+    // The pause hold is armed too, so a transient bridge blip cannot resume it.
+    assert.ok(runtimeState.pauseHoldUntil > 0);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller pauses a non-shared video even when room intent leaked as playing", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  // The room's own playing intent leaked onto this non-shared page. It must STILL
+  // be held — the page is not the shared video — so the pause is not gated on
+  // intendedPlayState.
+  runtimeState.intendedPlayState = "playing";
+  let pausedByGuard = 0;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => ({
+      videoId: "BVother:p1",
+      url: "https://www.bilibili.com/video/BVother?p=1",
+      title: "Other Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 20_000,
+  });
+
+  dom.video.pause = () => {
+    pausedByGuard += 1;
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.video.paused = false;
+    dom.listeners.get("playing")?.(new Event("playing"));
+
+    await Promise.resolve();
+
+    assert.equal(pausedByGuard, 1);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller periodic tick pauses a non-shared video already playing at hydration", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  let pausedByGuard = 0;
+  let intervalCallback: (() => void) | null = null;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalSetInterval = globalThis.window.setInterval;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => ({
+      videoId: "BVother:p1",
+      url: "https://www.bilibili.com/video/BVother?p=1",
+      title: "Other Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 20_000,
+  });
+
+  dom.video.pause = () => {
+    pausedByGuard += 1;
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+  globalThis.window.setTimeout = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      callback();
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+  globalThis.window.setInterval = ((callback: TimerHandler) => {
+    if (typeof callback === "function") {
+      intervalCallback = callback as () => void;
+    }
+    return 1;
+  }) as typeof globalThis.window.setInterval;
+
+  try {
+    // The video was already autoplaying when the room state hydrated, so its only
+    // play/playing event fired before listeners were attached — the event-driven
+    // hold never ran. The periodic tick must still pause it.
+    dom.video.paused = false;
+    controller.start();
+    assert.equal(pausedByGuard, 0);
+
+    assert.ok(intervalCallback, "expected the binding to register an interval");
+    intervalCallback?.();
+    await Promise.resolve();
+
+    assert.equal(pausedByGuard, 1);
+    assert.equal(
+      runtimeState.nonSharerAutoplayHoldUrl,
+      "https://www.bilibili.com/video/BVother?p=1",
+    );
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    globalThis.window.setInterval = originalSetInterval;
+    dom.video.pause = originalPause;
+    controller.destroy();
     dom.restore();
   }
 });
