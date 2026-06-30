@@ -283,7 +283,20 @@ export function createSyncController(args: {
         args.runtimeState.pendingPlaybackApplication = null;
       },
       onPlaybackAdjusted: (adjustment, playback) => {
-        if (adjustment.mode !== "soft-apply") {
+        // A `rate-only` catch-up that actually inflates the playback rate above
+        // the base rate must self-restore just like `soft-apply`: it bumps the
+        // rate to close drift but never writes time, so if no corrective remote
+        // update follows (e.g. the sharer keeps playing steadily after an
+        // autoplay-next), the elevated rate would otherwise persist and the
+        // playhead would run ahead forever. Registering it as an active
+        // soft-apply session lets the existing convergence/timeout machinery
+        // restore `restorePlaybackRate` once the local time catches up.
+        const isSelfRestoringRateAdjust =
+          adjustment.mode === "soft-apply" ||
+          (adjustment.mode === "rate-only" &&
+            Math.abs(adjustment.playbackRate - adjustment.restorePlaybackRate) >
+              0.01);
+        if (!isSelfRestoringRateAdjust) {
           softApply.clearSoftApplyCooldown();
         }
         args.debugLog(
@@ -295,7 +308,7 @@ export function createSyncController(args: {
             },
           )} wroteTime=${adjustment.didWriteCurrentTime} wroteRate=${adjustment.didWritePlaybackRate} targetTime=${adjustment.targetTime.toFixed(2)} appliedTime=${adjustment.currentTime.toFixed(2)} appliedRate=${adjustment.playbackRate.toFixed(2)} restoreRate=${adjustment.restorePlaybackRate.toFixed(2)}`,
         );
-        if (adjustment.mode === "soft-apply") {
+        if (isSelfRestoringRateAdjust) {
           softApply.upsertActiveSoftApply(
             playback,
             Math.abs(adjustment.targetTime - adjustment.currentTime),

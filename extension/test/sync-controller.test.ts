@@ -280,6 +280,7 @@ test("sync controller suppresses follow-up local broadcast after applying a late
 });
 
 test("sync controller uses rate-only reconcile for medium playing drift", async () => {
+  const windowHarness = installWindowStub();
   const harness = createControllerHarness();
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
@@ -299,33 +300,55 @@ test("sync controller uses rate-only reconcile for medium playing drift", async 
   harness.setVideoElement(video);
   harness.setNow(20_000);
 
-  await harness.controller.applyRoomState(
-    createRoomState({
-      actorId: "remote-member",
-      seq: 10,
-      serverTime: 19_900,
-      currentTime: 24.8,
-      playState: "playing",
-      playbackRate: 1,
-    }),
-  );
+  try {
+    await harness.controller.applyRoomState(
+      createRoomState({
+        actorId: "remote-member",
+        seq: 10,
+        serverTime: 19_900,
+        currentTime: 24.8,
+        playState: "playing",
+        playbackRate: 1,
+      }),
+    );
 
-  assert.ok(Math.abs(video.currentTime - 24) < 0.001);
-  assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
-  assert.equal(
-    harness.debugLogs.some(
-      (message) =>
-        message.includes("Playback reconcile") &&
-        message.includes("mode=rate-only") &&
-        message.includes("wroteTime=false") &&
-        message.includes("wroteRate=true"),
-    ),
-    true,
-  );
-  assert.equal(
-    harness.debugLogs.some((message) => message.includes("Started soft apply")),
-    false,
-  );
+    assert.ok(Math.abs(video.currentTime - 24) < 0.001);
+    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+    assert.equal(
+      harness.debugLogs.some(
+        (message) =>
+          message.includes("Playback reconcile") &&
+          message.includes("mode=rate-only") &&
+          message.includes("wroteTime=false") &&
+          message.includes("wroteRate=true"),
+      ),
+      true,
+    );
+    // The rate bump must register a self-restoring session so the elevated
+    // catch-up rate cannot persist when no corrective remote update follows.
+    assert.equal(
+      harness.debugLogs.some((message) =>
+        message.includes("Started soft apply"),
+      ),
+      true,
+    );
+
+    // Once the local playhead catches up to the target, the base rate is
+    // restored instead of running ahead forever.
+    video.currentTime = 24.8;
+    harness.controller.maintainActiveSoftApply(video);
+    assert.ok(Math.abs(video.playbackRate - 1) < 0.001);
+    assert.equal(
+      harness.debugLogs.some(
+        (message) =>
+          message.includes("Cancelled soft apply") &&
+          message.includes("result=converged"),
+      ),
+      true,
+    );
+  } finally {
+    windowHarness.restore();
+  }
 });
 
 test("sync controller does not downgrade explicit seek under rate-only thresholds", async () => {
