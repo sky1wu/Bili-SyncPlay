@@ -1,6 +1,7 @@
 import type { PlaybackState, RoomState } from "@bili-syncplay/protocol";
 import type { SharedVideoToastPayload } from "../shared/messages";
 import { t } from "../shared/i18n";
+import { setShadowRootTemplate } from "./shadow-template";
 
 const SEEK_TOAST_THRESHOLD_SECONDS = 1.5;
 const SEEK_START_TOAST_SUPPRESSION_MS = 1600;
@@ -54,7 +55,9 @@ export function createToastPresenter(): {
     toastHost.style.zIndex = "2147483000";
 
     const shadowRoot = toastHost.attachShadow({ mode: "open" });
-    shadowRoot.innerHTML = `
+    setShadowRootTemplate(
+      shadowRoot,
+      `
       <style>
         .toast-stack {
           position: absolute;
@@ -79,7 +82,8 @@ export function createToastPresenter(): {
         }
       </style>
       <div class="toast-stack" id="toast-stack"></div>
-    `;
+    `,
+    );
 
     mountTarget.appendChild(toastHost);
     toastContainer = shadowRoot.getElementById(

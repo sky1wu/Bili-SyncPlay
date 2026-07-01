@@ -15,6 +15,7 @@ import {
   type PageShareButtonPosition,
 } from "../shared/storage";
 import { areSharedVideoUrlsEqual } from "../shared/url";
+import { setShadowRootTemplate } from "./shadow-template";
 
 type RuntimeSendMessage = <T>(
   message: ContentToBackgroundMessage,
@@ -568,7 +569,9 @@ export function createPageShareButtonController(args: {
     host.style.zIndex = "2147482999";
 
     const shadowRoot = host.attachShadow({ mode: "open" });
-    shadowRoot.innerHTML = `
+    setShadowRootTemplate(
+      shadowRoot,
+      `
       <style>
         :host {
           all: initial;
@@ -795,7 +798,8 @@ export function createPageShareButtonController(args: {
           </span>
         </label>
       </div>
-    `;
+    `,
+    );
     button = shadowRoot.querySelector("button");
     popover = shadowRoot.querySelector(".share-popover");
     popoverStatus = shadowRoot.querySelector(".popover-status");
