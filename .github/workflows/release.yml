@@ -36,10 +36,9 @@ jobs:
 
       - name: Lint Firefox build (non-blocking)
         # Soft gate: dist-firefox has 0 errors but expected warnings
-        # (pre-existing innerHTML UNSAFE_VAR; data_collection_permissions
-        # KEY_FIREFOX_*_UNSUPPORTED_BY_MIN_VERSION because the key is only
-        # read by Firefox >=140 while strict_min_version is 121). Do not
-        # fail the release on warnings.
+        # (data_collection_permissions KEY_FIREFOX_*_UNSUPPORTED_BY_MIN_VERSION
+        # because the key is only read by Firefox >=140 while strict_min_version
+        # is 121). Do not fail the release on warnings.
         continue-on-error: true
         run: npx --yes web-ext lint --source-dir extension/dist-firefox --output text --no-config-discovery
 
