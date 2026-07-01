@@ -62,6 +62,7 @@ export function createRoomStateApplyController(args: {
   clearRemoteFollowPlayingWindow: () => void;
   acceptInitialRoomStateHydration: () => void;
   acceptInitialRoomStateHydrationIfPending: () => void;
+  markInitialRoomStateReceived: () => void;
   logIgnoredRemotePlayback: (argsForLog: {
     playback: PlaybackState;
     video: HTMLVideoElement;
@@ -469,6 +470,14 @@ export function createRoomStateApplyController(args: {
       args.debugLog(
         `Deferred remote paused url=${deferredPlayback.url} seq=${deferredPlayback.seq} for ${remotePauseDebounceMs}ms`,
       );
+      // The room's initial state is now known (we are merely debouncing the
+      // paused frame). Mark it received so `handleSyncStatus` stops re-arming a
+      // 150ms hydrate retry: otherwise each retry re-enters here and resets this
+      // 250ms defer timer (150ms < 250ms), so it never fires, hydration never
+      // completes, and the retry loop floods the server with `sync:request`
+      // until it rate-limits us. `pendingRoomStateHydration` is deliberately
+      // left true — it clears only when the deferred snapshot fires and applies.
+      args.markInitialRoomStateReceived();
       return;
     }
 

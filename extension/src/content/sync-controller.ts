@@ -373,6 +373,19 @@ export function createSyncController(args: {
     }
   }
 
+  // Mark the room's initial state as *received* without clearing
+  // `pendingRoomStateHydration`. Used when the state is known but its
+  // application is intentionally deferred (e.g. a remote `paused` held by the
+  // flicker debounce): `hasReceivedInitialRoomState` gates `handleSyncStatus`'s
+  // 150ms hydrate retry, so leaving it false while re-deferring the paused every
+  // ~150ms (< the 250ms debounce) resets the defer timer forever, spamming
+  // `sync:request` until the server rate-limits us. `pendingRoomStateHydration`
+  // stays true so the longer initial pause hold / protection still apply when
+  // the deferred snapshot finally fires and accepts hydration for real.
+  function markInitialRoomStateReceived(): void {
+    args.runtimeState.hasReceivedInitialRoomState = true;
+  }
+
   function logIgnoredRemotePlayback(argsForLog: {
     playback: PlaybackState;
     video: HTMLVideoElement;
@@ -1403,6 +1416,7 @@ export function createSyncController(args: {
     clearRemoteFollowPlayingWindow,
     acceptInitialRoomStateHydration,
     acceptInitialRoomStateHydrationIfPending,
+    markInitialRoomStateReceived,
     logIgnoredRemotePlayback,
     getPendingLocalPlaybackOverrideDecision:
       pendingLocalOverride.getPendingLocalPlaybackOverrideDecision,

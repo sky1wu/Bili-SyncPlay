@@ -87,6 +87,9 @@ function createController(overrides: {
       _acceptedHydration = true;
     },
     acceptInitialRoomStateHydrationIfPending: () => {},
+    markInitialRoomStateReceived: () => {
+      runtimeState.hasReceivedInitialRoomState = true;
+    },
     logIgnoredRemotePlayback: () => {},
     getPendingLocalPlaybackOverrideDecision: () => ({ shouldIgnore: false }),
     shouldCancelActiveSoftApplyForPlayback: () => null,
@@ -842,6 +845,55 @@ test("defers remote paused room state when remotePauseDebounceMs > 0", async () 
       applyPending,
       0,
       "apply should be deferred, not run synchronously",
+    );
+  } finally {
+    win.restore();
+  }
+});
+
+test("deferring initial paused marks room state received but keeps hydration pending", async () => {
+  const win = installWindowTimerStub();
+  try {
+    const video = createStubVideo(false);
+    const harness = createController({
+      video,
+      now: 30_000,
+      remotePauseDebounceMs: 250,
+    });
+    harness.runtimeState.localMemberId = "local-member";
+    // Simulate the in-room navigation / initial-hydration state: we are still
+    // waiting to apply the first room state and have not marked it received.
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.hasReceivedInitialRoomState = false;
+
+    await harness.controller.applyRoomState(
+      createRoomStateWithPlayback({
+        url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+        currentTime: 42,
+        playState: "paused",
+        actorId: "remote-member",
+        seq: 5,
+      }) as never,
+    );
+
+    assert.equal(
+      harness.runtimeState.deferredRemotePausedState !== null,
+      true,
+      "paused room state should be captured for deferred apply",
+    );
+    // The retry loop that floods the server with `sync:request` is gated on
+    // `hasReceivedInitialRoomState`; deferring must flip it so retries stop.
+    assert.equal(
+      harness.runtimeState.hasReceivedInitialRoomState,
+      true,
+      "initial room state must be marked received once deferred",
+    );
+    // But hydration is not finished until the deferred snapshot applies, so the
+    // longer initial pause hold / protection must still be armed.
+    assert.equal(
+      harness.runtimeState.pendingRoomStateHydration,
+      true,
+      "pending hydration must stay true until the deferred snapshot applies",
     );
   } finally {
     win.restore();
