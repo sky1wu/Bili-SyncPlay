@@ -1,11 +1,12 @@
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 import { shouldIncludeRuntimeEvent } from "./event-visibility.js";
-import type {
-  GlobalEventStore,
-  GlobalEventStoreAppendInput,
-  GlobalEventStoreQuery,
-  GlobalEventStoreQueryResult,
+import {
+  isWindowIndexedEvent,
+  type GlobalEventStore,
+  type GlobalEventStoreAppendInput,
+  type GlobalEventStoreQuery,
+  type GlobalEventStoreQueryResult,
 } from "./global-event-store.js";
 import type { RuntimeEvent } from "./types.js";
 
@@ -221,6 +222,43 @@ export async function createRedisEventStore(
     }
   }
 
+  // Drop window indexes for event names that are no longer indexed. Nothing
+  // prunes those keys once appends stop touching them, so a deploy that
+  // narrows the allowlist would otherwise leave the old high-volume ZSETs
+  // (24h of per-heartbeat system events) in Redis forever. UNLINK reclaims
+  // them off the main thread. A node still running the previous version may
+  // recreate a key during a rolling restart; the next startup removes it.
+  {
+    let cursor = "0";
+    const staleKeys: string[] = [];
+    do {
+      const [nextCursor, keys] = await redis.scan(
+        cursor,
+        "MATCH",
+        `${windowIndexKeyPrefix}:*`,
+        "COUNT",
+        100,
+      );
+      cursor = nextCursor;
+      for (const key of keys) {
+        const encodedEventName = key.slice(windowIndexKeyPrefix.length + 1);
+        let eventName = encodedEventName;
+        try {
+          eventName = decodeURIComponent(encodedEventName);
+        } catch {
+          // Not produced by eventWindowIndexKey; treat the raw suffix as the
+          // event name so unknown keys under the prefix still get removed.
+        }
+        if (!isWindowIndexedEvent(eventName)) {
+          staleKeys.push(key);
+        }
+      }
+    } while (cursor !== "0");
+    if (staleKeys.length > 0) {
+      await redis.unlink(...staleKeys);
+    }
+  }
+
   // Backfill the window indexes from retained stream entries on every startup.
   // ZADD by stream id is idempotent, so this cannot overwrite or double-count
   // entries written concurrently by another node during a rolling restart.
@@ -234,6 +272,7 @@ export async function createRedisEventStore(
         const eventName = fields.event;
         const timestamp = fields.timestamp;
         if (!eventName || !timestamp) continue;
+        if (!isWindowIndexedEvent(eventName)) continue;
         const ts = Date.parse(timestamp);
         if (!Number.isFinite(ts)) continue;
         transaction.zadd(
@@ -385,7 +424,8 @@ export async function createRedisEventStore(
           redis.xtrim(streamKey, "MAXLEN", "=", maxLen),
           redis.hincrby(countsKey, input.event, 1),
         ];
-        if (Number.isFinite(timestampMs)) {
+        const shouldIndexWindow = isWindowIndexedEvent(input.event);
+        if (shouldIndexWindow && Number.isFinite(timestampMs)) {
           writeOperations.push(
             redis.zadd(
               eventWindowIndexKey(windowIndexKeyPrefix, input.event),
@@ -395,7 +435,9 @@ export async function createRedisEventStore(
           );
         }
         await Promise.all(writeOperations);
-        await pruneEventWindowIndexIfNeeded(input.event, timestampMs);
+        if (shouldIndexWindow) {
+          await pruneEventWindowIndexIfNeeded(input.event, timestampMs);
+        }
 
         return {
           ...runtimeEvent,
@@ -443,7 +485,9 @@ export async function createRedisEventStore(
       return Object.fromEntries(
         await Promise.all(
           eventNames.map(async (name) => {
-            await pruneEventWindowIndexIfNeeded(name, toMs);
+            if (isWindowIndexedEvent(name)) {
+              await pruneEventWindowIndexIfNeeded(name, toMs);
+            }
             const total = await redis.zcount(
               eventWindowIndexKey(windowIndexKeyPrefix, name),
               fromMs,

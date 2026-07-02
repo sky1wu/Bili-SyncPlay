@@ -1,4 +1,7 @@
-import type { GlobalEventStore } from "./global-event-store.js";
+import {
+  WINDOW_INDEXED_EVENTS,
+  type GlobalEventStore,
+} from "./global-event-store.js";
 import type { RoomStore } from "../room-store.js";
 import type { RuntimeStore } from "../runtime-store.js";
 import type {
@@ -7,12 +10,9 @@ import type {
   Session,
 } from "../types.js";
 
-const OVERVIEW_EVENT_NAMES = [
-  "room_created",
-  "room_joined",
-  "rate_limited",
-  "ws_connection_rejected",
-] as const;
+// The overview reads windowed counts, so it may only ask for event names the
+// stores actually index — reusing the allowlist keeps the two in lockstep.
+const OVERVIEW_EVENT_NAMES = WINDOW_INDEXED_EVENTS;
 
 const EVENT_WINDOWS_MS = {
   lastMinute: 60_000,

@@ -351,3 +351,34 @@ test("in-memory event store hides system events by default and can include them 
   });
   assert.equal(fullView.total, 3);
 });
+
+test("countsByEventInWindow only indexes allowlisted events while totals count everything", async () => {
+  const store = createEventStore();
+  const base = Date.parse("2026-03-26T12:00:00.000Z");
+
+  await store.append({
+    event: "room_event_published",
+    timestamp: new Date(base).toISOString(),
+    data: { roomCode: "ROOM01", result: "ok" },
+  });
+  await store.append({
+    event: "room_created",
+    timestamp: new Date(base).toISOString(),
+    data: { roomCode: "ROOM01", result: "ok" },
+  });
+
+  const counts = await store.countsByEventInWindow(
+    ["room_event_published", "room_created"],
+    base - 60_000,
+    base,
+  );
+  assert.equal(counts.room_event_published, 0);
+  assert.equal(counts.room_created, 1);
+
+  const totals = await store.totalCountsByEvent([
+    "room_event_published",
+    "room_created",
+  ]);
+  assert.equal(totals.room_event_published, 1);
+  assert.equal(totals.room_created, 1);
+});

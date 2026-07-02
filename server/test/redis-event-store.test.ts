@@ -560,3 +560,71 @@ test("redis event store hides system events by default and can include them on d
     await store.close();
   }
 });
+
+test("window index allowlist skips system events and unlinks stale indexes on startup", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keys = createKeyTriplet();
+  const redis = new Redis(REDIS_URL);
+  const staleKey = `${keys.windowIndexKeyPrefix}:${encodeURIComponent(
+    "room_event_published",
+  )}`;
+  const indexedKey = `${keys.windowIndexKeyPrefix}:${encodeURIComponent(
+    "room_created",
+  )}`;
+
+  try {
+    // Simulate an index left behind by a version that indexed every event.
+    await redis.zadd(staleKey, "1", "1-1");
+
+    const store = await createRedisEventStore(REDIS_URL, keys);
+    try {
+      assert.equal(await redis.exists(staleKey), 0);
+
+      await store.append({
+        event: "room_event_published",
+        timestamp: "2026-03-26T13:00:30.000Z",
+        data: { roomCode: "ROOM01", result: "ok" },
+      });
+      await store.append({
+        event: "room_created",
+        timestamp: "2026-03-26T13:00:31.000Z",
+        data: { roomCode: "ROOM01", result: "ok" },
+      });
+
+      const counts = await store.countsByEventInWindow(
+        ["room_event_published", "room_created"],
+        Date.parse("2026-03-26T13:00:00.000Z"),
+        Date.parse("2026-03-26T13:01:00.000Z"),
+      );
+      assert.equal(counts.room_event_published, 0);
+      assert.equal(counts.room_created, 1);
+      assert.equal(await redis.exists(staleKey), 0);
+      assert.equal(await redis.exists(indexedKey), 1);
+
+      const totals = await store.totalCountsByEvent([
+        "room_event_published",
+        "room_created",
+      ]);
+      assert.equal(totals.room_event_published, 1);
+      assert.equal(totals.room_created, 1);
+    } finally {
+      await store.close();
+    }
+
+    // Restart backfills the window indexes from the retained stream, which
+    // still holds the room_event_published entry; it must stay unindexed.
+    const reopened = await createRedisEventStore(REDIS_URL, keys);
+    try {
+      assert.equal(await redis.exists(staleKey), 0);
+      assert.equal(await redis.exists(indexedKey), 1);
+    } finally {
+      await reopened.close();
+    }
+  } finally {
+    await redis.quit();
+  }
+});

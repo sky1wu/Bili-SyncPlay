@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { shouldIncludeRuntimeEvent } from "./event-visibility.js";
 import type { RuntimeEvent } from "./types.js";
-import type {
-  GlobalEventStore,
-  GlobalEventStoreQuery,
+import {
+  isWindowIndexedEvent,
+  type GlobalEventStore,
+  type GlobalEventStoreQuery,
 } from "./global-event-store.js";
 
 export type EventStore = GlobalEventStore;
@@ -91,7 +92,7 @@ export function createEventStore(capacity = 1_000): EventStore {
   }
 
   function recordWindowEventTime(eventName: string, timestampMs: number): void {
-    if (!Number.isFinite(timestampMs)) {
+    if (!isWindowIndexedEvent(eventName) || !Number.isFinite(timestampMs)) {
       return;
     }
     const retentionReferenceMs = retentionReferenceTimestamp(timestampMs);
