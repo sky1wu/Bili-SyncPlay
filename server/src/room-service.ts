@@ -37,6 +37,7 @@ import type {
 } from "./types.js";
 
 const PLAYBACK_AUTHORITY_WINDOW_MS = 1200;
+const PLAYBACK_AUTHORITY_SWEEP_INTERVAL_MS = 60_000;
 const MAX_VERSION_RETRIES = 3;
 const ROOM_LAST_ACTIVE_WRITE_INTERVAL_MS = 30_000;
 const JOIN_ADMISSION_LOCK_KEY = "join-admission";
@@ -452,12 +453,34 @@ export function createRoomService(options: {
     return null;
   }
 
+  let lastAuthoritySweepAt = 0;
+
+  // getPlaybackAuthority only removes the entry for the room it is asked
+  // about, so authorities of rooms that are deleted (or simply never read
+  // again) would sit in the map forever. Sweeping on record keeps the map
+  // bounded across every room-deletion path without wiring into them.
+  function sweepExpiredPlaybackAuthorities(currentTime: number): void {
+    if (
+      currentTime - lastAuthoritySweepAt <
+      PLAYBACK_AUTHORITY_SWEEP_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastAuthoritySweepAt = currentTime;
+    for (const [roomCode, authority] of playbackAuthorityByRoom) {
+      if (authority.until <= currentTime) {
+        playbackAuthorityByRoom.delete(roomCode);
+      }
+    }
+  }
+
   function recordPlaybackAuthority(args: {
     roomCode: string;
     actorId: string;
     kind: PlaybackAuthority["kind"];
     source: PlaybackAuthority["source"];
   }): void {
+    sweepExpiredPlaybackAuthorities(now());
     playbackAuthorityByRoom.set(args.roomCode, {
       actorId: args.actorId,
       until: now() + PLAYBACK_AUTHORITY_WINDOW_MS,

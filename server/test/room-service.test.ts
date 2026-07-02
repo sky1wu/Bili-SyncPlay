@@ -3390,3 +3390,74 @@ test("playback_update_applied skips steady ticks across actor handovers in multi
   );
   assert.deepEqual(applied, []);
 });
+
+test("room service sweeps expired playback authorities when recording new ones", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const roomCodes = ["ROOMSW1", "ROOMSW2"];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => roomCodes.shift() ?? "ROOMSWX",
+  });
+
+  const ownerA = createSession("owner-a");
+  const roomA = await service.createRoomForSession(ownerA, "Alice");
+  await service.shareVideoForSession(
+    ownerA,
+    roomA.memberToken,
+    createSharedVideo(),
+    createPlayback(ownerA.memberId ?? ownerA.id, {
+      playState: "paused",
+      currentTime: 10,
+    }),
+  );
+  currentTime = 2_000;
+  await service.updatePlaybackForSession(
+    ownerA,
+    roomA.memberToken,
+    createPlayback(ownerA.memberId ?? ownerA.id, {
+      playState: "playing",
+      currentTime: 10.1,
+      seq: 2,
+    }),
+  );
+  assert.equal(service.getPlaybackAuthority(roomA.room.code)?.kind, "play");
+
+  // Long past room A's authority window and the sweep interval; recording a
+  // new authority in room B triggers the sweep and must not clobber the
+  // entry it is about to record.
+  currentTime = 70_000;
+  const ownerB = createSession("owner-b");
+  const roomB = await service.createRoomForSession(ownerB, "Bob");
+  await service.shareVideoForSession(
+    ownerB,
+    roomB.memberToken,
+    createSharedVideo(),
+    createPlayback(ownerB.memberId ?? ownerB.id, {
+      playState: "paused",
+      currentTime: 5,
+    }),
+  );
+  currentTime = 71_000;
+  await service.updatePlaybackForSession(
+    ownerB,
+    roomB.memberToken,
+    createPlayback(ownerB.memberId ?? ownerB.id, {
+      playState: "playing",
+      currentTime: 5.05,
+      seq: 2,
+    }),
+  );
+
+  assert.equal(service.getPlaybackAuthority(roomB.room.code)?.kind, "play");
+  assert.equal(service.getPlaybackAuthority(roomA.room.code), null);
+});
