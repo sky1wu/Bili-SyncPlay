@@ -114,6 +114,14 @@ function eventWindowIndexKey(prefix: string, eventName: string): string {
   return `${prefix}:${encodeURIComponent(eventName)}`;
 }
 
+// SCAN MATCH takes a glob-style pattern, so a configured prefix (via
+// REDIS_NAMESPACE) containing *, ?, [ or \ would match keys outside this
+// store's namespace and the startup cleanup could UNLINK another
+// namespace's indexes on a shared Redis.
+function escapeRedisGlob(value: string): string {
+  return value.replace(/[\\*?[\]]/g, "\\$&");
+}
+
 function retentionReferenceTimestamp(timestampMs: number): number {
   return Math.min(timestampMs, Date.now());
 }
@@ -231,17 +239,23 @@ export async function createRedisEventStore(
   {
     let cursor = "0";
     const staleKeys: string[] = [];
+    const literalKeyPrefix = `${windowIndexKeyPrefix}:`;
     do {
       const [nextCursor, keys] = await redis.scan(
         cursor,
         "MATCH",
-        `${windowIndexKeyPrefix}:*`,
+        `${escapeRedisGlob(windowIndexKeyPrefix)}:*`,
         "COUNT",
         100,
       );
       cursor = nextCursor;
       for (const key of keys) {
-        const encodedEventName = key.slice(windowIndexKeyPrefix.length + 1);
+        // Literal-prefix backstop in case the glob escaping above ever
+        // diverges from Redis's matching rules.
+        if (!key.startsWith(literalKeyPrefix)) {
+          continue;
+        }
+        const encodedEventName = key.slice(literalKeyPrefix.length);
         let eventName = encodedEventName;
         try {
           eventName = decodeURIComponent(encodedEventName);

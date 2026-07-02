@@ -628,3 +628,41 @@ test("window index allowlist skips system events and unlinks stale indexes on st
     await redis.quit();
   }
 });
+
+test("startup cleanup escapes glob metacharacters in the window index prefix", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const suffix = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  const keys = {
+    streamKey: `bsp:test:events:${suffix}`,
+    countsKey: `bsp:test:event_counts:${suffix}`,
+    // Unescaped, "[ab]" would glob-match sibling prefixes ending in "a"/"b".
+    windowIndexKeyPrefix: `bsp:test:event_window_index:${suffix}[ab]`,
+  };
+  const redis = new Redis(REDIS_URL);
+  const ownStaleKey = `${keys.windowIndexKeyPrefix}:${encodeURIComponent(
+    "room_event_published",
+  )}`;
+  const siblingNamespaceKey = `bsp:test:event_window_index:${suffix}a:${encodeURIComponent(
+    "room_event_published",
+  )}`;
+
+  try {
+    await redis.zadd(ownStaleKey, "1", "1-1");
+    await redis.zadd(siblingNamespaceKey, "1", "1-1");
+
+    const store = await createRedisEventStore(REDIS_URL, keys);
+    try {
+      assert.equal(await redis.exists(ownStaleKey), 0);
+      assert.equal(await redis.exists(siblingNamespaceKey), 1);
+    } finally {
+      await store.close();
+    }
+  } finally {
+    await redis.del(siblingNamespaceKey);
+    await redis.quit();
+  }
+});
