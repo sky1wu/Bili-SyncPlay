@@ -248,7 +248,7 @@ After login, the current UI includes:
 The server is also published as a container image on every `v*` release tag:
 
 - `ghcr.io/sky1wu/bili-syncplay-server`
-- `docker.io/<dockerhub-username>/bili-syncplay-server` (mirror)
+- `docker.io/sky1wu/bili-syncplay-server` (mirror)
 
 Image tags: `latest`, `<major>.<minor>`, and the full version (e.g. `1.2.2`). Both `linux/amd64` and `linux/arm64` are supported.
 
