@@ -8,6 +8,7 @@ import {
   getPlaybackSyncedAt,
   formatRelativeDuration,
   getRoomPlaybackSummary,
+  getRoomStatusSummary,
   getRoomOwnerSummary,
   getRoomVideoSummary,
   groupRuntimeEventsByRoom,
@@ -574,7 +575,6 @@ export function createPageLoaders(options) {
                       <th>创建者</th>
                       <th>成员</th>
                       <th>视频</th>
-                      <th>播放状态</th>
                       <th>时间</th>
                       <th>操作</th>
                     </tr>
@@ -583,16 +583,15 @@ export function createPageLoaders(options) {
                     ${data.items
                       .map((item) => {
                         const videoSummary = getRoomVideoSummary(item);
-                        const playbackSummary = getRoomPlaybackSummary(item);
+                        const statusSummary = getRoomStatusSummary(item);
                         const ownerSummary = getRoomOwnerSummary(item);
                         return `
                       <tr>
                         <td><a href="${withDemoQuery(routeHref(`/rooms/${item.roomCode}`))}" data-room-link="${escapeHtml(item.roomCode)}" class="primary-cell-link"><strong>${escapeHtml(item.roomCode)}</strong></a></td>
-                        <td>${renderStatus(item.isActive ? "success" : "neutral", item.isActive ? "活跃" : "空闲")}</td>
+                        <td>${renderDataPair(renderStatus(statusSummary.tone, statusSummary.primary), escapeHtml(statusSummary.secondary))}</td>
                         <td>${renderDataPair(escapeHtml(ownerSummary.primary), escapeHtml(ownerSummary.secondary))}</td>
                         <td><strong>${item.memberCount}</strong></td>
                         <td>${renderDataPair(escapeHtml(videoSummary.primary), escapeHtml(videoSummary.secondary))}</td>
-                        <td>${renderDataPair(renderStatus(playbackSummary.tone, playbackSummary.primary), escapeHtml(playbackSummary.secondary))}</td>
                         <td>${renderDataPair(
                           `${formatDateTime(item.lastActiveAt)}`,
                           item.expiresAt
@@ -656,7 +655,7 @@ export function createPageLoaders(options) {
                 </div>
                 <div class="room-summary-chip">
                   <span class="room-summary-label">状态</span>
-                  ${renderStatus(detail.room.isActive ? "success" : "neutral", detail.room.isActive ? "active" : "idle")}
+                  ${renderStatus(detail.room.isActive ? "success" : "neutral", detail.room.isActive ? "活跃" : "空闲")}
                 </div>
                 <div class="room-summary-chip">
                   <span class="room-summary-label">在线成员</span>
@@ -690,7 +689,7 @@ export function createPageLoaders(options) {
                   <dl class="kv">
                     <dt>房间号</dt><dd><strong>${escapeHtml(detail.room.roomCode)}</strong></dd>
                     <dt>实例</dt><dd>${escapeHtml(detail.room.instanceId || "—")}</dd>
-                    <dt>在线状态</dt><dd>${renderStatus(detail.room.isActive ? "success" : "neutral", detail.room.isActive ? "active" : "idle")}</dd>
+                    <dt>在线状态</dt><dd>${renderStatus(detail.room.isActive ? "success" : "neutral", detail.room.isActive ? "活跃" : "空闲")}</dd>
                     <dt>成员数</dt><dd>${detail.room.memberCount}</dd>
                     <dt>创建时间</dt><dd>${formatDateTime(detail.room.createdAt)}</dd>
                     <dt>最近活跃</dt><dd>${formatDateTime(detail.room.lastActiveAt)}</dd>

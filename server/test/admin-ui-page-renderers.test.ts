@@ -256,8 +256,8 @@ test("rooms and events pages render direct admin ui tables", async () => {
   const eventsPage = await pageLoaders.renderEventsPage();
 
   assert.equal(roomsPage.html.includes("ROOM8A"), true);
-  assert.equal(roomsPage.html.includes("<th>播放状态</th>"), true);
-  assert.equal(roomsPage.html.includes("播放中"), true);
+  assert.equal(roomsPage.html.includes("<th>播放状态</th>"), false);
+  assert.equal(roomsPage.html.includes("活跃 · 播放中"), true);
   assert.equal(roomsPage.html.includes("关闭房间"), true);
   assert.equal(eventsPage.html.includes("房间 ROOM8A"), true);
   assert.equal(eventsPage.html.includes("Alice 加入了房间"), true);
