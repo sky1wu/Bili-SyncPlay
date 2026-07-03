@@ -20,9 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/bili-syncplay-server
-      # Docker Hub 为可选目标：仓库未配置 DOCKERHUB_USERNAME/DOCKERHUB_TOKEN
-      # secrets 时自动跳过，不会让发布失败。
+      # Docker Hub 为可选目标：DOCKERHUB_USERNAME/DOCKERHUB_TOKEN 两个 secrets
+      # 缺任意一个都完全跳过 Docker Hub（避免半配置时空凭据登录失败，阻断 GHCR 发布）。
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_ENABLED: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
 
     steps:
       - name: Checkout repository
@@ -40,7 +41,7 @@ jobs:
           {
             echo "images<<EOF"
             echo "$GHCR_IMAGE"
-            if [ -n "$DOCKERHUB_USERNAME" ]; then
+            if [ "$DOCKERHUB_ENABLED" = "true" ]; then
               echo "docker.io/$DOCKERHUB_USERNAME/bili-syncplay-server"
             fi
             echo "EOF"
@@ -55,7 +56,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request' && env.DOCKERHUB_USERNAME != ''
+        if: github.event_name != 'pull_request' && env.DOCKERHUB_ENABLED == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}

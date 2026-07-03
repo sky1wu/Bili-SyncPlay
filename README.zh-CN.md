@@ -266,7 +266,7 @@ docker run -d --name bili-syncplay-server \
 说明：
 
 - 容器监听 `8787`（可用 `PORT` 覆盖），提供 `/healthz` 与 `/readyz`，并内置 Docker `HEALTHCHECK`。
-- 配置完全通过环境变量完成，与裸机部署一致：`ALLOWED_ORIGINS`（扩展连接必填）、`REDIS_URL`、管理面板变量（`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET`）等——参见上文"本地默认值"和[多节点运维手册](./docs/runbook/multi-node-operations.zh-CN.md)。
+- 配置完全通过环境变量完成，与裸机部署一致：`ALLOWED_ORIGINS`（扩展连接必填）、Redis 持久化（需同时设置 `ROOM_STORE_PROVIDER=redis` 与 `REDIS_URL`，只设 `REDIS_URL` 仍是内存存储）、管理面板变量（`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET`）等——参见上文"本地默认值"和[多节点运维手册](./docs/runbook/multi-node-operations.zh-CN.md)。
 - 生产环境应在前置反向代理终结 TLS，让扩展通过 `wss://` 连接（见版本矩阵）。
 - 从源码构建：在仓库根目录执行 `docker build -t bili-syncplay-server .`（镜像只包含服务端，扩展另行分发）。
 

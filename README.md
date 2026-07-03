@@ -266,7 +266,7 @@ Or use the repository's [`docker-compose.yml`](./docker-compose.yml), which incl
 Notes:
 
 - The container listens on `8787` (override with `PORT`), exposes `/healthz` and `/readyz`, and ships a built-in Docker `HEALTHCHECK`.
-- Configuration is entirely environment-variable based, identical to a bare-metal deployment: `ALLOWED_ORIGINS` (required for extensions to connect), `REDIS_URL`, admin panel variables (`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET`), and so on — see "Local Defaults" above and the [multi-node runbook](./docs/runbook/multi-node-operations.zh-CN.md).
+- Configuration is entirely environment-variable based, identical to a bare-metal deployment: `ALLOWED_ORIGINS` (required for extensions to connect), Redis persistence (`ROOM_STORE_PROVIDER=redis` plus `REDIS_URL`; `REDIS_URL` alone keeps the in-memory store), admin panel variables (`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET`), and so on — see "Local Defaults" above and the [multi-node runbook](./docs/runbook/multi-node-operations.zh-CN.md).
 - In production, terminate TLS at a reverse proxy so the extension connects over `wss://` (see the version matrix).
 - Build locally from the repository root: `docker build -t bili-syncplay-server .` (the image contains only the server; the extension is distributed separately).
 

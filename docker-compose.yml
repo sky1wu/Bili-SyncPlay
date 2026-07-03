@@ -11,14 +11,18 @@ services:
       # 必填：允许连接的扩展 origin，多个用逗号分隔。
       # Chrome/Edge 固定为扩展 ID；Firefox 的 moz-extension UUID 见 README“Quick Start”。
       ALLOWED_ORIGINS: "chrome-extension://lbmckljnginagfabglpfdepofoglfdkj"
-      # 多节点部署或需要重启后保留房间状态时启用 Redis：
+      # 需要重启后保留房间状态时启用 Redis（两个变量都要设；只设 REDIS_URL
+      # 时仍是内存存储）。多节点部署所需的完整 provider 变量集见
+      # docs/runbook/multi-node-operations.zh-CN.md：
+      # ROOM_STORE_PROVIDER: "redis"
       # REDIS_URL: "redis://redis:6379"
       # 管理面板（可选）：
       # ADMIN_USERNAME: "admin"
       # ADMIN_PASSWORD_HASH: "sha256:<hex-password-hash>"
       # ADMIN_SESSION_SECRET: "<random-secret>"
 
-  # 可选的 Redis 依赖，启用时取消注释并同时设置上面的 REDIS_URL。
+  # 可选的 Redis 依赖，启用时取消注释并同时设置上面的
+  # ROOM_STORE_PROVIDER + REDIS_URL。
   # redis:
   #   image: redis:7-alpine
   #   restart: unless-stopped
