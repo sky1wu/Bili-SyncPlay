@@ -247,8 +247,10 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 
 服务端在每个 `v*` release tag 上同步发布容器镜像：
 
-- `ghcr.io/sky1wu/bili-syncplay-server`
-- `docker.io/sky1wu/bili-syncplay-server`（镜像仓库）
+- `ghcr.io/sky1wu/bili-syncplay-server`（[GHCR package 页面](https://github.com/sky1wu/Bili-SyncPlay/pkgs/container/bili-syncplay-server)）
+- `docker.io/sky1wu/bili-syncplay-server`（[Docker Hub 页面](https://hub.docker.com/r/sky1wu/bili-syncplay-server)，镜像仓库）
+
+以上是 `docker pull` 用的镜像引用，不是网页地址——浏览器访问请用括号里的链接。
 
 镜像 tag 包括 `latest`、`<major>.<minor>` 和完整版本号（如 `1.2.2`），支持 `linux/amd64` 与 `linux/arm64` 双架构。
 
