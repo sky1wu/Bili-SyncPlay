@@ -246,6 +246,19 @@ export function createAdminApp({
 
     if (page.autoRefresh) {
       state.refreshHandle = setInterval(() => {
+        // 整页重绘会丢掉未提交的表单输入和打开中的对话框内容，
+        // 用户正在交互时跳过本轮自动刷新。
+        if (state.dialog) {
+          return;
+        }
+        const activeTag = document.activeElement?.tagName;
+        if (
+          activeTag === "INPUT" ||
+          activeTag === "TEXTAREA" ||
+          activeTag === "SELECT"
+        ) {
+          return;
+        }
         rerender();
       }, AUTO_REFRESH_MS);
     }

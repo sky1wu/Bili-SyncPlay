@@ -435,6 +435,83 @@ test("room pages surface interrupted sync for stale playing playback", async () 
   assert.equal(detailPage.html.includes("<dt>上次同步</dt>"), true);
 });
 
+test("rooms list and detail pages expose auto refresh with a shared toggle", async () => {
+  const toggleButton = createButton();
+  let rerenderCount = 0;
+  const state = {
+    roomsAutoRefresh: true,
+    lastOverviewData: { instanceId: "instance-1" },
+  };
+
+  const pageLoaders = createPageLoaders({
+    document: createDocumentStub({
+      single: { "[data-toggle-rooms-refresh]": toggleButton },
+    }),
+    location: { search: "" },
+    history: { replaceState() {} },
+    state,
+    api: {
+      async listRooms() {
+        return { items: [], pagination: { total: 0 } };
+      },
+      async getRoomDetail() {
+        return {
+          instanceId: "instance-1",
+          room: {
+            roomCode: "ROOM8A",
+            isActive: false,
+            memberCount: 0,
+            instanceId: "instance-1",
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            expiresAt: Date.now() + 60_000,
+            sharedVideo: null,
+            playback: null,
+          },
+          members: [],
+          recentEvents: [],
+        };
+      },
+    },
+    routeHref(path: string) {
+      return `/admin${path}`;
+    },
+    withDemoQuery(url: string) {
+      return url;
+    },
+    serializeQuery() {
+      return "";
+    },
+    navigate() {},
+    navigateToUrl() {},
+    rerender() {
+      rerenderCount += 1;
+    },
+    canManage() {
+      return false;
+    },
+    confirmAction() {},
+    openReasonDialog() {},
+  });
+
+  const roomsPage = await pageLoaders.renderRoomsPage();
+  assert.equal(roomsPage.autoRefresh, true);
+  assert.equal(roomsPage.html.includes("自动刷新中"), true);
+
+  roomsPage.bind?.();
+  await toggleButton.click();
+  assert.equal(state.roomsAutoRefresh, false);
+  assert.equal(rerenderCount, 1);
+
+  const detailPage = await pageLoaders.renderRoomDetailPage("ROOM8A");
+  assert.equal(detailPage.autoRefresh, false);
+  assert.equal(detailPage.html.includes("自动刷新已关"), true);
+
+  detailPage.bind?.();
+  await toggleButton.click();
+  assert.equal(state.roomsAutoRefresh, true);
+});
+
 test("danger room actions require confirmed config before execution", async () => {
   const roomActionButton = createButton({
     "data-room-action": "close",

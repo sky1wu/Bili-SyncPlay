@@ -242,6 +242,7 @@ function bindRoomsListEvents(options, query) {
   const {
     document,
     history,
+    state,
     routeHref,
     withDemoQuery,
     serializeQuery,
@@ -284,6 +285,13 @@ function bindRoomsListEvents(options, query) {
   document
     .querySelector("[data-refresh-rooms]")
     ?.addEventListener("click", () => rerender());
+
+  document
+    .querySelector("[data-toggle-rooms-refresh]")
+    ?.addEventListener("click", () => {
+      state.roomsAutoRefresh = !state.roomsAutoRefresh;
+      rerender();
+    });
 
   document
     .querySelectorAll("[data-open-room],[data-room-link]")
@@ -518,6 +526,7 @@ export function createPageLoaders(options) {
       const query = roomsQueryFromLocation(location.search);
       const data = await api.listRooms(query);
       return {
+        autoRefresh: state.roomsAutoRefresh,
         instanceId: state.lastOverviewData?.instanceId,
         html: `
           <div class="section">
@@ -559,6 +568,8 @@ export function createPageLoaders(options) {
               <div class="toolbar table-toolbar">
                 <div class="table-title">房间列表</div>
                 <div class="table-toolbar-actions">
+                  <div class="pill">${state.roomsAutoRefresh ? "自动刷新中" : "自动刷新已关"}</div>
+                  <button class="button ghost" data-toggle-rooms-refresh>${state.roomsAutoRefresh ? "关闭" : "开启"}</button>
                   <button class="button" data-refresh-rooms>刷新</button>
                 </div>
               </div>
@@ -645,6 +656,7 @@ export function createPageLoaders(options) {
             title: `房间 ${detail.room.roomCode}`,
             description: "查看房间摘要、共享视频、在线成员与最近事件。",
           },
+          autoRefresh: state.roomsAutoRefresh,
           instanceId: detail.instanceId,
           html: `
             <div class="section">
@@ -669,6 +681,8 @@ export function createPageLoaders(options) {
               <div class="toolbar">
                 <div class="actions">
                   <button class="button ghost" data-nav-back>返回房间列表</button>
+                  <div class="pill">${state.roomsAutoRefresh ? "自动刷新中" : "自动刷新已关"}</div>
+                  <button class="button ghost" data-toggle-rooms-refresh>${state.roomsAutoRefresh ? "关闭" : "开启"}</button>
                   <button class="button" data-refresh-detail>刷新</button>
                 </div>
                 ${
@@ -808,6 +822,12 @@ export function createPageLoaders(options) {
             document
               .querySelector("[data-refresh-detail]")
               ?.addEventListener("click", () => rerender());
+            document
+              .querySelector("[data-toggle-rooms-refresh]")
+              ?.addEventListener("click", () => {
+                state.roomsAutoRefresh = !state.roomsAutoRefresh;
+                rerender();
+              });
             document
               .querySelector("[data-jump-events]")
               ?.addEventListener("click", (event) => {
