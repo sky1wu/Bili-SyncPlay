@@ -35,6 +35,11 @@ COPY --from=builder /app/server/dist server/dist
 # 服务端按 dist/../admin-ui 解析管理面板静态资源。
 COPY server/admin-ui server/admin-ui
 
+# 运行阶段直接以 node 启动，用不到 npm/corepack/yarn；删除基础镜像自带的
+# npm CLI，消除其 vendored 依赖（sigstore/tar/picomatch 等）触发的漏洞扫描报告。
+RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+  /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn*
+
 USER node
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
