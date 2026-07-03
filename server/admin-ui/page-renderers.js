@@ -4,6 +4,7 @@ import {
   formatDuration,
   formatJson,
   formatPlaybackPosition,
+  getPlaybackDisplayPosition,
   getPlaybackSyncedAt,
   formatRelativeDuration,
   getRoomPlaybackSummary,
@@ -710,7 +711,7 @@ export function createPageLoaders(options) {
                     <dt>视频 ID</dt><dd>${detail.room.sharedVideo?.videoId ? `<span class="code">${escapeHtml(detail.room.sharedVideo.videoId)}</span>` : renderEmptyValue()}</dd>
                     <dt>URL</dt><dd>${detail.room.sharedVideo?.url ? `<a href="${escapeHtml(detail.room.sharedVideo.url)}" target="_blank" rel="noreferrer">${escapeHtml(detail.room.sharedVideo.url)}</a>` : renderEmptyValue()}</dd>
                     <dt>播放状态</dt><dd>${detail.room.playback ? renderStatus(playbackSummary.tone, playbackSummary.primary) : renderEmptyValue("未同步")}</dd>
-                    <dt>当前时间</dt><dd>${detail.room.playback ? formatPlaybackPosition(detail.room.playback.currentTime) : renderEmptyValue()}</dd>
+                    <dt>当前时间</dt><dd>${detail.room.playback ? formatPlaybackPosition(getPlaybackDisplayPosition(detail.room)) : renderEmptyValue()}</dd>
                     <dt>播放速度</dt><dd>${detail.room.playback ? `x${Number(detail.room.playback.playbackRate || 1).toFixed(2)}` : renderEmptyValue()}</dd>
                     <dt>上次同步</dt><dd>${formatDateTime(getPlaybackSyncedAt(detail.room))}</dd>
                   </dl>
