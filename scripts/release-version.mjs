@@ -61,6 +61,22 @@ if (process.platform === "win32") {
   await run("npm", ["install", "--package-lock-only"], rootDir);
 }
 
+// JSON.stringify 的输出与仓库 Prettier 风格不完全一致（如 manifest.json 的
+// 数组换行），不格式化会被预提交的 format:check 拦下。
+const prettierTargets = [...packagePaths, extensionManifestPath].map(
+  (filePath) => path.relative(rootDir, filePath),
+);
+
+if (process.platform === "win32") {
+  await run(
+    process.env.ComSpec ?? "cmd.exe",
+    ["/d", "/s", "/c", `npx prettier --write ${prettierTargets.join(" ")}`],
+    rootDir,
+  );
+} else {
+  await run("npx", ["prettier", "--write", ...prettierTargets], rootDir);
+}
+
 console.log(`Updated workspace version to ${nextVersion}`);
 
 function run(command, args, cwd) {
