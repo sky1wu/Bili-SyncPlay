@@ -4,9 +4,11 @@ import {
   formatDuration,
   formatJson,
   formatPlaybackPosition,
+  getPlaybackDisplayPosition,
   getPlaybackSyncedAt,
   formatRelativeDuration,
   getRoomPlaybackSummary,
+  getRoomStatusSummary,
   getRoomOwnerSummary,
   getRoomVideoSummary,
   groupRuntimeEventsByRoom,
@@ -240,6 +242,7 @@ function bindRoomsListEvents(options, query) {
   const {
     document,
     history,
+    state,
     routeHref,
     withDemoQuery,
     serializeQuery,
@@ -282,6 +285,13 @@ function bindRoomsListEvents(options, query) {
   document
     .querySelector("[data-refresh-rooms]")
     ?.addEventListener("click", () => rerender());
+
+  document
+    .querySelector("[data-toggle-rooms-refresh]")
+    ?.addEventListener("click", () => {
+      state.roomsAutoRefresh = !state.roomsAutoRefresh;
+      rerender();
+    });
 
   document
     .querySelectorAll("[data-open-room],[data-room-link]")
@@ -516,6 +526,7 @@ export function createPageLoaders(options) {
       const query = roomsQueryFromLocation(location.search);
       const data = await api.listRooms(query);
       return {
+        autoRefresh: state.roomsAutoRefresh,
         instanceId: state.lastOverviewData?.instanceId,
         html: `
           <div class="section">
@@ -557,6 +568,8 @@ export function createPageLoaders(options) {
               <div class="toolbar table-toolbar">
                 <div class="table-title">房间列表</div>
                 <div class="table-toolbar-actions">
+                  <div class="pill">${state.roomsAutoRefresh ? "自动刷新中" : "自动刷新已关"}</div>
+                  <button class="button ghost" data-toggle-rooms-refresh>${state.roomsAutoRefresh ? "关闭" : "开启"}</button>
                   <button class="button" data-refresh-rooms>刷新</button>
                 </div>
               </div>
@@ -573,7 +586,6 @@ export function createPageLoaders(options) {
                       <th>创建者</th>
                       <th>成员</th>
                       <th>视频</th>
-                      <th>播放状态</th>
                       <th>时间</th>
                       <th>操作</th>
                     </tr>
@@ -582,16 +594,15 @@ export function createPageLoaders(options) {
                     ${data.items
                       .map((item) => {
                         const videoSummary = getRoomVideoSummary(item);
-                        const playbackSummary = getRoomPlaybackSummary(item);
+                        const statusSummary = getRoomStatusSummary(item);
                         const ownerSummary = getRoomOwnerSummary(item);
                         return `
                       <tr>
                         <td><a href="${withDemoQuery(routeHref(`/rooms/${item.roomCode}`))}" data-room-link="${escapeHtml(item.roomCode)}" class="primary-cell-link"><strong>${escapeHtml(item.roomCode)}</strong></a></td>
-                        <td>${renderStatus(item.isActive ? "success" : "neutral", item.isActive ? "活跃" : "空闲")}</td>
+                        <td>${renderDataPair(renderStatus(statusSummary.tone, statusSummary.primary), escapeHtml(statusSummary.secondary))}</td>
                         <td>${renderDataPair(escapeHtml(ownerSummary.primary), escapeHtml(ownerSummary.secondary))}</td>
                         <td><strong>${item.memberCount}</strong></td>
                         <td>${renderDataPair(escapeHtml(videoSummary.primary), escapeHtml(videoSummary.secondary))}</td>
-                        <td>${renderDataPair(renderStatus(playbackSummary.tone, playbackSummary.primary), escapeHtml(playbackSummary.secondary))}</td>
                         <td>${renderDataPair(
                           `${formatDateTime(item.lastActiveAt)}`,
                           item.expiresAt
@@ -645,6 +656,7 @@ export function createPageLoaders(options) {
             title: `房间 ${detail.room.roomCode}`,
             description: "查看房间摘要、共享视频、在线成员与最近事件。",
           },
+          autoRefresh: state.roomsAutoRefresh,
           instanceId: detail.instanceId,
           html: `
             <div class="section">
@@ -655,7 +667,7 @@ export function createPageLoaders(options) {
                 </div>
                 <div class="room-summary-chip">
                   <span class="room-summary-label">状态</span>
-                  ${renderStatus(detail.room.isActive ? "success" : "neutral", detail.room.isActive ? "active" : "idle")}
+                  ${renderStatus(detail.room.isActive ? "success" : "neutral", detail.room.isActive ? "活跃" : "空闲")}
                 </div>
                 <div class="room-summary-chip">
                   <span class="room-summary-label">在线成员</span>
@@ -669,6 +681,8 @@ export function createPageLoaders(options) {
               <div class="toolbar">
                 <div class="actions">
                   <button class="button ghost" data-nav-back>返回房间列表</button>
+                  <div class="pill">${state.roomsAutoRefresh ? "自动刷新中" : "自动刷新已关"}</div>
+                  <button class="button ghost" data-toggle-rooms-refresh>${state.roomsAutoRefresh ? "关闭" : "开启"}</button>
                   <button class="button" data-refresh-detail>刷新</button>
                 </div>
                 ${
@@ -689,7 +703,7 @@ export function createPageLoaders(options) {
                   <dl class="kv">
                     <dt>房间号</dt><dd><strong>${escapeHtml(detail.room.roomCode)}</strong></dd>
                     <dt>实例</dt><dd>${escapeHtml(detail.room.instanceId || "—")}</dd>
-                    <dt>在线状态</dt><dd>${renderStatus(detail.room.isActive ? "success" : "neutral", detail.room.isActive ? "active" : "idle")}</dd>
+                    <dt>在线状态</dt><dd>${renderStatus(detail.room.isActive ? "success" : "neutral", detail.room.isActive ? "活跃" : "空闲")}</dd>
                     <dt>成员数</dt><dd>${detail.room.memberCount}</dd>
                     <dt>创建时间</dt><dd>${formatDateTime(detail.room.createdAt)}</dd>
                     <dt>最近活跃</dt><dd>${formatDateTime(detail.room.lastActiveAt)}</dd>
@@ -710,7 +724,7 @@ export function createPageLoaders(options) {
                     <dt>视频 ID</dt><dd>${detail.room.sharedVideo?.videoId ? `<span class="code">${escapeHtml(detail.room.sharedVideo.videoId)}</span>` : renderEmptyValue()}</dd>
                     <dt>URL</dt><dd>${detail.room.sharedVideo?.url ? `<a href="${escapeHtml(detail.room.sharedVideo.url)}" target="_blank" rel="noreferrer">${escapeHtml(detail.room.sharedVideo.url)}</a>` : renderEmptyValue()}</dd>
                     <dt>播放状态</dt><dd>${detail.room.playback ? renderStatus(playbackSummary.tone, playbackSummary.primary) : renderEmptyValue("未同步")}</dd>
-                    <dt>当前时间</dt><dd>${detail.room.playback ? formatPlaybackPosition(detail.room.playback.currentTime) : renderEmptyValue()}</dd>
+                    <dt>当前时间</dt><dd>${detail.room.playback ? formatPlaybackPosition(getPlaybackDisplayPosition(detail.room)) : renderEmptyValue()}</dd>
                     <dt>播放速度</dt><dd>${detail.room.playback ? `x${Number(detail.room.playback.playbackRate || 1).toFixed(2)}` : renderEmptyValue()}</dd>
                     <dt>上次同步</dt><dd>${formatDateTime(getPlaybackSyncedAt(detail.room))}</dd>
                   </dl>
@@ -808,6 +822,12 @@ export function createPageLoaders(options) {
             document
               .querySelector("[data-refresh-detail]")
               ?.addEventListener("click", () => rerender());
+            document
+              .querySelector("[data-toggle-rooms-refresh]")
+              ?.addEventListener("click", () => {
+                state.roomsAutoRefresh = !state.roomsAutoRefresh;
+                rerender();
+              });
             document
               .querySelector("[data-jump-events]")
               ?.addEventListener("click", (event) => {

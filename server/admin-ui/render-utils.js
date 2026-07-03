@@ -220,6 +220,27 @@ export function isRoomPlaybackStale(item, currentTime = Date.now()) {
   return syncedAt !== null && currentTime - syncedAt > PLAYBACK_STALE_AFTER_MS;
 }
 
+export function getPlaybackDisplayPosition(item, currentTime = Date.now()) {
+  if (!item?.playback) {
+    return null;
+  }
+  const basePosition = Number(item.playback.currentTime);
+  if (!Number.isFinite(basePosition)) {
+    return null;
+  }
+  const syncedAt = getPlaybackSyncedAt(item);
+  if (
+    getPlaybackState(item.playback) !== "playing" ||
+    isRoomPlaybackStale(item, currentTime) ||
+    syncedAt === null
+  ) {
+    return basePosition;
+  }
+  const rate = Number(item.playback.playbackRate || 1);
+  const elapsedSeconds = Math.max(0, (currentTime - syncedAt) / 1000);
+  return basePosition + elapsedSeconds * rate;
+}
+
 export function getRoomVideoSummary(item) {
   if (!item.sharedVideo) {
     return {
@@ -236,7 +257,7 @@ export function getRoomVideoSummary(item) {
   };
 }
 
-export function getRoomPlaybackSummary(item) {
+export function getRoomPlaybackSummary(item, currentTime = Date.now()) {
   if (!item.playback) {
     return {
       tone: "neutral",
@@ -247,21 +268,59 @@ export function getRoomPlaybackSummary(item) {
 
   const state = getPlaybackState(item.playback);
   const syncedAt = getPlaybackSyncedAt(item);
-  const stale = isRoomPlaybackStale(item);
+  const stale = isRoomPlaybackStale(item, currentTime);
+
+  // 客户端只在播放中发送 steady tick，暂停后同步静默是常态而非异常，
+  // 因此暂停态超时不告警；播放/缓冲态超时才意味着同步链路真的断了。
+  if (stale && state === "paused") {
+    return {
+      tone: "neutral",
+      primary: "已暂停",
+      secondary: `${formatPlaybackPosition(item.playback.currentTime)} · 暂停于 ${formatElapsedDuration(currentTime - syncedAt)}`,
+    };
+  }
+
+  if (stale) {
+    return {
+      tone: "danger",
+      primary: "同步中断",
+      secondary: `${getPlaybackStateLabel(state)}停留在 ${formatPlaybackPosition(item.playback.currentTime)} · 上次同步 ${formatElapsedDuration(currentTime - syncedAt)}`,
+    };
+  }
+
   return {
-    tone: stale
-      ? "warning"
-      : state === "playing"
+    tone:
+      state === "playing"
         ? "success"
         : state === "buffering"
           ? "warning"
           : "neutral",
-    primary: stale
-      ? `${getPlaybackStateLabel(state)}（已陈旧）`
-      : getPlaybackStateLabel(state),
-    secondary: stale
-      ? `${formatPlaybackPosition(item.playback.currentTime)} · 上次同步 ${formatElapsedDuration(Date.now() - syncedAt)}`
-      : `${formatPlaybackPosition(item.playback.currentTime)} · x${Number(item.playback.playbackRate || 1).toFixed(2)}`,
+    primary: getPlaybackStateLabel(state),
+    secondary: `${formatPlaybackPosition(getPlaybackDisplayPosition(item, currentTime))} · x${Number(item.playback.playbackRate || 1).toFixed(2)}`,
+  };
+}
+
+export function getRoomStatusSummary(item, currentTime = Date.now()) {
+  if (!item.isActive) {
+    return { tone: "neutral", primary: "空闲", secondary: "" };
+  }
+
+  const playbackSummary = getRoomPlaybackSummary(item, currentTime);
+  if (!item.playback) {
+    return {
+      tone: "neutral",
+      primary: "活跃 · 未同步",
+      secondary: playbackSummary.secondary,
+    };
+  }
+
+  return {
+    tone: playbackSummary.tone,
+    primary:
+      playbackSummary.tone === "danger"
+        ? playbackSummary.primary
+        : `活跃 · ${playbackSummary.primary}`,
+    secondary: playbackSummary.secondary,
   };
 }
 

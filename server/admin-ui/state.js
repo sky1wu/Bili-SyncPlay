@@ -54,6 +54,7 @@ export const state = {
   lastOverviewData: null,
   instanceId: "",
   overviewAutoRefresh: true,
+  roomsAutoRefresh: true,
 };
 
 export function resolveApiPath(path) {

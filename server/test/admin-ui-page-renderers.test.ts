@@ -256,8 +256,8 @@ test("rooms and events pages render direct admin ui tables", async () => {
   const eventsPage = await pageLoaders.renderEventsPage();
 
   assert.equal(roomsPage.html.includes("ROOM8A"), true);
-  assert.equal(roomsPage.html.includes("<th>播放状态</th>"), true);
-  assert.equal(roomsPage.html.includes("播放中"), true);
+  assert.equal(roomsPage.html.includes("<th>播放状态</th>"), false);
+  assert.equal(roomsPage.html.includes("活跃 · 播放中"), true);
   assert.equal(roomsPage.html.includes("关闭房间"), true);
   assert.equal(eventsPage.html.includes("房间 ROOM8A"), true);
   assert.equal(eventsPage.html.includes("Alice 加入了房间"), true);
@@ -295,7 +295,8 @@ test("room detail renders playback position as media timestamp", async () => {
               url: "https://www.bilibili.com/video/BV1TEST",
             },
             playback: {
-              playState: "playing",
+              // paused：播放中会按经过时间外推显示位置，无法稳定断言精确时间戳
+              playState: "paused",
               currentTime: 3723.4,
               playbackRate: 1,
               serverTime: Date.now(),
@@ -343,7 +344,7 @@ test("room detail renders playback position as media timestamp", async () => {
   assert.equal(page.html.includes("Alice 加入了房间 · 房间 ROOM8A"), false);
 });
 
-test("room pages mark stale playback snapshots instead of presenting them as live", async () => {
+test("room pages surface interrupted sync for stale playing playback", async () => {
   const staleServerTime = Date.now() - 3 * 60 * 60 * 1000;
   const pageLoaders = createPageLoaders({
     document: createDocumentStub(),
@@ -427,10 +428,88 @@ test("room pages mark stale playback snapshots instead of presenting them as liv
   const roomsPage = await pageLoaders.renderRoomsPage();
   const detailPage = await pageLoaders.renderRoomDetailPage("ROOM8A");
 
-  assert.equal(roomsPage.html.includes("播放中（已陈旧）"), true);
+  assert.equal(roomsPage.html.includes("同步中断"), true);
+  assert.equal(roomsPage.html.includes("已陈旧"), false);
   assert.equal(roomsPage.html.includes("上次同步 3 小时前"), true);
-  assert.equal(detailPage.html.includes("播放中（已陈旧）"), true);
+  assert.equal(detailPage.html.includes("同步中断"), true);
   assert.equal(detailPage.html.includes("<dt>上次同步</dt>"), true);
+});
+
+test("rooms list and detail pages expose auto refresh with a shared toggle", async () => {
+  const toggleButton = createButton();
+  let rerenderCount = 0;
+  const state = {
+    roomsAutoRefresh: true,
+    lastOverviewData: { instanceId: "instance-1" },
+  };
+
+  const pageLoaders = createPageLoaders({
+    document: createDocumentStub({
+      single: { "[data-toggle-rooms-refresh]": toggleButton },
+    }),
+    location: { search: "" },
+    history: { replaceState() {} },
+    state,
+    api: {
+      async listRooms() {
+        return { items: [], pagination: { total: 0 } };
+      },
+      async getRoomDetail() {
+        return {
+          instanceId: "instance-1",
+          room: {
+            roomCode: "ROOM8A",
+            isActive: false,
+            memberCount: 0,
+            instanceId: "instance-1",
+            createdAt: Date.now(),
+            lastActiveAt: Date.now(),
+            expiresAt: Date.now() + 60_000,
+            sharedVideo: null,
+            playback: null,
+          },
+          members: [],
+          recentEvents: [],
+        };
+      },
+    },
+    routeHref(path: string) {
+      return `/admin${path}`;
+    },
+    withDemoQuery(url: string) {
+      return url;
+    },
+    serializeQuery() {
+      return "";
+    },
+    navigate() {},
+    navigateToUrl() {},
+    rerender() {
+      rerenderCount += 1;
+    },
+    canManage() {
+      return false;
+    },
+    confirmAction() {},
+    openReasonDialog() {},
+  });
+
+  const roomsPage = await pageLoaders.renderRoomsPage();
+  assert.equal(roomsPage.autoRefresh, true);
+  assert.equal(roomsPage.html.includes("自动刷新中"), true);
+
+  roomsPage.bind?.();
+  await toggleButton.click();
+  assert.equal(state.roomsAutoRefresh, false);
+  assert.equal(rerenderCount, 1);
+
+  const detailPage = await pageLoaders.renderRoomDetailPage("ROOM8A");
+  assert.equal(detailPage.autoRefresh, false);
+  assert.equal(detailPage.html.includes("自动刷新已关"), true);
+
+  detailPage.bind?.();
+  await toggleButton.click();
+  assert.equal(state.roomsAutoRefresh, true);
 });
 
 test("danger room actions require confirmed config before execution", async () => {
