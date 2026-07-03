@@ -1,0 +1,16 @@
+.git
+.github
+.claude
+node_modules
+**/node_modules
+packages/protocol/dist
+server/dist
+server/test
+extension/*
+!extension/package.json
+bench
+docs
+release
+coverage
+*.md
+**/*.md

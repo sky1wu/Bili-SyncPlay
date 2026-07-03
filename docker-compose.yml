@@ -1,0 +1,29 @@
+# 自托管示例：docker compose up -d
+# 默认使用发布镜像；想从源码构建时改用 `docker compose up -d --build`（走同目录 Dockerfile）。
+services:
+  server:
+    image: ghcr.io/sky1wu/bili-syncplay-server:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      # 必填：允许连接的扩展 origin，多个用逗号分隔。
+      # Chrome/Edge 固定为扩展 ID；Firefox 的 moz-extension UUID 见 README“Quick Start”。
+      ALLOWED_ORIGINS: "chrome-extension://lbmckljnginagfabglpfdepofoglfdkj"
+      # 多节点部署或需要重启后保留房间状态时启用 Redis：
+      # REDIS_URL: "redis://redis:6379"
+      # 管理面板（可选）：
+      # ADMIN_USERNAME: "admin"
+      # ADMIN_PASSWORD_HASH: "sha256:<hex-password-hash>"
+      # ADMIN_SESSION_SECRET: "<random-secret>"
+
+  # 可选的 Redis 依赖，启用时取消注释并同时设置上面的 REDIS_URL。
+  # redis:
+  #   image: redis:7-alpine
+  #   restart: unless-stopped
+  #   volumes:
+  #     - redis-data:/data
+
+# volumes:
+#   redis-data:

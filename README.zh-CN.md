@@ -243,6 +243,35 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 - 关房、过期、清空共享视频、踢人、断开会话等现有管理动作
 - 被踢成员会被临时阻止使用旧 `memberToken` 立即自动重连
 
+## Docker 部署
+
+服务端在每个 `v*` release tag 上同步发布容器镜像：
+
+- `ghcr.io/sky1wu/bili-syncplay-server`
+- `docker.io/<dockerhub-username>/bili-syncplay-server`（镜像仓库）
+
+镜像 tag 包括 `latest`、`<major>.<minor>` 和完整版本号（如 `1.2.2`），支持 `linux/amd64` 与 `linux/arm64` 双架构。
+
+直接运行：
+
+```bash
+docker run -d --name bili-syncplay-server \
+  -p 8787:8787 \
+  -e ALLOWED_ORIGINS=chrome-extension://lbmckljnginagfabglpfdepofoglfdkj \
+  ghcr.io/sky1wu/bili-syncplay-server:latest
+```
+
+也可以使用仓库内的 [`docker-compose.yml`](./docker-compose.yml)，其中附带可选的 Redis 服务，用于多节点或需要重启后保留状态的部署。
+
+说明：
+
+- 容器监听 `8787`（可用 `PORT` 覆盖），提供 `/healthz` 与 `/readyz`，并内置 Docker `HEALTHCHECK`。
+- 配置完全通过环境变量完成，与裸机部署一致：`ALLOWED_ORIGINS`（扩展连接必填）、`REDIS_URL`、管理面板变量（`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET`）等——参见上文"本地默认值"和[多节点运维手册](./docs/runbook/multi-node-operations.zh-CN.md)。
+- 生产环境应在前置反向代理终结 TLS，让扩展通过 `wss://` 连接（见版本矩阵）。
+- 从源码构建：在仓库根目录执行 `docker build -t bili-syncplay-server .`（镜像只包含服务端，扩展另行分发）。
+
+维护者说明：`Docker Release` workflow 使用内置 `GITHUB_TOKEN` 自动推送 GHCR；如需同步发布 Docker Hub，配置仓库 secrets `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`，缺省时会跳过 Docker Hub 推送而不影响发布。
+
 ## 开发参考
 
 ### 本地开发

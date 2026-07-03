@@ -243,6 +243,35 @@ After login, the current UI includes:
 - existing admin actions such as close room, expire room, clear shared video, kick member, and disconnect session
 - kicked members are temporarily blocked from immediately rejoining with their previous `memberToken`
 
+## Docker Deployment
+
+The server is also published as a container image on every `v*` release tag:
+
+- `ghcr.io/sky1wu/bili-syncplay-server`
+- `docker.io/<dockerhub-username>/bili-syncplay-server` (mirror)
+
+Image tags: `latest`, `<major>.<minor>`, and the full version (e.g. `1.2.2`). Both `linux/amd64` and `linux/arm64` are supported.
+
+Run directly:
+
+```bash
+docker run -d --name bili-syncplay-server \
+  -p 8787:8787 \
+  -e ALLOWED_ORIGINS=chrome-extension://lbmckljnginagfabglpfdepofoglfdkj \
+  ghcr.io/sky1wu/bili-syncplay-server:latest
+```
+
+Or use the repository's [`docker-compose.yml`](./docker-compose.yml), which includes an optional Redis service for multi-node / restart-persistent deployments.
+
+Notes:
+
+- The container listens on `8787` (override with `PORT`), exposes `/healthz` and `/readyz`, and ships a built-in Docker `HEALTHCHECK`.
+- Configuration is entirely environment-variable based, identical to a bare-metal deployment: `ALLOWED_ORIGINS` (required for extensions to connect), `REDIS_URL`, admin panel variables (`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET`), and so on — see "Local Defaults" above and the [multi-node runbook](./docs/runbook/multi-node-operations.zh-CN.md).
+- In production, terminate TLS at a reverse proxy so the extension connects over `wss://` (see the version matrix).
+- Build locally from the repository root: `docker build -t bili-syncplay-server .` (the image contains only the server; the extension is distributed separately).
+
+For maintainers: the `Docker Release` workflow pushes to GHCR automatically using the built-in `GITHUB_TOKEN`. To also publish to Docker Hub, configure the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets; when they are absent the Docker Hub push is skipped without failing the release.
+
 ## Developer Reference
 
 ### Local Development
