@@ -62,7 +62,9 @@ export function createWsHeartbeat(options: {
           // Half-open TCP connections never emit "close" on their own, so this
           // terminate() is what finally triggers the existing close-path
           // cleanup (leaveRoom, session unregister, room expiry scheduling).
-          tracked.delete(socket);
+          // Untrack only after terminate() succeeds: if it throws, the entry
+          // stays tracked and the next sweep retries, so the ghost is never
+          // silently abandoned.
           options.logEvent("ws_heartbeat_timeout_terminated", {
             sessionId: entry.session.id,
             roomCode: entry.session.roomCode,
@@ -73,6 +75,7 @@ export function createWsHeartbeat(options: {
             result: "terminated",
           });
           socket.terminate();
+          tracked.delete(socket);
           terminatedCount += 1;
           continue;
         }

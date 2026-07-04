@@ -160,13 +160,17 @@ test("ws heartbeat does not ping sockets that are no longer open", () => {
   assert.equal(socket.pingCount, 0);
 });
 
-test("ws heartbeat sweep survives a terminate() throw and still processes remaining sockets", () => {
+test("ws heartbeat sweep survives a terminate() throw, keeps the socket tracked, and retries", () => {
   const { heartbeat, events } = createHeartbeatHarness();
-  const throwingSocket = createFakeSocket({
-    terminate() {
+  let failTerminate = true;
+  const throwingSocket = createFakeSocket();
+  throwingSocket.terminate = () => {
+    if (failTerminate) {
       throw new Error("stream already destroyed");
-    },
-  });
+    }
+    throwingSocket.terminated = true;
+    throwingSocket.emit("close");
+  };
   const healthySocket = createFakeSocket();
   heartbeat.track(throwingSocket, createSession("session-throwing"));
   heartbeat.track(healthySocket, createSession("session-healthy"));
@@ -175,15 +179,24 @@ test("ws heartbeat sweep survives a terminate() throw and still processes remain
   healthySocket.emit("pong");
   heartbeat.sweepNow();
   healthySocket.emit("pong");
-  const terminated = heartbeat.sweepNow();
 
-  assert.equal(terminated, 0);
+  // 3rd sweep: threshold reached, terminate throws — the sweep must not
+  // crash, the healthy socket must still be pinged, and the failed socket
+  // must stay tracked instead of being silently abandoned.
+  assert.equal(heartbeat.sweepNow(), 0);
+  healthySocket.emit("pong");
   const failure = events.find((e) => e.event === "ws_heartbeat_sweep_failed");
   assert.ok(failure);
   assert.equal(failure.data.sessionId, "session-throwing");
   assert.equal(failure.data.error, "stream already destroyed");
+  assert.equal(throwingSocket.terminated, false);
   assert.equal(healthySocket.pingCount, 3);
   assert.equal(healthySocket.terminated, false);
+
+  // 4th sweep retries the terminate; once it succeeds the ghost is reaped.
+  failTerminate = false;
+  assert.equal(heartbeat.sweepNow(), 1);
+  assert.equal(throwingSocket.terminated, true);
 });
 
 test("ws heartbeat tracks nothing when disabled", () => {
