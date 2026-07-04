@@ -46,6 +46,40 @@ jobs:
       - name: Build Firefox extension target
         run: npm run build:extension:firefox
 
+  redis-integration:
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build protocol package
+        run: npm run build -w @bili-syncplay/protocol
+
+      - name: Run server tests against Redis
+        run: npm run test:server:redis
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+
   benchmark-baseline:
     runs-on: ubuntu-latest
 
