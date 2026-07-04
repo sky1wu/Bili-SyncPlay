@@ -95,6 +95,16 @@ export const SERVER_CONFIG_FIELDS = [
     "positiveInteger",
   ),
   createField(
+    ["security", "wsHeartbeatEnabled"],
+    "WS_HEARTBEAT_ENABLED",
+    "boolean",
+  ),
+  createField(
+    ["security", "wsHeartbeatIntervalMs"],
+    "WS_HEARTBEAT_INTERVAL_MS",
+    "positiveInteger",
+  ),
+  createField(
     ["security", "rateLimits", "roomCreatePerMinute"],
     "RATE_LIMIT_ROOM_CREATE_PER_MINUTE",
     "positiveInteger",

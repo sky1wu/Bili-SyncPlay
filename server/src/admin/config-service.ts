@@ -35,6 +35,8 @@ export function createAdminConfigService(options: {
           maxMessageBytes: options.securityConfig.maxMessageBytes,
           invalidMessageCloseThreshold:
             options.securityConfig.invalidMessageCloseThreshold,
+          wsHeartbeatEnabled: options.securityConfig.wsHeartbeatEnabled,
+          wsHeartbeatIntervalMs: options.securityConfig.wsHeartbeatIntervalMs,
           rateLimits: options.securityConfig.rateLimits,
         },
         admin: options.adminConfig

@@ -842,6 +842,8 @@ The server accepts the following environment variables. Safe defaults are built 
 - `MAX_MEMBERS_PER_ROOM`: room member cap
 - `MAX_MESSAGE_BYTES`: WebSocket message size cap in bytes
 - `INVALID_MESSAGE_CLOSE_THRESHOLD`: number of invalid messages before disconnect
+- `WS_HEARTBEAT_ENABLED`: enables server-side WebSocket ping/pong liveness checks that terminate half-open dead connections (ghost members); defaults to `true`
+- `WS_HEARTBEAT_INTERVAL_MS`: WebSocket heartbeat ping interval in milliseconds; a connection is terminated after two consecutive missed pongs; defaults to `30000`
 - `ROOM_STORE_PROVIDER`: `memory` or `redis`
 - `EMPTY_ROOM_TTL_MS`: how long an empty room is retained before deletion
 - `ROOM_CLEANUP_INTERVAL_MS`: how often the server deletes expired rooms

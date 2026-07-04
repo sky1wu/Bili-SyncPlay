@@ -842,6 +842,8 @@ node server/dist/global-admin-index.js
 - `MAX_MEMBERS_PER_ROOM`：房间成员上限
 - `MAX_MESSAGE_BYTES`：WebSocket 消息字节上限
 - `INVALID_MESSAGE_CLOSE_THRESHOLD`：在断开连接前允许的无效消息次数
+- `WS_HEARTBEAT_ENABLED`：是否开启服务端 WebSocket ping/pong 存活检测，用于清理半开死连接（幽灵成员）；默认 `true`
+- `WS_HEARTBEAT_INTERVAL_MS`：WebSocket 心跳 ping 间隔（毫秒），连续 2 次未收到 pong 即断开；默认 `30000`
 - `ROOM_STORE_PROVIDER`：`memory` 或 `redis`
 - `EMPTY_ROOM_TTL_MS`：空房保留时长，超时后删除
 - `ROOM_CLEANUP_INTERVAL_MS`：服务端扫描并清理过期房间的周期

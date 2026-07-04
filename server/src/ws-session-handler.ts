@@ -189,6 +189,7 @@ export function createWsConnectionHandler(args: {
   logEvent: LogEvent;
   pendingSessionCleanup: Set<Promise<void>>;
   messageQueueDrainTimeoutMs?: number;
+  wsHeartbeat?: { track: (socket: WebSocket, session: Session) => void };
 }): (socket: WebSocket, request: IncomingMessage) => void {
   const drainTimeoutMs = args.messageQueueDrainTimeoutMs ?? 10_000;
   return (socket, request) => {
@@ -217,6 +218,7 @@ export function createWsConnectionHandler(args: {
 
     args.securityPolicy.incrementConnectionCount(session.remoteAddress);
     args.runtimeStore.registerSession(session);
+    args.wsHeartbeat?.track(socket, session);
     args.logEvent("ws_connection_accepted", {
       sessionId: session.id,
       remoteAddress: session.remoteAddress,

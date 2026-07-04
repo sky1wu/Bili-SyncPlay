@@ -210,6 +210,8 @@ export function getDefaultSecurityConfig(): SecurityConfig {
     maxMembersPerRoom: 8,
     maxMessageBytes: 8 * 1024,
     invalidMessageCloseThreshold: 3,
+    wsHeartbeatEnabled: true,
+    wsHeartbeatIntervalMs: 30_000,
     rateLimits: {
       roomCreatePerMinute: 3,
       roomJoinPerMinute: 10,

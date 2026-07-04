@@ -26,6 +26,19 @@ test("security config reads overrides and keeps defaults for missing values", ()
   assert.deepEqual(config.trustedProxyAddresses, ["127.0.0.1", "198.51.100.7"]);
   assert.equal(config.rateLimits.syncPingBurst, 5);
   assert.equal(config.maxMembersPerRoom, 8);
+  assert.equal(config.wsHeartbeatEnabled, true);
+  assert.equal(config.wsHeartbeatIntervalMs, 30_000);
+});
+
+test("security config reads ws heartbeat overrides", () => {
+  const config = loadSecurityConfig({
+    ALLOWED_ORIGINS: "https://a.example",
+    WS_HEARTBEAT_ENABLED: "false",
+    WS_HEARTBEAT_INTERVAL_MS: "10000",
+  });
+
+  assert.equal(config.wsHeartbeatEnabled, false);
+  assert.equal(config.wsHeartbeatIntervalMs, 10_000);
 });
 
 test("persistence config validates provider and trims string env values", () => {

@@ -18,6 +18,7 @@ import { createRoomEventConsumer } from "./room-event-consumer.js";
 import { type RoomStore } from "./room-store.js";
 import { createRoomReaper } from "./room-reaper.js";
 import { createRoomService } from "./room-service.js";
+import { createWsHeartbeat } from "./ws-heartbeat.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
 import { type RuntimeStore } from "./runtime-store.js";
 import { hasAttachedSocket } from "./types.js";
@@ -293,6 +294,12 @@ export async function createSyncServer(
     maxPayload: securityConfig.maxMessageBytes,
   });
   const pendingSessionCleanup = new Set<Promise<void>>();
+  const wsHeartbeat = createWsHeartbeat({
+    enabled: securityConfig.wsHeartbeatEnabled,
+    intervalMs: securityConfig.wsHeartbeatIntervalMs,
+    logEvent,
+  });
+  wsHeartbeat.start();
 
   httpServer.on(
     "upgrade",
@@ -309,6 +316,7 @@ export async function createSyncServer(
       messageHandler,
       logEvent,
       pendingSessionCleanup,
+      wsHeartbeat,
     }),
   );
 
@@ -361,6 +369,12 @@ export async function createSyncServer(
           {
             name: "stop_runtime_index_reaper",
             run: () => runtimeIndexReaper.stop(),
+          },
+          {
+            name: "stop_ws_heartbeat",
+            run: () => {
+              wsHeartbeat.stop();
+            },
           },
           {
             name: "terminate_ws_clients",

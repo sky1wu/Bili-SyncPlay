@@ -39,6 +39,8 @@ type SecurityConfigFile = {
   maxMembersPerRoom?: number;
   maxMessageBytes?: number;
   invalidMessageCloseThreshold?: number;
+  wsHeartbeatEnabled?: boolean;
+  wsHeartbeatIntervalMs?: number;
   rateLimits?: {
     roomCreatePerMinute?: number;
     roomJoinPerMinute?: number;
