@@ -1,6 +1,6 @@
 import type { LogEvent, Session } from "./types.js";
 
-export const WS_HEARTBEAT_MISSED_PONG_THRESHOLD = 2;
+const MISSED_PONG_THRESHOLD = 2;
 
 export type HeartbeatSocket = {
   readyState?: number;
@@ -20,11 +20,8 @@ export type WsHeartbeat = {
 export function createWsHeartbeat(options: {
   enabled: boolean;
   intervalMs: number;
-  missedPongThreshold?: number;
   logEvent: LogEvent;
 }): WsHeartbeat {
-  const missedPongThreshold =
-    options.missedPongThreshold ?? WS_HEARTBEAT_MISSED_PONG_THRESHOLD;
   const tracked = new Map<
     HeartbeatSocket,
     { session: Session; missedPongs: number }
@@ -57,33 +54,45 @@ export function createWsHeartbeat(options: {
   function sweepNow(): number {
     let terminatedCount = 0;
     for (const [socket, entry] of tracked) {
-      if (entry.missedPongs >= missedPongThreshold) {
-        // Half-open TCP connections never emit "close" on their own, so this
-        // terminate() is what finally triggers the existing close-path cleanup
-        // (leaveRoom, session unregister, room expiry scheduling).
-        tracked.delete(socket);
-        options.logEvent("ws_heartbeat_timeout_terminated", {
+      // Per-socket guard: sweepNow runs inside a bare setInterval, so an
+      // exception here would otherwise crash the process and skip the
+      // remaining sockets in this sweep.
+      try {
+        if (entry.missedPongs >= MISSED_PONG_THRESHOLD) {
+          // Half-open TCP connections never emit "close" on their own, so this
+          // terminate() is what finally triggers the existing close-path
+          // cleanup (leaveRoom, session unregister, room expiry scheduling).
+          tracked.delete(socket);
+          options.logEvent("ws_heartbeat_timeout_terminated", {
+            sessionId: entry.session.id,
+            roomCode: entry.session.roomCode,
+            memberId: entry.session.memberId,
+            remoteAddress: entry.session.remoteAddress,
+            origin: entry.session.origin,
+            missedPongs: entry.missedPongs,
+            result: "terminated",
+          });
+          socket.terminate();
+          terminatedCount += 1;
+          continue;
+        }
+
+        entry.missedPongs += 1;
+        if (isSocketOpen(socket)) {
+          try {
+            socket.ping?.();
+          } catch {
+            // A socket racing into CLOSING/CLOSED state may reject the ping;
+            // the pending close event will untrack it.
+          }
+        }
+      } catch (error) {
+        options.logEvent("ws_heartbeat_sweep_failed", {
           sessionId: entry.session.id,
           roomCode: entry.session.roomCode,
-          memberId: entry.session.memberId,
-          remoteAddress: entry.session.remoteAddress,
-          origin: entry.session.origin,
-          missedPongs: entry.missedPongs,
-          result: "terminated",
+          result: "error",
+          error: error instanceof Error ? error.message : String(error),
         });
-        socket.terminate();
-        terminatedCount += 1;
-        continue;
-      }
-
-      entry.missedPongs += 1;
-      if (isSocketOpen(socket)) {
-        try {
-          socket.ping?.();
-        } catch {
-          // A socket racing into CLOSING/CLOSED state may reject the ping;
-          // the pending close event will untrack it.
-        }
       }
     }
     return terminatedCount;

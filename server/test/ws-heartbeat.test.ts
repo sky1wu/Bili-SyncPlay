@@ -160,6 +160,32 @@ test("ws heartbeat does not ping sockets that are no longer open", () => {
   assert.equal(socket.pingCount, 0);
 });
 
+test("ws heartbeat sweep survives a terminate() throw and still processes remaining sockets", () => {
+  const { heartbeat, events } = createHeartbeatHarness();
+  const throwingSocket = createFakeSocket({
+    terminate() {
+      throw new Error("stream already destroyed");
+    },
+  });
+  const healthySocket = createFakeSocket();
+  heartbeat.track(throwingSocket, createSession("session-throwing"));
+  heartbeat.track(healthySocket, createSession("session-healthy"));
+
+  heartbeat.sweepNow();
+  healthySocket.emit("pong");
+  heartbeat.sweepNow();
+  healthySocket.emit("pong");
+  const terminated = heartbeat.sweepNow();
+
+  assert.equal(terminated, 0);
+  const failure = events.find((e) => e.event === "ws_heartbeat_sweep_failed");
+  assert.ok(failure);
+  assert.equal(failure.data.sessionId, "session-throwing");
+  assert.equal(failure.data.error, "stream already destroyed");
+  assert.equal(healthySocket.pingCount, 3);
+  assert.equal(healthySocket.terminated, false);
+});
+
 test("ws heartbeat tracks nothing when disabled", () => {
   const { heartbeat, events } = createHeartbeatHarness({ enabled: false });
   const socket = createFakeSocket();
