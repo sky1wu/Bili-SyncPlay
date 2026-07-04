@@ -283,14 +283,25 @@ export function setConfigValue(
   current[path[path.length - 1]!] = value;
 }
 
-function assertFiniteNumber(scope: string, value: unknown): number | undefined {
+function assertInteger(scope: string, value: unknown): number | undefined {
   if (value === undefined) {
     return undefined;
   }
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`Config field "${scope}" must be a finite number.`);
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`Config field "${scope}" must be an integer.`);
   }
   return value;
+}
+
+function assertPositiveInteger(
+  scope: string,
+  value: unknown,
+): number | undefined {
+  const parsedValue = assertInteger(scope, value);
+  if (parsedValue !== undefined && parsedValue <= 0) {
+    throw new Error(`Config field "${scope}" must be greater than 0.`);
+  }
+  return parsedValue;
 }
 
 function assertBoolean(scope: string, value: unknown): boolean | undefined {
@@ -336,13 +347,26 @@ export function parseConfigFileFieldValue(
 ): unknown {
   switch (field.kind) {
     case "integer":
+      return assertInteger(scope, value);
     case "positiveInteger":
-      return assertFiniteNumber(scope, value);
+      return assertPositiveInteger(scope, value);
     case "boolean":
       return assertBoolean(scope, value);
     case "string":
-    case "enum":
       return assertString(scope, value);
+    case "enum": {
+      const parsedValue = assertString(scope, value);
+      if (
+        parsedValue !== undefined &&
+        field.enumValues &&
+        !field.enumValues.includes(parsedValue)
+      ) {
+        throw new Error(
+          `Config field "${scope}" must be one of ${field.enumValues.join(", ")}.`,
+        );
+      }
+      return parsedValue;
+    }
     case "stringArray":
       return assertStringArray(scope, value);
   }

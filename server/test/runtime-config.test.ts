@@ -335,6 +335,63 @@ test("runtime config reports invalid config field types", async () => {
   });
 });
 
+test("runtime config rejects non-positive positiveInteger fields from config file", async () => {
+  await withTempDir(async (tempDir) => {
+    await writeFile(
+      join(tempDir, "server.config.json"),
+      JSON.stringify({
+        security: {
+          wsHeartbeatIntervalMs: 0,
+        },
+      }),
+      "utf8",
+    );
+
+    await assert.rejects(
+      () => loadRuntimeConfig({}, { cwd: tempDir }),
+      /security\.wsHeartbeatIntervalMs.*greater than 0/,
+    );
+  });
+});
+
+test("runtime config rejects fractional integer fields from config file", async () => {
+  await withTempDir(async (tempDir) => {
+    await writeFile(
+      join(tempDir, "server.config.json"),
+      JSON.stringify({
+        security: {
+          wsHeartbeatIntervalMs: 0.5,
+        },
+      }),
+      "utf8",
+    );
+
+    await assert.rejects(
+      () => loadRuntimeConfig({}, { cwd: tempDir }),
+      /security\.wsHeartbeatIntervalMs.*must be an integer/,
+    );
+  });
+});
+
+test("runtime config rejects unknown enum values from config file", async () => {
+  await withTempDir(async (tempDir) => {
+    await writeFile(
+      join(tempDir, "server.config.json"),
+      JSON.stringify({
+        persistence: {
+          provider: "postgres",
+        },
+      }),
+      "utf8",
+    );
+
+    await assert.rejects(
+      () => loadRuntimeConfig({}, { cwd: tempDir }),
+      /persistence\.provider.*must be one of memory, redis/,
+    );
+  });
+});
+
 test("redisNamespace is loaded from config file and passable through env override", async () => {
   await withTempDir(async (tempDir) => {
     await writeFile(
