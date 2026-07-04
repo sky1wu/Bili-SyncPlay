@@ -16,8 +16,8 @@
     "@bili-syncplay/protocol": "1.2.3"
   },
   "devDependencies": {
-    "@types/chrome": "^0.1.40",
-    "esbuild": "^0.25.10",
-    "typescript": "^5.9.3"
+    "@types/chrome": "^0.2.2",
+    "esbuild": "^0.28.1",
+    "typescript": "^6.0.3"
   }
 }

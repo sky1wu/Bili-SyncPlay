@@ -40,10 +40,10 @@
     "release:version": "node scripts/release-version.mjs"
   },
   "devDependencies": {
-    "@eslint/js": "^9.22.0",
-    "eslint": "^9.22.0",
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.6.0",
     "eslint-config-prettier": "^10.1.1",
-    "globals": "^16.0.0",
+    "globals": "^17.7.0",
     "prettier": "^3.5.3",
     "typescript-eslint": "^8.26.1",
     "tsx": "^4.20.6"
