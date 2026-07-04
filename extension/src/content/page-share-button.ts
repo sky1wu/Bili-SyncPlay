@@ -22,11 +22,7 @@ type RuntimeSendMessage = <T>(
 ) => Promise<T | null>;
 
 export type PageShareActionResult =
-  | "shared"
-  | "cancelled"
-  | "no-video"
-  | "context-error"
-  | "share-error";
+  "shared" | "cancelled" | "no-video" | "context-error" | "share-error";
 
 export interface PageSharePopoverViewModel {
   status: string | null;

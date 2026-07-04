@@ -14,10 +14,7 @@ const CORE_EVENT_NAMES = [
 ] as const;
 
 export type MonitoredMessageType =
-  | "video:share"
-  | "playback:update"
-  | "room:join"
-  | "room:leave";
+  "video:share" | "playback:update" | "room:join" | "room:leave";
 
 type LabelValues = Record<string, string>;
 

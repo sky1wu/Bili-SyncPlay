@@ -7,8 +7,7 @@ export type AdminWriteOriginPolicy = {
 };
 
 type OriginCheckResult =
-  | { ok: true }
-  | { ok: false; reason: "origin_missing" | "origin_not_allowed" };
+  { ok: true } | { ok: false; reason: "origin_missing" | "origin_not_allowed" };
 
 function getRequestScheme(request: IncomingMessage): string {
   const forwardedProto = request.headers["x-forwarded-proto"];

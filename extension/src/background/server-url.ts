@@ -4,8 +4,7 @@ import { t } from "../shared/i18n";
 export const INVALID_SERVER_URL_MESSAGE = t("invalidServerUrl");
 
 type ServerUrlValidationResult =
-  | { ok: true; normalizedUrl: string }
-  | { ok: false; message: string };
+  { ok: true; normalizedUrl: string } | { ok: false; message: string };
 
 export interface PersistedServerUrlResolution {
   serverUrl: string;

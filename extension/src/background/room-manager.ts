@@ -29,16 +29,14 @@ export function createPendingShareToast(args: {
 
 export function getPendingShareToastFor(args: {
   pendingShareToast:
-    | (SharedVideoToastPayload & { expiresAt: number; roomCode: string })
-    | null;
+    (SharedVideoToastPayload & { expiresAt: number; roomCode: string }) | null;
   state: RoomState;
   normalizedPendingToastUrl: string | null;
   normalizedSharedUrl: string | null;
   now: number;
 }): {
   pendingShareToast:
-    | (SharedVideoToastPayload & { expiresAt: number; roomCode: string })
-    | null;
+    (SharedVideoToastPayload & { expiresAt: number; roomCode: string }) | null;
   shareToast: SharedVideoToastPayload | null;
 } {
   if (!args.pendingShareToast) {

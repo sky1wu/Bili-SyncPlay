@@ -1,10 +1,7 @@
 import type { PlaybackState } from "@bili-syncplay/protocol";
 
 export type PlaybackReconcileMode =
-  | "ignore"
-  | "rate-only"
-  | "soft-apply"
-  | "hard-seek";
+  "ignore" | "rate-only" | "soft-apply" | "hard-seek";
 
 export interface PlaybackReconcileDecision {
   mode: PlaybackReconcileMode;

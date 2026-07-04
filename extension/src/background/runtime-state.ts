@@ -102,8 +102,7 @@ export interface ShareState {
    */
   pendingLocalShareIsAutoShare: boolean;
   pendingShareToast:
-    | (SharedVideoToastPayload & { expiresAt: number; roomCode: string })
-    | null;
+    (SharedVideoToastPayload & { expiresAt: number; roomCode: string }) | null;
 }
 
 export interface ClockState {

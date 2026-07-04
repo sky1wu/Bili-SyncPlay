@@ -13,12 +13,7 @@ import {
 } from "./env.js";
 
 type ConfigValueKind =
-  | "integer"
-  | "positiveInteger"
-  | "boolean"
-  | "string"
-  | "stringArray"
-  | "enum";
+  "integer" | "positiveInteger" | "boolean" | "string" | "stringArray" | "enum";
 
 export type ConfigField = {
   path: readonly [string, ...string[]];

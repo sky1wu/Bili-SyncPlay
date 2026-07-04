@@ -86,8 +86,7 @@ export async function createRoomEventConsumer(options: {
           return;
         }
         let legacyRoomState:
-          | Awaited<ReturnType<typeof options.getRoomStateByCode>>
-          | undefined;
+          Awaited<ReturnType<typeof options.getRoomStateByCode>> | undefined;
         let legacyRoomStateLoaded = false;
         async function getLegacyRoomState() {
           if (!legacyRoomStateLoaded) {

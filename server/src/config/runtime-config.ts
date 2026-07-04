@@ -231,11 +231,7 @@ export function configFileToEnv(fileConfig: ServerConfigFile): EnvSource {
       env,
       field.envName,
       getConfigValue(fileConfig as JsonObject, field.path) as
-        | string
-        | number
-        | boolean
-        | string[]
-        | undefined,
+        string | number | boolean | string[] | undefined,
     );
   }
 
