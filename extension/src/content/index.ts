@@ -307,7 +307,7 @@ function schedulePageShareButtonSettingsHydrationRetry(
 }
 
 async function hydratePageShareButtonSettings(attempt = 1): Promise<void> {
-  let response: unknown = null;
+  let response: unknown;
   try {
     response = await runtimeSendMessage<unknown>({
       type: "content:get-page-share-button-settings",

@@ -348,7 +348,9 @@ function runNpmAudit(auditLevel) {
     auditReport = JSON.parse(stdout);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to parse npm audit JSON output: ${message}`);
+    throw new Error(`Failed to parse npm audit JSON output: ${message}`, {
+      cause: error,
+    });
   }
 
   const auditErrorMessage = formatNpmAuditErrorMessage(auditReport);

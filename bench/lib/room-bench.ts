@@ -548,7 +548,7 @@ export async function runPlaybackBroadcastBenchmark(input: {
     Math.round(input.durationSeconds * input.updatesPerSecond),
   );
   const intervalMs = 1_000 / input.updatesPerSecond;
-  let completedAtMs = startedAtMs;
+  let completedAtMs: number;
 
   try {
     for (let index = 0; index < totalUpdates; index += 1) {
@@ -651,7 +651,7 @@ export async function runReconnectStormBenchmark(input: {
   };
   let completed = 0;
   let errors = 0;
-  let completedAtMs = startedAtMs;
+  let completedAtMs: number;
   const reconnectSockets: Array<Awaited<ReturnType<typeof connectClient>>> = [];
 
   detachParticipantCollectors([environment.owner, ...environment.joiners]);

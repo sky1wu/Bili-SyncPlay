@@ -325,7 +325,6 @@ export function createWsConnectionHandler(args: {
         ]);
         if (drainTimeoutHandle !== null) {
           clearTimeout(drainTimeoutHandle);
-          drainTimeoutHandle = null;
         }
         if (drainOutcome === "timeout") {
           // The in-flight handler may still be running when cleanup proceeds;

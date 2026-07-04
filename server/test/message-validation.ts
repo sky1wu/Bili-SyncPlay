@@ -1142,9 +1142,9 @@ test("restores persisted room state across server restart and issues a new membe
     dependencies: { roomStore },
   });
 
-  let createdRoomCode = "";
-  let joinToken = "";
-  let firstMemberToken = "";
+  let createdRoomCode: string;
+  let joinToken: string;
+  let firstMemberToken: string;
 
   try {
     const owner = await connectClient(firstServer.url);

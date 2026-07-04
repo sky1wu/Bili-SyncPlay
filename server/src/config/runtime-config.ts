@@ -197,6 +197,7 @@ async function readServerConfigFile(
         `Failed to parse JSON config file at ${absolutePath}: ${
           error instanceof Error ? error.message : String(error)
         }`,
+        { cause: error },
       );
     }
     return parseConfigFileShape(parsed);
@@ -209,6 +210,7 @@ async function readServerConfigFile(
     }
     throw new Error(
       `Failed to load config file at ${absolutePath}: ${String(error)}`,
+      { cause: error },
     );
   }
 }

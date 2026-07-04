@@ -312,7 +312,6 @@ test("websocket lifecycle mirrors sessions into the shared redis runtime store",
   const runtimeStore = await createRedisRuntimeStore(REDIS_URL);
   const roomStore = await createRedisRoomStore(REDIS_URL);
   let roomCode = "";
-  let joinToken = "";
 
   try {
     const owner = await connectClient(serverA.wsUrl);
@@ -329,7 +328,7 @@ test("websocket lifecycle mirrors sessions into the shared redis runtime store",
       );
       const created = await ownerCollector.next("room:created");
       roomCode = (created.payload as { roomCode: string }).roomCode;
-      joinToken = (created.payload as { joinToken: string }).joinToken;
+      const joinToken = (created.payload as { joinToken: string }).joinToken;
       await ownerCollector.next("room:state");
 
       joiner.send(
