@@ -1,6 +1,6 @@
 {
   "name": "@bili-syncplay/extension",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,7 @@
     "coverage": "tsx --test --experimental-test-coverage test/**/*.test.ts"
   },
   "dependencies": {
-    "@bili-syncplay/protocol": "1.2.3"
+    "@bili-syncplay/protocol": "1.2.4"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.2",
