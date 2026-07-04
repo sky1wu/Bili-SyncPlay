@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import {
   closeClient,
   connectClient,
@@ -30,7 +31,7 @@ test("global admin executes cross-node kick_member and disconnect_session action
     owner.send(
       JSON.stringify({
         type: "room:create",
-        payload: { displayName: "Alice" },
+        payload: { displayName: "Alice", protocolVersion: PROTOCOL_VERSION },
       }),
     );
     const created = await ownerCollector.next("room:created");
@@ -43,6 +44,7 @@ test("global admin executes cross-node kick_member and disconnect_session action
           roomCode: (created.payload as { roomCode: string }).roomCode,
           joinToken: (created.payload as { joinToken: string }).joinToken,
           displayName: "Bob",
+          protocolVersion: PROTOCOL_VERSION,
         },
       }),
     );
@@ -86,10 +88,10 @@ test("global admin executes cross-node kick_member and disconnect_session action
     assert.equal(kickResponse.status, 200);
     await waitForCondition(() => joiner.readyState === joiner.CLOSED);
 
-    const ownerAfterKick = await ownerCollector.next("room:state");
+    const ownerSawKick = await ownerCollector.next("room:member-left");
     assert.equal(
-      (ownerAfterKick.payload as { members: Array<unknown> }).members.length,
-      1,
+      (ownerSawKick.payload as { member: { id: string } }).member.id,
+      bob?.memberId,
     );
 
     const kickedReconnect = await connectClient(nodeB.wsUrl);

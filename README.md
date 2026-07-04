@@ -307,7 +307,7 @@ Useful command matrix:
 - `npm test`: run audit gate tests plus repository-wide protocol, server, and extension tests
 - `npm run audit`: run the dependency audit gate, failing on unallowlisted `high` or `critical` vulnerabilities
 - `npm run test:audit-gate`: run unit tests for the dependency audit gate
-- `npm run test:server:redis`: run the explicit Redis regression entry point for server persistence
+- `npm run test:server:redis`: run the explicit Redis regression entry point for server persistence (requires `REDIS_URL`; CI runs it in a dedicated job with a Redis service container)
 
 Development constraints:
 
