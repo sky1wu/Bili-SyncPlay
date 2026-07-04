@@ -1,3 +1,4 @@
+import { clampTimerIntervalMs } from "./timers.js";
 import type { LogEvent, Session } from "./types.js";
 
 const MISSED_PONG_THRESHOLD = 2;
@@ -110,7 +111,7 @@ export function createWsHeartbeat(options: {
       }
       timer = setInterval(() => {
         sweepNow();
-      }, options.intervalMs);
+      }, clampTimerIntervalMs(options.intervalMs));
       timer.unref?.();
     },
     stop() {

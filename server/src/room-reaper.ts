@@ -1,3 +1,4 @@
+import { clampTimerIntervalMs } from "./timers.js";
 import type { LogEvent } from "./types.js";
 
 export type RoomReaper = {
@@ -35,7 +36,7 @@ export function createRoomReaper(options: {
 
   const intervalId = setInterval(() => {
     void runNow();
-  }, options.intervalMs);
+  }, clampTimerIntervalMs(options.intervalMs));
 
   return {
     stop() {

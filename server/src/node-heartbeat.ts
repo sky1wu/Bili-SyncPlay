@@ -1,3 +1,4 @@
+import { clampTimerIntervalMs } from "./timers.js";
 import type { LogEvent, ClusterNodeStatus } from "./types.js";
 import type { RuntimeStore } from "./runtime-store.js";
 
@@ -69,7 +70,7 @@ export function createNodeHeartbeat(options: {
       scheduleBeat();
       timer = setInterval(() => {
         scheduleBeat();
-      }, options.intervalMs);
+      }, clampTimerIntervalMs(options.intervalMs));
       timer.unref?.();
     },
     async beat() {

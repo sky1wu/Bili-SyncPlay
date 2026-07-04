@@ -1,3 +1,4 @@
+import { clampTimerIntervalMs } from "./timers.js";
 import type { LogEvent } from "./types.js";
 import type { RuntimeStore } from "./runtime-store.js";
 
@@ -94,7 +95,7 @@ export function createRuntimeIndexReaper(options: {
       }
       timer = setInterval(() => {
         scheduleSweep();
-      }, options.intervalMs);
+      }, clampTimerIntervalMs(options.intervalMs));
       timer.unref?.();
     },
     async sweep() {
