@@ -94,10 +94,12 @@ export function parseBilibiliVideoRef(
         : basePath;
     return { videoId, normalizedUrl };
   } catch (err) {
-    if (
-      !(err instanceof TypeError) &&
-      (typeof process === "undefined" || process.env.NODE_ENV !== "production")
-    ) {
+    // Ambient `process` typing is unavailable here: this package is shared
+    // browser/node code and must not depend on @types/node.
+    const nodeEnv = (
+      globalThis as { process?: { env?: { NODE_ENV?: string } } }
+    ).process?.env?.NODE_ENV;
+    if (!(err instanceof TypeError) && nodeEnv !== "production") {
       console.debug(
         "[bili-syncplay] parseBilibiliVideoRef: unexpected error parsing URL",
         url,
