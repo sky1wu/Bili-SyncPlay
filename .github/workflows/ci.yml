@@ -43,6 +43,9 @@ jobs:
       - name: Run tests with coverage
         run: npm run coverage
 
+      - name: Build Firefox extension target
+        run: npm run build:extension:firefox
+
   benchmark-baseline:
     runs-on: ubuntu-latest
 
