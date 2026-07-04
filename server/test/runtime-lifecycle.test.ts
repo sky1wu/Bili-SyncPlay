@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
 import { WebSocket, type RawData } from "ws";
+import { PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import { EventEmitter } from "node:events";
 import {
   cleanupSessionAfterClose,
@@ -404,7 +405,10 @@ test("profile updates are reflected in redis-backed room state views", async (t)
       owner.send(
         JSON.stringify({
           type: "room:create",
-          payload: { displayName: "Guest-123" },
+          payload: {
+            displayName: "Guest-123",
+            protocolVersion: PROTOCOL_VERSION,
+          },
         }),
       );
       const created = await ownerCollector.next("room:created");
@@ -419,6 +423,7 @@ test("profile updates are reflected in redis-backed room state views", async (t)
             roomCode,
             joinToken,
             displayName: "Bob",
+            protocolVersion: PROTOCOL_VERSION,
           },
         }),
       );

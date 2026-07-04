@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import {
   closeClient,
   connectClient,
@@ -26,7 +27,7 @@ test("cross-node room broadcasts sync join, shared video, playback updates, and 
     owner.send(
       JSON.stringify({
         type: "room:create",
-        payload: { displayName: "Alice" },
+        payload: { displayName: "Alice", protocolVersion: PROTOCOL_VERSION },
       }),
     );
     const created = await ownerCollector.next("room:created");
@@ -39,6 +40,7 @@ test("cross-node room broadcasts sync join, shared video, playback updates, and 
           roomCode: (created.payload as { roomCode: string }).roomCode,
           joinToken: (created.payload as { joinToken: string }).joinToken,
           displayName: "Bob",
+          protocolVersion: PROTOCOL_VERSION,
         },
       }),
     );
