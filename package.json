@@ -7,6 +7,9 @@
     "server",
     "extension"
   ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "lint": "eslint . --ext .ts,.js,.mjs,.cjs",
     "lint:fix": "npm run lint -- --fix",

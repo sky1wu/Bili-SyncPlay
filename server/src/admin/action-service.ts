@@ -95,36 +95,40 @@ export function createAdminActionService(options: {
       commandResult?: AdminCommandResult;
     },
   ): void {
-    void Promise.resolve(
-      options.auditLogService.append({
-        actor,
-        action,
-        targetType,
-        targetId,
-        request,
-        result,
-        reason,
-        instanceId: options.instanceId,
-        targetInstanceId: commandDetails?.targetInstanceId,
-        executorInstanceId: commandDetails?.commandResult?.executorInstanceId,
-        commandRequestId: commandDetails?.commandResult?.requestId,
-        commandStatus: commandDetails?.commandResult?.status,
-        commandCode:
-          commandDetails?.commandResult?.status === "ok"
-            ? undefined
-            : commandDetails?.commandResult?.code,
-      }),
-    ).catch((error: unknown) => {
-      options.logEvent("admin_audit_log_append_failed", {
-        actor: actor.username,
-        action,
-        targetType,
-        targetId,
-        result: "error",
-        instanceId: options.instanceId,
-        error: error instanceof Error ? error.message : String(error),
+    // .then() defers the append call so a synchronous throw is routed to
+    // .catch() instead of escaping into the admin action call site.
+    void Promise.resolve()
+      .then(() =>
+        options.auditLogService.append({
+          actor,
+          action,
+          targetType,
+          targetId,
+          request,
+          result,
+          reason,
+          instanceId: options.instanceId,
+          targetInstanceId: commandDetails?.targetInstanceId,
+          executorInstanceId: commandDetails?.commandResult?.executorInstanceId,
+          commandRequestId: commandDetails?.commandResult?.requestId,
+          commandStatus: commandDetails?.commandResult?.status,
+          commandCode:
+            commandDetails?.commandResult?.status === "ok"
+              ? undefined
+              : commandDetails?.commandResult?.code,
+        }),
+      )
+      .catch((error: unknown) => {
+        options.logEvent("admin_audit_log_append_failed", {
+          actor: actor.username,
+          action,
+          targetType,
+          targetId,
+          result: "error",
+          instanceId: options.instanceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
       });
-    });
   }
 
   function throwCommandFailure(
