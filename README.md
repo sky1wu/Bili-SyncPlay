@@ -150,8 +150,8 @@ Bili-SyncPlay/
 
 | Dependency    | Minimum                    | Recommended    | Notes                                                                                             |
 | ------------- | -------------------------- | -------------- | ------------------------------------------------------------------------------------------------- |
-| Node.js       | 18                         | 22             | see `.nvmrc`; Node 20 and 22 are both supported                                                   |
-| npm           | 8                          | 10             | ship with the corresponding Node.js version                                                       |
+| Node.js       | 22.5                       | 22 LTS         | see `.nvmrc`; Node 18/20 are EOL, ESLint 10 needs ≥20.19, and `npm run coverage` needs ≥22.5      |
+| npm           | 10                         | 10             | ships with the corresponding Node.js version                                                      |
 | Chrome / Edge | current stable             | current stable | required to load the unpacked extension                                                           |
 | Firefox       | 121                        | current stable | optional; uses the Firefox build (`dist-firefox`, event-page background)                          |
 | Redis         | 6.0                        | 7+             | optional for single-node; **required** for multi-node deployments and persistence across restarts |
