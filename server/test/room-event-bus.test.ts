@@ -41,6 +41,30 @@ test("in-memory room event bus delivers published messages to subscribers", asyn
   assert.equal(received.length, 1);
 });
 
+test("in-memory room event bus isolates throwing subscribers from the rest", async () => {
+  const bus = createInMemoryRoomEventBus();
+  const received: string[] = [];
+
+  await bus.subscribe(() => {
+    throw new Error("sync boom");
+  });
+  await bus.subscribe(async () => {
+    throw new Error("async boom");
+  });
+  await bus.subscribe((message) => {
+    received.push(message.roomCode);
+  });
+
+  await bus.publish({
+    type: "room_state_updated",
+    roomCode: "ROOM01",
+    sourceInstanceId: "instance-a",
+    emittedAt: 1_000,
+  });
+
+  assert.deepEqual(received, ["ROOM01"]);
+});
+
 test("noop room event bus accepts publish and subscribe without side effects", async () => {
   const bus = createNoopRoomEventBus();
   const unsubscribe = await bus.subscribe(() => {

@@ -186,7 +186,10 @@ test("redis room event bus reports handler errors", async (t) => {
 
   try {
     await bus.subscribe(async () => {
-      throw new Error("handler boom");
+      throw new Error("async boom");
+    });
+    await bus.subscribe(() => {
+      throw new Error("sync boom");
     });
 
     await bus.publish({
@@ -196,9 +199,12 @@ test("redis room event bus reports handler errors", async (t) => {
       emittedAt: Date.now(),
     });
 
-    await waitUntil(() => handlerErrors.length >= 1);
+    await waitUntil(() => handlerErrors.length >= 2);
+    const errorMessages = handlerErrors
+      .map((entry) => (entry.error as Error).message)
+      .sort();
+    assert.deepEqual(errorMessages, ["async boom", "sync boom"]);
     assert.equal(handlerErrors[0]?.message.roomCode, "ROOM01");
-    assert.equal((handlerErrors[0]?.error as Error).message, "handler boom");
   } finally {
     await bus.close();
   }

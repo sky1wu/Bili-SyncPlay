@@ -80,8 +80,11 @@ export function createInMemoryRoomEventBus(): RoomEventBus {
   return {
     async publish(message) {
       await Promise.allSettled(
+        // Promise.resolve(subscriber(...)) would let a synchronous throw
+        // abort the mapping and skip remaining subscribers; .then() defers
+        // the call so allSettled isolates sync and async failures alike.
         Array.from(subscribers, (subscriber) =>
-          Promise.resolve(subscriber(message)),
+          Promise.resolve().then(() => subscriber(message)),
         ),
       );
     },

@@ -152,9 +152,14 @@ export async function createRedisRoomEventBus(
           return;
         }
 
-        void Promise.resolve(handler(message)).catch((error: unknown) => {
-          options.onHandlerError?.(message, error);
-        });
+        // Promise.resolve(handler(...)) would let a synchronous throw escape
+        // the ioredis "message" listener as an uncaught exception; .then()
+        // defers the call so sync and async failures both reach the callback.
+        void Promise.resolve()
+          .then(() => handler(message))
+          .catch((error: unknown) => {
+            options.onHandlerError?.(message, error);
+          });
       };
 
       subscribers.set(handler, listener);

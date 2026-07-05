@@ -98,20 +98,24 @@ export function createStructuredLogger(
     }
 
     if (eventStore && !EVENT_STORE_EXCLUDED_EVENTS.has(event)) {
-      void Promise.resolve(
-        eventStore.append({ event, timestamp, data: { level, ...data } }),
-      ).catch((error: unknown) => {
-        emitLine(
-          JSON.stringify({
-            event: "runtime_event_append_failed",
-            level: "error" satisfies LogLevel,
-            timestamp: new Date().toISOString(),
-            result: "error",
-            failedEvent: event,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-      });
+      // .then() defers the append call so a synchronous throw is routed to
+      // .catch() instead of escaping into the logging call site.
+      void Promise.resolve()
+        .then(() =>
+          eventStore.append({ event, timestamp, data: { level, ...data } }),
+        )
+        .catch((error: unknown) => {
+          emitLine(
+            JSON.stringify({
+              event: "runtime_event_append_failed",
+              level: "error" satisfies LogLevel,
+              timestamp: new Date().toISOString(),
+              result: "error",
+              failedEvent: event,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        });
     }
     runtimeStore?.recordEvent(event, Date.parse(timestamp));
     metricsCollector?.recordEvent(event);
