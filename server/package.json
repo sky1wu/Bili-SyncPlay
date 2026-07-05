@@ -12,7 +12,7 @@
     "test": "tsx --test test/**/*.ts",
     "pretest:e2e": "npm --prefix ../packages/protocol run build",
     "test:e2e": "tsx --test test/e2e-smoke.test.ts",
-    "coverage": "tsx --test --experimental-test-coverage test/**/*.ts",
+    "coverage": "tsx --test --experimental-test-coverage --test-coverage-exclude='test/**' --test-coverage-exclude='admin-ui/**' --test-coverage-exclude='../bench/**' --test-coverage-exclude='../packages/**' test/**/*.ts",
     "test:redis": "node scripts/run-redis-test.mjs"
   },
   "dependencies": {

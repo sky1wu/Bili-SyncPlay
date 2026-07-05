@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "pretest": "npm --prefix ../packages/protocol run build",
     "test": "tsx --test test/**/*.test.ts",
-    "coverage": "tsx --test --experimental-test-coverage test/**/*.test.ts"
+    "coverage": "tsx --test --experimental-test-coverage --test-coverage-exclude='test/**' --test-coverage-exclude='../packages/**' test/**/*.test.ts"
   },
   "dependencies": {
     "@bili-syncplay/protocol": "1.2.4"

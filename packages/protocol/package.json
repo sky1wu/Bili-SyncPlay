@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
-    "coverage": "tsx --test --experimental-test-coverage test/**/*.test.ts"
+    "coverage": "tsx --test --experimental-test-coverage --test-coverage-exclude='test/**' test/**/*.test.ts"
   },
   "devDependencies": {
     "typescript": "^6.0.3"
