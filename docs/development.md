@@ -175,7 +175,7 @@ Redis integration test notes:
 
 ## Code Organization
 
-The repository follows a "thin entrypoint + named modules" structure.
+The repository follows a "thin entrypoint + named modules" structure. For the runtime view — system parts, sync data flow, and controller responsibilities — see the [architecture overview](./architecture.md).
 
 - `extension/src/background`
   - `index.ts` is assembly only

@@ -175,7 +175,7 @@ Redis 集成测试说明：
 
 ## 代码组织约定
 
-仓库遵循“薄入口 + 具名模块”的组织方式。
+仓库遵循“薄入口 + 具名模块”的组织方式。运行时视角——系统组成、同步数据流与 controller 职责——见[架构概览](./architecture.zh-CN.md)。
 
 - `extension/src/background`
   - `index.ts` 只负责装配

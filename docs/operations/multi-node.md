@@ -26,7 +26,7 @@ The server does not implement L4/L7 load balancing inside the application proces
 > If you are only doing local development or one-node deployment, you can stay on the single-node setup. The rest of this section is mainly for production multi-node rollout.
 
 For day-2 operations such as scaling, Redis incidents, admin credential rotation, and alert triage, see the
-[multi-node operations runbook](../runbook/multi-node-operations.zh-CN.md).
+[multi-node operations runbook](../runbook/multi-node-operations.md).
 
 ## Minimum required shared settings
 

@@ -5,18 +5,20 @@ This directory keeps project documentation that is useful after the first README
 
 ## Development / 开发
 
+- [Architecture overview](./architecture.md) / [架构概览](./architecture.zh-CN.md)
 - [Development guide](./development.md) / [开发指南](./development.zh-CN.md)
 
 ## Operations / 运维
 
 - [Server deployment guide](./operations/deployment.md) / [服务器部署指南](./operations/deployment.zh-CN.md)
 - [Multi-node deployment and global admin](./operations/multi-node.md) / [多节点部署与全局管理面](./operations/multi-node.zh-CN.md)
-- [Multi-node operations runbook](./runbook/multi-node-operations.zh-CN.md)
+- [Multi-node operations runbook](./runbook/multi-node-operations.md) / [多节点运维 Runbook](./runbook/multi-node-operations.zh-CN.md)
 - [Multi-node global admin migration](./operations/multi-node-global-admin-migration.md)
 - [多节点全局管理面迁移说明](./operations/multi-node-global-admin-migration.zh-CN.md)
 
 ## Reference / 参考
 
+- [Protocol reference](./reference/protocol.md) / [协议参考](./reference/protocol.zh-CN.md)
 - [Security environment variables](./reference/security-env.md) / [安全相关环境变量](./reference/security-env.zh-CN.md)
 - [Admin panel and API](./reference/admin-api.md) / [管理面板与 API](./reference/admin-api.zh-CN.md)
 

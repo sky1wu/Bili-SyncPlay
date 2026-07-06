@@ -1,5 +1,7 @@
 # Bili-SyncPlay 多节点运维 Runbook
 
+[English](./multi-node-operations.md) | [简体中文](./multi-node-operations.zh-CN.md)
+
 本文档面向日常运维和应急值班，覆盖多 Room Node、独立 Global Admin 与 Redis
 共享控制面的扩容、缩容、Redis 故障、管理员口令轮换和常见告警定位。
 
