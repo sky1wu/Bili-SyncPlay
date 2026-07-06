@@ -62,15 +62,15 @@
 
 ## 服务端消息（`ServerMessage`）
 
-| 类型                 | Payload                                                                  | 用途                                       |
-| -------------------- | ------------------------------------------------------------------------ | ------------------------------------------ |
-| `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | 房间已创建，携带邀请与会话 token           |
-| `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | 加入成功，签发新 `memberToken`             |
-| `room:state`         | `RoomState`                                                              | 房间完整快照（加入后、按请求、状态变化时） |
-| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | 成员加入                                   |
-| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | 成员离开                                   |
-| `error`              | `{ code: ErrorCode, message }`                                           | 请求失败                                   |
-| `sync:pong`          | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | 时钟偏移探测响应                           |
+| 类型                 | Payload                                                                  | 用途                                                                                  |
+| -------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | 房间已创建，携带邀请与会话 token                                                      |
+| `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | 加入成功，返回本次会话的 `memberToken`（重连携带仍有效的旧 token 时复用，否则新签发） |
+| `room:state`         | `RoomState`                                                              | 房间完整快照（加入后、按请求、状态变化时）                                            |
+| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | 成员加入                                                                              |
+| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | 成员离开                                                                              |
+| `error`              | `{ code: ErrorCode, message }`                                           | 请求失败                                                                              |
+| `sync:pong`          | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | 时钟偏移探测响应                                                                      |
 
 ### 时钟同步
 

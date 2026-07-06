@@ -82,7 +82,7 @@ npm run build:release
 - 支持 `memory` 和 `redis` 两种房间存储实现
 - 当 `ROOM_STORE_PROVIDER=redis` 时会持久化房间基础状态
 - 房间加入需要 `roomCode + joinToken`，房间消息需要 `memberToken`
-- 服务重连或服务端重启后会重新签发 `memberToken`
+- 重连携带仍有效的旧 `memberToken` 时复用，否则重新签发
 - 最后一名成员离开后，房间不会立即删除，而是保留到 `EMPTY_ROOM_TTL_MS` 到期
 - 支持 Origin 白名单、连接限流、消息限流和结构化安全日志
 
@@ -503,7 +503,7 @@ sudo systemctl restart bili-syncplay-global-admin
 - 当 `ROOM_STORE_PROVIDER=redis` 时，房间基础状态会在重启后保留，直到过期或被删除。
 - 最后一名成员离开后，房间不会立刻删除；服务端会写入 `expiresAt`，并在 `EMPTY_ROOM_TTL_MS` 到期后清理。
 - 加入房间需要同时提供 `roomCode` 和 `joinToken`；发送房间消息需要有效的 `memberToken`。
-- `memberToken` 是会话态，不会从持久层恢复；重连或重启后都需要重新加入并重新签发。
+- `memberToken` 是会话态；重连携带仍有效的旧 token 时复用，否则重新签发（扩展会在断开连接时清除本地保存的 token，因此通常以新 token 重新加入）。
 - 握手阶段的 Origin 检查默认拒绝，除非你在开发环境中显式允许缺失 `Origin`。
 - 只有当 socket 对端命中 `TRUSTED_PROXY_ADDRESSES` 时才会读取 `X-Forwarded-For`。
 - 健康检查同时提供 `GET /` 与 `GET /healthz`；就绪检查为 `GET /readyz`。

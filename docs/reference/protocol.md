@@ -62,15 +62,15 @@ Clients send `protocolVersion` inside the `room:create` / `room:join` payload; t
 
 ## Server Messages (`ServerMessage`)
 
-| Type                 | Payload                                                                  | Purpose                                                |
-| -------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------ |
-| `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | Room created; carries the invite and session tokens    |
-| `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | Join succeeded; issues a fresh `memberToken`           |
-| `room:state`         | `RoomState`                                                              | Full room snapshot (after join, on request, on change) |
-| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | A member joined                                        |
-| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | A member left                                          |
-| `error`              | `{ code: ErrorCode, message }`                                           | Request failed                                         |
-| `sync:pong`          | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | Clock-offset probe response                            |
+| Type                 | Payload                                                                  | Purpose                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | Room created; carries the invite and session tokens                                                                                     |
+| `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | Join succeeded; returns the session `memberToken` (a rejoin with a still-valid previous token reuses it, otherwise a new one is issued) |
+| `room:state`         | `RoomState`                                                              | Full room snapshot (after join, on request, on change)                                                                                  |
+| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | A member joined                                                                                                                         |
+| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | A member left                                                                                                                           |
+| `error`              | `{ code: ErrorCode, message }`                                           | Request failed                                                                                                                          |
+| `sync:pong`          | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | Clock-offset probe response                                                                                                             |
 
 ### Clock synchronization
 

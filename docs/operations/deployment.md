@@ -82,7 +82,7 @@ The current server implementation:
 - supports `memory` and `redis` room storage providers
 - persists room base state when `ROOM_STORE_PROVIDER=redis`
 - requires `roomCode + joinToken` for room join and `memberToken` for room messages
-- reissues `memberToken` after reconnect or server restart
+- on rejoin, reuses a still-valid previous `memberToken` and issues a new one otherwise
 - keeps empty rooms until `EMPTY_ROOM_TTL_MS` expires instead of deleting them immediately
 - supports origin allowlists, connection throttling, message throttling, and structured security logs
 
@@ -503,7 +503,7 @@ If you run multiple room nodes, prefer a rolling restart instead of restarting e
 - With `ROOM_STORE_PROVIDER=redis`, room base state survives restart until it expires or is deleted.
 - Rooms are not deleted immediately when the last member leaves; the server writes `expiresAt` and retains the room until `EMPTY_ROOM_TTL_MS` elapses.
 - Room join requires both `roomCode` and `joinToken`; room messages require a valid `memberToken`.
-- `memberToken` is session-bound, never restored from persistence, and is re-issued after reconnect or restart.
+- `memberToken` is session-bound; a rejoin that presents a still-valid previous token reuses it, otherwise a new one is issued (the extension discards its stored token on disconnect, so it typically rejoins with a fresh token).
 - Handshake origin checks are deny-by-default unless you explicitly allow missing `Origin` in development.
 - `X-Forwarded-For` is ignored unless the socket peer matches `TRUSTED_PROXY_ADDRESSES`.
 - Health checks are available on both `GET /` and `GET /healthz`; readiness is `GET /readyz`.
