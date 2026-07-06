@@ -72,5 +72,5 @@ Refactors that touch these areas should include regression coverage:
 
 ## Documentation
 
-- Update `README.md` and `README.zh-CN.md` when developer-facing commands or workflows change.
+- Update `docs/development.md` and `docs/development.zh-CN.md` when developer-facing commands or workflows change; update `README.md` and `README.zh-CN.md` when the quick start or user-facing behavior changes.
 - Update relevant files under `docs/` when a structural refactor changes the intended architecture or module boundaries.
