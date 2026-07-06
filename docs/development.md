@@ -175,7 +175,7 @@ Redis integration test notes:
 
 ## Code Organization
 
-The repository follows a "thin entrypoint + named modules" structure.
+The repository follows a "thin entrypoint + named modules" structure. For the runtime view — system parts, sync data flow, and controller responsibilities — see the [architecture overview](./architecture.md).
 
 - `extension/src/background`
   - `index.ts` is assembly only
@@ -241,7 +241,7 @@ Development notes:
 - `@bili-syncplay/server` depends on the built output of `@bili-syncplay/protocol`
 - for a clean local setup, prefer `npm run build` instead of building `server` alone
 - the extension does not keep a permanent socket by default; it connects when a room already exists in session state or when the user creates / joins a room
-- reconnecting into an existing room requires the stored `joinToken`; stale `memberToken` values are discarded on disconnect
+- reconnecting into an existing room requires the stored `joinToken`; the cached `memberToken` is sent along on automatic reconnect and is discarded only on explicit leave or an admin-initiated session teardown
 - if you change protocol types or message validation, rebuild both `packages/protocol` and `server`
 - the local server rejects extension connections unless `ALLOWED_ORIGINS` includes the current `chrome-extension://<extension-id>`
 - you can find the unpacked extension ID on `chrome://extensions`
@@ -271,7 +271,7 @@ Practical consequences:
 - the custom server URL survives browser restart
 - room session state and profile preferences are persisted independently, so a room-state write cannot leave `serverUrl` or `displayName` half-updated
 - the popup can reconnect into the current room only while the browser session still holds both `roomCode` and `joinToken`
-- `memberToken` is intentionally cleared on disconnect and re-issued after a successful rejoin
+- `memberToken` is kept across automatic reconnects and presented on rejoin; it is cleared on explicit leave or an admin-initiated session teardown, after which the next join receives a fresh token
 - if the persisted server URL becomes invalid, the extension keeps that value visible and stops auto reconnect until the URL is fixed
 - closing the browser does not restore the previous room automatically on the next launch
 

@@ -140,12 +140,14 @@ Bili-SyncPlay/
 ## Documentation
 
 - [Documentation index](./docs/README.md)
+- [Architecture overview](./docs/architecture.md) — system parts, sync data flow, where new code belongs
 - [Development guide](./docs/development.md) — local commands, tests, benchmarks, code organization, troubleshooting, release packaging
 - [Server deployment guide](./docs/operations/deployment.md) — build, systemd, Nginx, TLS, update flow
 - [Multi-node deployment and global admin](./docs/operations/multi-node.md)
+- [Protocol reference](./docs/reference/protocol.md)
 - [Security environment variables](./docs/reference/security-env.md)
 - [Admin panel and API](./docs/reference/admin-api.md)
-- [Multi-node operations runbook](./docs/runbook/multi-node-operations.zh-CN.md)
+- [Multi-node operations runbook](./docs/runbook/multi-node-operations.md)
 - [Multi-node global admin migration](./docs/operations/multi-node-global-admin-migration.md)
 - [Privacy policy](./docs/legal/privacy.md)
 
@@ -204,7 +206,7 @@ Or use the repository's [`docker-compose.yml`](./docker-compose.yml), which incl
 Notes:
 
 - The container listens on `8787` (override with `PORT`), exposes `/healthz` and `/readyz`, and ships a built-in Docker `HEALTHCHECK`.
-- Configuration is entirely environment-variable based, identical to a bare-metal deployment: `ALLOWED_ORIGINS` (required for extensions to connect), Redis persistence (`ROOM_STORE_PROVIDER=redis` plus `REDIS_URL`; `REDIS_URL` alone keeps the in-memory store), admin panel variables (`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET`), and so on — see the [security environment variable reference](./docs/reference/security-env.md) and the [multi-node runbook](./docs/runbook/multi-node-operations.zh-CN.md).
+- Configuration is entirely environment-variable based, identical to a bare-metal deployment: `ALLOWED_ORIGINS` (required for extensions to connect), Redis persistence (`ROOM_STORE_PROVIDER=redis` plus `REDIS_URL`; `REDIS_URL` alone keeps the in-memory store), admin panel variables (`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET`), and so on — see the [security environment variable reference](./docs/reference/security-env.md) and the [multi-node runbook](./docs/runbook/multi-node-operations.md).
 - In production, terminate TLS at a reverse proxy so the extension connects over `wss://` (see the version matrix).
 - Build locally from the repository root: `docker build -t bili-syncplay-server .` (the image contains only the server; the extension is distributed separately).
 

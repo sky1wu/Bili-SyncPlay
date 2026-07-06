@@ -175,7 +175,7 @@ Redis 集成测试说明：
 
 ## 代码组织约定
 
-仓库遵循“薄入口 + 具名模块”的组织方式。
+仓库遵循“薄入口 + 具名模块”的组织方式。运行时视角——系统组成、同步数据流与 controller 职责——见[架构概览](./architecture.zh-CN.md)。
 
 - `extension/src/background`
   - `index.ts` 只负责装配
@@ -241,7 +241,7 @@ ws://localhost:8787
 - `@bili-syncplay/server` 依赖 `@bili-syncplay/protocol` 的构建产物
 - 对于全新本地环境，优先使用 `npm run build`，而不是单独构建 `server`
 - 扩展默认不会永久保持 socket 连接；只有在会话状态中已存在房间，或用户创建 / 加入房间时才会建立连接
-- 重新进入已有房间需要保存的 `joinToken`；断开连接后，旧的 `memberToken` 会被丢弃
+- 重新进入已有房间需要保存的 `joinToken`；自动重连会携带缓存的 `memberToken`，只有显式离开或管理端终止会话时才丢弃
 - 如果你修改了协议类型或消息校验，需要重新构建 `packages/protocol` 和 `server`
 - 本地服务器默认会拒绝扩展连接，除非 `ALLOWED_ORIGINS` 包含当前 `chrome-extension://<extension-id>`
 - 你可以在 `chrome://extensions` 中查看未打包扩展的 ID
@@ -271,7 +271,7 @@ Chrome 显示的扩展版本来自 `extension/dist/manifest.json`。
 - 自定义服务器地址会在浏览器重启后保留
 - 房间会话态与用户偏好会分别持久化，房间状态写入失败不会把 `serverUrl` 或 `displayName` 留在半更新状态
 - 只有在浏览器会话中仍保留 `roomCode` 和 `joinToken` 时，弹窗才能重新进入当前房间
-- `memberToken` 会在断开连接时被有意清除，并在重新加入成功后重新签发
+- `memberToken` 在自动重连时保留并随重新加入发送；显式离开或管理端终止会话时被清除，之后重新加入会拿到新 token
 - 如果持久化的服务器地址非法，扩展会保留原始值并停止自动重连，直到地址被修正
 - 关闭浏览器后，下次启动不会自动恢复之前的房间
 

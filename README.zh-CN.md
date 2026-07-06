@@ -140,9 +140,11 @@ Bili-SyncPlay/
 ## 文档入口
 
 - [文档索引](./docs/README.md)
+- [架构概览](./docs/architecture.zh-CN.md)——系统组成、同步数据流、新代码放哪里
 - [开发指南](./docs/development.zh-CN.md)——本地命令、测试、基准压测、代码组织、故障排查、发布打包
 - [服务器部署指南](./docs/operations/deployment.zh-CN.md)——构建、systemd、Nginx、TLS、更新流程
 - [多节点部署与全局管理面](./docs/operations/multi-node.zh-CN.md)
+- [协议参考](./docs/reference/protocol.zh-CN.md)
 - [安全相关环境变量](./docs/reference/security-env.zh-CN.md)
 - [管理面板与 API](./docs/reference/admin-api.zh-CN.md)
 - [多节点运维 Runbook](./docs/runbook/multi-node-operations.zh-CN.md)

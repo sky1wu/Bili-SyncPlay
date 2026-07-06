@@ -1,5 +1,7 @@
 # Bili-SyncPlay 多节点运维 Runbook
 
+[English](./multi-node-operations.md) | [简体中文](./multi-node-operations.zh-CN.md)
+
 本文档面向日常运维和应急值班，覆盖多 Room Node、独立 Global Admin 与 Redis
 共享控制面的扩容、缩容、Redis 故障、管理员口令轮换和常见告警定位。
 
@@ -49,6 +51,8 @@ NODE_HEARTBEAT_ENABLED=true
 `GLOBAL_ADMIN_ENABLED=false`；Global Admin 使用 `GLOBAL_ADMIN_PORT`，并设置
 `GLOBAL_ADMIN_ENABLED=true`。
 
+如果设置了 `REDIS_NAMESPACE`，它会作为所有 Redis 键和频道（房间、运行时索引、事件流、房间事件总线、管理命令总线）的前缀，因此所有 Room Node 与 Global Admin 必须使用同一个值；全部不设置时共同使用默认前缀 `bsp`。命名空间不一致会把集群分裂——表现为 Global Admin 看不到房间和心跳、跨节点广播与管理命令静默失效。
+
 生产环境还应显式配置并保持一致：
 
 - `ALLOWED_ORIGINS`
@@ -79,9 +83,11 @@ curl -fsS http://10.0.0.11:8788/readyz
 curl -fsS http://10.0.0.11:8787/metrics
 
 # systemd 日志
-sudo journalctl -u bili-syncplay-server -f
+sudo journalctl -u bili-syncplay-room-node-a -f
 sudo journalctl -u bili-syncplay-global-admin -f
 ```
+
+示例中的 systemd 单元名沿用[部署指南](../operations/deployment.zh-CN.md)的按节点命名方案（`bili-syncplay-room-node-a`、`bili-syncplay-room-node-b`……），实际操作时替换为目标节点对应的单元名。
 
 如果部署了独立指标端口，使用 `METRICS_PORT` 对应地址抓取 `/metrics`。
 
@@ -104,8 +110,8 @@ sudo journalctl -u bili-syncplay-global-admin -f
 5. 启动服务：
 
    ```bash
-   sudo systemctl enable --now bili-syncplay-server
-   sudo systemctl status bili-syncplay-server
+   sudo systemctl enable --now bili-syncplay-room-node-c
+   sudo systemctl status bili-syncplay-room-node-c
    ```
 
 6. 在入口层加入新 upstream，但先设置较低权重或仅灰度少量流量。
@@ -146,7 +152,7 @@ sudo journalctl -u bili-syncplay-global-admin -f
 8. 停止目标节点：
 
    ```bash
-   sudo systemctl stop bili-syncplay-server
+   sudo systemctl stop bili-syncplay-room-node-b
    ```
 
 9. 等待至少一个 `NODE_HEARTBEAT_TTL_MS` 周期，确认 Global Admin 中目标节点消失或标记为过期。
@@ -170,7 +176,7 @@ Redis 在启动阶段不可用会导致相关进程启动失败；运行中 Redi
 redis-cli -u "$REDIS_URL" ping
 curl -fsS http://10.0.0.11:8787/readyz
 curl -fsS http://10.0.0.11:8787/metrics | grep bili_syncplay_redis_operation_failures_total
-sudo journalctl -u bili-syncplay-server --since "15 min ago" | grep -E "redis|Redis|node_heartbeat_failed"
+sudo journalctl -u bili-syncplay-room-node-a --since "15 min ago" | grep -E "redis|Redis|node_heartbeat_failed"
 ```
 
 同时检查 Global Admin 概览：
@@ -186,7 +192,7 @@ sudo journalctl -u bili-syncplay-server --since "15 min ago" | grep -E "redis|Re
 3. Redis 恢复后重启受影响进程：
 
    ```bash
-   sudo systemctl restart bili-syncplay-server
+   sudo systemctl restart bili-syncplay-room-node-a   # 每个 Room Node 依次执行
    sudo systemctl restart bili-syncplay-global-admin
    ```
 
@@ -225,7 +231,7 @@ NODE_HEARTBEAT_ENABLED=false
 4. 重启服务：
 
    ```bash
-   sudo systemctl restart bili-syncplay-server
+   sudo systemctl restart bili-syncplay-room-node-a   # 每个 Room Node 依次执行
    sudo systemctl restart bili-syncplay-global-admin
    ```
 
@@ -263,7 +269,7 @@ NODE_HEARTBEAT_ENABLED=false
 5. 滚动重启：
 
    ```bash
-   sudo systemctl restart bili-syncplay-server
+   sudo systemctl restart bili-syncplay-room-node-a   # 每个 Room Node 依次执行
    sudo systemctl restart bili-syncplay-global-admin
    ```
 
@@ -305,7 +311,7 @@ curl -fsS http://10.0.0.11:8788/readyz
 curl -fsS http://<room-node>:8787/metrics
 curl -fsS http://<room-node>:8787/readyz
 curl -fsS http://<global-admin>:8788/readyz
-sudo journalctl -u bili-syncplay-server --since "30 min ago"
+sudo journalctl -u bili-syncplay-room-node-a --since "30 min ago"
 sudo journalctl -u bili-syncplay-global-admin --since "30 min ago"
 ```
 
