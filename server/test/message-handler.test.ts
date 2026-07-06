@@ -771,6 +771,7 @@ test("message handler records the negotiated protocol version once per session",
   const recordedVersions: string[] = [];
   const session = createSession("versioned-member");
   const legacySession = createSession("legacy-member");
+  const futureSession = createSession("future-member");
 
   const handler = createMessageHandler({
     config: CONFIG,
@@ -846,8 +847,19 @@ test("message handler records the negotiated protocol version once per session",
       displayName: "Bob",
     },
   });
+  // Client-supplied versions above the server's current version must collapse
+  // into one bucket so hostile clients cannot mint unbounded label values.
+  await handler.handleClientMessage(futureSession, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      displayName: "Mallory",
+      protocolVersion: 9999,
+    },
+  });
 
-  assert.deepEqual(recordedVersions, ["2", "legacy"]);
+  assert.deepEqual(recordedVersions, ["2", "legacy", "future"]);
 });
 
 test("message handler accepts room:create without protocolVersion (legacy client)", async () => {

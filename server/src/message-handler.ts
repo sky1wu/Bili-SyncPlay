@@ -451,9 +451,16 @@ export function createMessageHandler(options: {
     }
     // Count each session once, at its first accepted handshake, so the
     // per-version series tracks connected-client population rather than
-    // room:create/room:join message volume.
+    // room:create/room:join message volume. The label set must stay bounded
+    // even though clients control the value: anything above the server's
+    // current version collapses into a single "future" bucket so a hostile
+    // client cannot mint unbounded Prometheus series.
     if (session.protocolVersion === undefined) {
-      metricsCollector?.recordSessionProtocolVersion(String(clientVersion));
+      metricsCollector?.recordSessionProtocolVersion(
+        clientVersion <= CURRENT_PROTOCOL_VERSION
+          ? String(clientVersion)
+          : "future",
+      );
     }
     session.protocolVersion = clientVersion;
     return true;
