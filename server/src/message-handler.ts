@@ -100,7 +100,10 @@ export function createMessageHandler(options: {
   instanceId: string;
   metricsCollector?: Pick<
     MetricsCollector,
-    "observeMessageHandlerDuration" | "recordRoomEventPublishDropped"
+    | "observeMessageHandlerDuration"
+    | "recordRoomEventPublishDropped"
+    | "recordRateLimited"
+    | "recordSessionProtocolVersion"
   >;
   maxPendingPublishes?: number;
   backpressureWaitMs?: number;
@@ -384,6 +387,7 @@ export function createMessageHandler(options: {
     session: Session,
     messageType: string,
   ): void {
+    metricsCollector?.recordRateLimited(messageType);
     logEvent("rate_limited", {
       sessionId: session.id,
       roomCode: session.roomCode,
@@ -416,6 +420,9 @@ export function createMessageHandler(options: {
   ): boolean {
     if (clientVersion === undefined) {
       // Old extension without protocolVersion — compatible baseline, log deprecation
+      if (session.protocolVersion === undefined) {
+        metricsCollector?.recordSessionProtocolVersion("legacy");
+      }
       session.protocolVersion = MIN_PROTOCOL_VERSION;
       logEvent("protocol_version_missing", {
         sessionId: session.id,
@@ -441,6 +448,12 @@ export function createMessageHandler(options: {
         minVersion: MIN_PROTOCOL_VERSION,
       });
       return false;
+    }
+    // Count each session once, at its first accepted handshake, so the
+    // per-version series tracks connected-client population rather than
+    // room:create/room:join message volume.
+    if (session.protocolVersion === undefined) {
+      metricsCollector?.recordSessionProtocolVersion(String(clientVersion));
     }
     session.protocolVersion = clientVersion;
     return true;

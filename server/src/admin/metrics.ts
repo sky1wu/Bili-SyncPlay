@@ -13,6 +13,17 @@ const CORE_EVENT_NAMES = [
   "rate_limited",
 ] as const;
 
+// Every message type guarded by a rate limiter in the message handler.
+// Pre-seeded to 0 so dashboards can tell "never limited" from "not emitted".
+const RATE_LIMITED_MESSAGE_TYPES = [
+  "room:create",
+  "room:join",
+  "video:share",
+  "playback:update",
+  "sync:request",
+  "sync:ping",
+] as const;
+
 export type MonitoredMessageType =
   "video:share" | "playback:update" | "room:join" | "room:leave";
 
@@ -44,6 +55,8 @@ type CounterMetric = {
 export type MetricsCollector = {
   bindRuntimeStore: (runtimeStore: RuntimeStore) => void;
   recordEvent: (event: string) => void;
+  recordRateLimited: (messageType: string) => void;
+  recordSessionProtocolVersion: (protocolVersion: string) => void;
   observeMessageHandlerDuration: (
     messageType: MonitoredMessageType,
     durationMs: number,
@@ -134,10 +147,21 @@ function ensureHistogramSample(
 export function createMetricsCollector(options: {
   runtimeStore: RuntimeStore;
   roomStore: RoomStore;
+  serviceVersion?: string;
 }): MetricsCollector {
   let runtimeStore = options.runtimeStore;
+  const serviceVersion = options.serviceVersion ?? "unknown";
+  const processStartTimeSeconds = (Date.now() - process.uptime() * 1000) / 1000;
   const eventCounter: CounterMetric = {
     help: "Total structured log events grouped by event name",
+    samples: new Map(),
+  };
+  const rateLimitedCounter: CounterMetric = {
+    help: "Total rate_limited events grouped by client message type",
+    samples: new Map(),
+  };
+  const sessionProtocolVersionCounter: CounterMetric = {
+    help: "Total accepted sessions grouped by first negotiated protocol version",
     samples: new Map(),
   };
   const redisFailureCounter: CounterMetric = {
@@ -166,6 +190,10 @@ export function createMetricsCollector(options: {
 
   for (const eventName of CORE_EVENT_NAMES) {
     ensureCounterSample(eventCounter, { event: eventName });
+  }
+
+  for (const messageType of RATE_LIMITED_MESSAGE_TYPES) {
+    ensureCounterSample(rateLimitedCounter, { message_type: messageType });
   }
 
   // Pre-seed every room event type to 0 so dashboards can distinguish
@@ -221,6 +249,18 @@ export function createMetricsCollector(options: {
     ).sort((a, b) =>
       (a.labels.event_type ?? "").localeCompare(b.labels.event_type ?? ""),
     );
+    const rateLimitedSamples = Array.from(
+      rateLimitedCounter.samples.values(),
+    ).sort((a, b) =>
+      (a.labels.message_type ?? "").localeCompare(b.labels.message_type ?? ""),
+    );
+    const sessionProtocolVersionSamples = Array.from(
+      sessionProtocolVersionCounter.samples.values(),
+    ).sort((a, b) =>
+      (a.labels.protocol_version ?? "").localeCompare(
+        b.labels.protocol_version ?? "",
+      ),
+    );
     const histogramMetrics = [
       {
         name: "bili_syncplay_message_handler_duration_seconds",
@@ -237,6 +277,17 @@ export function createMetricsCollector(options: {
     ] as const;
 
     const lines = [
+      "# HELP bili_syncplay_build_info Build metadata; constant 1 labelled with the service version",
+      "# TYPE bili_syncplay_build_info gauge",
+      formatMetricLine("bili_syncplay_build_info", 1, {
+        version: serviceVersion,
+      }),
+      "# HELP bili_syncplay_process_start_time_seconds Unix time the server process started, in seconds",
+      "# TYPE bili_syncplay_process_start_time_seconds gauge",
+      formatMetricLine(
+        "bili_syncplay_process_start_time_seconds",
+        processStartTimeSeconds,
+      ),
       "# HELP bili_syncplay_connections Current websocket connection count",
       "# TYPE bili_syncplay_connections gauge",
       formatMetricLine(
@@ -281,11 +332,23 @@ export function createMetricsCollector(options: {
           event: "ws_connection_rejected",
         }).value,
       ),
-      "# HELP bili_syncplay_rate_limited_total Total rate_limited events",
+      "# HELP bili_syncplay_rate_limited_total Total rate_limited events grouped by client message type",
       "# TYPE bili_syncplay_rate_limited_total counter",
-      formatMetricLine(
-        "bili_syncplay_rate_limited_total",
-        ensureCounterSample(eventCounter, { event: "rate_limited" }).value,
+      ...rateLimitedSamples.map((sample) =>
+        formatMetricLine(
+          "bili_syncplay_rate_limited_total",
+          sample.value,
+          sample.labels,
+        ),
+      ),
+      "# HELP bili_syncplay_session_protocol_versions_total Total accepted sessions grouped by first negotiated protocol version",
+      "# TYPE bili_syncplay_session_protocol_versions_total counter",
+      ...sessionProtocolVersionSamples.map((sample) =>
+        formatMetricLine(
+          "bili_syncplay_session_protocol_versions_total",
+          sample.value,
+          sample.labels,
+        ),
       ),
       "# HELP bili_syncplay_redis_operation_failures_total Total Redis metric-instrumented operation failures",
       "# TYPE bili_syncplay_redis_operation_failures_total counter",
@@ -349,6 +412,14 @@ export function createMetricsCollector(options: {
     recordEvent(event) {
       incrementCounter(eventCounter, { event });
     },
+    recordRateLimited(messageType) {
+      incrementCounter(rateLimitedCounter, { message_type: messageType });
+    },
+    recordSessionProtocolVersion(protocolVersion) {
+      incrementCounter(sessionProtocolVersionCounter, {
+        protocol_version: protocolVersion,
+      });
+    },
     observeMessageHandlerDuration(messageType, durationMs) {
       observeHistogram(
         messageDurationHistogram,
@@ -394,6 +465,7 @@ export function createMetricsCollector(options: {
 export function createMetricsService(options: {
   runtimeStore: RuntimeStore;
   roomStore: RoomStore;
+  serviceVersion?: string;
 }) {
   return createMetricsCollector(options);
 }

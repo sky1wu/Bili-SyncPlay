@@ -648,6 +648,9 @@ test("message handler records monitored duration metrics for critical room paths
       observeMessageHandlerDuration(messageType) {
         observedTypes.push(messageType);
       },
+      recordRoomEventPublishDropped() {},
+      recordRateLimited() {},
+      recordSessionProtocolVersion() {},
     },
   });
 
@@ -706,6 +709,145 @@ test("message handler records monitored duration metrics for critical room paths
     "playback:update",
     "room:leave",
   ]);
+});
+
+test("message handler records rate-limited messages with their message type", async () => {
+  const rateLimitedTypes: string[] = [];
+  const session = createSession("pinger");
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession() {
+        return { room: null };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+    now: () => 0,
+    metricsCollector: {
+      observeMessageHandlerDuration() {},
+      recordRoomEventPublishDropped() {},
+      recordRateLimited(messageType) {
+        rateLimitedTypes.push(messageType);
+      },
+      recordSessionProtocolVersion() {},
+    },
+  });
+
+  // syncPingBurst is 2 with a frozen clock, so the third ping is limited.
+  for (let index = 0; index < 3; index += 1) {
+    await handler.handleClientMessage(session, {
+      type: "sync:ping",
+      payload: { clientSendTime: 1 },
+    });
+  }
+
+  assert.deepEqual(rateLimitedTypes, ["sync:ping"]);
+});
+
+test("message handler records the negotiated protocol version once per session", async () => {
+  const recordedVersions: string[] = [];
+  const session = createSession("versioned-member");
+  const legacySession = createSession("legacy-member");
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = "ROOM01";
+        currentSession.memberId = "member-1";
+        currentSession.memberToken = "member-token-1";
+        return {
+          room: { code: "ROOM01" },
+          memberToken: "member-token-1",
+        };
+      },
+      async leaveRoomForSession() {
+        return { room: null };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        return {
+          roomCode: "ROOM01",
+          sharedVideo: null,
+          playback: null,
+          members: [{ id: "member-1", name: "Alice" }],
+        };
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+    metricsCollector: {
+      observeMessageHandlerDuration() {},
+      recordRoomEventPublishDropped() {},
+      recordRateLimited() {},
+      recordSessionProtocolVersion(protocolVersion) {
+        recordedVersions.push(protocolVersion);
+      },
+    },
+  });
+
+  const joinPayload = {
+    roomCode: "ROOM01",
+    joinToken: "join-token-1",
+    displayName: "Alice",
+    protocolVersion: 2,
+  };
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: joinPayload,
+  });
+  // Re-joining with the same session must not double-count it.
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: joinPayload,
+  });
+  await handler.handleClientMessage(legacySession, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      displayName: "Bob",
+    },
+  });
+
+  assert.deepEqual(recordedVersions, ["2", "legacy"]);
 });
 
 test("message handler accepts room:create without protocolVersion (legacy client)", async () => {
@@ -1587,6 +1729,8 @@ test("publish backpressure drops new events when wait deadline elapses", async (
       recordRoomEventPublishDropped(eventType) {
         droppedMetricTypes.push(eventType);
       },
+      recordRateLimited() {},
+      recordSessionProtocolVersion() {},
     },
   });
 

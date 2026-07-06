@@ -249,6 +249,7 @@ export async function createServerBootstrapContext(
   const metricsCollector = createMetricsCollector({
     runtimeStore: localRuntimeStore,
     roomStore,
+    serviceVersion,
   });
   const runtimeStorePendingOperationLogger =
     options.loggingHooks?.onRuntimeStorePendingOperationError;

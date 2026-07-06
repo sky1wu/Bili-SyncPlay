@@ -12,6 +12,7 @@ test("metrics collector renders event counters, histograms, and redis failure co
         return 2;
       },
     } as never,
+    serviceVersion: "9.9.9-test",
   });
 
   runtimeStore.registerSession({
@@ -39,6 +40,10 @@ test("metrics collector renders event counters, histograms, and redis failure co
   runtimeStore.markSessionJoinedRoom("session-1", "ROOM01");
 
   metrics.recordEvent("room_created");
+  metrics.recordRateLimited("sync:request");
+  metrics.recordRateLimited("sync:request");
+  metrics.recordSessionProtocolVersion("2");
+  metrics.recordSessionProtocolVersion("legacy");
   metrics.observeMessageHandlerDuration("room:join", 12);
   metrics.observeRedisRuntimeStoreDuration("register_session", 8);
   metrics.observeRedisRuntimeStoreFailure("register_session");
@@ -52,6 +57,40 @@ test("metrics collector renders event counters, histograms, and redis failure co
   assert.equal(rendered.includes("bili_syncplay_connections 1"), true);
   assert.equal(rendered.includes("bili_syncplay_active_rooms 1"), true);
   assert.equal(rendered.includes("bili_syncplay_rooms_non_expired 2"), true);
+  assert.equal(
+    rendered.includes('bili_syncplay_build_info{version="9.9.9-test"} 1'),
+    true,
+  );
+  const startTimeMatch = rendered.match(
+    /^bili_syncplay_process_start_time_seconds (\d+(?:\.\d+)?)$/m,
+  );
+  assert.notEqual(startTimeMatch, null);
+  assert.equal(Number(startTimeMatch![1]) > 0, true);
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_rate_limited_total{message_type="sync:request"} 2',
+    ),
+    true,
+  );
+  // Pre-seeded to 0 so "never limited" is distinguishable from "metric absent".
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_rate_limited_total{message_type="playback:update"} 0',
+    ),
+    true,
+  );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_session_protocol_versions_total{protocol_version="2"} 1',
+    ),
+    true,
+  );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_session_protocol_versions_total{protocol_version="legacy"} 1',
+    ),
+    true,
+  );
   assert.equal(
     rendered.includes('bili_syncplay_events_total{event="room_created"} 1'),
     true,
