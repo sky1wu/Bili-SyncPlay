@@ -503,7 +503,7 @@ If you run multiple room nodes, prefer a rolling restart instead of restarting e
 - With `ROOM_STORE_PROVIDER=redis`, room base state survives restart until it expires or is deleted.
 - Rooms are not deleted immediately when the last member leaves; the server writes `expiresAt` and retains the room until `EMPTY_ROOM_TTL_MS` elapses.
 - Room join requires both `roomCode` and `joinToken`; room messages require a valid `memberToken`.
-- `memberToken` is session-bound; a rejoin that presents a still-valid previous token reuses it, otherwise a new one is issued (the extension discards its stored token on disconnect, so it typically rejoins with a fresh token).
+- `memberToken` is session-bound; a rejoin that presents a still-valid previous token reuses it, otherwise a new one is issued. The extension keeps its cached token across automatic reconnects and clears it only on explicit leave or an admin-initiated session teardown.
 - Handshake origin checks are deny-by-default unless you explicitly allow missing `Origin` in development.
 - `X-Forwarded-For` is ignored unless the socket peer matches `TRUSTED_PROXY_ADDRESSES`.
 - Health checks are available on both `GET /` and `GET /healthz`; readiness is `GET /readyz`.

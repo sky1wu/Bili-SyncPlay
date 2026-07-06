@@ -79,7 +79,7 @@ Every store and bus has a `memory` and a `redis` provider behind the same interf
 
 ## Identity and State Lifetimes
 
-- A room is identified by `roomCode`; joining requires the `joinToken` from the invite (`roomCode:joinToken`), and every subsequent room message requires the session-bound `memberToken` returned by join. A rejoin that presents a still-valid previous `memberToken` keeps its member identity and reuses that token; otherwise the server issues a new one. The extension intentionally discards its stored `memberToken` on disconnect, so it typically rejoins with a fresh token.
+- A room is identified by `roomCode`; joining requires the `joinToken` from the invite (`roomCode:joinToken`), and every subsequent room message requires the session-bound `memberToken` returned by join. A rejoin that presents a still-valid previous `memberToken` keeps its member identity and reuses that token; otherwise the server issues a new one. The extension keeps its cached `memberToken` across automatic reconnects and presents it when rejoining; the token is cleared only on explicit leave or when the server tears down the session (e.g. an admin kick).
 - The extension splits persisted state by lifetime: `chrome.storage.session` holds room membership (cleared when the browser closes), `chrome.storage.local` holds `displayName` and `serverUrl`. Practical consequences are listed in the [development guide](./development.md#state-persistence).
 
 ## Where New Code Belongs

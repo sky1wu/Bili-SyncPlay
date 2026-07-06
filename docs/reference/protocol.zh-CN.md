@@ -95,10 +95,11 @@
 
 ## 类型守卫
 
-每种线上结构都有从包根导出的运行时守卫，服务端用于校验入站消息，扩展用于校验服务端帧：
+运行时守卫从包根导出。线上校验请使用顶层守卫：
 
-- `isClientMessage(value)` / `isServerMessage(value)`——顶层分发守卫
-- 结构级守卫，如 `isSharedVideo`、`isPlaybackState`、`isRoomState`、`isRoomMember`、`isErrorMessage`、`isClientHelloPayload`
-- 原语守卫，如 `isRoomCode`、`isToken`、`isVideoId`、`isBilibiliUrl`、`isPlaybackPlayState`
+- `isClientMessage(value)`——服务端用它校验入站客户端帧
+- `isServerMessage(value)`——扩展用它校验服务端帧；单独的房间快照用 `isRoomState(value)`
+
+其余导出的守卫（`isSharedVideo`、`isPlaybackState`、`isClientHelloPayload`、`isRoomMember`、`isErrorMessage`，以及 `isRoomCode`、`isToken`、`isVideoId`、`isBilibiliUrl`、`isPlaybackPlayState` 等原语守卫）用于组合与测试上述消息守卫。注意：导出的 `isSharedVideo` 与 `isPlaybackState` 来自客户端消息守卫集，带有客户端 payload 限制——例如 `isSharedVideo` 把 `sharedByMemberId` 上限设为 32 字符，而服务端签发的成员 ID 是 36 字符 UUID——因此服务端填充的 `room:state.sharedVideo` 可能被它们合法地拒绝。不要用客户端 payload 守卫校验服务端帧；`isServerMessage` / `isRoomState` 内部使用更宽松的服务端结构。
 
 新增或修改消息时，必须在同一变更中更新对应守卫及其接受/拒绝用例测试（见 [CONTRIBUTING.md](../../CONTRIBUTING.md) 的清单）。

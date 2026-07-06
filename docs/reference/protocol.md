@@ -95,10 +95,11 @@ All video-identity comparisons in the extension and server must go through these
 
 ## Type Guards
 
-Every wire shape has a runtime guard exported from the package root, used by the server to validate inbound messages and by the extension to validate server frames:
+Runtime guards are exported from the package root. For wire validation, use the top-level guards:
 
-- `isClientMessage(value)` / `isServerMessage(value)` — top-level dispatch guards
-- Per-shape guards such as `isSharedVideo`, `isPlaybackState`, `isRoomState`, `isRoomMember`, `isErrorMessage`, `isClientHelloPayload`
-- Primitive guards such as `isRoomCode`, `isToken`, `isVideoId`, `isBilibiliUrl`, `isPlaybackPlayState`
+- `isClientMessage(value)` — the server validates inbound client frames with this
+- `isServerMessage(value)` — the extension validates server frames with this; `isRoomState(value)` covers a bare room snapshot
+
+The other exported guards (`isSharedVideo`, `isPlaybackState`, `isClientHelloPayload`, `isRoomMember`, `isErrorMessage`, and primitives such as `isRoomCode`, `isToken`, `isVideoId`, `isBilibiliUrl`, `isPlaybackPlayState`) exist to compose and test the message guards. Note that the exported `isSharedVideo` and `isPlaybackState` come from the client-message guard set and enforce client-payload limits — for example, `isSharedVideo` caps `sharedByMemberId` at 32 characters, while server-issued member ids are 36-character UUIDs — so a server-populated `room:state.sharedVideo` can legitimately fail them. Do not validate server frames with client-payload guards; `isServerMessage` / `isRoomState` internally apply the more lenient server-side shapes.
 
 When adding or changing a message, update the corresponding guard and its accepted/rejected payload tests in the same change (see the checklist in [CONTRIBUTING.md](../../CONTRIBUTING.md)).

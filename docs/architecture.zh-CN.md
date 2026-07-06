@@ -79,7 +79,7 @@ flowchart LR
 
 ## 身份与状态生命周期
 
-- 房间由 `roomCode` 标识；加入需要邀请串（`roomCode:joinToken`）中的 `joinToken`，之后每条房间消息都需要加入时返回的会话绑定 `memberToken`。重连携带仍有效的旧 `memberToken` 时会保留原成员身份并复用该 token；否则服务端签发新 token。扩展会在断开连接时有意清除本地保存的 `memberToken`，因此重新加入时通常拿到新 token。
+- 房间由 `roomCode` 标识；加入需要邀请串（`roomCode:joinToken`）中的 `joinToken`，之后每条房间消息都需要加入时返回的会话绑定 `memberToken`。重连携带仍有效的旧 `memberToken` 时会保留原成员身份并复用该 token；否则服务端签发新 token。扩展在自动重连时会保留缓存的 `memberToken` 并随重新加入一起发送；只有显式离开房间或服务端主动终止会话（如管理员踢人）时才会清除该 token。
 - 扩展按生命周期拆分持久化状态：`chrome.storage.session` 保存房间成员信息（浏览器关闭即清除），`chrome.storage.local` 保存 `displayName` 与 `serverUrl`。实际影响见[开发指南](./development.zh-CN.md#状态持久化)。
 
 ## 新代码应该放在哪里
