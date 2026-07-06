@@ -18,19 +18,19 @@
 
 ### `SharedVideo`
 
-| 字段                  | 类型      | 说明               |
-| --------------------- | --------- | ------------------ |
-| `videoId`             | `string`  | 归一化后的视频标识 |
-| `url`                 | `string`  | 归一化后的视频 URL |
-| `title`               | `string`  | 展示标题           |
-| `sharedByMemberId`    | `string?` | 分享者成员 ID      |
-| `sharedByDisplayName` | `string?` | 分享者昵称         |
+| 字段                  | 类型      | 说明                                                                                                              |
+| --------------------- | --------- | ----------------------------------------------------------------------------------------------------------------- |
+| `videoId`             | `string`  | 归一化后的视频标识                                                                                                |
+| `url`                 | `string`  | 分享方发送的分享 URL——可被归一化 helper 接受，但不保证已归一化（festival 分享保留原始页面 URL）；比较前必须归一化 |
+| `title`               | `string`  | 展示标题                                                                                                          |
+| `sharedByMemberId`    | `string?` | 分享者成员 ID                                                                                                     |
+| `sharedByDisplayName` | `string?` | 分享者昵称                                                                                                        |
 
 ### `PlaybackState`
 
 | 字段            | 类型                                        | 说明                                                                                               |
 | --------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `url`           | `string`                                    | 该状态对应的归一化 URL                                                                             |
+| `url`           | `string`                                    | 该状态对应的 URL；与 `SharedVideo.url` 一样，比较前必须归一化                                      |
 | `currentTime`   | `number`                                    | 播放位置（秒）                                                                                     |
 | `playState`     | `"playing" \| "paused" \| "buffering"`      | `PlaybackPlayState`                                                                                |
 | `syncIntent`    | `"explicit-seek" \| "explicit-ratechange"?` | 标记由显式 seek / 倍速操作产生的状态（`PlaybackSyncIntent`）                                       |
@@ -66,11 +66,15 @@
 | -------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
 | `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | 房间已创建，携带邀请与会话 token                                                      |
 | `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | 加入成功，返回本次会话的 `memberToken`（重连携带仍有效的旧 token 时复用，否则新签发） |
-| `room:state`         | `RoomState`                                                              | 房间完整快照（加入后、按请求、状态变化时）                                            |
-| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | 成员加入                                                                              |
-| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | 成员离开                                                                              |
+| `room:state`         | `RoomState`                                                              | 房间完整快照（加入后、按请求、共享视频/播放状态变化时）                               |
+| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | 成员加入（增量消息，发给 `protocolVersion >= 2` 客户端）                              |
+| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | 成员离开（增量消息，发给 `protocolVersion >= 2` 客户端）                              |
 | `error`              | `{ code: ErrorCode, message }`                                           | 请求失败                                                                              |
 | `sync:pong`          | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | 时钟偏移探测响应                                                                      |
+
+### 成员增量消息
+
+成员变更按协议版本分流（`server/src/room-event-consumer.ts` 中 `MEMBER_DELTA_PROTOCOL_VERSION = 2`）：`protocolVersion >= 2` 的客户端收到 `room:member-joined` / `room:member-left` 增量，必须据此维护成员列表——成员变更不会重新广播 `room:state`；旧客户端（v1 或未携带版本号）则收到完整 `room:state`。
 
 ### 时钟同步
 

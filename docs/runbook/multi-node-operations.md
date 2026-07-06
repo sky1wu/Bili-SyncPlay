@@ -45,6 +45,8 @@ NODE_HEARTBEAT_ENABLED=true
 
 Every process must use a unique `INSTANCE_ID`. Room nodes listen on `PORT` with `GLOBAL_ADMIN_ENABLED=false`; the global admin listens on `GLOBAL_ADMIN_PORT` with `GLOBAL_ADMIN_ENABLED=true`.
 
+If `REDIS_NAMESPACE` is set, it prefixes every Redis key and channel (rooms, runtime indexes, event streams, room event bus, admin command bus), so it must be identical on every room node and the global admin; leaving it unset everywhere means all nodes share the default `bsp` prefix. Mixed namespaces split the cluster — the global admin stops seeing rooms and heartbeats, and cross-node fanout and admin commands silently fail.
+
 Production should also set these explicitly and keep them aligned:
 
 - `ALLOWED_ORIGINS`
@@ -75,9 +77,11 @@ curl -fsS http://10.0.0.11:8788/readyz
 curl -fsS http://10.0.0.11:8787/metrics
 
 # systemd logs
-sudo journalctl -u bili-syncplay-server -f
+sudo journalctl -u bili-syncplay-room-node-a -f
 sudo journalctl -u bili-syncplay-global-admin -f
 ```
+
+The examples use the per-node systemd unit names from the [deployment guide](../operations/deployment.md) (`bili-syncplay-room-node-a`, `bili-syncplay-room-node-b`, …); substitute the unit of the node you are operating on.
 
 If a dedicated metrics port is deployed, scrape `/metrics` from the address configured by `METRICS_PORT`.
 
@@ -99,8 +103,8 @@ Goal: add a room node and let the edge layer start distributing new connections 
 5. Start the service:
 
    ```bash
-   sudo systemctl enable --now bili-syncplay-server
-   sudo systemctl status bili-syncplay-server
+   sudo systemctl enable --now bili-syncplay-room-node-c
+   sudo systemctl status bili-syncplay-room-node-c
    ```
 
 6. Add the new upstream at the edge layer, but start with a low weight or only a small share of canary traffic.
@@ -141,7 +145,7 @@ Goal: stop accepting new connections, wait out or migrate existing rooms, then s
 8. Stop the target node:
 
    ```bash
-   sudo systemctl stop bili-syncplay-server
+   sudo systemctl stop bili-syncplay-room-node-b
    ```
 
 9. Wait at least one `NODE_HEARTBEAT_TTL_MS` cycle and confirm the node disappears from the global admin or is marked as expired.
@@ -164,7 +168,7 @@ When the providers are configured as `redis`, Bili-SyncPlay does not transparent
 redis-cli -u "$REDIS_URL" ping
 curl -fsS http://10.0.0.11:8787/readyz
 curl -fsS http://10.0.0.11:8787/metrics | grep bili_syncplay_redis_operation_failures_total
-sudo journalctl -u bili-syncplay-server --since "15 min ago" | grep -E "redis|Redis|node_heartbeat_failed"
+sudo journalctl -u bili-syncplay-room-node-a --since "15 min ago" | grep -E "redis|Redis|node_heartbeat_failed"
 ```
 
 Also check the global admin overview:
@@ -180,7 +184,7 @@ Also check the global admin overview:
 3. After Redis recovers, restart the affected processes:
 
    ```bash
-   sudo systemctl restart bili-syncplay-server
+   sudo systemctl restart bili-syncplay-room-node-a   # repeat for every room node
    sudo systemctl restart bili-syncplay-global-admin
    ```
 
@@ -219,7 +223,7 @@ Downgrade steps:
 4. Restart the services:
 
    ```bash
-   sudo systemctl restart bili-syncplay-server
+   sudo systemctl restart bili-syncplay-room-node-a   # repeat for every room node
    sudo systemctl restart bili-syncplay-global-admin
    ```
 
@@ -255,7 +259,7 @@ Goal: change the admin password, and rotate the session secret at the same time 
 5. Rolling restart:
 
    ```bash
-   sudo systemctl restart bili-syncplay-server
+   sudo systemctl restart bili-syncplay-room-node-a   # repeat for every room node
    sudo systemctl restart bili-syncplay-global-admin
    ```
 
@@ -297,7 +301,7 @@ When troubleshooting, check these together first:
 curl -fsS http://<room-node>:8787/metrics
 curl -fsS http://<room-node>:8787/readyz
 curl -fsS http://<global-admin>:8788/readyz
-sudo journalctl -u bili-syncplay-server --since "30 min ago"
+sudo journalctl -u bili-syncplay-room-node-a --since "30 min ago"
 sudo journalctl -u bili-syncplay-global-admin --since "30 min ago"
 ```
 

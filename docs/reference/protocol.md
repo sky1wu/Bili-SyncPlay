@@ -18,19 +18,19 @@ Clients send `protocolVersion` inside the `room:create` / `room:join` payload; t
 
 ### `SharedVideo`
 
-| Field                 | Type      | Notes                       |
-| --------------------- | --------- | --------------------------- |
-| `videoId`             | `string`  | Normalized video identity   |
-| `url`                 | `string`  | Normalized video URL        |
-| `title`               | `string`  | Display title               |
-| `sharedByMemberId`    | `string?` | Member who shared the video |
-| `sharedByDisplayName` | `string?` | Display name of that member |
+| Field                 | Type      | Notes                                                                                                                                                                         |
+| --------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `videoId`             | `string`  | Normalized video identity                                                                                                                                                     |
+| `url`                 | `string`  | Share URL as sent by the sharer — accepted by the normalization helpers but not guaranteed pre-normalized (festival shares keep the raw page URL); normalize before comparing |
+| `title`               | `string`  | Display title                                                                                                                                                                 |
+| `sharedByMemberId`    | `string?` | Member who shared the video                                                                                                                                                   |
+| `sharedByDisplayName` | `string?` | Display name of that member                                                                                                                                                   |
 
 ### `PlaybackState`
 
 | Field           | Type                                        | Notes                                                                                                                                                                                   |
 | --------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `url`           | `string`                                    | Normalized URL the state applies to                                                                                                                                                     |
+| `url`           | `string`                                    | URL the state applies to; like `SharedVideo.url`, normalize before comparing                                                                                                            |
 | `currentTime`   | `number`                                    | Playback position in seconds                                                                                                                                                            |
 | `playState`     | `"playing" \| "paused" \| "buffering"`      | `PlaybackPlayState`                                                                                                                                                                     |
 | `syncIntent`    | `"explicit-seek" \| "explicit-ratechange"?` | Marks a state produced by an explicit seek / rate change (`PlaybackSyncIntent`)                                                                                                         |
@@ -66,11 +66,15 @@ Clients send `protocolVersion` inside the `room:create` / `room:join` payload; t
 | -------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | Room created; carries the invite and session tokens                                                                                     |
 | `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | Join succeeded; returns the session `memberToken` (a rejoin with a still-valid previous token reuses it, otherwise a new one is issued) |
-| `room:state`         | `RoomState`                                                              | Full room snapshot (after join, on request, on change)                                                                                  |
-| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | A member joined                                                                                                                         |
-| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | A member left                                                                                                                           |
+| `room:state`         | `RoomState`                                                              | Full room snapshot (after join, on request, on shared-video / playback changes)                                                         |
+| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | Member joined (delta, sent to `protocolVersion >= 2` clients)                                                                           |
+| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | Member left (delta, sent to `protocolVersion >= 2` clients)                                                                             |
 | `error`              | `{ code: ErrorCode, message }`                                           | Request failed                                                                                                                          |
 | `sync:pong`          | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | Clock-offset probe response                                                                                                             |
+
+### Membership deltas
+
+Membership changes are version-gated (`MEMBER_DELTA_PROTOCOL_VERSION = 2` in `server/src/room-event-consumer.ts`): clients with `protocolVersion >= 2` receive `room:member-joined` / `room:member-left` deltas and must apply them to their member list — `room:state` is not re-broadcast for membership changes. Legacy clients (v1 or no version) receive a full `room:state` instead.
 
 ### Clock synchronization
 
