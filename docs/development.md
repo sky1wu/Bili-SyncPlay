@@ -66,7 +66,7 @@ When a high-severity audit finding appears:
 
 ## Benchmark Baselines
 
-The repository now includes reproducible benchmark entry points under `bench/` for the main high-load scenarios discussed in issue `#67`.
+Reproducible benchmark entry points live under `bench/`, covering the main high-load scenarios.
 
 Commands:
 
@@ -175,7 +175,7 @@ Redis integration test notes:
 
 ## Code Organization
 
-The repository now follows a "thin entrypoint + named modules" structure.
+The repository follows a "thin entrypoint + named modules" structure.
 
 - `extension/src/background`
   - `index.ts` is assembly only
@@ -201,7 +201,7 @@ The repository now follows a "thin entrypoint + named modules" structure.
   - bootstrap glue lives under `bootstrap/*`
   - admin route dispatch lives under `admin/routes/*`
 
-Current regression coverage is intentionally aligned with those boundaries and now includes store/controller/helper coverage for the refactored modules, not only end-to-end behavior checks.
+Regression coverage is intentionally aligned with those boundaries and includes store/controller/helper coverage, not only end-to-end behavior checks.
 
 ## Contribution Constraints
 
@@ -241,7 +241,7 @@ Development notes:
 - `@bili-syncplay/server` depends on the built output of `@bili-syncplay/protocol`
 - for a clean local setup, prefer `npm run build` instead of building `server` alone
 - the extension does not keep a permanent socket by default; it connects when a room already exists in session state or when the user creates / joins a room
-- reconnecting into an existing room now requires the stored `joinToken`; stale `memberToken` values are discarded on disconnect
+- reconnecting into an existing room requires the stored `joinToken`; stale `memberToken` values are discarded on disconnect
 - if you change protocol types or message validation, rebuild both `packages/protocol` and `server`
 - the local server rejects extension connections unless `ALLOWED_ORIGINS` includes the current `chrome-extension://<extension-id>`
 - you can find the unpacked extension ID on `chrome://extensions`
@@ -326,7 +326,7 @@ Chrome-side debugging tips:
 Update the workspace version first:
 
 ```bash
-npm run release:version -- 0.9.0
+npm run release:version -- 1.3.0
 ```
 
 This command updates:
@@ -337,32 +337,38 @@ This command updates:
 - `extension/package.json`
 - `package-lock.json`
 
-Build the extension release zip:
+The rewritten JSON and manifest files may not match Prettier style, so run `npm run format:check` (and `npm run format` if needed) before committing the version bump.
+
+Build the extension release packages:
 
 ```bash
-npm run build:release
+npm run build:release          # Chrome/Edge + Firefox
+npm run build:release:chrome   # Chrome/Edge zip only
+npm run build:release:firefox  # Firefox zip + xpi only
 ```
 
 Output:
 
 ```text
-release/bili-syncplay-extension-v<version>.zip
+release/bili-syncplay-extension-v<version>-chrome.zip
+release/bili-syncplay-extension-v<version>-firefox.zip
+release/bili-syncplay-extension-v<version>-firefox.xpi
 ```
+
+The `.xpi` is a byte-for-byte copy of the Firefox zip so Firefox users can install it by drag-and-drop.
 
 ## Automated GitHub Release
 
-The repository already includes a GitHub Actions workflow that:
+Two GitHub Actions workflows trigger on `v*` tags:
 
-- triggers on `v*` tags
-- builds the extension
-- creates a GitHub Release
-- uploads the zip asset
+- `release.yml` builds both browser targets and creates a GitHub Release with the Chrome/Edge zip and the Firefox zip + xpi attached
+- `docker-release.yml` builds the server container image and pushes it to GHCR (`ghcr.io/sky1wu/bili-syncplay-server`); it also pushes to Docker Hub when the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repository secrets are configured, and skips that push otherwise without failing the release
 
 Example:
 
 ```bash
-npm run release:version -- 0.9.0
+npm run release:version -- 1.3.0
 git push origin main
-git tag v0.9.0
-git push origin v0.9.0
+git tag v1.3.0
+git push origin v1.3.0
 ```

@@ -2,7 +2,7 @@
 
 [English](./multi-node.md) | [简体中文](./multi-node.zh-CN.md)
 
-The server now supports a full multi-node topology with shared admin sessions, shared event and audit streams, shared runtime indexes, cross-node room-state fanout, cross-node admin commands, and a dedicated global admin entrypoint.
+The server supports a full multi-node topology with shared admin sessions, shared event and audit streams, shared runtime indexes, cross-node room-state fanout, cross-node admin commands, and a dedicated global admin entrypoint.
 
 ## Core model
 

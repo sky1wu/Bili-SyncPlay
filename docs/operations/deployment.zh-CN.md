@@ -32,7 +32,7 @@ npm run build:release
 
 本地开发时，`ALLOWED_ORIGINS` 必须包含当前 `chrome-extension://<extension-id>`，否则服务端会以 `origin_not_allowed` 拒绝 WebSocket 握手。
 
-服务端现在也支持可选的 JSON 配置文件。加载优先级为：
+服务端支持可选的 JSON 配置文件。加载优先级为：
 
 - 内置默认值
 - 当前工作目录下的 `server.config.json`，或 `BILI_SYNCPLAY_CONFIG` 指定的文件
@@ -456,7 +456,7 @@ wss://sync.example.com
 ws://localhost:8787
 ```
 
-房间邀请现在以 `roomCode:joinToken` 的形式分享。弹窗复制操作会复制这个邀请串，加入输入框也接受同样格式。
+房间邀请以 `roomCode:joinToken` 的形式分享。弹窗复制操作会复制这个邀请串，加入输入框也接受同样格式。
 
 ## 7. 部署更新
 
@@ -475,13 +475,14 @@ npm run build
 npm run build -w @bili-syncplay/server
 ```
 
-单机 / 单进程部署重启方式：
+单机部署重启方式（即第 3 步创建的两个单元）：
 
 ```bash
-sudo systemctl restart bili-syncplay
+sudo systemctl restart bili-syncplay-room-node-a
+sudo systemctl restart bili-syncplay-global-admin
 ```
 
-多节点部署重启方式：
+多节点部署重启方式（每条命令在承载对应单元的机器上执行；按两机部署样例，`room-node-b` 在服务器 2 上）：
 
 ```bash
 sudo systemctl restart bili-syncplay-room-node-a

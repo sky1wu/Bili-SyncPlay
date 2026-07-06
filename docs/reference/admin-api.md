@@ -75,7 +75,7 @@ After login, the current UI includes:
 
 ## Admin API
 
-The server now includes a P0 admin backend on the same HTTP port.
+The server includes a built-in admin backend served on the same HTTP port as the WebSocket service.
 
 Admin control panel:
 
@@ -113,6 +113,8 @@ Implemented endpoints:
 - `POST /api/admin/rooms/:roomCode/clear-video`
 - `POST /api/admin/rooms/:roomCode/members/:memberId/kick`
 - `POST /api/admin/sessions/:sessionId/disconnect`
+
+`GET /metrics` is served on the main service port by default and can be moved to a dedicated port with `METRICS_PORT` (see [Security Environment Variables](./security-env.md)).
 
 Authentication model:
 

@@ -66,7 +66,7 @@ CI 会在 `npm ci` 后执行 `npm run audit`。该门禁会运行 `npm audit --j
 
 ## 基准压测
 
-仓库现在在 `bench/` 下提供了可复现的基准脚本，对应 issue `#67` 里要求的三类高负载场景。
+`bench/` 下提供了可复现的基准脚本，覆盖三类主要高负载场景。
 
 命令：
 
@@ -175,7 +175,7 @@ Redis 集成测试说明：
 
 ## 代码组织约定
 
-仓库现在遵循“薄入口 + 具名模块”的组织方式。
+仓库遵循“薄入口 + 具名模块”的组织方式。
 
 - `extension/src/background`
   - `index.ts` 只负责装配
@@ -201,7 +201,7 @@ Redis 集成测试说明：
   - bootstrap 拼装位于 `bootstrap/*`
   - admin 路由分发位于 `admin/routes/*`
 
-当前回归测试已经开始按这些边界补齐，不再只覆盖“功能能不能跑通”，也覆盖重构后 store/controller/helper 的关键行为。
+回归测试按这些边界组织，不只覆盖“功能能不能跑通”，也覆盖 store/controller/helper 的关键行为。
 
 ## 贡献约束
 
@@ -241,7 +241,7 @@ ws://localhost:8787
 - `@bili-syncplay/server` 依赖 `@bili-syncplay/protocol` 的构建产物
 - 对于全新本地环境，优先使用 `npm run build`，而不是单独构建 `server`
 - 扩展默认不会永久保持 socket 连接；只有在会话状态中已存在房间，或用户创建 / 加入房间时才会建立连接
-- 重新进入已有房间现在需要保存的 `joinToken`；断开连接后，旧的 `memberToken` 会被丢弃
+- 重新进入已有房间需要保存的 `joinToken`；断开连接后，旧的 `memberToken` 会被丢弃
 - 如果你修改了协议类型或消息校验，需要重新构建 `packages/protocol` 和 `server`
 - 本地服务器默认会拒绝扩展连接，除非 `ALLOWED_ORIGINS` 包含当前 `chrome-extension://<extension-id>`
 - 你可以在 `chrome://extensions` 中查看未打包扩展的 ID
@@ -326,7 +326,7 @@ Chrome 侧调试建议：
 先更新 workspace 版本：
 
 ```bash
-npm run release:version -- 0.9.0
+npm run release:version -- 1.3.0
 ```
 
 该命令会更新：
@@ -337,32 +337,38 @@ npm run release:version -- 0.9.0
 - `extension/package.json`
 - `package-lock.json`
 
-构建扩展发布 zip：
+脚本重写的 JSON 与 manifest 文件可能不符合 Prettier 风格，提交版本号变更前先执行 `npm run format:check`（必要时 `npm run format`）。
+
+构建扩展发布包：
 
 ```bash
-npm run build:release
+npm run build:release          # Chrome/Edge + Firefox
+npm run build:release:chrome   # 仅 Chrome/Edge zip
+npm run build:release:firefox  # 仅 Firefox zip + xpi
 ```
 
 输出：
 
 ```text
-release/bili-syncplay-extension-v<version>.zip
+release/bili-syncplay-extension-v<version>-chrome.zip
+release/bili-syncplay-extension-v<version>-firefox.zip
+release/bili-syncplay-extension-v<version>-firefox.xpi
 ```
+
+`.xpi` 与 Firefox zip 字节一致，Firefox 用户可直接拖入浏览器安装。
 
 ## 自动化 GitHub Release
 
-仓库已经包含一个 GitHub Actions 工作流，用于：
+`v*` 标签会触发两个 GitHub Actions 工作流：
 
-- 在 `v*` 标签上触发
-- 构建扩展
-- 创建 GitHub Release
-- 上传 zip 产物
+- `release.yml` 构建双浏览器目标，并创建 GitHub Release，附带 Chrome/Edge zip 与 Firefox zip + xpi
+- `docker-release.yml` 构建服务端容器镜像并推送 GHCR（`ghcr.io/sky1wu/bili-syncplay-server`）；配置了 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` 仓库 secrets 时同步推送 Docker Hub，未配置时跳过且不影响发布
 
 示例：
 
 ```bash
-npm run release:version -- 0.9.0
+npm run release:version -- 1.3.0
 git push origin main
-git tag v0.9.0
-git push origin v0.9.0
+git tag v1.3.0
+git push origin v1.3.0
 ```

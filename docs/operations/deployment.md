@@ -32,7 +32,7 @@ When the environment variable is unset, the build output still uses `ws://localh
 
 For local unpacked-extension development, `ALLOWED_ORIGINS` must include the current `chrome-extension://<extension-id>` or the server will reject the WebSocket handshake with `origin_not_allowed`.
 
-The server now also supports an optional JSON config file. Resolution order is:
+The server also supports an optional JSON config file. Resolution order is:
 
 - built-in defaults
 - `server.config.json` in the current working directory, or the path from `BILI_SYNCPLAY_CONFIG`
@@ -456,7 +456,7 @@ For local testing, switch back to:
 ws://localhost:8787
 ```
 
-Room invites are now shared as `roomCode:joinToken`. The popup copy action copies that invite string, and the join field accepts the same format.
+Room invites are shared as `roomCode:joinToken`. The popup copy action copies that invite string, and the join field accepts the same format.
 
 ## 7. Deploy updates
 
@@ -475,13 +475,14 @@ If you know only `server/` changed and `packages/protocol` is unchanged, you can
 npm run build -w @bili-syncplay/server
 ```
 
-Single-node / single-process restart flow:
+Single-node restart flow (the units created in step 3):
 
 ```bash
-sudo systemctl restart bili-syncplay
+sudo systemctl restart bili-syncplay-room-node-a
+sudo systemctl restart bili-syncplay-global-admin
 ```
 
-Multi-node restart flow:
+Multi-node restart flow (run each command on the machine that hosts that unit; in the two-server example, `room-node-b` lives on server 2):
 
 ```bash
 sudo systemctl restart bili-syncplay-room-node-a

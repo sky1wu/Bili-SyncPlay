@@ -75,7 +75,7 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 
 ## 管理后台 API
 
-服务端现在已经内置 P0 管理后台，只读接口与主服务复用同一个 HTTP 端口。
+服务端内置管理后台，管理接口与 WebSocket 服务复用同一个 HTTP 端口。
 
 管理控制面板入口：
 
@@ -113,6 +113,8 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 - `POST /api/admin/rooms/:roomCode/clear-video`
 - `POST /api/admin/rooms/:roomCode/members/:memberId/kick`
 - `POST /api/admin/sessions/:sessionId/disconnect`
+
+`GET /metrics` 默认在主服务端口上提供，也可以通过 `METRICS_PORT` 挪到独立端口（见[安全相关环境变量](./security-env.zh-CN.md)）。
 
 鉴权方式：
 
