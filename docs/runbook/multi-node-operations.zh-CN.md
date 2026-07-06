@@ -245,7 +245,7 @@ NODE_HEARTBEAT_ENABLED=false
 
 目标：更换后台密码，必要时同时轮换会话 secret，使旧 token 失效。
 
-1. 生成新密码哈希。当前支持 `sha256:<hex>` 和 `scrypt:<salt>:<base64url>`；README
+1. 生成新密码哈希。当前支持 `sha256:<hex>` 和 `scrypt:<salt>:<base64url>`；[安全相关环境变量参考](../reference/security-env.zh-CN.md)
    中的快速命令使用 `sha256`：
 
    ```bash
