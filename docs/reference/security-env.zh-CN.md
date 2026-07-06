@@ -9,6 +9,7 @@
 - `BILI_SYNCPLAY_CONFIG`：可选的 JSON 配置文件路径；未设置时会优先查找当前工作目录下的 `server.config.json`
 - `PORT`：Room Node 的 HTTP/WebSocket 监听端口；默认 `8787`
 - `METRICS_PORT`：可选的 `GET /metrics` 独立端口；未设置时 metrics 在主服务端口上提供；不能与 `PORT` 或 `GLOBAL_ADMIN_PORT` 冲突
+- `METRICS_TOKEN`：可选的 `GET /metrics` 静态 Bearer token（主端口路由和 `METRICS_PORT` 独立端口都会校验）；设置后抓取请求必须携带 `Authorization: Bearer <token>`，否则返回 `401`；未设置时端点保持开放；`/healthz` 与 `/readyz` 不受影响。Prometheus 侧通过 `authorization.credentials_file` 配置
 - `LOG_LEVEL`：日志级别，可选 `debug`、`info`、`warn`、`error`；默认 `info`
 - `INSTANCE_ID`：当前服务进程的标识（如 `room-node-a`），会出现在后台概览、房间详情和审计日志中；多节点部署时每个进程必须唯一；默认 `instance-1`
 

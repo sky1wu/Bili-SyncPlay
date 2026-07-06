@@ -151,6 +151,7 @@ export type SecurityConfig = {
   invalidMessageCloseThreshold: number;
   wsHeartbeatEnabled: boolean;
   wsHeartbeatIntervalMs: number;
+  metricsToken?: string;
   rateLimits: {
     roomCreatePerMinute: number;
     roomJoinPerMinute: number;

@@ -9,6 +9,7 @@ The server accepts the following environment variables. Safe defaults are built 
 - `BILI_SYNCPLAY_CONFIG`: optional path to a JSON config file; when unset, the server looks for `server.config.json` in the current working directory
 - `PORT`: HTTP/WebSocket listen port for a room node; defaults to `8787`
 - `METRICS_PORT`: optional dedicated port for `GET /metrics`; when unset, metrics are served on the main service port; must not collide with `PORT` or `GLOBAL_ADMIN_PORT`
+- `METRICS_TOKEN`: optional static bearer token guarding `GET /metrics` (both the main-port route and the `METRICS_PORT` server); when set, scrapes must send `Authorization: Bearer <token>` or receive `401`; when unset, the endpoint stays open; `/healthz` and `/readyz` are never affected. Configure Prometheus via `authorization.credentials_file`
 - `LOG_LEVEL`: log level, one of `debug`, `info`, `warn`, `error`; defaults to `info`
 - `INSTANCE_ID`: identifier for the current server process (e.g. `room-node-a`), shown in the admin overview, room detail, and audit logs; must be unique per process in multi-node deployments; defaults to `instance-1`
 

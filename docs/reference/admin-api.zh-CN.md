@@ -114,7 +114,7 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 - `POST /api/admin/rooms/:roomCode/members/:memberId/kick`
 - `POST /api/admin/sessions/:sessionId/disconnect`
 
-`GET /metrics` 默认在主服务端口上提供，也可以通过 `METRICS_PORT` 挪到独立端口（见[安全相关环境变量](./security-env.zh-CN.md)）。
+`GET /metrics` 默认在主服务端口上提供，也可以通过 `METRICS_PORT` 挪到独立端口；设置 `METRICS_TOKEN` 后抓取请求还需携带 `Authorization: Bearer <token>`（见[安全相关环境变量](./security-env.zh-CN.md)）。
 
 鉴权方式：
 

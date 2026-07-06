@@ -117,6 +117,7 @@ export async function createSharedAdminHttpBootstrap(args: {
     : createServer(
         createMetricsRequestHandler({
           getMetrics: () => args.metricsCollector.render(),
+          metricsToken: args.securityConfig.metricsToken,
         }),
       );
   runtimeIndexReaper.start();

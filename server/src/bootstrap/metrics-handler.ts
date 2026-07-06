@@ -1,7 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import {
+  isMetricsRequestAuthorized,
+  sendMetricsUnauthorized,
+} from "../metrics-auth.js";
 
 export function createMetricsRequestHandler(args: {
   getMetrics: () => Promise<string> | string;
+  metricsToken?: string;
 }) {
   return async (
     request: IncomingMessage,
@@ -32,6 +37,10 @@ export function createMetricsRequestHandler(args: {
           },
         }),
       );
+      return;
+    }
+    if (!isMetricsRequestAuthorized(request, args.metricsToken)) {
+      sendMetricsUnauthorized(response);
       return;
     }
     try {

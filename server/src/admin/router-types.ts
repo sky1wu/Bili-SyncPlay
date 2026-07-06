@@ -14,6 +14,7 @@ import type {
 export type AdminRouterOptions = {
   getConfigSummary: () => unknown;
   getMetrics: () => Promise<string>;
+  metricsToken?: string;
   authService?: AdminAuthService;
   roomStoreReady: () => Promise<boolean>;
   getOverview: () => Promise<unknown>;

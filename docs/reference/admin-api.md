@@ -114,7 +114,7 @@ Implemented endpoints:
 - `POST /api/admin/rooms/:roomCode/members/:memberId/kick`
 - `POST /api/admin/sessions/:sessionId/disconnect`
 
-`GET /metrics` is served on the main service port by default and can be moved to a dedicated port with `METRICS_PORT` (see [Security Environment Variables](./security-env.md)).
+`GET /metrics` is served on the main service port by default and can be moved to a dedicated port with `METRICS_PORT`; setting `METRICS_TOKEN` additionally requires scrapes to send `Authorization: Bearer <token>` (see [Security Environment Variables](./security-env.md)).
 
 Authentication model:
 

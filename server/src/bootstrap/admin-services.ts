@@ -174,6 +174,7 @@ export function createAdminServices(args: {
     const adminRouter = createAdminRouter({
       getConfigSummary: () => configService.getSummary(),
       getMetrics: () => metricsService.render(),
+      metricsToken: args.securityConfig.metricsToken,
       authService,
       roomStoreReady: () => args.roomStore.isReady(),
       getOverview: () => overviewService.getOverview(),

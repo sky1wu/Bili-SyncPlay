@@ -41,6 +41,19 @@ test("security config reads ws heartbeat overrides", () => {
   assert.equal(config.wsHeartbeatIntervalMs, 10_000);
 });
 
+test("security config reads the optional metrics token", () => {
+  const withToken = loadSecurityConfig({
+    ALLOWED_ORIGINS: "https://a.example",
+    METRICS_TOKEN: " scrape-token-1 ",
+  });
+  assert.equal(withToken.metricsToken, "scrape-token-1");
+
+  const withoutToken = loadSecurityConfig({
+    ALLOWED_ORIGINS: "https://a.example",
+  });
+  assert.equal(withoutToken.metricsToken, undefined);
+});
+
 test("persistence config validates provider and trims string env values", () => {
   const config = loadPersistenceConfig({
     ROOM_STORE_PROVIDER: "redis",

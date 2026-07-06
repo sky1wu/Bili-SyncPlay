@@ -1,3 +1,7 @@
+import {
+  isMetricsRequestAuthorized,
+  sendMetricsUnauthorized,
+} from "../../metrics-auth.js";
 import { sendOk } from "../response.js";
 import type { AdminRouteHandler } from "../router-types.js";
 
@@ -8,6 +12,10 @@ export const handleSystemRoutes: AdminRouteHandler = async ({
   options,
 }) => {
   if (request.method === "GET" && pathname === "/metrics") {
+    if (!isMetricsRequestAuthorized(request, options.metricsToken)) {
+      sendMetricsUnauthorized(response);
+      return true;
+    }
     response.writeHead(200, {
       "content-type": "text/plain; version=0.0.4; charset=utf-8",
     });
