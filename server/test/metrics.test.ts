@@ -47,6 +47,8 @@ test("metrics collector renders event counters, histograms, and redis failure co
   metrics.observeMessageHandlerDuration("room:join", 12);
   metrics.observeRedisRuntimeStoreDuration("register_session", 8);
   metrics.observeRedisRuntimeStoreFailure("register_session");
+  metrics.observeRedisRoomStoreDuration("update_room", 6);
+  metrics.observeRedisRoomStoreFailure("update_room");
   metrics.observeRedisRoomEventBusPublishDuration(5);
   metrics.observeRedisRoomEventBusPublishFailure();
   metrics.recordRoomEventPublishDropped("room_member_changed");
@@ -125,6 +127,34 @@ test("metrics collector renders event counters, histograms, and redis failure co
     ),
     true,
   );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_redis_room_store_duration_seconds_count{operation="update_room"} 1',
+    ),
+    true,
+  );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_redis_operation_failures_total{component="room_store",operation="update_room"} 1',
+    ),
+    true,
+  );
+  // The 15ms bucket fills the 10–25ms gap where playback:update P95 lives.
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_message_handler_duration_seconds_bucket{le="0.015",message_type="room:join"}',
+    ),
+    true,
+  );
+  for (const stat of ["mean", "p50", "p99", "max"]) {
+    assert.match(
+      rendered,
+      new RegExp(
+        `^bili_syncplay_nodejs_eventloop_lag_seconds\\{stat="${stat}"\\} `,
+        "m",
+      ),
+    );
+  }
   // Member-affecting drops are counted under their own event_type label so a
   // critical room_member_changed drop is never hidden behind high-frequency
   // room_state_updated drops.

@@ -34,6 +34,7 @@ import {
   type RoomEventBusMessage,
 } from "../room-event-bus.js";
 import { createInMemoryRoomStore, type RoomStore } from "../room-store.js";
+import { instrumentRoomStore } from "../room-store-instrumentation.js";
 import {
   createInMemoryRuntimeStore,
   type RuntimeStore,
@@ -238,7 +239,7 @@ export async function createServerBootstrapContext(
   const serviceVersion =
     dependencies.serviceVersion ?? (await resolveServiceVersion());
   const now = dependencies.now ?? Date.now;
-  const roomStore =
+  const rawRoomStore =
     dependencies.roomStore ??
     (persistenceConfig.provider === "redis"
       ? await createRedisRoomStore(persistenceConfig.redisUrl, {
@@ -246,11 +247,18 @@ export async function createServerBootstrapContext(
         })
       : createInMemoryRoomStore({ now }));
   const localRuntimeStore = createInMemoryRuntimeStore(now);
+  // The collector polls countRooms on every scrape; give it the raw store so
+  // scrape-driven reads stay out of the room store operation histogram.
   const metricsCollector = createMetricsCollector({
     runtimeStore: localRuntimeStore,
-    roomStore,
+    roomStore: rawRoomStore,
     serviceVersion,
   });
+  const roomStore =
+    persistenceConfig.provider === "redis" &&
+    dependencies.roomStore === undefined
+      ? instrumentRoomStore(rawRoomStore, metricsCollector)
+      : rawRoomStore;
   const runtimeStorePendingOperationLogger =
     options.loggingHooks?.onRuntimeStorePendingOperationError;
 
