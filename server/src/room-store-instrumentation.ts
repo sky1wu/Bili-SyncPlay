@@ -35,7 +35,7 @@ export function instrumentRoomStore(
     };
   }
 
-  return {
+  const instrumented: RoomStore = {
     createRoom: measure("create_room", (input) => roomStore.createRoom(input)),
     getRoom: measure("get_room", (code) => roomStore.getRoom(code)),
     saveRoom: measure("save_room", (room) => roomStore.saveRoom(room)),
@@ -50,4 +50,16 @@ export function instrumentRoomStore(
     countRooms: measure("count_rooms", (query) => roomStore.countRooms(query)),
     isReady: measure("is_ready", () => roomStore.isReady()),
   };
+
+  // The Redis-backed store carries a close() hook outside the RoomStore
+  // contract, and shutdown probes for it structurally (hasClose) — it must
+  // survive wrapping or server.close() would leak the Redis connection.
+  const underlying = roomStore as RoomStore & {
+    close?: () => Promise<void>;
+  };
+  if (typeof underlying.close === "function") {
+    const close = underlying.close.bind(underlying);
+    return Object.assign(instrumented, { close });
+  }
+  return instrumented;
 }

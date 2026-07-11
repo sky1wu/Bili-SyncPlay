@@ -74,3 +74,34 @@ test("instrumented room store counts failures and still records duration", async
     ["update_room"],
   );
 });
+
+test("instrumented room store preserves the underlying close hook", async () => {
+  const recorder = createRecorder();
+  let closed = 0;
+  const store = instrumentRoomStore(
+    {
+      ...createInMemoryRoomStore({ now: () => 0 }),
+      async close() {
+        closed += 1;
+      },
+    } as never,
+    recorder.collector,
+  );
+
+  // Shutdown probes structurally ("close" in store) — the hook must survive
+  // wrapping and forward to the underlying store without being instrumented.
+  assert.equal("close" in store, true);
+  await (store as { close?: () => Promise<void> }).close?.();
+  assert.equal(closed, 1);
+  assert.deepEqual(recorder.durations, []);
+});
+
+test("instrumented room store adds no close hook when the underlying store has none", () => {
+  const recorder = createRecorder();
+  const store = instrumentRoomStore(
+    createInMemoryRoomStore({ now: () => 0 }),
+    recorder.collector,
+  );
+
+  assert.equal("close" in store, false);
+});
