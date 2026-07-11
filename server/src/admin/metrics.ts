@@ -1,10 +1,13 @@
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { RuntimeStore } from "../runtime-store.js";
 import type { RoomStore } from "../room-store.js";
 import { ROOM_EVENT_TYPES, type RoomEventType } from "../room-event-bus.js";
 
 const DEFAULT_HISTOGRAM_BUCKETS_SECONDS = [
-  0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
+  0.001, 0.005, 0.01, 0.015, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 ] as const;
+
+const NANOSECONDS_PER_SECOND = 1e9;
 
 const CORE_EVENT_NAMES = [
   "room_created",
@@ -66,6 +69,11 @@ export type MetricsCollector = {
     durationMs: number,
   ) => void;
   observeRedisRuntimeStoreFailure: (operation: string) => void;
+  observeRedisRoomStoreDuration: (
+    operation: string,
+    durationMs: number,
+  ) => void;
+  observeRedisRoomStoreFailure: (operation: string) => void;
   observeRedisRoomEventBusPublishDuration: (durationMs: number) => void;
   observeRedisRoomEventBusPublishFailure: () => void;
   recordRoomEventPublishDropped: (eventType: RoomEventType) => void;
@@ -182,6 +190,15 @@ export function createMetricsCollector(options: {
     buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
     samples: new Map(),
   };
+  const redisRoomStoreDurationHistogram: HistogramMetric = {
+    help: "Duration of Redis room store operations in seconds",
+    buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
+    samples: new Map(),
+  };
+  // 20ms sampling resolution keeps overhead negligible while still catching
+  // the multi-hundred-millisecond stalls this gauge exists to expose.
+  const eventLoopDelayMonitor = monitorEventLoopDelay({ resolution: 20 });
+  eventLoopDelayMonitor.enable();
   const redisRoomEventBusPublishDurationHistogram: HistogramMetric = {
     help: "Duration of Redis room event bus publish operations in seconds",
     buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
@@ -271,6 +288,10 @@ export function createMetricsCollector(options: {
         metric: redisRuntimeStoreDurationHistogram,
       },
       {
+        name: "bili_syncplay_redis_room_store_duration_seconds",
+        metric: redisRoomStoreDurationHistogram,
+      },
+      {
         name: "bili_syncplay_redis_room_event_bus_publish_duration_seconds",
         metric: redisRoomEventBusPublishDurationHistogram,
       },
@@ -287,6 +308,28 @@ export function createMetricsCollector(options: {
       formatMetricLine(
         "bili_syncplay_process_start_time_seconds",
         processStartTimeSeconds,
+      ),
+      "# HELP bili_syncplay_nodejs_eventloop_lag_seconds Event loop delay since the previous scrape, in seconds",
+      "# TYPE bili_syncplay_nodejs_eventloop_lag_seconds gauge",
+      formatMetricLine(
+        "bili_syncplay_nodejs_eventloop_lag_seconds",
+        eventLoopDelayMonitor.mean / NANOSECONDS_PER_SECOND,
+        { stat: "mean" },
+      ),
+      formatMetricLine(
+        "bili_syncplay_nodejs_eventloop_lag_seconds",
+        eventLoopDelayMonitor.percentile(50) / NANOSECONDS_PER_SECOND,
+        { stat: "p50" },
+      ),
+      formatMetricLine(
+        "bili_syncplay_nodejs_eventloop_lag_seconds",
+        eventLoopDelayMonitor.percentile(99) / NANOSECONDS_PER_SECOND,
+        { stat: "p99" },
+      ),
+      formatMetricLine(
+        "bili_syncplay_nodejs_eventloop_lag_seconds",
+        eventLoopDelayMonitor.max / NANOSECONDS_PER_SECOND,
+        { stat: "max" },
       ),
       "# HELP bili_syncplay_connections Current websocket connection count",
       "# TYPE bili_syncplay_connections gauge",
@@ -370,6 +413,10 @@ export function createMetricsCollector(options: {
       ),
     ];
 
+    // Each scrape reports the delay distribution observed since the previous
+    // scrape, so a stall shows up exactly once instead of decaying slowly.
+    eventLoopDelayMonitor.reset();
+
     for (const { name, metric } of histogramMetrics) {
       lines.push(`# HELP ${name} ${metric.help}`);
       lines.push(`# TYPE ${name} histogram`);
@@ -437,6 +484,19 @@ export function createMetricsCollector(options: {
     observeRedisRuntimeStoreFailure(operation) {
       incrementCounter(redisFailureCounter, {
         component: "runtime_store",
+        operation,
+      });
+    },
+    observeRedisRoomStoreDuration(operation, durationMs) {
+      observeHistogram(
+        redisRoomStoreDurationHistogram,
+        { operation },
+        durationMs,
+      );
+    },
+    observeRedisRoomStoreFailure(operation) {
+      incrementCounter(redisFailureCounter, {
+        component: "room_store",
         operation,
       });
     },
