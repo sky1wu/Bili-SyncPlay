@@ -31,7 +31,6 @@ function createPopupState(
     pendingJoinRoomCode: null,
     retryInMs: null,
     retryAttempt: 0,
-    retryAttemptMax: 5,
     clockOffsetMs: null,
     rttMs: null,
     pageShareButtonEnabled: true,

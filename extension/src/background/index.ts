@@ -21,7 +21,6 @@ import { createPopupStateController } from "./popup-state-controller";
 import { createRoomSessionController } from "./room-session-controller";
 import {
   BILIBILI_VIDEO_URL_PATTERNS,
-  MAX_RECONNECT_ATTEMPTS,
   SHARE_TOAST_TTL_MS,
 } from "./runtime-state";
 import { createServerMessageController } from "./server-message-controller";
@@ -35,6 +34,7 @@ import {
   persistBackgroundProfile,
   persistBackgroundState,
 } from "./storage-manager";
+import { registerReconnectWatchdog } from "./reconnect-watchdog";
 import { disconnectSocket as executeDisconnectSocket } from "./socket-lifecycle";
 import { createTabController } from "./tab-controller";
 import { t } from "../shared/i18n";
@@ -148,7 +148,6 @@ serverMessageController = createServerMessageController({
 const socketController = createSocketController({
   connectionState,
   roomSessionState,
-  maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS,
   log: (scope, message) => diagnosticsController.log(scope, message),
   logInvalidServerUrl,
   logConnectionProbeFailure,
@@ -172,10 +171,6 @@ const socketController = createSocketController({
     );
   },
   formatAdminSessionResetReason,
-  reconnectFailedMessage: () =>
-    t("popupErrorReconnectFailed", {
-      attempts: MAX_RECONNECT_ATTEMPTS,
-    }),
 });
 const serverUrlController = createServerUrlController({
   connectionState,
@@ -194,7 +189,6 @@ const serverUrlController = createServerUrlController({
 const popupStateController = createPopupStateController({
   createState: () => runtimeSyncController.syncRuntimeStateStore(),
   getRetryInMs: () => socketController.getRetryInMs(),
-  retryAttemptMax: MAX_RECONNECT_ATTEMPTS,
   notifyContentScripts,
   getSyncStatus: () => ({
     roomCode: roomSessionState.roomCode,
@@ -462,4 +456,19 @@ registerBackgroundListeners({
   bootstrapFailedMessage: BOOTSTRAP_FAILED_MESSAGE,
   popupStateController,
   messageController,
+});
+
+registerReconnectWatchdog({
+  alarms: chrome.alarms,
+  // While bootstrap is still pending it runs its own auto-connect for a
+  // restored room session, so the watchdog only acts on a session that
+  // finished bootstrapping but is offline.
+  shouldReconnect: () =>
+    bootstrapStatus === "ready" &&
+    roomSessionState.roomCode !== null &&
+    !connectionState.connected,
+  connect: () => {
+    void socketController.connect();
+  },
+  log: backgroundLog,
 });

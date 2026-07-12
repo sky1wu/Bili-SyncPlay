@@ -2,7 +2,10 @@ import type { ClientMessage, ServerMessage } from "@bili-syncplay/protocol";
 import { isServerMessage, PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import type { DebugLogEntry } from "../shared/messages";
 import type { ConnectionState, RoomSessionState } from "./runtime-state";
-import { getConnectionErrorMessage } from "./connection-error";
+import {
+  getConnectionErrorMessage,
+  getSocketErrorMessage,
+} from "./connection-error";
 import { getExtensionOrigin } from "../shared/extension-origin";
 import {
   shouldReconnect as shouldScheduleReconnect,
@@ -21,7 +24,6 @@ export interface SocketController {
 export function createSocketController(args: {
   connectionState: ConnectionState;
   roomSessionState: RoomSessionState;
-  maxReconnectAttempts: number;
   log: (scope: DebugLogEntry["scope"], message: string) => void;
   logInvalidServerUrl: (context: string, invalidUrl: string) => void;
   logConnectionProbeFailure: (details: {
@@ -45,7 +47,6 @@ export function createSocketController(args: {
   onOpen: () => void;
   onAdminSessionReset: (reason: string) => void;
   formatAdminSessionResetReason: (reason: string) => string;
-  reconnectFailedMessage: () => string;
 }): SocketController {
   async function connect(): Promise<void> {
     if (
@@ -152,6 +153,32 @@ export function createSocketController(args: {
             args.notifyAll();
             return;
           }
+        } else if (response.status >= 500) {
+          // The HTTP layer answered but the backend is erroring (typically a
+          // reverse proxy returning 502/503 while the server restarts). Treat
+          // this as unreachable instead of falling through to the no-cors
+          // healthcheck, whose opaque response would count ANY status as
+          // reachable and mislabel the subsequent WebSocket failure as a
+          // handshake rejection. Non-5xx statuses (e.g. an older server's 404
+          // for this endpoint) still fall through to the healthcheck probe.
+          if (isProbeAborted()) {
+            return;
+          }
+          args.connectionState.lastError = getConnectionErrorMessage({
+            healthcheckReachable: false,
+            extensionOrigin,
+          });
+          args.connectionState.connected = false;
+          args.stopClockSyncTimer();
+          args.logConnectionProbeFailure({
+            stage: "connection-check",
+            serverUrl: serverUrlResult.normalizedUrl,
+            reason: `http_${response.status}`,
+            extensionOrigin,
+          });
+          scheduleReconnect();
+          args.notifyAll();
+          return;
         }
       } catch {
         // Fall back to the healthcheck probe for older servers that do not expose the preflight endpoint.
@@ -213,7 +240,13 @@ export function createSocketController(args: {
     // must not mutate the live connection state, which the replacement now owns.
     const isSuperseded = () => args.connectionState.socket !== socket;
 
+    // Whether THIS socket ever completed its handshake. An `error` after `open`
+    // is an established connection dropping (e.g. a server restart), not a
+    // handshake failure, and the two need different user-facing messages.
+    let sawOpen = false;
+
     socket.addEventListener("open", () => {
+      sawOpen = true;
       if (isSuperseded()) {
         return;
       }
@@ -375,9 +408,9 @@ export function createSocketController(args: {
       if (isSuperseded()) {
         return;
       }
-      args.connectionState.lastError = getConnectionErrorMessage({
+      args.connectionState.lastError = getSocketErrorMessage({
+        sawOpen,
         healthcheckReachable,
-        extensionOrigin,
       });
       args.connectionState.connected = false;
       args.stopClockSyncTimer();
@@ -403,18 +436,8 @@ export function createSocketController(args: {
         reconnectTimer: args.connectionState.reconnectTimer,
         roomCode: args.roomSessionState.roomCode,
         pendingCreateRoom: args.roomSessionState.pendingCreateRoom,
-        reconnectAttempt: args.connectionState.reconnectAttempt,
-        maxReconnectAttempts: args.maxReconnectAttempts,
       })
     ) {
-      if (args.connectionState.reconnectAttempt >= args.maxReconnectAttempts) {
-        args.connectionState.reconnectDeadlineMs = null;
-        args.connectionState.lastError = args.reconnectFailedMessage();
-        args.log(
-          "background",
-          `Reconnect exhausted after ${args.maxReconnectAttempts} attempts`,
-        );
-      }
       return;
     }
 

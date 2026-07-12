@@ -16,7 +16,6 @@ export const DEFAULT_SERVER_URL =
   typeof __BILI_SYNCPLAY_DEFAULT_SERVER_URL__ === "string"
     ? __BILI_SYNCPLAY_DEFAULT_SERVER_URL__
     : LOCALHOST_SERVER_URL;
-export const MAX_RECONNECT_ATTEMPTS = 5;
 export const SHARE_TOAST_TTL_MS = 8000;
 export const BILIBILI_VIDEO_URL_PATTERNS = [
   "https://www.bilibili.com/video/*",

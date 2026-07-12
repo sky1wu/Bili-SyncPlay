@@ -4,7 +4,7 @@
   "version": "1.2.4",
   "description": "__MSG_extensionDescription__",
   "default_locale": "zh_CN",
-  "permissions": ["storage", "tabs"],
+  "permissions": ["alarms", "storage", "tabs"],
   "host_permissions": ["https://www.bilibili.com/*"],
   "background": {
     "service_worker": "background.js",

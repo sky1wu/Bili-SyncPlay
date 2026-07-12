@@ -4,7 +4,6 @@ import type { BackgroundRuntimeState } from "./runtime-state";
 export function createPopupStateSnapshot(args: {
   state: BackgroundRuntimeState;
   retryInMs: number | null;
-  retryAttemptMax: number;
 }): BackgroundToPopupMessage {
   return {
     type: "background:state",
@@ -21,7 +20,6 @@ export function createPopupStateSnapshot(args: {
       pendingJoinRoomCode: args.state.room.pendingJoinRoomCode,
       retryInMs: args.retryInMs,
       retryAttempt: args.state.connection.reconnectAttempt,
-      retryAttemptMax: args.retryAttemptMax,
       clockOffsetMs: args.state.clock.clockOffsetMs,
       rttMs: args.state.clock.rttMs,
       pageShareButtonEnabled: args.state.settings.pageShareButtonEnabled,

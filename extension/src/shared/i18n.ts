@@ -54,6 +54,7 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     membersOnline: "{count} 人在线",
     membersCount: "{count}人",
     retrySeconds: "{seconds} 秒",
+    retryAttemptCount: "(第 {attempt} 次)",
     clockStatus: "偏移 {offset}ms / RTT {rtt}ms",
     stateNoMembers: "暂无成员",
     memberSelf: "我 ({name})",
@@ -71,6 +72,9 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
       "服务器可达，但 WebSocket 握手被拒绝。请检查服务端 ALLOWED_ORIGINS 是否包含 {extensionOrigin}，以及反向代理是否已正确转发 WebSocket。",
     connectionAllowedOriginsRejected:
       "服务器可达，但 WebSocket 握手被拒绝。请检查服务端 ALLOWED_ORIGINS，以及反向代理是否已正确转发 WebSocket。",
+    connectionLostReconnecting: "与同步服务器的连接已断开，正在尝试重连。",
+    connectionWebsocketFailed:
+      "服务器 HTTP 可达，但 WebSocket 连接失败。服务端可能正在启动或重启；若持续出现，请检查反向代理的 WebSocket 转发与服务端 ALLOWED_ORIGINS。",
     adminRemovedFromRoom: "你已被管理员移出房间。",
     adminDisconnectedSession: "你的连接已被管理员断开。",
     adminClosedRoom: "当前房间已被管理员关闭。",
@@ -80,7 +84,6 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     popupErrorNoPlayableVideo: "当前页面没有可播放的视频。",
     popupErrorCannotAccessPage: "无法访问当前页面。",
     popupErrorMemberTokenMissing: "成员令牌缺失，请重新加入房间。",
-    popupErrorReconnectFailed: "重试 {attempts} 次后仍无法连接到同步服务器。",
     popupErrorCannotReadCurrentVideo: "无法读取当前视频。",
     serverErrorRoomNotFound: "房间不存在。",
     serverErrorJoinTokenInvalid: "加入码无效，请检查后重试。",
@@ -150,6 +153,7 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     membersOnline: "{count} online",
     membersCount: "{count} members",
     retrySeconds: "{seconds}s",
+    retryAttemptCount: "(attempt {attempt})",
     clockStatus: "Offset {offset}ms / RTT {rtt}ms",
     stateNoMembers: "No members yet",
     memberSelf: "Me ({name})",
@@ -168,6 +172,10 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
       "The server is reachable, but the WebSocket handshake was rejected. Check whether ALLOWED_ORIGINS includes {extensionOrigin}, and make sure the reverse proxy forwards WebSocket correctly.",
     connectionAllowedOriginsRejected:
       "The server is reachable, but the WebSocket handshake was rejected. Check ALLOWED_ORIGINS and make sure the reverse proxy forwards WebSocket correctly.",
+    connectionLostReconnecting:
+      "Lost connection to the sync server. Reconnecting…",
+    connectionWebsocketFailed:
+      "The server responds over HTTP, but the WebSocket connection failed. It may be starting or restarting; if this persists, check the reverse proxy's WebSocket forwarding and the server's ALLOWED_ORIGINS.",
     adminRemovedFromRoom: "You were removed from the room by an admin.",
     adminDisconnectedSession: "Your connection was terminated by an admin.",
     adminClosedRoom: "This room was closed by an admin.",
@@ -178,8 +186,6 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
       "No playable video was found on the current page.",
     popupErrorCannotAccessPage: "Cannot access the current page.",
     popupErrorMemberTokenMissing: "Member token is missing. Rejoin the room.",
-    popupErrorReconnectFailed:
-      "Still unable to connect to the sync server after {attempts} attempts.",
     popupErrorCannotReadCurrentVideo: "Unable to read the current video.",
     serverErrorRoomNotFound: "The room was not found.",
     serverErrorJoinTokenInvalid: "The join token is invalid.",

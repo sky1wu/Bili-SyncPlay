@@ -80,7 +80,7 @@ export function renderPopup(args: {
       : "-";
   args.refs.retryStatusCount.textContent =
     args.state.retryAttempt > 0
-      ? `(${args.state.retryAttempt}/${args.state.retryAttemptMax})`
+      ? t("retryAttemptCount", { attempt: args.state.retryAttempt })
       : "";
   renderClockStatus(
     args.refs.clockStatus,

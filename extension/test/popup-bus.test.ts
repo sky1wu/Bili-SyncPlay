@@ -23,7 +23,6 @@ test("popup snapshot includes connection, room, retry, clock, and logs state", (
   const snapshot = createPopupStateSnapshot({
     state,
     retryInMs: 3000,
-    retryAttemptMax: 5,
   });
 
   assert.equal(snapshot.type, "background:state");
@@ -33,7 +32,6 @@ test("popup snapshot includes connection, room, retry, clock, and logs state", (
   assert.equal(snapshot.payload.displayName, "Alice");
   assert.equal(snapshot.payload.retryInMs, 3000);
   assert.equal(snapshot.payload.retryAttempt, 2);
-  assert.equal(snapshot.payload.retryAttemptMax, 5);
   assert.equal(snapshot.payload.clockOffsetMs, 120);
   assert.equal(snapshot.payload.rttMs, 45);
   assert.equal(snapshot.payload.pageShareButtonEnabled, false);

@@ -48,7 +48,7 @@ State lives in `state-store.ts`. Key controllers:
 | `tab-controller.ts`          | Bilibili tab tracking, shared vs. local page switching |
 | `message-controller.ts`      | Routes popup / content messages to handlers            |
 
-Supporting modules handle server-message dispatch (`server-message-controller.ts`), the popup connection (`popup-state-controller.ts`, `popup-bus.ts`), the server URL lifecycle (`server-url-controller.ts`), and persistence (`storage-manager.ts`).
+Supporting modules handle server-message dispatch (`server-message-controller.ts`), the popup connection (`popup-state-controller.ts`, `popup-bus.ts`), the server URL lifecycle (`server-url-controller.ts`), persistence (`storage-manager.ts`), and a `chrome.alarms`-based reconnect fallback that survives service-worker suspension (`reconnect-watchdog.ts`).
 
 ### Content script (`extension/src/content/`)
 

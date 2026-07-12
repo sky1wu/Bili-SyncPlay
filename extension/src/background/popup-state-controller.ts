@@ -16,7 +16,6 @@ export interface PopupStateController {
 export function createPopupStateController(args: {
   createState: () => BackgroundRuntimeState;
   getRetryInMs: () => number | null;
-  retryAttemptMax: number;
   notifyContentScripts: (message: BackgroundToContentMessage) => Promise<void>;
   getSyncStatus: () => {
     roomCode: string | null;
@@ -31,7 +30,6 @@ export function createPopupStateController(args: {
     return createPopupStateSnapshot({
       state: args.createState(),
       retryInMs: args.getRetryInMs(),
-      retryAttemptMax: args.retryAttemptMax,
     });
   }
 
