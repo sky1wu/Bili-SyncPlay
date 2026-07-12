@@ -34,6 +34,7 @@ import {
   persistBackgroundProfile,
   persistBackgroundState,
 } from "./storage-manager";
+import { registerReconnectWatchdog } from "./reconnect-watchdog";
 import { disconnectSocket as executeDisconnectSocket } from "./socket-lifecycle";
 import { createTabController } from "./tab-controller";
 import { t } from "../shared/i18n";
@@ -455,4 +456,19 @@ registerBackgroundListeners({
   bootstrapFailedMessage: BOOTSTRAP_FAILED_MESSAGE,
   popupStateController,
   messageController,
+});
+
+registerReconnectWatchdog({
+  alarms: chrome.alarms,
+  // While bootstrap is still pending it runs its own auto-connect for a
+  // restored room session, so the watchdog only acts on a session that
+  // finished bootstrapping but is offline.
+  shouldReconnect: () =>
+    bootstrapStatus === "ready" &&
+    roomSessionState.roomCode !== null &&
+    !connectionState.connected,
+  connect: () => {
+    void socketController.connect();
+  },
+  log: backgroundLog,
 });

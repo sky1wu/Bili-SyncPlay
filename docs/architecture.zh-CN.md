@@ -48,7 +48,7 @@ flowchart LR
 | `tab-controller.ts`          | Bilibili 标签页跟踪、共享页与本地页切换   |
 | `message-controller.ts`      | 把 popup / content 消息路由到对应 handler |
 
-辅助模块负责服务端消息分发（`server-message-controller.ts`）、popup 连接（`popup-state-controller.ts`、`popup-bus.ts`）、服务器地址生命周期（`server-url-controller.ts`）和持久化（`storage-manager.ts`）。
+辅助模块负责服务端消息分发（`server-message-controller.ts`）、popup 连接（`popup-state-controller.ts`、`popup-bus.ts`）、服务器地址生命周期（`server-url-controller.ts`）、持久化（`storage-manager.ts`），以及基于 `chrome.alarms`、能在 service worker 挂起后继续生效的重连兜底（`reconnect-watchdog.ts`）。
 
 ### Content script（`extension/src/content/`）
 
