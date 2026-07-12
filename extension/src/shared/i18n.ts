@@ -71,6 +71,9 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
       "服务器可达，但 WebSocket 握手被拒绝。请检查服务端 ALLOWED_ORIGINS 是否包含 {extensionOrigin}，以及反向代理是否已正确转发 WebSocket。",
     connectionAllowedOriginsRejected:
       "服务器可达，但 WebSocket 握手被拒绝。请检查服务端 ALLOWED_ORIGINS，以及反向代理是否已正确转发 WebSocket。",
+    connectionLostReconnecting: "与同步服务器的连接已断开，正在尝试重连。",
+    connectionWebsocketFailed:
+      "服务器 HTTP 可达，但 WebSocket 连接失败。服务端可能正在启动或重启；若持续出现，请检查反向代理的 WebSocket 转发与服务端 ALLOWED_ORIGINS。",
     adminRemovedFromRoom: "你已被管理员移出房间。",
     adminDisconnectedSession: "你的连接已被管理员断开。",
     adminClosedRoom: "当前房间已被管理员关闭。",
@@ -168,6 +171,10 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
       "The server is reachable, but the WebSocket handshake was rejected. Check whether ALLOWED_ORIGINS includes {extensionOrigin}, and make sure the reverse proxy forwards WebSocket correctly.",
     connectionAllowedOriginsRejected:
       "The server is reachable, but the WebSocket handshake was rejected. Check ALLOWED_ORIGINS and make sure the reverse proxy forwards WebSocket correctly.",
+    connectionLostReconnecting:
+      "Lost connection to the sync server. Reconnecting…",
+    connectionWebsocketFailed:
+      "The server responds over HTTP, but the WebSocket connection failed. It may be starting or restarting; if this persists, check the reverse proxy's WebSocket forwarding and the server's ALLOWED_ORIGINS.",
     adminRemovedFromRoom: "You were removed from the room by an admin.",
     adminDisconnectedSession: "Your connection was terminated by an admin.",
     adminClosedRoom: "This room was closed by an admin.",

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getConnectionErrorMessage } from "../src/background/connection-error";
+import {
+  getConnectionErrorMessage,
+  getSocketErrorMessage,
+} from "../src/background/connection-error";
 import { setLocaleForTests } from "../src/shared/i18n";
 
 test("returns the generic message when the healthcheck endpoint is unreachable", () => {
@@ -45,6 +48,30 @@ test("falls back to a generic handshake rejection hint when the extension origin
       extensionOrigin: "   ",
     }),
     "服务器可达，但 WebSocket 握手被拒绝。请检查服务端 ALLOWED_ORIGINS，以及反向代理是否已正确转发 WebSocket。",
+  );
+});
+
+test("a socket error after open reports a dropped connection, not a handshake rejection", () => {
+  setLocaleForTests("zh-CN");
+  assert.equal(
+    getSocketErrorMessage({ sawOpen: true, healthcheckReachable: true }),
+    "与同步服务器的连接已断开，正在尝试重连。",
+  );
+});
+
+test("a socket error before open with an unreachable healthcheck reports unreachable", () => {
+  setLocaleForTests("zh-CN");
+  assert.equal(
+    getSocketErrorMessage({ sawOpen: false, healthcheckReachable: false }),
+    "无法连接到同步服务器。",
+  );
+});
+
+test("a socket error before open with a reachable healthcheck avoids blaming ALLOWED_ORIGINS with confidence", () => {
+  setLocaleForTests("zh-CN");
+  assert.equal(
+    getSocketErrorMessage({ sawOpen: false, healthcheckReachable: true }),
+    "服务器 HTTP 可达，但 WebSocket 连接失败。服务端可能正在启动或重启；若持续出现，请检查反向代理的 WebSocket 转发与服务端 ALLOWED_ORIGINS。",
   );
 });
 

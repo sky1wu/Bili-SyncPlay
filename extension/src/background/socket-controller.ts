@@ -2,7 +2,10 @@ import type { ClientMessage, ServerMessage } from "@bili-syncplay/protocol";
 import { isServerMessage, PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import type { DebugLogEntry } from "../shared/messages";
 import type { ConnectionState, RoomSessionState } from "./runtime-state";
-import { getConnectionErrorMessage } from "./connection-error";
+import {
+  getConnectionErrorMessage,
+  getSocketErrorMessage,
+} from "./connection-error";
 import { getExtensionOrigin } from "../shared/extension-origin";
 import {
   shouldReconnect as shouldScheduleReconnect,
@@ -152,6 +155,32 @@ export function createSocketController(args: {
             args.notifyAll();
             return;
           }
+        } else if (response.status >= 500) {
+          // The HTTP layer answered but the backend is erroring (typically a
+          // reverse proxy returning 502/503 while the server restarts). Treat
+          // this as unreachable instead of falling through to the no-cors
+          // healthcheck, whose opaque response would count ANY status as
+          // reachable and mislabel the subsequent WebSocket failure as a
+          // handshake rejection. Non-5xx statuses (e.g. an older server's 404
+          // for this endpoint) still fall through to the healthcheck probe.
+          if (isProbeAborted()) {
+            return;
+          }
+          args.connectionState.lastError = getConnectionErrorMessage({
+            healthcheckReachable: false,
+            extensionOrigin,
+          });
+          args.connectionState.connected = false;
+          args.stopClockSyncTimer();
+          args.logConnectionProbeFailure({
+            stage: "connection-check",
+            serverUrl: serverUrlResult.normalizedUrl,
+            reason: `http_${response.status}`,
+            extensionOrigin,
+          });
+          scheduleReconnect();
+          args.notifyAll();
+          return;
         }
       } catch {
         // Fall back to the healthcheck probe for older servers that do not expose the preflight endpoint.
@@ -213,7 +242,13 @@ export function createSocketController(args: {
     // must not mutate the live connection state, which the replacement now owns.
     const isSuperseded = () => args.connectionState.socket !== socket;
 
+    // Whether THIS socket ever completed its handshake. An `error` after `open`
+    // is an established connection dropping (e.g. a server restart), not a
+    // handshake failure, and the two need different user-facing messages.
+    let sawOpen = false;
+
     socket.addEventListener("open", () => {
+      sawOpen = true;
       if (isSuperseded()) {
         return;
       }
@@ -375,9 +410,9 @@ export function createSocketController(args: {
       if (isSuperseded()) {
         return;
       }
-      args.connectionState.lastError = getConnectionErrorMessage({
+      args.connectionState.lastError = getSocketErrorMessage({
+        sawOpen,
         healthcheckReachable,
-        extensionOrigin,
       });
       args.connectionState.connected = false;
       args.stopClockSyncTimer();

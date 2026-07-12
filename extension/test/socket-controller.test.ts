@@ -3,6 +3,7 @@ import test from "node:test";
 import type { SharedVideo } from "@bili-syncplay/protocol";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
 import { createSocketController } from "../src/background/socket-controller";
+import { setLocaleForTests, t } from "../src/shared/i18n";
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -42,6 +43,9 @@ let createdSockets: FakeWebSocket[] = [];
 // letting a test interleave an admin close while the probe is mid-await.
 let blockFetch = false;
 let releaseFetch: (() => void) | null = null;
+// When set, the connection-check fetch resolves with this instead of the
+// default ok/websocketAllowed response (e.g. a reverse proxy's 502).
+let fetchResponseOverride: { ok: boolean; status: number } | null = null;
 
 function installGlobals(): { restore: () => void } {
   const original = {
@@ -53,12 +57,13 @@ function installGlobals(): { restore: () => void } {
   createdSockets = [];
   blockFetch = false;
   releaseFetch = null;
+  fetchResponseOverride = null;
   Object.assign(globalThis, {
     WebSocket: FakeWebSocket,
     chrome: { runtime: { getURL: () => "chrome-extension://test/" } },
     self: { setTimeout, clearTimeout },
     fetch: () => {
-      const result = {
+      const result = fetchResponseOverride ?? {
         ok: true,
         json: async () => ({ data: { websocketAllowed: true } }),
       };
@@ -401,6 +406,84 @@ test("a CLOSING-window reconnect clears the stale connected flag for the CONNECT
     assert.equal(secondSocket.readyState, FakeWebSocket.CONNECTING);
     assert.equal(harness.runtimeState.connection.connected, false);
   } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a socket error after open reports a dropped connection instead of a handshake rejection", async () => {
+  const globals = installGlobals();
+  setLocaleForTests("zh-CN");
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+
+    await harness.controller.connect();
+    const socket = createdSockets[0];
+    socket.emit("open", {});
+    assert.equal(harness.runtimeState.connection.connected, true);
+
+    // The server restarts and kills the established connection: error fires
+    // before close. This is not a handshake failure, so the message must not
+    // point at ALLOWED_ORIGINS / proxy configuration.
+    socket.emit("error", {});
+
+    assert.equal(
+      harness.runtimeState.connection.lastError,
+      t("connectionLostReconnecting"),
+    );
+  } finally {
+    setLocaleForTests(null);
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a socket error before open without a reachable healthcheck reports unreachable", async () => {
+  const globals = installGlobals();
+  setLocaleForTests("zh-CN");
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    // No probe URLs: `healthcheckReachable` stays false, so a handshake that
+    // never opened must surface as plain unreachable.
+    harness = createHarness();
+
+    await harness.controller.connect();
+    const socket = createdSockets[0];
+    socket.emit("error", {});
+
+    assert.equal(
+      harness.runtimeState.connection.lastError,
+      t("connectionServerUnreachable"),
+    );
+  } finally {
+    setLocaleForTests(null);
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a 5xx connection-check response is treated as unreachable instead of probing further", async () => {
+  const globals = installGlobals();
+  setLocaleForTests("zh-CN");
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness({ withProbeFetch: true });
+    // A reverse proxy answers 502 while the backend restarts. The probe must
+    // stop here (the no-cors healthcheck would count the opaque 502 as
+    // reachable) and schedule a retry instead of opening a doomed socket.
+    fetchResponseOverride = { ok: false, status: 502 };
+
+    await harness.controller.connect();
+
+    assert.equal(createdSockets.length, 0);
+    assert.equal(
+      harness.runtimeState.connection.lastError,
+      t("connectionServerUnreachable"),
+    );
+    assert.notEqual(harness.runtimeState.connection.reconnectTimer, null);
+  } finally {
+    setLocaleForTests(null);
     harness?.controller.clearReconnectTimer();
     globals.restore();
   }
