@@ -155,6 +155,25 @@ test("metrics collector renders event counters, histograms, and redis failure co
       ),
     );
   }
+  for (const gauge of [
+    "bili_syncplay_nodejs_heap_used_bytes",
+    "bili_syncplay_nodejs_heap_total_bytes",
+    "bili_syncplay_nodejs_process_rss_bytes",
+  ]) {
+    const match = rendered.match(new RegExp(`^${gauge} (\\d+)$`, "m"));
+    assert.notEqual(match, null, gauge);
+    assert.equal(Number(match![1]) > 0, true, gauge);
+  }
+  // GC kinds are pre-seeded so "no major GC" is an explicit zero series.
+  for (const kind of ["major", "minor", "incremental", "weakcb"]) {
+    assert.match(
+      rendered,
+      new RegExp(
+        `^bili_syncplay_nodejs_gc_duration_seconds_count\\{kind="${kind}"\\} \\d+$`,
+        "m",
+      ),
+    );
+  }
   // Member-affecting drops are counted under their own event_type label so a
   // critical room_member_changed drop is never hidden behind high-frequency
   // room_state_updated drops.

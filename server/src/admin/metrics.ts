@@ -1,4 +1,9 @@
-import { monitorEventLoopDelay } from "node:perf_hooks";
+import {
+  constants as perfHooksConstants,
+  monitorEventLoopDelay,
+  PerformanceObserver,
+  type PerformanceEntry,
+} from "node:perf_hooks";
 import type { RuntimeStore } from "../runtime-store.js";
 import type { RoomStore } from "../room-store.js";
 import { ROOM_EVENT_TYPES, type RoomEventType } from "../room-event-bus.js";
@@ -8,6 +13,22 @@ const DEFAULT_HISTOGRAM_BUCKETS_SECONDS = [
 ] as const;
 
 const NANOSECONDS_PER_SECOND = 1e9;
+
+const GC_KIND_NAMES: Readonly<Record<number, string>> = Object.freeze({
+  [perfHooksConstants.NODE_PERFORMANCE_GC_MAJOR]: "major",
+  [perfHooksConstants.NODE_PERFORMANCE_GC_MINOR]: "minor",
+  [perfHooksConstants.NODE_PERFORMANCE_GC_INCREMENTAL]: "incremental",
+  [perfHooksConstants.NODE_PERFORMANCE_GC_WEAKCB]: "weakcb",
+});
+
+function resolveGcKind(entry: PerformanceEntry): string {
+  const detail = (entry as PerformanceEntry & { detail?: { kind?: number } })
+    .detail;
+  return (
+    (typeof detail?.kind === "number" ? GC_KIND_NAMES[detail.kind] : null) ??
+    "unknown"
+  );
+}
 
 const CORE_EVENT_NAMES = [
   "room_created",
@@ -199,6 +220,21 @@ export function createMetricsCollector(options: {
   // the multi-hundred-millisecond stalls this gauge exists to expose.
   const eventLoopDelayMonitor = monitorEventLoopDelay({ resolution: 20 });
   eventLoopDelayMonitor.enable();
+  const nodejsGcDurationHistogram: HistogramMetric = {
+    help: "Duration of Node.js garbage collection pauses in seconds, grouped by GC kind",
+    buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
+    samples: new Map(),
+  };
+  const gcObserver = new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      observeHistogram(
+        nodejsGcDurationHistogram,
+        { kind: resolveGcKind(entry) },
+        entry.duration,
+      );
+    }
+  });
+  gcObserver.observe({ entryTypes: ["gc"] });
   const redisRoomEventBusPublishDurationHistogram: HistogramMetric = {
     help: "Duration of Redis room event bus publish operations in seconds",
     buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
@@ -211,6 +247,12 @@ export function createMetricsCollector(options: {
 
   for (const messageType of RATE_LIMITED_MESSAGE_TYPES) {
     ensureCounterSample(rateLimitedCounter, { message_type: messageType });
+  }
+
+  // Pre-seed every GC kind so "no major GC happened" renders as an explicit
+  // zero-count series instead of an absent one.
+  for (const kindName of Object.values(GC_KIND_NAMES)) {
+    ensureHistogramSample(nodejsGcDurationHistogram, { kind: kindName });
   }
 
   // Pre-seed every room event type to 0 so dashboards can distinguish
@@ -251,6 +293,7 @@ export function createMetricsCollector(options: {
       keyword: undefined,
       includeExpired: false,
     });
+    const memory = process.memoryUsage();
     const eventSamples = Array.from(eventCounter.samples.values()).sort(
       (a, b) => (a.labels.event ?? "").localeCompare(b.labels.event ?? ""),
     );
@@ -292,6 +335,10 @@ export function createMetricsCollector(options: {
         metric: redisRoomStoreDurationHistogram,
       },
       {
+        name: "bili_syncplay_nodejs_gc_duration_seconds",
+        metric: nodejsGcDurationHistogram,
+      },
+      {
         name: "bili_syncplay_redis_room_event_bus_publish_duration_seconds",
         metric: redisRoomEventBusPublishDurationHistogram,
       },
@@ -331,6 +378,18 @@ export function createMetricsCollector(options: {
         eventLoopDelayMonitor.max / NANOSECONDS_PER_SECOND,
         { stat: "max" },
       ),
+      "# HELP bili_syncplay_nodejs_heap_used_bytes V8 heap currently in use, in bytes",
+      "# TYPE bili_syncplay_nodejs_heap_used_bytes gauge",
+      formatMetricLine("bili_syncplay_nodejs_heap_used_bytes", memory.heapUsed),
+      "# HELP bili_syncplay_nodejs_heap_total_bytes V8 heap currently reserved, in bytes",
+      "# TYPE bili_syncplay_nodejs_heap_total_bytes gauge",
+      formatMetricLine(
+        "bili_syncplay_nodejs_heap_total_bytes",
+        memory.heapTotal,
+      ),
+      "# HELP bili_syncplay_nodejs_process_rss_bytes Resident set size of the server process, in bytes",
+      "# TYPE bili_syncplay_nodejs_process_rss_bytes gauge",
+      formatMetricLine("bili_syncplay_nodejs_process_rss_bytes", memory.rss),
       "# HELP bili_syncplay_connections Current websocket connection count",
       "# TYPE bili_syncplay_connections gauge",
       formatMetricLine(
