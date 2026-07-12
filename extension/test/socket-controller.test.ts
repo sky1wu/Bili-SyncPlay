@@ -92,7 +92,6 @@ function createHarness(options: { withProbeFetch?: boolean } = {}) {
   const controller = createSocketController({
     connectionState: runtimeState.connection,
     roomSessionState: runtimeState.room,
-    maxReconnectAttempts: 5,
     log: () => {},
     logInvalidServerUrl: () => {},
     logConnectionProbeFailure: () => {},
@@ -121,7 +120,6 @@ function createHarness(options: { withProbeFetch?: boolean } = {}) {
       adminResets.push(reason);
     },
     formatAdminSessionResetReason: (reason) => reason,
-    reconnectFailedMessage: () => "reconnect failed",
   });
 
   return {

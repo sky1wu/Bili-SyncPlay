@@ -66,7 +66,6 @@ export type BackgroundToPopupMessage =
         pendingJoinRoomCode: string | null;
         retryInMs: number | null;
         retryAttempt: number;
-        retryAttemptMax: number;
         clockOffsetMs: number | null;
         rttMs: number | null;
         pageShareButtonEnabled: boolean;

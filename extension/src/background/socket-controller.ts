@@ -24,7 +24,6 @@ export interface SocketController {
 export function createSocketController(args: {
   connectionState: ConnectionState;
   roomSessionState: RoomSessionState;
-  maxReconnectAttempts: number;
   log: (scope: DebugLogEntry["scope"], message: string) => void;
   logInvalidServerUrl: (context: string, invalidUrl: string) => void;
   logConnectionProbeFailure: (details: {
@@ -48,7 +47,6 @@ export function createSocketController(args: {
   onOpen: () => void;
   onAdminSessionReset: (reason: string) => void;
   formatAdminSessionResetReason: (reason: string) => string;
-  reconnectFailedMessage: () => string;
 }): SocketController {
   async function connect(): Promise<void> {
     if (
@@ -438,18 +436,8 @@ export function createSocketController(args: {
         reconnectTimer: args.connectionState.reconnectTimer,
         roomCode: args.roomSessionState.roomCode,
         pendingCreateRoom: args.roomSessionState.pendingCreateRoom,
-        reconnectAttempt: args.connectionState.reconnectAttempt,
-        maxReconnectAttempts: args.maxReconnectAttempts,
       })
     ) {
-      if (args.connectionState.reconnectAttempt >= args.maxReconnectAttempts) {
-        args.connectionState.reconnectDeadlineMs = null;
-        args.connectionState.lastError = args.reconnectFailedMessage();
-        args.log(
-          "background",
-          `Reconnect exhausted after ${args.maxReconnectAttempts} attempts`,
-        );
-      }
       return;
     }
 

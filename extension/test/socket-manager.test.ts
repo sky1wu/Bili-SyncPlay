@@ -5,22 +5,21 @@ import {
   shouldReconnect,
 } from "../src/background/socket-manager";
 
-test("reconnect backoff grows and caps at ten seconds", () => {
+test("reconnect backoff grows and caps at thirty seconds", () => {
   assert.equal(getReconnectDelayMs(1), 1000);
   assert.equal(getReconnectDelayMs(2), 2000);
-  assert.equal(getReconnectDelayMs(5), 10000);
-  assert.equal(getReconnectDelayMs(8), 10000);
+  assert.equal(getReconnectDelayMs(5), 16000);
+  assert.equal(getReconnectDelayMs(6), 30000);
+  assert.equal(getReconnectDelayMs(50), 30000);
 });
 
-test("reconnect scheduling requires an active room or pending create and stops at max attempts", () => {
+test("reconnect scheduling requires an active room or pending create and has no attempt cap", () => {
   assert.equal(
     shouldReconnect({
       connected: false,
       reconnectTimer: null,
       roomCode: "ROOM01",
       pendingCreateRoom: false,
-      reconnectAttempt: 2,
-      maxReconnectAttempts: 5,
     }),
     true,
   );
@@ -31,8 +30,16 @@ test("reconnect scheduling requires an active room or pending create and stops a
       reconnectTimer: null,
       roomCode: null,
       pendingCreateRoom: false,
-      reconnectAttempt: 2,
-      maxReconnectAttempts: 5,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldReconnect({
+      connected: true,
+      reconnectTimer: null,
+      roomCode: "ROOM01",
+      pendingCreateRoom: false,
     }),
     false,
   );
@@ -40,11 +47,9 @@ test("reconnect scheduling requires an active room or pending create and stops a
   assert.equal(
     shouldReconnect({
       connected: false,
-      reconnectTimer: null,
+      reconnectTimer: 42,
       roomCode: "ROOM01",
       pendingCreateRoom: false,
-      reconnectAttempt: 5,
-      maxReconnectAttempts: 5,
     }),
     false,
   );
