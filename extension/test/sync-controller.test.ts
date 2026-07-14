@@ -58,7 +58,6 @@ function createControllerHarness() {
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
-    bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
@@ -1553,7 +1552,7 @@ test("sync controller releases sharer end-of-video marker once the resolved url 
   assert.equal(harness.runtimeState.sharerEndedSuppressionUntil, 0);
 });
 
-test("sync controller broadcasts buffering when active pause is classified as buffer", async () => {
+test("sync controller broadcasts buffering while a pause lacks user intent", async () => {
   const harness = createControllerHarness();
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
@@ -1589,7 +1588,6 @@ test("sync controller broadcasts buffering when active pause is classified as bu
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
-    bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
@@ -1617,7 +1615,7 @@ test("sync controller broadcasts buffering when active pause is classified as bu
   assert.equal(payload.playState, "buffering");
 });
 
-test("sync controller broadcasts paused once buffer-pause upgrade window elapses", async () => {
+test("sync controller keeps an unconfirmed pause as buffering after the recovery delay", async () => {
   const harness = createControllerHarness();
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
@@ -1653,11 +1651,10 @@ test("sync controller broadcasts paused once buffer-pause upgrade window elapses
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
-    bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => 21_700, // 1700ms after pauseStartedAt, past upgrade threshold
+    getNow: () => 21_700, // 1700ms after pauseStartedAt, past recovery delay
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
     runtimeSendMessage: async (message) => {
@@ -1678,7 +1675,7 @@ test("sync controller broadcasts paused once buffer-pause upgrade window elapses
   const payload = (
     harness.runtimeMessages[0] as { payload: { playState: string } }
   ).payload;
-  assert.equal(payload.playState, "paused");
+  assert.equal(payload.playState, "buffering");
 });
 
 test("sync controller suppresses local end-pause broadcasts from non-sharer autoplay guard", async () => {
@@ -1764,7 +1761,6 @@ test("sync controller tags broadcast with userInitiated:true on a fresh user pau
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
-    bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
@@ -1833,7 +1829,6 @@ test("sync controller omits userInitiated when a pause is buffer-induced", async
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
-    bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
@@ -1864,7 +1859,7 @@ test("sync controller omits userInitiated when a pause is buffer-induced", async
   assert.equal(payload.userInitiated, undefined);
 });
 
-test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast", async () => {
+test("sync controller omits userInitiated when paused broadcast has no fresh gesture", async () => {
   const harness = createControllerHarness();
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
@@ -1882,7 +1877,7 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
   harness.runtimeState.localMemberId = "local-member";
   harness.runtimeState.intendedPlayState = "paused";
   harness.runtimeState.pauseStartedAt = 20_000;
-  harness.runtimeState.pauseClassifiedAsBuffer = false; // already upgraded
+  harness.runtimeState.pauseClassifiedAsBuffer = false;
   // Original gesture, if any, is way past the gesture grace window — the
   // re-broadcast must not be mistaken for a fresh user pause.
   harness.runtimeState.lastExplicitUserAction = {
@@ -1907,7 +1902,6 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
-    bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
@@ -1948,6 +1942,8 @@ test("sync controller keeps non-shared authorization on reset while still on tha
   });
   harness.runtimeState.explicitNonSharedPlaybackUrl = localUrl;
   harness.runtimeState.nonSharerAutoplayHoldUrl = localUrl;
+  harness.runtimeState.pauseStartedAt = 20_000;
+  harness.runtimeState.pauseClassifiedAsBuffer = true;
 
   // A remote member switches the room's shared video while the user is still
   // watching their manually-started local video. Its authorization must survive,
@@ -1955,6 +1951,8 @@ test("sync controller keeps non-shared authorization on reset while still on tha
   harness.controller.resetPlaybackSyncState("shared url changed");
 
   assert.equal(harness.runtimeState.explicitNonSharedPlaybackUrl, localUrl);
+  assert.equal(harness.runtimeState.pauseStartedAt, 0);
+  assert.equal(harness.runtimeState.pauseClassifiedAsBuffer, false);
 });
 
 test("sync controller clears non-shared authorization on reset when no longer on that video", () => {
@@ -2091,7 +2089,6 @@ test("programmatic apply signature stores the normalized url for mismatched (fes
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
-    bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
     nextSeq: () => 1,
     markBroadcastAt: () => {},

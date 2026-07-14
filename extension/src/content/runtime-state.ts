@@ -209,16 +209,17 @@ export interface ContentRuntimeState {
   /**
    * Timestamp when the local video most recently transitioned to `paused`.
    * Reset to 0 once playback resumes. Together with
-   * [[pauseClassifiedAsBuffer]] this powers the "buffer-pause → buffering"
-   * remote broadcast classification and its upgrade-to-`paused` timeout.
+   * [[pauseClassifiedAsBuffer]] this identifies the active unconfirmed pause
+   * and prevents a stale recovery timer from acting in a new context.
    */
   pauseStartedAt: number;
   /**
-   * Whether the active pause is currently classified as buffer-induced. Set
-   * on the `pause` event when a `waiting`/`stalled` signal occurred very
-   * recently and no fresh user gesture preceded the pause; cleared on
-   * resume. The broadcast layer reports `buffering` instead of `paused`
-   * while this flag is on and within the upgrade threshold.
+   * Whether the active pause is currently unconfirmed. Set on a `pause` event
+   * when no fresh in-player gesture proves explicit user intent (including,
+   * but not limited to, pauses preceded by `waiting`/`stalled`); cleared on
+   * resume. The binding suppresses the paused broadcast and attempts to restore
+   * room playback locally; any incidental broadcasts remain `buffering`, never
+   * `paused`, while this flag is on.
    */
   pauseClassifiedAsBuffer: boolean;
   /**
@@ -249,6 +250,8 @@ export function resetUserGestureState(state: ContentRuntimeState): void {
   state.suppressedLocalEndPauseUrl = null;
   state.suppressedLocalEndPauseUntil = 0;
   state.nonSharerAutoplayHoldUrl = null;
+  state.pauseStartedAt = 0;
+  state.pauseClassifiedAsBuffer = false;
 }
 
 export function createContentRuntimeState(): ContentRuntimeState {

@@ -38,7 +38,7 @@ const REMOTE_FOLLOW_PLAYING_WINDOW_MS = 3000;
 const PROGRAMMATIC_APPLY_WINDOW_MS = 700;
 const USER_GESTURE_GRACE_MS = 1200;
 const BUFFER_SIGNAL_WINDOW_MS = 300;
-const BUFFER_PAUSE_UPGRADE_MS = 1500;
+const UNCONFIRMED_PAUSE_RECOVERY_MS = 1500;
 const REMOTE_PAUSE_DEBOUNCE_MS = 250;
 const FESTIVAL_SNAPSHOT_TTL_MS = 1200;
 const NAVIGATION_WATCH_INTERVAL_MS = 400;
@@ -108,7 +108,6 @@ const syncController = createSyncController({
   remoteFollowPlayingWindowMs: REMOTE_FOLLOW_PLAYING_WINDOW_MS,
   programmaticApplyWindowMs: PROGRAMMATIC_APPLY_WINDOW_MS,
   userGestureGraceMs: USER_GESTURE_GRACE_MS,
-  bufferPauseUpgradeMs: BUFFER_PAUSE_UPGRADE_MS,
   remotePauseDebounceMs: REMOTE_PAUSE_DEBOUNCE_MS,
   nextSeq: () => seq++,
   markBroadcastAt: (at) => {
@@ -132,7 +131,7 @@ const playbackBindingController = createPlaybackBindingController({
   userGestureGraceMs: USER_GESTURE_GRACE_MS,
   initialRoomStatePauseHoldMs: INITIAL_ROOM_STATE_PAUSE_HOLD_MS,
   bufferSignalWindowMs: BUFFER_SIGNAL_WINDOW_MS,
-  bufferPauseUpgradeMs: BUFFER_PAUSE_UPGRADE_MS,
+  unconfirmedPauseRecoveryMs: UNCONFIRMED_PAUSE_RECOVERY_MS,
   getSharedVideo: () => shareController.getSharedVideo(),
   hasRecentRemoteStopIntent: (currentVideoUrl) =>
     syncController.hasRecentRemoteStopIntent(currentVideoUrl),

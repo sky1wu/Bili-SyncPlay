@@ -73,12 +73,6 @@ export function createSyncController(args: {
   programmaticApplyWindowMs: number;
   userGestureGraceMs: number;
   /**
-   * Window during which a buffer-induced pause is broadcast as `buffering`
-   * instead of `paused`. After this elapses the binding layer re-broadcasts
-   * as `paused`.
-   */
-  bufferPauseUpgradeMs: number;
-  /**
    * Delay before applying a remote `paused` room state, to absorb the
    * "pause→play within ~1s" flicker emitted by peers experiencing buffer
    * stalls. Set to 0 to disable.
@@ -259,6 +253,8 @@ export function createSyncController(args: {
     args.runtimeState.intendedPlaybackRate = 1;
     args.runtimeState.lastNonSharedGuardUrl = null;
     args.runtimeState.lastExplicitPlaybackAction = null;
+    args.runtimeState.pauseStartedAt = 0;
+    args.runtimeState.pauseClassifiedAsBuffer = false;
     // Preserve the user's authorization to keep watching a non-shared local video
     // they manually started when this reset is a remote shared-url switch and they
     // are STILL on that very video. Otherwise the periodic non-shared load-pause
@@ -688,9 +684,7 @@ export function createSyncController(args: {
     if (
       basePlayState === "paused" &&
       args.runtimeState.pauseClassifiedAsBuffer &&
-      args.runtimeState.pauseStartedAt > 0 &&
-      argsForBroadcast.now - args.runtimeState.pauseStartedAt <
-        args.bufferPauseUpgradeMs
+      args.runtimeState.pauseStartedAt > 0
     ) {
       return "buffering";
     }

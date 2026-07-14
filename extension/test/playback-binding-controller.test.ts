@@ -1,12 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SharedVideo } from "@bili-syncplay/protocol";
-import { createContentRuntimeState } from "../src/content/runtime-state";
+import {
+  createContentRuntimeState,
+  resetUserGestureState,
+} from "../src/content/runtime-state";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
 import { createRoomStateController } from "../src/content/room-state-controller";
 import { createToastCoordinatorState } from "../src/content/toast";
 
 type ListenerMap = Map<string, EventListener>;
+
+test("resetting gesture state invalidates an unconfirmed pause", () => {
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 5_000;
+  runtimeState.lastUserGestureInPlayerAt = 5_000;
+  runtimeState.pauseStartedAt = 5_100;
+  runtimeState.pauseClassifiedAsBuffer = true;
+
+  resetUserGestureState(runtimeState);
+
+  assert.equal(runtimeState.pauseStartedAt, 0);
+  assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+});
 
 function installDomStub() {
   const originalDocument = globalThis.document;
@@ -103,6 +119,7 @@ test("playback binding controller cancels active soft apply on pause and seek", 
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.lastUserGestureAt = 1_000;
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
   const reasons: string[] = [];
 
   const controller = createPlaybackBindingController({
@@ -427,7 +444,7 @@ test("playback binding controller keeps hydration guard after direct room switch
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => ({
       videoId: "BVnew:p1",
       url: currentUrl,
@@ -569,7 +586,7 @@ test("playback binding controller reapplies pause hold for unstable identity aft
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => ({
       videoId: "/festival/demo",
       url: "https://www.bilibili.com/festival/demo",
@@ -638,7 +655,7 @@ test("playback binding controller reapplies pause hold for unstable room shared 
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => ({
       videoId: "ep1231523",
       url: "https://www.bilibili.com/bangumi/play/ep1231523",
@@ -1931,6 +1948,8 @@ test("playback binding controller preserves the explicit non-shared authorizatio
     );
 
     // A genuine manual mid-video pause (not ended) still deauthorizes it.
+    runtimeState.lastUserGestureAt = 19_950;
+    runtimeState.lastUserGestureInPlayerAt = 19_950;
     (dom.video as { ended?: boolean }).ended = false;
     dom.listeners.get("pause")?.(new Event("pause"));
     await Promise.resolve();
@@ -2244,7 +2263,7 @@ test("playback binding controller holds a non-sharer at the shared video natural
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => ({
       videoId: "BVshared:p1",
       url: "https://www.bilibili.com/video/BVshared?p=1",
@@ -2319,7 +2338,7 @@ test("playback binding controller does not pause the sharer at the shared video 
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => ({
       videoId: "BVshared:p1",
       url: "https://www.bilibili.com/video/BVshared?p=1",
@@ -2383,7 +2402,7 @@ test("playback binding controller does not pause a non-sharer before the shared 
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => ({
       videoId: "BVshared:p1",
       url: "https://www.bilibili.com/video/BVshared?p=1",
@@ -2449,7 +2468,7 @@ test("playback binding controller re-pauses non-sharer multi-part autoplay after
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => ({
       videoId: "BVshared:p1",
       url: "https://www.bilibili.com/video/BVshared?p=1",
@@ -2517,7 +2536,7 @@ test("playback binding controller classifies pause as buffer when waiting fired 
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2552,6 +2571,7 @@ test("playback binding controller treats pause as user-initiated when fresh gest
   const runtimeState = createContentRuntimeState();
   let now = 5_000;
   runtimeState.lastUserGestureAt = 4_950; // fresh gesture
+  runtimeState.lastUserGestureInPlayerAt = 4_950;
   runtimeState.lastForcedPauseAt = 0;
 
   const controller = createPlaybackBindingController({
@@ -2560,7 +2580,7 @@ test("playback binding controller treats pause as user-initiated when fresh gest
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2585,12 +2605,72 @@ test("playback binding controller treats pause as user-initiated when fresh gest
 
     assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
     assert.equal(runtimeState.pauseStartedAt, 5_120);
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "pause",
+      at: 5_120,
+    });
   } finally {
     dom.restore();
   }
 });
 
-test("playback binding controller clears buffer-pause classification on resume", () => {
+test("playback binding controller defers a seek-triggered pause from the same player gesture", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  let now = 5_000;
+  runtimeState.lastUserGestureAt = 4_950;
+  runtimeState.lastUserGestureInPlayerAt = 4_950;
+  const broadcasts: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    unconfirmedPauseRecoveryMs: 1_500,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+    await Promise.resolve();
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 5_000,
+    });
+
+    broadcasts.length = 0;
+    now = 5_100;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+
+    assert.deepEqual(broadcasts, []);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 5_000,
+    });
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller clears unconfirmed-pause classification on resume", () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.lastUserGestureAt = 0;
@@ -2602,7 +2682,7 @@ test("playback binding controller clears buffer-pause classification on resume",
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2667,7 +2747,7 @@ test("playback binding controller does not classify pause as buffer-induced insi
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => ({
       videoId: "BV1xx411c7mD:p1",
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -2696,7 +2776,7 @@ test("playback binding controller does not classify pause as buffer-induced insi
 
     assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
     assert.equal(runtimeState.pauseStartedAt, 5_120);
-    // No buffer-pause upgrade timer should have been armed.
+    // No unconfirmed-pause recovery timer should have been armed.
     assert.equal(
       scheduledTimers.some((t) => t.ms === 1_500),
       false,
@@ -2726,7 +2806,7 @@ test("playback binding controller still classifies pause as buffer-induced when 
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => ({
       videoId: "BV1xx411c7mD:p1",
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -2757,12 +2837,17 @@ test("playback binding controller still classifies pause as buffer-induced when 
   }
 });
 
-test("playback binding controller re-broadcasts paused after buffer-pause upgrade threshold", async () => {
+test("playback binding controller never broadcasts an unconfirmed pause and restores local playback", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
+  // The player pauses internally without any user gesture at all.
   runtimeState.lastUserGestureAt = 0;
+  runtimeState.lastUserGestureInPlayerAt = 0;
+  runtimeState.intendedPlayState = "playing";
   let now = 5_000;
   const broadcasts: string[] = [];
+  let playCalls = 0;
+  const originalPlay = dom.video.play;
   const originalSetTimeout = globalThis.window.setTimeout;
   const scheduledTimers: Array<{ cb: () => void; ms: number }> = [];
   globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
@@ -2771,6 +2856,10 @@ test("playback binding controller re-broadcasts paused after buffer-pause upgrad
     }
     return scheduledTimers.length;
   }) as typeof globalThis.window.setTimeout;
+  dom.video.play = () => {
+    playCalls += 1;
+    return Promise.resolve();
+  };
 
   const controller = createPlaybackBindingController({
     runtimeState,
@@ -2778,7 +2867,7 @@ test("playback binding controller re-broadcasts paused after buffer-pause upgrad
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
+    unconfirmedPauseRecoveryMs: 1_500,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2796,26 +2885,137 @@ test("playback binding controller re-broadcasts paused after buffer-pause upgrad
 
   try {
     controller.attachPlaybackListeners();
-    dom.listeners.get("waiting")?.(new Event("waiting"));
     now = 5_100;
     dom.video.paused = true;
     dom.listeners.get("pause")?.(new Event("pause"));
 
     await Promise.resolve();
-    // Initial broadcasts from pause + 120ms followup (captured but not fired here)
-    assert.equal(broadcasts.includes("pause"), true);
+    assert.deepEqual(broadcasts, []);
     assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
-    const upgradeTimer = scheduledTimers.find((t) => t.ms === 1_500);
-    assert.notEqual(upgradeTimer, undefined);
+    assert.equal(runtimeState.lastExplicitUserAction, null);
+    const recoveryTimer = scheduledTimers.find((t) => t.ms === 1_500);
+    assert.notEqual(recoveryTimer, undefined);
 
-    // Fire the upgrade timer: video still paused, should re-broadcast and clear classification
+    // A persistent player-internal pause must still not stop the room. Restore
+    // the intended room playback locally instead.
     now = 6_600;
     broadcasts.length = 0;
-    upgradeTimer?.cb();
+    recoveryTimer?.cb();
     await Promise.resolve();
 
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+    assert.deepEqual(broadcasts, []);
+    assert.equal(playCalls, 1);
+  } finally {
+    dom.video.play = originalPlay;
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.restore();
+  }
+});
+
+test("playback binding controller cancels unconfirmed-pause recovery when playback resumes", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  let now = 5_000;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalClearTimeout = globalThis.window.clearTimeout;
+  const clearedTimers: number[] = [];
+  globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
+    assert.equal(typeof callback, "function");
+    return ms === 1_500 ? 7 : 8;
+  }) as typeof globalThis.window.setTimeout;
+  globalThis.window.clearTimeout = ((id?: number) => {
+    if (id !== undefined) {
+      clearedTimers.push(id);
+    }
+  }) as typeof globalThis.window.clearTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    unconfirmedPauseRecoveryMs: 1_500,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+
+    now = 5_200;
+    dom.video.paused = false;
+    dom.listeners.get("playing")?.(new Event("playing"));
+
     assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
-    assert.equal(broadcasts.includes("pause"), true);
+    assert.equal(runtimeState.pauseStartedAt, 0);
+    assert.deepEqual(clearedTimers, [7]);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    globalThis.window.clearTimeout = originalClearTimeout;
+    dom.restore();
+  }
+});
+
+test("playback binding controller ignores unconfirmed-pause recovery invalidated by navigation", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  let upgradeCallback: (() => void) | null = null;
+  const broadcasts: string[] = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
+    if (typeof callback === "function" && ms === 1_500) {
+      upgradeCallback = callback as () => void;
+    }
+    return 1;
+  }) as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    unconfirmedPauseRecoveryMs: 1_500,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    assert.notEqual(upgradeCallback, null);
+
+    resetUserGestureState(runtimeState);
+    upgradeCallback?.();
+    await Promise.resolve();
+
+    assert.deepEqual(broadcasts, []);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.restore();

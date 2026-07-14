@@ -35,11 +35,10 @@ export function createPlaybackBindingController(args: {
    */
   bufferSignalWindowMs: number;
   /**
-   * Maximum duration to keep reporting a buffer-induced pause as
-   * `buffering` to peers before re-broadcasting it as `paused`. Bounds the
-   * worst-case desync if a buffer stall turns into a real stop.
+   * Delay before trying to resume a pause that lacks explicit in-player intent.
+   * Such pauses never gain authority to stop the room.
    */
-  bufferPauseUpgradeMs: number;
+  unconfirmedPauseRecoveryMs: number;
   getSharedVideo: () => SharedVideo | null;
   hasRecentRemoteStopIntent: (currentVideoUrl: string) => boolean;
   normalizeUrl: (url: string | undefined | null) => string | null;
@@ -60,10 +59,13 @@ export function createPlaybackBindingController(args: {
   getNow?: () => number;
 }): PlaybackBindingController {
   let videoBindingTimer: number | null = null;
-  let pauseBufferUpgradeTimerId: number | null = null;
+  let unconfirmedPauseRecoveryTimerId: number | null = null;
   let sharerEndedFlushTimerId: number | null = null;
   const nowOf = () => args.getNow?.() ?? Date.now();
-  const scheduleUpgradeTimer = (cb: () => void, ms: number): number | null => {
+  const scheduleControllerTimer = (
+    cb: () => void,
+    ms: number,
+  ): number | null => {
     if (
       typeof globalThis.window !== "undefined" &&
       typeof globalThis.window.setTimeout === "function"
@@ -75,7 +77,7 @@ export function createPlaybackBindingController(args: {
     }
     return null;
   };
-  const cancelUpgradeTimer = (id: number): void => {
+  const cancelControllerTimer = (id: number): void => {
     if (
       typeof globalThis.window !== "undefined" &&
       typeof globalThis.window.clearTimeout === "function"
@@ -87,22 +89,22 @@ export function createPlaybackBindingController(args: {
       globalThis.clearTimeout(id);
     }
   };
-  const clearBufferUpgradeTimer = () => {
-    if (pauseBufferUpgradeTimerId !== null) {
-      cancelUpgradeTimer(pauseBufferUpgradeTimerId);
-      pauseBufferUpgradeTimerId = null;
+  const clearUnconfirmedPauseRecoveryTimer = () => {
+    if (unconfirmedPauseRecoveryTimerId !== null) {
+      cancelControllerTimer(unconfirmedPauseRecoveryTimerId);
+      unconfirmedPauseRecoveryTimerId = null;
     }
   };
   const clearSharerEndedFlushTimer = () => {
     if (sharerEndedFlushTimerId !== null) {
-      cancelUpgradeTimer(sharerEndedFlushTimerId);
+      cancelControllerTimer(sharerEndedFlushTimerId);
       sharerEndedFlushTimerId = null;
     }
   };
   const clearActivePauseClassification = () => {
     args.runtimeState.pauseStartedAt = 0;
     args.runtimeState.pauseClassifiedAsBuffer = false;
-    clearBufferUpgradeTimer();
+    clearUnconfirmedPauseRecoveryTimer();
   };
   const hasRecentUserGesture = () =>
     nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs;
@@ -114,16 +116,17 @@ export function createPlaybackBindingController(args: {
   const hasRecentUserGestureInPlayer = () =>
     nowOf() - args.runtimeState.lastUserGestureInPlayerAt <
     args.userGestureGraceMs;
+  const hasFreshInPlayerGesture = () =>
+    hasRecentUserGestureInPlayer() &&
+    args.runtimeState.lastUserGestureInPlayerAt >
+      args.runtimeState.lastForcedPauseAt;
   // A FRESH in-player play intent: an in-player gesture that also postdates the
   // last forced pause. While the page bridge resolves, the unconfirmed-context
   // hold force-pauses (updating `lastForcedPauseAt`); the SAME click that
   // triggered that pause must not then authorize the delayed `play`/`playing`
   // once the bridge resolves — only a gesture made AFTER the forced pause counts
   // as a new play intent (mirrors `shouldPreRecordNonSharedExplicitPlay`).
-  const hasFreshInPlayerPlayIntent = () =>
-    hasRecentUserGestureInPlayer() &&
-    args.runtimeState.lastUserGestureInPlayerAt >
-      args.runtimeState.lastForcedPauseAt;
+  const hasFreshInPlayerPlayIntent = () => hasFreshInPlayerGesture();
   const getRecentExplicitSeekWithoutNewGestureAt = (): number | null => {
     const explicitAction = args.runtimeState.lastExplicitUserAction;
     if (
@@ -151,10 +154,13 @@ export function createPlaybackBindingController(args: {
     }
   }
 
-  function rememberExplicitPlaybackAction(playState: "playing" | "paused") {
+  function rememberExplicitPlaybackAction(
+    playState: "playing" | "paused",
+    gestureAt = args.runtimeState.lastUserGestureAt,
+  ) {
     if (
-      nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
-      args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
+      nowOf() - gestureAt < args.userGestureGraceMs &&
+      gestureAt > args.runtimeState.lastForcedPauseAt
     ) {
       args.runtimeState.lastExplicitPlaybackAction = {
         playState,
@@ -163,10 +169,13 @@ export function createPlaybackBindingController(args: {
     }
   }
 
-  function rememberExplicitUserAction(kind: ExplicitUserActionKind) {
+  function rememberExplicitUserAction(
+    kind: ExplicitUserActionKind,
+    gestureAt = args.runtimeState.lastUserGestureAt,
+  ) {
     if (
-      nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
-      args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
+      nowOf() - gestureAt < args.userGestureGraceMs &&
+      gestureAt > args.runtimeState.lastForcedPauseAt
     ) {
       if (
         kind === "play" &&
@@ -348,7 +357,7 @@ export function createPlaybackBindingController(args: {
       nowOf() + args.initialRoomStatePauseHoldMs;
     args.runtimeState.sharerEndedSuppressionArmedAt = nowOf();
     clearSharerEndedFlushTimer();
-    sharerEndedFlushTimerId = scheduleUpgradeTimer(() => {
+    sharerEndedFlushTimerId = scheduleControllerTimer(() => {
       sharerEndedFlushTimerId = null;
       flushSharerEndedSuppressionIfTerminal(armedUrl);
     }, args.initialRoomStatePauseHoldMs);
@@ -830,7 +839,13 @@ export function createPlaybackBindingController(args: {
         if (video.ended && armSharerSharedVideoEndSuppression()) {
           return;
         }
-        if (hasRecentUserGesture()) {
+        // A seek can pause the element as part of the same progress-bar drag.
+        // It is only a real pause intent when a distinct, newer in-player
+        // gesture follows that seek.
+        const userInitiatedPause =
+          hasFreshInPlayerGesture() &&
+          getRecentExplicitSeekWithoutNewGestureAt() === null;
+        if (userInitiatedPause) {
           args.cancelActiveSoftApply(video, "pause");
         }
         const now = nowOf();
@@ -838,10 +853,6 @@ export function createPlaybackBindingController(args: {
           args.runtimeState.lastBufferSignalAt > 0 &&
           now - args.runtimeState.lastBufferSignalAt <
             args.bufferSignalWindowMs;
-        const userInitiatedPause =
-          hasRecentUserGesture() &&
-          args.runtimeState.lastUserGestureAt >
-            args.runtimeState.lastForcedPauseAt;
         // When applying a remote `paused`, we hard-seek then call `video.pause()`.
         // The seek trips a `waiting` event milliseconds before the `pause`, so the
         // buffer-signal window will look "fresh" even though no real stall occurred.
@@ -860,28 +871,51 @@ export function createPlaybackBindingController(args: {
           now < args.runtimeState.programmaticApplyUntil &&
           normalizedSharedUrl !== null &&
           normalizedSharedUrl === programmaticSignature.url;
-        const bufferInduced =
-          !insideProgrammaticPausedWindow &&
-          recentBufferSignal &&
-          !userInitiatedPause;
+        // A DOM `pause` without a fresh in-player gesture is not authoritative:
+        // Bilibili can briefly pause while rebuilding the player, switching
+        // quality, or recovering from a stall without firing `waiting` first.
+        // Treat every such pause as local/transient. It never gains authority
+        // to stop the room; after a short grace period we instead try to restore
+        // the room's non-paused intent locally. Known buffer pauses have already
+        // emitted `waiting`/`stalled` and recover through the same path.
+        const unconfirmedPause =
+          !insideProgrammaticPausedWindow && !userInitiatedPause;
         args.runtimeState.pauseStartedAt = now;
-        args.runtimeState.pauseClassifiedAsBuffer = bufferInduced;
-        clearBufferUpgradeTimer();
-        if (bufferInduced) {
-          pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
-            pauseBufferUpgradeTimerId = null;
-            if (!video.paused) {
+        args.runtimeState.pauseClassifiedAsBuffer = unconfirmedPause;
+        clearUnconfirmedPauseRecoveryTimer();
+        if (unconfirmedPause) {
+          const classifiedPauseStartedAt = now;
+          unconfirmedPauseRecoveryTimerId = scheduleControllerTimer(() => {
+            unconfirmedPauseRecoveryTimerId = null;
+            if (
+              !video.paused ||
+              !args.runtimeState.pauseClassifiedAsBuffer ||
+              args.runtimeState.pauseStartedAt !== classifiedPauseStartedAt
+            ) {
               return;
             }
-            args.runtimeState.pauseClassifiedAsBuffer = false;
-            args.debugLog(
-              `Buffer-pause upgraded to paused after ${args.bufferPauseUpgradeMs}ms, re-broadcasting`,
-            );
-            void args.broadcastPlayback(video, "pause");
-          }, args.bufferPauseUpgradeMs);
+            if (args.runtimeState.intendedPlayState !== "paused") {
+              args.debugLog(
+                `Unconfirmed local pause persisted for ${args.unconfirmedPauseRecoveryMs}ms, restoring room playback`,
+              );
+              void video.play().catch(() => {
+                args.debugLog(
+                  "Failed to restore playback after unconfirmed pause",
+                );
+              });
+            }
+          }, args.unconfirmedPauseRecoveryMs);
         }
-        rememberExplicitPlaybackAction("paused");
-        rememberExplicitUserAction("pause");
+        if (userInitiatedPause) {
+          rememberExplicitPlaybackAction(
+            "paused",
+            args.runtimeState.lastUserGestureInPlayerAt,
+          );
+          rememberExplicitUserAction(
+            "pause",
+            args.runtimeState.lastUserGestureInPlayerAt,
+          );
+        }
         // Deauthorize the non-shared video the user paused — UNLESS this `pause`
         // is the natural end of the video (the browser fires `pause` immediately
         // before `ended`). At a natural end the player is about to autoplay the
@@ -892,12 +926,19 @@ export function createPlaybackBindingController(args: {
         // make that classification fail and let the next episode autoplay, so keep
         // it until the navigation reset replaces it.
         if (
+          userInitiatedPause &&
           !video.ended &&
           currentVideo &&
           args.normalizeUrl(currentVideo.url) ===
             args.runtimeState.explicitNonSharedPlaybackUrl
         ) {
           args.runtimeState.explicitNonSharedPlaybackUrl = null;
+        }
+        if (unconfirmedPause) {
+          args.debugLog(
+            `Deferred unconfirmed local pause (recentBufferSignal=${recentBufferSignal})`,
+          );
+          return;
         }
         scheduleBroadcast(video, "pause", 120);
       },
@@ -1009,7 +1050,7 @@ export function createPlaybackBindingController(args: {
         window.clearInterval(videoBindingTimer);
         videoBindingTimer = null;
       }
-      clearBufferUpgradeTimer();
+      clearUnconfirmedPauseRecoveryTimer();
       clearSharerEndedFlushTimer();
     },
   };
