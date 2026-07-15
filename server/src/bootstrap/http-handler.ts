@@ -94,6 +94,8 @@ export function createHttpRequestHandler(args: {
         !adminUiEnabled &&
         (pathname === "/admin" ||
           pathname.startsWith("/admin/") ||
+          pathname === "/admin-next" ||
+          pathname.startsWith("/admin-next/") ||
           pathname.startsWith("/api/admin/"))
       ) {
         response.writeHead(404, { "content-type": "application/json" });

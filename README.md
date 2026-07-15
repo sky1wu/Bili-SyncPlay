@@ -155,14 +155,14 @@ Bili-SyncPlay/
 
 ### Version matrix
 
-| Dependency    | Minimum                    | Recommended    | Notes                                                                                             |
-| ------------- | -------------------------- | -------------- | ------------------------------------------------------------------------------------------------- |
-| Node.js       | 22.5                       | 22 LTS         | see `.nvmrc`; Node 18/20 are EOL, ESLint 10 needs ≥20.19, and `npm run coverage` needs ≥22.5      |
-| npm           | 10                         | 10             | ships with the corresponding Node.js version                                                      |
-| Chrome / Edge | current stable             | current stable | required to load the unpacked extension                                                           |
-| Firefox       | 121                        | current stable | optional; uses the Firefox build (`dist-firefox`, event-page background)                          |
-| Redis         | 6.0                        | 7+             | optional for single-node; **required** for multi-node deployments and persistence across restarts |
-| Reverse proxy | any with WebSocket support | Nginx 1.18+    | required in production for TLS termination and `wss://`                                           |
+| Dependency    | Minimum                    | Recommended    | Notes                                                                                                |
+| ------------- | -------------------------- | -------------- | ---------------------------------------------------------------------------------------------------- |
+| Node.js       | 22.12                      | 22 LTS         | see `.nvmrc`; Node 18/20 are EOL, `npm run coverage` needs ≥22.5, and Vite 8 (admin-ui) needs ≥22.12 |
+| npm           | 10                         | 10             | ships with the corresponding Node.js version                                                         |
+| Chrome / Edge | current stable             | current stable | required to load the unpacked extension                                                              |
+| Firefox       | 121                        | current stable | optional; uses the Firefox build (`dist-firefox`, event-page background)                             |
+| Redis         | 6.0                        | 7+             | optional for single-node; **required** for multi-node deployments and persistence across restarts    |
+| Reverse proxy | any with WebSocket support | Nginx 1.18+    | required in production for TLS termination and `wss://`                                              |
 
 ### Non-goals
 
