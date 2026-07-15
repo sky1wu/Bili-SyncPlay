@@ -13,6 +13,7 @@ function createAuthValue(
     token: "token-1",
     me: { id: "admin-1", username: "ops", role: "operator" },
     initializing: false,
+    meError: "",
     api: {
       login: vi.fn(),
       logout: vi.fn(),
@@ -20,6 +21,7 @@ function createAuthValue(
     },
     signIn: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
+    retryLoadMe: vi.fn(),
     ...overrides,
   };
 }

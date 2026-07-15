@@ -9,7 +9,7 @@ import {
 import type { ReactNode } from "react";
 import { createAdminApi } from "../api/admin-api.js";
 import type { AdminApi } from "../api/admin-api.js";
-import { createHttpClient } from "../api/http.js";
+import { ApiError, createHttpClient } from "../api/http.js";
 import type { AdminIdentity } from "../api/types.js";
 import { readAdminUiConfig } from "../config.js";
 import {
@@ -22,9 +22,11 @@ export type AuthContextValue = {
   token: string;
   me: AdminIdentity | null;
   initializing: boolean;
+  meError: string;
   api: AdminApi;
   signIn: (username: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  retryLoadMe: () => void;
 };
 
 export const AuthContext = createContext<AuthContextValue | null>(null);
@@ -32,6 +34,8 @@ export const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setTokenState] = useState(() => getStoredToken());
   const [me, setMe] = useState<AdminIdentity | null>(null);
+  const [meError, setMeError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [initializing, setInitializing] = useState(
     () => getStoredToken() !== "",
   );
@@ -40,6 +44,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearStoredToken();
     setTokenState("");
     setMe(null);
+    setMeError("");
   }, []);
 
   const api = useMemo(() => {
@@ -69,11 +74,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             username: result.username,
             role: result.role,
           });
+          setMeError("");
         }
       })
-      .catch(() => {
-        if (!cancelled) {
-          clearSession();
+      .catch((cause: unknown) => {
+        if (cancelled) {
+          return;
+        }
+        // 401 已由 http client 的 onUnauthorized 回调清理会话；
+        // 其它失败（网络抖动、5xx）保留本地令牌，仅记录错误供重试。
+        if (!(cause instanceof ApiError && cause.status === 401)) {
+          setMeError(
+            cause instanceof Error ? cause.message : "管理员身份校验失败。",
+          );
         }
       })
       .finally(() => {
@@ -84,7 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [api, token, me, clearSession]);
+  }, [api, token, me, loadAttempt]);
 
   const signIn = useCallback(
     async (username: string, password: string) => {
@@ -105,9 +118,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearSession();
   }, [api, clearSession]);
 
+  const retryLoadMe = useCallback(() => {
+    setMeError("");
+    setLoadAttempt((attempt) => attempt + 1);
+  }, []);
+
   const value = useMemo(
-    () => ({ token, me, initializing, api, signIn, signOut }),
-    [token, me, initializing, api, signIn, signOut],
+    () => ({
+      token,
+      me,
+      initializing,
+      meError,
+      api,
+      signIn,
+      signOut,
+      retryLoadMe,
+    }),
+    [token, me, initializing, meError, api, signIn, signOut, retryLoadMe],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

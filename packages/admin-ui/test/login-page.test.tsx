@@ -14,6 +14,7 @@ function createAuthValue(
     token: "",
     me: null,
     initializing: false,
+    meError: "",
     api: {
       login: vi.fn(),
       logout: vi.fn(),
@@ -21,14 +22,15 @@ function createAuthValue(
     },
     signIn: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
+    retryLoadMe: vi.fn(),
     ...overrides,
   };
 }
 
-function renderLogin(authValue: AuthContextValue) {
+function renderLogin(authValue: AuthContextValue, initialEntry = "/login") {
   return render(
     <AuthContext.Provider value={authValue}>
-      <MemoryRouter initialEntries={["/login"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/overview" element={<div>overview-page</div>} />
@@ -99,22 +101,19 @@ describe("LoginPage", () => {
     afterEach(() => {
       delete (globalThis as { __ADMIN_UI_CONFIG__?: unknown })
         .__ADMIN_UI_CONFIG__;
-      window.history.replaceState(null, "", "/");
     });
 
     it("points demo previews at the legacy panel", () => {
       (globalThis as { __ADMIN_UI_CONFIG__?: unknown }).__ADMIN_UI_CONFIG__ = {
         demoEnabled: true,
       };
-      window.history.replaceState(null, "", "/?demo=1");
-      renderLogin(createAuthValue());
+      renderLogin(createAuthValue(), "/login?demo=1");
 
       expect(screen.getByText("新控制台暂不支持演示模式")).toBeTruthy();
     });
 
     it("stays hidden when demo mode is disabled", () => {
-      window.history.replaceState(null, "", "/?demo=1");
-      renderLogin(createAuthValue());
+      renderLogin(createAuthValue(), "/login?demo=1");
 
       expect(screen.queryByText("新控制台暂不支持演示模式")).toBeNull();
     });
