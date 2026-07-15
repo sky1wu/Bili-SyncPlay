@@ -114,6 +114,8 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 - `POST /api/admin/rooms/:roomCode/members/:memberId/kick`
 - `POST /api/admin/sessions/:sessionId/disconnect`
 
+所有 `/api/admin/*` 接口都支持 `GET`、`POST`、`OPTIONS` 的 CORS 预检，并允许 `authorization` 与 `content-type` 请求头。管理 UI 会访问的 `/healthz` 与 `/readyz` 使用相同的来源策略，并支持 `GET` 和 `OPTIONS`。只有请求 Origin 与 API 同源或被显式列入 `ALLOWED_ORIGINS` 时，服务端才会原样返回该 Origin，不使用通配符。`GLOBAL_ADMIN_API_BASE_URL` 指向独立 API 域名时，需把管理 UI 的 Origin 加入该白名单。
+
 `GET /metrics` 默认在主服务端口上提供，也可以通过 `METRICS_PORT` 挪到独立端口；设置 `METRICS_TOKEN` 后抓取请求还需携带 `Authorization: Bearer <token>`（见[安全相关环境变量](./security-env.zh-CN.md)）。
 
 鉴权方式：

@@ -67,7 +67,7 @@ GLOBAL_ADMIN_ENABLED=true \
 node server/dist/global-admin-index.js
 ```
 
-If the admin UI should talk to a separate API origin, set `GLOBAL_ADMIN_API_BASE_URL=https://admin.example.com`.
+If the admin UI should talk to a separate API origin, set `GLOBAL_ADMIN_API_BASE_URL=https://admin.example.com` and add the UI origin to `ALLOWED_ORIGINS`. The admin API only returns CORS headers for same-origin requests and origins explicitly included in that allowlist.
 
 ## Node role configuration matrix
 

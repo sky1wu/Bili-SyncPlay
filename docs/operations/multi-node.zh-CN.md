@@ -67,7 +67,7 @@ GLOBAL_ADMIN_ENABLED=true \
 node server/dist/global-admin-index.js
 ```
 
-如果管理 UI 需要请求一个独立 API 域名，可设置 `GLOBAL_ADMIN_API_BASE_URL=https://admin.example.com`。
+如果管理 UI 需要请求一个独立 API 域名，可设置 `GLOBAL_ADMIN_API_BASE_URL=https://admin.example.com`，并把 UI 的 Origin 加入 `ALLOWED_ORIGINS`。管理 API 只会为同源请求和显式列入该白名单的 Origin 返回 CORS 响应头。
 
 ## 节点角色配置矩阵
 

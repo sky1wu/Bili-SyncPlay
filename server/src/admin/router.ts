@@ -1,6 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AdminActionError } from "./action-service.js";
-import { requireAdminWriteOrigin } from "./csrf.js";
+import {
+  requireAdminWriteOrigin,
+  setAdminCorsResponseHeaders,
+} from "./csrf.js";
 import {
   getBearerToken,
   getPathSegments,
@@ -25,6 +28,16 @@ function unauthorized(response: ServerResponse): void {
 
 function forbidden(response: ServerResponse): void {
   sendError(response, 403, "forbidden", FORBIDDEN_MESSAGE);
+}
+
+function getAdminCorsAllowedMethods(pathname: string): string | null {
+  if (pathname.startsWith("/api/admin/")) {
+    return "GET, POST, OPTIONS";
+  }
+  if (pathname === "/healthz" || pathname === "/readyz") {
+    return "GET, OPTIONS";
+  }
+  return null;
 }
 
 export function createAdminRouter(options: AdminRouterOptions) {
@@ -96,6 +109,31 @@ export function createAdminRouter(options: AdminRouterOptions) {
       const segments = getPathSegments(request);
 
       try {
+        const corsAllowedMethods = getAdminCorsAllowedMethods(pathname);
+        if (corsAllowedMethods) {
+          setAdminCorsResponseHeaders(
+            request,
+            response,
+            options.writeOriginPolicy,
+          );
+          if (request.method === "OPTIONS") {
+            if (!requireWriteOrigin(request, response)) {
+              return true;
+            }
+            response.setHeader(
+              "access-control-allow-methods",
+              corsAllowedMethods,
+            );
+            response.setHeader(
+              "access-control-allow-headers",
+              "authorization, content-type",
+            );
+            response.writeHead(204);
+            response.end();
+            return true;
+          }
+        }
+
         for (const routeHandler of routeHandlers) {
           if (
             await routeHandler({
