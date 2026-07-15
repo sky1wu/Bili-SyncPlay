@@ -2,12 +2,35 @@ import { Alert, Button, Card, Form, Input, Typography } from "antd";
 import { LockOutlined, UserOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
+import { ApiError } from "../api/http.js";
 import { useAuth } from "../auth/auth-context.js";
+import { readAdminUiConfig } from "../config.js";
 
 type LoginFormValues = {
   username: string;
   password: string;
 };
+
+// 服务端错误信封是英文文案，这里按错误码映射成友好的中文提示。
+const LOGIN_ERROR_MESSAGES: Record<string, string> = {
+  invalid_credentials: "用户名或密码错误。",
+  too_many_login_attempts: "登录尝试过于频繁，请稍后再试。",
+  admin_auth_unavailable: "管理端认证未配置或不可用。",
+};
+
+function resolveLoginErrorMessage(cause: unknown): string {
+  if (cause instanceof ApiError && LOGIN_ERROR_MESSAGES[cause.code]) {
+    return LOGIN_ERROR_MESSAGES[cause.code];
+  }
+  return cause instanceof Error ? cause.message : "登录失败。";
+}
+
+function isDemoPreviewRequest(): boolean {
+  return (
+    readAdminUiConfig().demoEnabled &&
+    new URLSearchParams(window.location.search).get("demo") === "1"
+  );
+}
 
 export function LoginPage() {
   const { token, signIn } = useAuth();
@@ -26,7 +49,7 @@ export function LoginPage() {
       await signIn(values.username.trim(), values.password);
       navigate("/overview", { replace: true });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "登录失败。");
+      setError(resolveLoginErrorMessage(cause));
     } finally {
       setSubmitting(false);
     }
@@ -49,6 +72,20 @@ export function LoginPage() {
         <Typography.Paragraph type="secondary">
           登录管理控制台
         </Typography.Paragraph>
+        {isDemoPreviewRequest() ? (
+          <Alert
+            type="info"
+            message="新控制台暂不支持演示模式"
+            description={
+              <>
+                演示预览请使用旧面板 <a href="/admin?demo=1">/admin?demo=1</a>
+                ，新控制台的演示支持将随页面迁移逐步补齐。
+              </>
+            }
+            showIcon
+            style={{ marginBottom: 16 }}
+          />
+        ) : null}
         {error ? (
           <Alert
             type="error"

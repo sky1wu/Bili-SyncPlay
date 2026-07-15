@@ -76,6 +76,33 @@ describe("createHttpClient", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the error envelope for unauthenticated 401 (login failure)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(401, {
+        ok: false,
+        error: {
+          code: "invalid_credentials",
+          message: "Invalid username or password.",
+        },
+      }),
+    );
+    const onUnauthorized = vi.fn();
+    const client = createHttpClient({
+      getToken: () => "",
+      onUnauthorized,
+      fetchImpl,
+    });
+
+    const error = await client
+      .request<never>("/api/admin/auth/login")
+      .catch((e: unknown) => e as ApiError);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.code).toBe("invalid_credentials");
+    expect(error.message).toBe("Invalid username or password.");
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
   it("maps error envelope code and message", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(429, {

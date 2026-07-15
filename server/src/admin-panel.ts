@@ -85,7 +85,13 @@ export function createAdminPanelHandler(
       .normalize(relativePath)
       .replace(/^(\.\.(\/|\\|$))+/, "");
     const assetPath = path.resolve(target.rootDir, sanitizedPath);
-    if (!assetPath.startsWith(target.rootDir)) {
+    // 用 path.relative 判定越界：字符串前缀比较会放行与根目录同名前缀的
+    // 兄弟目录（如 dist-backup），也挡不住双斜线带来的绝对路径。
+    const relativeAssetPath = path.relative(target.rootDir, assetPath);
+    if (
+      relativeAssetPath.startsWith("..") ||
+      path.isAbsolute(relativeAssetPath)
+    ) {
       response.writeHead(404);
       response.end();
       return true;
