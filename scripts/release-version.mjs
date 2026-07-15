@@ -21,6 +21,7 @@ if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(nextVersion)) {
 const packagePaths = [
   path.join(rootDir, "package.json"),
   path.join(rootDir, "packages", "protocol", "package.json"),
+  path.join(rootDir, "packages", "admin-ui", "package.json"),
   path.join(rootDir, "server", "package.json"),
   path.join(rootDir, "extension", "package.json"),
 ];
