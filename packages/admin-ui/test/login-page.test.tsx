@@ -19,6 +19,8 @@ function createAuthValue(
       login: vi.fn(),
       logout: vi.fn(),
       getMe: vi.fn(),
+      getOverview: vi.fn(),
+      getReady: vi.fn(),
     },
     signIn: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
