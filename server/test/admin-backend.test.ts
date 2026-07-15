@@ -455,7 +455,7 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
   }
 });
 
-test("admin API supports CORS preflights and responses for allowed origins", async () => {
+test("admin UI endpoints support CORS preflights and responses for allowed origins", async () => {
   const server = await startAdminServer();
 
   try {
@@ -534,6 +534,42 @@ test("admin API supports CORS preflights and responses for allowed origins", asy
       meResponse.headers.get("access-control-allow-origin"),
       ALLOWED_ORIGIN,
     );
+
+    for (const path of ["/healthz", "/readyz"]) {
+      const probePreflight = await fetch(`${server.httpBaseUrl}${path}`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: ALLOWED_ORIGIN,
+          "Access-Control-Request-Method": "GET",
+          "Access-Control-Request-Headers": "authorization",
+        },
+      });
+      assert.equal(probePreflight.status, 204);
+      assert.equal(
+        probePreflight.headers.get("access-control-allow-origin"),
+        ALLOWED_ORIGIN,
+      );
+      assert.equal(
+        probePreflight.headers.get("access-control-allow-methods"),
+        "GET, OPTIONS",
+      );
+      assert.equal(
+        probePreflight.headers.get("access-control-allow-headers"),
+        "authorization, content-type",
+      );
+
+      const probeResponse = await fetch(`${server.httpBaseUrl}${path}`, {
+        headers: {
+          Origin: ALLOWED_ORIGIN,
+          Authorization: `Bearer ${loginPayload.data.token}`,
+        },
+      });
+      assert.equal(probeResponse.status, 200);
+      assert.equal(
+        probeResponse.headers.get("access-control-allow-origin"),
+        ALLOWED_ORIGIN,
+      );
+    }
 
     const deniedPreflight = await fetch(
       `${server.httpBaseUrl}/api/admin/auth/login`,

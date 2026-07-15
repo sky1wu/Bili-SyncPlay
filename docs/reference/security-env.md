@@ -15,7 +15,7 @@ The server accepts the following environment variables. Safe defaults are built 
 
 ## Origin and Connection Security
 
-- `ALLOWED_ORIGINS`: comma-separated `Origin` allowlist for WebSocket connections and cross-origin admin API requests; when empty, the server rejects all explicit cross-origin values by default
+- `ALLOWED_ORIGINS`: comma-separated `Origin` allowlist for WebSocket connections and cross-origin admin UI requests; when empty, the server rejects all explicit cross-origin values by default
 - `ALLOW_MISSING_ORIGIN_IN_DEV`: allow missing `Origin` headers when set to `true`; defaults to `false`
 - `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN`: when `true`, accept any well-formed `moz-extension://<uuid>` origin; Firefox assigns a random per-install UUID that a public/shared server cannot enumerate in `ALLOWED_ORIGINS`. Still rejects web-page origins (a page can never present a `moz-extension://` origin) and does not replace room/member-token auth; defaults to `false`
 - `TRUSTED_PROXY_ADDRESSES`: comma-separated proxy socket IP allowlist; only requests arriving from these proxies can use `X-Forwarded-For`; defaults to empty

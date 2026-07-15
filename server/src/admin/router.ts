@@ -30,6 +30,16 @@ function forbidden(response: ServerResponse): void {
   sendError(response, 403, "forbidden", FORBIDDEN_MESSAGE);
 }
 
+function getAdminCorsAllowedMethods(pathname: string): string | null {
+  if (pathname.startsWith("/api/admin/")) {
+    return "GET, POST, OPTIONS";
+  }
+  if (pathname === "/healthz" || pathname === "/readyz") {
+    return "GET, OPTIONS";
+  }
+  return null;
+}
+
 export function createAdminRouter(options: AdminRouterOptions) {
   const roleRank: Record<AdminRole, number> = {
     viewer: 1,
@@ -99,7 +109,8 @@ export function createAdminRouter(options: AdminRouterOptions) {
       const segments = getPathSegments(request);
 
       try {
-        if (pathname.startsWith("/api/admin/")) {
+        const corsAllowedMethods = getAdminCorsAllowedMethods(pathname);
+        if (corsAllowedMethods) {
           setAdminCorsResponseHeaders(
             request,
             response,
@@ -111,7 +122,7 @@ export function createAdminRouter(options: AdminRouterOptions) {
             }
             response.setHeader(
               "access-control-allow-methods",
-              "GET, POST, OPTIONS",
+              corsAllowedMethods,
             );
             response.setHeader(
               "access-control-allow-headers",

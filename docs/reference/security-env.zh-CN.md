@@ -15,7 +15,7 @@
 
 ## Origin 与连接安全
 
-- `ALLOWED_ORIGINS`：逗号分隔的 `Origin` 白名单，用于 WebSocket 连接和跨域管理 API 请求；为空时服务器默认拒绝所有显式跨域 Origin
+- `ALLOWED_ORIGINS`：逗号分隔的 `Origin` 白名单，用于 WebSocket 连接和跨域管理 UI 请求；为空时服务器默认拒绝所有显式跨域 Origin
 - `ALLOW_MISSING_ORIGIN_IN_DEV`：设为 `true` 时允许缺失 `Origin` 头；默认 `false`
 - `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN`：设为 `true` 时接受任意格式正确的 `moz-extension://<uuid>` Origin；Firefox 每个安装随机分配 UUID，公共/共享服务端无法逐一枚举进 `ALLOWED_ORIGINS`。仍会拒绝网页 Origin（网页永远无法呈现 `moz-extension://` Origin），且不替代房间/成员 token 鉴权；默认 `false`
 - `TRUSTED_PROXY_ADDRESSES`：逗号分隔的受信代理 socket IP 列表；只有来自这些代理的请求才会使用 `X-Forwarded-For`；默认为空
