@@ -122,6 +122,20 @@ describe("createHttpClient", () => {
     expect(error.status).toBe(429);
   });
 
+  it("returns data when the envelope is ok despite a non-2xx status (readyz 503)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(503, {
+        ok: true,
+        data: { status: "not_ready" },
+      }),
+    );
+    const client = createHttpClient({ getToken: () => "", fetchImpl });
+
+    const data = await client.request<{ status: string }>("/readyz");
+
+    expect(data).toEqual({ status: "not_ready" });
+  });
+
   it("falls back to request_failed for non-JSON failures", async () => {
     const fetchImpl = vi
       .fn()

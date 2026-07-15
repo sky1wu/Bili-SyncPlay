@@ -74,15 +74,17 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
         );
       }
 
-      if (!response.ok || payload?.ok !== true) {
-        throw new ApiError(
-          payload?.error?.code ?? "request_failed",
-          payload?.error?.message ?? "请求失败。",
-          response.status,
-        );
+      // 信封 ok:true 优先于 HTTP 状态码：/readyz 未就绪时返回 503 但
+      // 信封仍是 ok:true 的有效数据，调用方需要拿到 status 字段做降级展示。
+      if (payload?.ok === true) {
+        return payload.data as T;
       }
 
-      return payload.data as T;
+      throw new ApiError(
+        payload?.error?.code ?? "request_failed",
+        payload?.error?.message ?? "请求失败。",
+        response.status,
+      );
     },
   };
 }

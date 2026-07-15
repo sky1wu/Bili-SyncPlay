@@ -4,6 +4,8 @@ import type {
   AdminLoginResult,
   AdminLogoutResult,
   AdminMeResult,
+  AdminOverview,
+  ReadyStatus,
 } from "./types.js";
 
 export function createAdminApi(client: HttpClient) {
@@ -19,6 +21,12 @@ export function createAdminApi(client: HttpClient) {
     },
     getMe(): Promise<AdminMeResult> {
       return client.request("/api/admin/me");
+    },
+    getOverview(): Promise<AdminOverview> {
+      return client.request("/api/admin/overview");
+    },
+    getReady(): Promise<ReadyStatus> {
+      return client.request("/readyz");
     },
   };
 }
