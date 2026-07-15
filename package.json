@@ -11,7 +11,7 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "lint": "eslint . --ext .ts,.js,.mjs,.cjs",
+    "lint": "eslint . --ext .ts,.tsx,.js,.mjs,.cjs",
     "lint:fix": "npm run lint -- --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -23,18 +23,19 @@
     "bench:reconnect-storm": "tsx bench/reconnect-storm.ts",
     "prebench:ci-light": "npm run build -w @bili-syncplay/protocol",
     "bench:ci-light": "tsx bench/ci-light.ts",
-    "typecheck": "npm run typecheck -w @bili-syncplay/protocol && npm run typecheck -w @bili-syncplay/server && npm run typecheck -w @bili-syncplay/extension",
-    "build": "npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server && npm run build -w @bili-syncplay/extension",
+    "typecheck": "npm run typecheck -w @bili-syncplay/protocol && npm run typecheck -w @bili-syncplay/server && npm run typecheck -w @bili-syncplay/extension && npm run typecheck -w @bili-syncplay/admin-ui",
+    "build": "npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server && npm run build -w @bili-syncplay/extension && npm run build -w @bili-syncplay/admin-ui",
     "pretest": "npm run build -w @bili-syncplay/protocol",
-    "test": "npm run test:audit-gate && npm run test:scripts && npm run --ignore-scripts test -w @bili-syncplay/protocol && npm run --ignore-scripts test -w @bili-syncplay/server && npm run --ignore-scripts test -w @bili-syncplay/extension",
+    "test": "npm run test:audit-gate && npm run test:scripts && npm run --ignore-scripts test -w @bili-syncplay/protocol && npm run --ignore-scripts test -w @bili-syncplay/server && npm run --ignore-scripts test -w @bili-syncplay/extension && npm run --ignore-scripts test -w @bili-syncplay/admin-ui",
     "test:scripts": "node --test scripts/target-browser.test.mjs",
-    "coverage": "npm run --ignore-scripts coverage -w @bili-syncplay/protocol && npm run --ignore-scripts coverage -w @bili-syncplay/server && npm run --ignore-scripts coverage -w @bili-syncplay/extension",
+    "coverage": "npm run --ignore-scripts coverage -w @bili-syncplay/protocol && npm run --ignore-scripts coverage -w @bili-syncplay/server && npm run --ignore-scripts coverage -w @bili-syncplay/extension && npm run --ignore-scripts coverage -w @bili-syncplay/admin-ui",
     "audit": "node scripts/audit-gate.mjs",
     "test:audit-gate": "node --test scripts/audit-gate.test.mjs",
     "test:e2e": "npm run --ignore-scripts test:e2e -w @bili-syncplay/server",
     "test:e2e:smoke:plan": "node scripts/e2e-smoke-plan.mjs",
     "test:server:redis": "npm run --ignore-scripts test:redis -w @bili-syncplay/server",
     "dev:server": "npm run dev -w @bili-syncplay/server",
+    "dev:admin-ui": "npm run dev -w @bili-syncplay/admin-ui",
     "build:extension": "npm run build -w @bili-syncplay/extension",
     "build:extension:firefox": "npm run build -w @bili-syncplay/extension -- --target=firefox",
     "build:release:chrome": "npm run build:extension && node scripts/package-release.mjs --target=chrome",
@@ -46,9 +47,10 @@
     "@eslint/js": "^10.0.1",
     "eslint": "^10.6.0",
     "eslint-config-prettier": "^10.1.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.7.0",
     "prettier": "^3.5.3",
-    "typescript-eslint": "^8.26.1",
-    "tsx": "^4.20.6"
+    "tsx": "^4.20.6",
+    "typescript-eslint": "^8.26.1"
   }
 }

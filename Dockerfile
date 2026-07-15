@@ -6,6 +6,7 @@ WORKDIR /app
 # npm workspaces 安装要求所有成员的 package.json 在位（含 extension，仅清单不拷源码）。
 COPY package.json package-lock.json ./
 COPY packages/protocol/package.json packages/protocol/
+COPY packages/admin-ui/package.json packages/admin-ui/
 COPY server/package.json server/
 COPY extension/package.json extension/
 RUN npm ci
@@ -13,9 +14,11 @@ RUN npm ci
 COPY tsconfig.base.json ./
 COPY packages/protocol/tsconfig.json packages/protocol/
 COPY packages/protocol/src packages/protocol/src
+COPY packages/admin-ui/tsconfig.json packages/admin-ui/vite.config.ts packages/admin-ui/index.html packages/admin-ui/
+COPY packages/admin-ui/src packages/admin-ui/src
 COPY server/tsconfig.json server/
 COPY server/src server/src
-RUN npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server
+RUN npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server && npm run build -w @bili-syncplay/admin-ui
 
 # 重装仅生产依赖（ws、ioredis 及 workspace 链接），供运行阶段拷贝。
 RUN npm ci --omit=dev
@@ -32,8 +35,10 @@ COPY --from=builder /app/packages/protocol/package.json packages/protocol/
 COPY --from=builder /app/packages/protocol/dist packages/protocol/dist
 COPY --from=builder /app/server/package.json server/
 COPY --from=builder /app/server/dist server/dist
-# 服务端按 dist/../admin-ui 解析管理面板静态资源。
+# 服务端按 dist/../admin-ui 解析旧管理面板静态资源，
+# 按 dist/../../packages/admin-ui/dist 解析新面板（/admin-next）构建产物。
 COPY server/admin-ui server/admin-ui
+COPY --from=builder /app/packages/admin-ui/dist packages/admin-ui/dist
 
 # 运行阶段直接以 node 启动，用不到 npm/corepack/yarn；删除基础镜像自带的
 # npm CLI，消除其 vendored 依赖（sigstore/tar/picomatch 等）触发的漏洞扫描报告。

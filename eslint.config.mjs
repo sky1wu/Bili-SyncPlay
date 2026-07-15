@@ -2,8 +2,9 @@ import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 import eslintConfigPrettier from "eslint-config-prettier";
+import reactHooks from "eslint-plugin-react-hooks";
 
-const sourceFiles = ["**/*.{ts,js,mjs,cjs}"];
+const sourceFiles = ["**/*.{ts,tsx,js,mjs,cjs}"];
 const ignores = [
   "**/node_modules/**",
   "**/dist/**",
@@ -49,6 +50,16 @@ export default tseslint.config(
     files: ["**/*.cjs"],
     languageOptions: {
       sourceType: "commonjs",
+    },
+  },
+  {
+    files: ["packages/admin-ui/**/*.{ts,tsx}"],
+    plugins: {
+      "react-hooks": reactHooks,
+    },
+    rules: {
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "error",
     },
   },
   eslintConfigPrettier,
