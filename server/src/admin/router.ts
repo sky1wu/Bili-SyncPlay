@@ -1,6 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AdminActionError } from "./action-service.js";
-import { requireAdminWriteOrigin } from "./csrf.js";
+import {
+  requireAdminWriteOrigin,
+  setAdminCorsResponseHeaders,
+} from "./csrf.js";
 import {
   getBearerToken,
   getPathSegments,
@@ -96,6 +99,30 @@ export function createAdminRouter(options: AdminRouterOptions) {
       const segments = getPathSegments(request);
 
       try {
+        if (pathname.startsWith("/api/admin/")) {
+          setAdminCorsResponseHeaders(
+            request,
+            response,
+            options.writeOriginPolicy,
+          );
+          if (request.method === "OPTIONS") {
+            if (!requireWriteOrigin(request, response)) {
+              return true;
+            }
+            response.setHeader(
+              "access-control-allow-methods",
+              "GET, POST, OPTIONS",
+            );
+            response.setHeader(
+              "access-control-allow-headers",
+              "authorization, content-type",
+            );
+            response.writeHead(204);
+            response.end();
+            return true;
+          }
+        }
+
         for (const routeHandler of routeHandlers) {
           if (
             await routeHandler({

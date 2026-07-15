@@ -139,7 +139,7 @@ Room Node：
 Global Admin：
 
 - `GLOBAL_ADMIN_ENABLED=true`
-- 如 UI 与 API 域名分离，可补 `GLOBAL_ADMIN_API_BASE_URL`
+- 如 UI 与 API 域名分离，可补 `GLOBAL_ADMIN_API_BASE_URL`，并把 UI 的 Origin 加入 `ALLOWED_ORIGINS`
 
 验证：
 

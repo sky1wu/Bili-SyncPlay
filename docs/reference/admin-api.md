@@ -114,6 +114,8 @@ Implemented endpoints:
 - `POST /api/admin/rooms/:roomCode/members/:memberId/kick`
 - `POST /api/admin/sessions/:sessionId/disconnect`
 
+Every `/api/admin/*` endpoint accepts CORS preflights for `GET`, `POST`, and `OPTIONS`, with `authorization` and `content-type` request headers. The server reflects the exact request origin only when it is same-origin or explicitly included in `ALLOWED_ORIGINS`; wildcard origins are not used. When `GLOBAL_ADMIN_API_BASE_URL` points to a separate API origin, add the admin UI origin to that allowlist.
+
 `GET /metrics` is served on the main service port by default and can be moved to a dedicated port with `METRICS_PORT`; setting `METRICS_TOKEN` additionally requires scrapes to send `Authorization: Bearer <token>` (see [Security Environment Variables](./security-env.md)).
 
 Authentication model:

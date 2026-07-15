@@ -48,6 +48,20 @@ export function evaluateAdminWriteOrigin(
   return { ok: false, reason: "origin_not_allowed" };
 }
 
+export function setAdminCorsResponseHeaders(
+  request: IncomingMessage,
+  response: ServerResponse,
+  policy: AdminWriteOriginPolicy,
+): void {
+  response.setHeader("vary", "origin");
+
+  const result = evaluateAdminWriteOrigin(request, policy);
+  const origin = request.headers.origin;
+  if (result.ok && typeof origin === "string") {
+    response.setHeader("access-control-allow-origin", origin);
+  }
+}
+
 export function requireAdminWriteOrigin(
   request: IncomingMessage,
   response: ServerResponse,

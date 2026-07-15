@@ -136,7 +136,7 @@ Room node setting:
 Global admin setting:
 
 - `GLOBAL_ADMIN_ENABLED=true`
-- optional `GLOBAL_ADMIN_API_BASE_URL` if the UI and API origins differ
+- optional `GLOBAL_ADMIN_API_BASE_URL` if the UI and API origins differ; add the UI origin to `ALLOWED_ORIGINS`
 
 Verify:
 

@@ -15,7 +15,7 @@
 
 ## Origin 与连接安全
 
-- `ALLOWED_ORIGINS`：逗号分隔的 WebSocket `Origin` 白名单；为空时服务器默认拒绝所有显式 `Origin`
+- `ALLOWED_ORIGINS`：逗号分隔的 `Origin` 白名单，用于 WebSocket 连接和跨域管理 API 请求；为空时服务器默认拒绝所有显式跨域 Origin
 - `ALLOW_MISSING_ORIGIN_IN_DEV`：设为 `true` 时允许缺失 `Origin` 头；默认 `false`
 - `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN`：设为 `true` 时接受任意格式正确的 `moz-extension://<uuid>` Origin；Firefox 每个安装随机分配 UUID，公共/共享服务端无法逐一枚举进 `ALLOWED_ORIGINS`。仍会拒绝网页 Origin（网页永远无法呈现 `moz-extension://` Origin），且不替代房间/成员 token 鉴权；默认 `false`
 - `TRUSTED_PROXY_ADDRESSES`：逗号分隔的受信代理 socket IP 列表；只有来自这些代理的请求才会使用 `X-Forwarded-For`；默认为空
@@ -70,7 +70,7 @@
 - `ROOM_EVENT_BUS_PROVIDER`：跨节点房间事件广播，`none`、`memory` 或 `redis`；当 `RUNTIME_STORE_PROVIDER=redis` 时默认跟随 `redis`，否则默认 `memory`
 - `ADMIN_COMMAND_BUS_PROVIDER`：跨节点管理命令路由，`none`、`memory` 或 `redis`；当 `RUNTIME_STORE_PROVIDER=redis` 时默认跟随 `redis`，否则默认 `memory`
 - `GLOBAL_ADMIN_ENABLED`：设为 `false` 时，Room Node 保留 `/`、`/healthz`、`/readyz`，但关闭 `/admin` 与 `/api/admin/*`；默认 `true`
-- `GLOBAL_ADMIN_API_BASE_URL`：可选的管理 UI API 基址覆盖项，用于管理 UI 与管理 API 分属不同域名的场景
+- `GLOBAL_ADMIN_API_BASE_URL`：可选的管理 UI API 基址覆盖项，用于管理 UI 与管理 API 分属不同域名的场景；使用该模式时需把 UI 的 Origin 加入 `ALLOWED_ORIGINS`
 - `GLOBAL_ADMIN_PORT`：`server/dist/global-admin-index.js` 使用的 HTTP 端口；默认取 `PORT`，`PORT` 也未设置时为 `8788`
 - `NODE_HEARTBEAT_ENABLED`：是否向共享运行时存储上报节点心跳；默认 `false`
 - `NODE_HEARTBEAT_INTERVAL_MS`：节点心跳间隔，单位毫秒；默认 `15000`

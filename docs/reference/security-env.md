@@ -15,7 +15,7 @@ The server accepts the following environment variables. Safe defaults are built 
 
 ## Origin and Connection Security
 
-- `ALLOWED_ORIGINS`: comma-separated WebSocket `Origin` allowlist; when empty, the server rejects all explicit `Origin` values by default
+- `ALLOWED_ORIGINS`: comma-separated `Origin` allowlist for WebSocket connections and cross-origin admin API requests; when empty, the server rejects all explicit cross-origin values by default
 - `ALLOW_MISSING_ORIGIN_IN_DEV`: allow missing `Origin` headers when set to `true`; defaults to `false`
 - `ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN`: when `true`, accept any well-formed `moz-extension://<uuid>` origin; Firefox assigns a random per-install UUID that a public/shared server cannot enumerate in `ALLOWED_ORIGINS`. Still rejects web-page origins (a page can never present a `moz-extension://` origin) and does not replace room/member-token auth; defaults to `false`
 - `TRUSTED_PROXY_ADDRESSES`: comma-separated proxy socket IP allowlist; only requests arriving from these proxies can use `X-Forwarded-For`; defaults to empty
@@ -70,7 +70,7 @@ All three of `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH`, and `ADMIN_SESSION_SECRET`
 - `ROOM_EVENT_BUS_PROVIDER`: cross-node room event fanout, `none`, `memory`, or `redis`; defaults to `redis` when `RUNTIME_STORE_PROVIDER=redis`, otherwise `memory`
 - `ADMIN_COMMAND_BUS_PROVIDER`: cross-node admin command routing, `none`, `memory`, or `redis`; defaults to `redis` when `RUNTIME_STORE_PROVIDER=redis`, otherwise `memory`
 - `GLOBAL_ADMIN_ENABLED`: when `false`, a room node keeps `/`, `/healthz`, `/readyz`, but disables `/admin` and `/api/admin/*`; defaults to `true`
-- `GLOBAL_ADMIN_API_BASE_URL`: optional admin UI API base URL override, for serving the admin UI and admin API from different origins
+- `GLOBAL_ADMIN_API_BASE_URL`: optional admin UI API base URL override, for serving the admin UI and admin API from different origins; add the UI origin to `ALLOWED_ORIGINS` when using this mode
 - `GLOBAL_ADMIN_PORT`: HTTP port for `server/dist/global-admin-index.js`; defaults to `PORT`, or `8788` when `PORT` is also unset
 - `NODE_HEARTBEAT_ENABLED`: enables node heartbeat reporting to the shared runtime store; defaults to `false`
 - `NODE_HEARTBEAT_INTERVAL_MS`: heartbeat interval in milliseconds; defaults to `15000`

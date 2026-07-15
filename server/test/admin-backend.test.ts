@@ -455,6 +455,108 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
   }
 });
 
+test("admin API supports CORS preflights and responses for allowed origins", async () => {
+  const server = await startAdminServer();
+
+  try {
+    const loginPreflight = await fetch(
+      `${server.httpBaseUrl}/api/admin/auth/login`,
+      {
+        method: "OPTIONS",
+        headers: {
+          Origin: ALLOWED_ORIGIN,
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "content-type",
+        },
+      },
+    );
+    assert.equal(loginPreflight.status, 204);
+    assert.equal(
+      loginPreflight.headers.get("access-control-allow-origin"),
+      ALLOWED_ORIGIN,
+    );
+    assert.equal(
+      loginPreflight.headers.get("access-control-allow-methods"),
+      "GET, POST, OPTIONS",
+    );
+    assert.equal(
+      loginPreflight.headers.get("access-control-allow-headers"),
+      "authorization, content-type",
+    );
+    assert.equal(loginPreflight.headers.get("vary"), "origin");
+
+    const loginResponse = await fetch(
+      `${server.httpBaseUrl}/api/admin/auth/login`,
+      {
+        method: "POST",
+        headers: {
+          Origin: ALLOWED_ORIGIN,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          username: "admin",
+          password: "secret-123",
+        }),
+      },
+    );
+    assert.equal(loginResponse.status, 200);
+    assert.equal(
+      loginResponse.headers.get("access-control-allow-origin"),
+      ALLOWED_ORIGIN,
+    );
+    assert.equal(loginResponse.headers.get("vary"), "origin");
+    const loginPayload = (await loginResponse.json()) as {
+      data: { token: string };
+    };
+
+    const mePreflight = await fetch(`${server.httpBaseUrl}/api/admin/me`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "authorization",
+      },
+    });
+    assert.equal(mePreflight.status, 204);
+    assert.equal(
+      mePreflight.headers.get("access-control-allow-origin"),
+      ALLOWED_ORIGIN,
+    );
+
+    const meResponse = await fetch(`${server.httpBaseUrl}/api/admin/me`, {
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        Authorization: `Bearer ${loginPayload.data.token}`,
+      },
+    });
+    assert.equal(meResponse.status, 200);
+    assert.equal(
+      meResponse.headers.get("access-control-allow-origin"),
+      ALLOWED_ORIGIN,
+    );
+
+    const deniedPreflight = await fetch(
+      `${server.httpBaseUrl}/api/admin/auth/login`,
+      {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://not-allowed.example.com",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "content-type",
+        },
+      },
+    );
+    assert.equal(deniedPreflight.status, 403);
+    assert.equal(
+      deniedPreflight.headers.get("access-control-allow-origin"),
+      null,
+    );
+    assert.equal(deniedPreflight.headers.get("vary"), "origin");
+  } finally {
+    await server.close();
+  }
+});
+
 test("admin overview falls back to server package version", async () => {
   const packageJson = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8"),
