@@ -82,13 +82,6 @@ test("global admin server starts without websocket runtime and serves admin endp
     assert.equal(adminRedirect.status, 302);
     assert.equal(adminRedirect.headers.get("location"), "/admin-next");
 
-    const adminHtml = await fetch(`${baseUrl}/admin-legacy`);
-    assert.equal(adminHtml.status, 200);
-    assert.equal(
-      adminHtml.headers.get("content-type")?.includes("text/html"),
-      true,
-    );
-
     const login = await requestJson(baseUrl, "/api/admin/auth/login", {
       method: "POST",
       body: { username: "admin", password: "secret-123" },

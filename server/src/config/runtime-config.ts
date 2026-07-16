@@ -69,7 +69,6 @@ type PersistenceConfigFile = {
 };
 
 type AdminUiConfigFile = {
-  demoEnabled?: boolean;
   apiBaseUrl?: string;
   enabled?: boolean;
 };

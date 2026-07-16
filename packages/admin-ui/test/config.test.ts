@@ -3,33 +3,17 @@ import { normalizeAdminUiConfig } from "../src/config.js";
 
 describe("normalizeAdminUiConfig", () => {
   it("returns defaults for non-object input", () => {
-    expect(normalizeAdminUiConfig(null)).toEqual({
-      demoEnabled: false,
-      apiBaseUrl: "",
-    });
+    expect(normalizeAdminUiConfig(null)).toEqual({ apiBaseUrl: "" });
     expect(normalizeAdminUiConfig("__ADMIN_UI_CONFIG__")).toEqual({
-      demoEnabled: false,
       apiBaseUrl: "",
     });
-    expect(normalizeAdminUiConfig(undefined)).toEqual({
-      demoEnabled: false,
-      apiBaseUrl: "",
-    });
+    expect(normalizeAdminUiConfig(undefined)).toEqual({ apiBaseUrl: "" });
   });
 
   it("strips trailing slashes from apiBaseUrl", () => {
     expect(
       normalizeAdminUiConfig({ apiBaseUrl: "https://example.com//" }),
-    ).toEqual({ demoEnabled: false, apiBaseUrl: "https://example.com" });
-  });
-
-  it("only accepts demoEnabled === true", () => {
-    expect(normalizeAdminUiConfig({ demoEnabled: true }).demoEnabled).toBe(
-      true,
-    );
-    expect(normalizeAdminUiConfig({ demoEnabled: "yes" }).demoEnabled).toBe(
-      false,
-    );
+    ).toEqual({ apiBaseUrl: "https://example.com" });
   });
 
   it("ignores non-string apiBaseUrl", () => {

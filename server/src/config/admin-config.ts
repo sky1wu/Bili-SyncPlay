@@ -64,7 +64,6 @@ export function loadAdminUiConfig(env: EnvSource = process.env): AdminUiConfig {
   return loadSectionConfigFromEnv(
     env,
     {
-      demoEnabled: false,
       apiBaseUrl: undefined,
       enabled: true,
     },

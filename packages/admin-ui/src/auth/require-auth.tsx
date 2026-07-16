@@ -23,7 +23,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   }
 
   if (!token) {
-    // 保留查询串（如 ?demo=1），登录页依赖它展示演示模式提示。
+    // 保留查询串，登录后回跳与外链进入的筛选条件不因重定向丢失。
     return (
       <Navigate to={{ pathname: "/login", search: location.search }} replace />
     );

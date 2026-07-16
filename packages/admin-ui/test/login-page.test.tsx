@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../src/api/http.js";
 import { AuthContext } from "../src/auth/auth-context.js";
 import type { AuthContextValue } from "../src/auth/auth-context.js";
@@ -76,27 +76,5 @@ describe("LoginPage", () => {
   it("redirects to overview when already authenticated", () => {
     renderLogin(createAuthValue({ token: "token-1" }));
     expect(screen.getByText("overview-page")).toBeTruthy();
-  });
-
-  describe("demo preview notice", () => {
-    afterEach(() => {
-      delete (globalThis as { __ADMIN_UI_CONFIG__?: unknown })
-        .__ADMIN_UI_CONFIG__;
-    });
-
-    it("points demo previews at the legacy panel", () => {
-      (globalThis as { __ADMIN_UI_CONFIG__?: unknown }).__ADMIN_UI_CONFIG__ = {
-        demoEnabled: true,
-      };
-      renderLogin(createAuthValue(), "/login?demo=1");
-
-      expect(screen.getByText("新控制台暂不支持演示模式")).toBeTruthy();
-    });
-
-    it("stays hidden when demo mode is disabled", () => {
-      renderLogin(createAuthValue(), "/login?demo=1");
-
-      expect(screen.queryByText("新控制台暂不支持演示模式")).toBeNull();
-    });
   });
 });

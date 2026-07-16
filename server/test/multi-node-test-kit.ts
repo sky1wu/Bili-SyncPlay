@@ -295,7 +295,6 @@ export async function createMultiNodeTestKit(
         serviceVersion: dependencies.serviceVersion ?? `0.9.0-${name}-test`,
         adminUiConfig: dependencies.adminUiConfig ?? {
           enabled: false,
-          demoEnabled: false,
         },
       },
     );

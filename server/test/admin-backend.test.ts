@@ -227,31 +227,12 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
   const server = await startAdminServer();
 
   try {
-    // /admin 已切换为跳转到新控制台，旧面板保留在 /admin-legacy。
+    // /admin 跳转到新控制台（构建产物由部署提供，此处验证路由语义）。
     const adminRedirect = await fetch(`${server.httpBaseUrl}/admin`, {
       redirect: "manual",
     });
     assert.equal(adminRedirect.status, 302);
     assert.equal(adminRedirect.headers.get("location"), "/admin-next");
-
-    const legacyHtml = await fetch(`${server.httpBaseUrl}/admin-legacy`);
-    assert.equal(legacyHtml.status, 200);
-    assert.equal(
-      legacyHtml.headers.get("content-type")?.includes("text/html"),
-      true,
-    );
-    // 资源前缀在服务时被改写为实际挂载前缀。
-    assert.equal(
-      (await legacyHtml.text()).includes("/admin-legacy/app.js"),
-      true,
-    );
-
-    const adminAsset = await fetch(`${server.httpBaseUrl}/admin-legacy/app.js`);
-    assert.equal(adminAsset.status, 200);
-    assert.equal(
-      adminAsset.headers.get("content-type")?.includes("text/javascript"),
-      true,
-    );
 
     const root = await requestJson(server.httpBaseUrl, "/");
     assert.equal(root.status, 200);
@@ -654,43 +635,6 @@ test("admin overview falls back to server package version", async () => {
     );
   } finally {
     await server.close();
-  }
-});
-
-test("admin demo mode stays disabled by default and only enables when explicitly configured", async () => {
-  const defaultServer = await startAdminServer();
-
-  try {
-    const defaultHtml = await requestText(
-      defaultServer.httpBaseUrl,
-      "/admin-legacy/login?demo=1",
-    );
-    assert.equal(defaultHtml.status, 200);
-    assert.equal(defaultHtml.body.includes('"demoEnabled":false'), true);
-  } finally {
-    await defaultServer.close();
-  }
-
-  const enabledServer = await startAdminServer({
-    adminUiConfig: {
-      demoEnabled: true,
-      apiBaseUrl: "https://admin.example.com",
-    },
-  });
-
-  try {
-    const enabledHtml = await requestText(
-      enabledServer.httpBaseUrl,
-      "/admin-legacy/login?demo=1",
-    );
-    assert.equal(enabledHtml.status, 200);
-    assert.equal(enabledHtml.body.includes('"demoEnabled":true'), true);
-    assert.equal(
-      enabledHtml.body.includes('"apiBaseUrl":"https://admin.example.com"'),
-      true,
-    );
-  } finally {
-    await enabledServer.close();
   }
 });
 

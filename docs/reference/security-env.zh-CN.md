@@ -59,7 +59,6 @@
 - `ADMIN_SESSION_SECRET`：用于绑定后台 Bearer Token 与服务端会话的 secret
 - `ADMIN_SESSION_TTL_MS`：后台会话有效期，单位毫秒；默认 `43200000`（12 小时）
 - `ADMIN_ROLE`：当前唯一后台账号的角色，可选 `viewer`、`operator`、`admin`；默认 `admin`
-- `ADMIN_UI_DEMO_ENABLED`：是否开启后台内置 demo 模式，适用于本地 / 非生产预览；默认 `false`
 
 ## 多节点 provider 与全局管理面
 

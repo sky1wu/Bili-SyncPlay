@@ -35,15 +35,6 @@ $env:ADMIN_ROLE="admin"
 npm run dev:server
 ```
 
-如果你只是在本地或非生产环境下预览后台演示数据，需要显式开启：
-
-```powershell
-$env:ADMIN_UI_DEMO_ENABLED="true"
-npm run dev:server
-```
-
-未开启这个变量时，后台页面上的 `?demo=1` 会被忽略。
-
 本地生成 `sha256:<hex>` 密码哈希：
 
 PowerShell：

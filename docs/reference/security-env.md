@@ -59,7 +59,6 @@ All three of `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH`, and `ADMIN_SESSION_SECRET`
 - `ADMIN_SESSION_SECRET`: secret used to bind bearer tokens to server-side sessions
 - `ADMIN_SESSION_TTL_MS`: admin session lifetime in milliseconds; defaults to `43200000` (12 hours)
 - `ADMIN_ROLE`: role of the single configured admin account, one of `viewer`, `operator`, `admin`; defaults to `admin`
-- `ADMIN_UI_DEMO_ENABLED`: enables the built-in admin UI demo mode for local / non-production preview; defaults to `false`
 
 ## Multi-Node Providers and Global Admin
 

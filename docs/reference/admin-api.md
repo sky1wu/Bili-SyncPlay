@@ -35,15 +35,6 @@ $env:ADMIN_ROLE="admin"
 npm run dev:server
 ```
 
-To enable the built-in admin demo data in a non-production environment, opt in explicitly:
-
-```powershell
-$env:ADMIN_UI_DEMO_ENABLED="true"
-npm run dev:server
-```
-
-When this flag is not enabled, `?demo=1` is ignored by the admin UI.
-
 Generate a `sha256:<hex>` password hash locally:
 
 PowerShell:

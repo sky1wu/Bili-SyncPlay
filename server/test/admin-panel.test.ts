@@ -39,33 +39,24 @@ function createResponse(): {
 
 async function createFixtureDirs() {
   const baseDir = await mkdtemp(path.join(os.tmpdir(), "admin-panel-test-"));
-  const legacyDir = path.join(baseDir, "legacy");
   const nextDir = path.join(baseDir, "next");
   // 与静态根目录同名前缀的兄弟目录，用于验证越界防护不是字符串前缀比较。
   const siblingDir = `${nextDir}-secret`;
-  await mkdir(legacyDir, { recursive: true });
   await mkdir(path.join(nextDir, "assets"), { recursive: true });
   await mkdir(siblingDir, { recursive: true });
   await writeFile(path.join(siblingDir, "leak.js"), "leaked-content");
-  await writeFile(
-    path.join(legacyDir, "index.html"),
-    '<title>legacy</title><script>window.__ADMIN_UI_CONFIG__ = "__ADMIN_UI_CONFIG__";</script><script src="/admin/app.js"></script>',
-  );
   await writeFile(
     path.join(nextDir, "index.html"),
     '<title>next</title><script>window.__ADMIN_UI_CONFIG__ = "__ADMIN_UI_CONFIG__";</script>',
   );
   await writeFile(path.join(nextDir, "assets", "app.js"), "console.log(1);");
-  return { legacyDir, nextDir, siblingDir };
+  return { nextDir, siblingDir };
 }
 
 async function createHandler() {
-  const { legacyDir, nextDir, siblingDir } = await createFixtureDirs();
+  const { nextDir, siblingDir } = await createFixtureDirs();
   const handler = createAdminPanelHandler(
-    [
-      { basePath: "/admin-next", rootDir: nextDir },
-      { basePath: "/admin-legacy", rootDir: legacyDir },
-    ],
+    [{ basePath: "/admin-next", rootDir: nextDir }],
     [{ fromBasePath: "/admin", toBasePath: "/admin-next" }],
   );
   return { handler, siblingDir };
@@ -97,24 +88,7 @@ test("redirects /admin to /admin-next preserving subpath and query", async () =>
   );
 });
 
-test("serves the legacy panel at /admin-legacy with config injection", async () => {
-  const { handler } = await createHandler();
-  const { response, captured } = createResponse();
-
-  const handled = await handler(
-    createRequest("GET", "/admin-legacy"),
-    response,
-  );
-
-  assert.equal(handled, true);
-  assert.equal(captured.statusCode, 200);
-  assert.match(captured.body, /legacy/);
-  assert.doesNotMatch(captured.body, /"__ADMIN_UI_CONFIG__"/);
-  // 硬编码的 /admin/ 资源前缀被改写为实际挂载前缀。
-  assert.match(captured.body, /src="\/admin-legacy\/app\.js"/);
-});
-
-test("serves the next panel at /admin-next instead of the legacy index", async () => {
+test("serves the panel index at /admin-next with config injection", async () => {
   const { handler } = await createHandler();
   const { response, captured } = createResponse();
 
@@ -123,9 +97,8 @@ test("serves the next panel at /admin-next instead of the legacy index", async (
   assert.equal(handled, true);
   assert.equal(captured.statusCode, 200);
   assert.match(captured.body, /next/);
-  assert.doesNotMatch(captured.body, /legacy/);
   // 精确命中 basePath 也必须注入运行时配置，不能返回原始占位符。
-  assert.match(captured.body, /"demoEnabled":false/);
+  assert.match(captured.body, /"enabled":true/);
   assert.doesNotMatch(captured.body, /"__ADMIN_UI_CONFIG__"/);
 });
 
@@ -136,13 +109,12 @@ test("serves SPA index for nested /admin-next routes and injects config", async 
   const handled = await handler(
     createRequest("GET", "/admin-next/rooms"),
     response,
-    { demoEnabled: true, apiBaseUrl: "https://api.example.com", enabled: true },
+    { apiBaseUrl: "https://api.example.com", enabled: true },
   );
 
   assert.equal(handled, true);
   assert.equal(captured.statusCode, 200);
   assert.match(captured.body, /next/);
-  assert.match(captured.body, /"demoEnabled":true/);
   assert.match(captured.body, /"apiBaseUrl":"https:\/\/api\.example\.com"/);
 });
 
@@ -179,13 +151,13 @@ test("keeps no-store caching for index and non-hashed files", async () => {
     "no-cache, no-store, must-revalidate",
   );
 
-  const legacyAsset = createResponse();
+  const indexFile = createResponse();
   await handler(
-    createRequest("GET", "/admin-legacy/index.html"),
-    legacyAsset.response,
+    createRequest("GET", "/admin-next/index.html"),
+    indexFile.response,
   );
   assert.equal(
-    legacyAsset.captured.headers["cache-control"],
+    indexFile.captured.headers["cache-control"],
     "no-cache, no-store, must-revalidate",
   );
 });
@@ -231,7 +203,6 @@ test("ignores unrelated paths and disabled panels", async () => {
   const disabled = createResponse();
   assert.equal(
     await handler(createRequest("GET", "/admin-next"), disabled.response, {
-      demoEnabled: false,
       enabled: false,
     }),
     false,
