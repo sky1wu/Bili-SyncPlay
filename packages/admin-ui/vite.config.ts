@@ -19,6 +19,12 @@ const devProxyEntry: ProxyOptions = {
 export default defineConfig({
   base: "/admin-next/",
   plugins: [react()],
+  build: {
+    // 管理后台是内部工具，不追首屏体积；产物带内容 hash 且服务端已
+    // 对 assets/ 长缓存，单 chunk（AntD+React 约 1.3MB/gzip 404KB）
+    // 只在发版后首次访问下载一次，无需路由级代码分割。
+    chunkSizeWarningLimit: 1500,
+  },
   server: {
     proxy: {
       "/api": devProxyEntry,

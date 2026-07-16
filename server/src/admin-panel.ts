@@ -136,13 +136,21 @@ export function createAdminPanelHandler(
       ? path.join(target.rootDir, "index.html")
       : assetPath;
 
+    // Vite 产物在 assets/ 下且文件名含内容 hash，内容变则 URL 变，
+    // 可安全地长缓存；index.html 与旧面板的非 hash 文件维持禁缓存，
+    // 保证发版即生效。
+    const isImmutableAsset =
+      !shouldServeIndex && sanitizedPath.startsWith(`assets${path.sep}`);
+
     try {
       const body = await readFile(filePath);
       const contentType =
         assetTypes.get(path.extname(filePath)) ?? "application/octet-stream";
       response.writeHead(200, {
         "content-type": contentType,
-        "cache-control": "no-cache, no-store, must-revalidate",
+        "cache-control": isImmutableAsset
+          ? "public, max-age=31536000, immutable"
+          : "no-cache, no-store, must-revalidate",
       });
 
       if (request.method === "HEAD") {

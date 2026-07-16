@@ -162,6 +162,32 @@ test("serves hashed assets under /admin-next/assets", async () => {
     "text/javascript; charset=utf-8",
   );
   assert.equal(captured.body, "console.log(1);");
+  // assets/ 下的内容寻址产物可长缓存。
+  assert.equal(
+    captured.headers["cache-control"],
+    "public, max-age=31536000, immutable",
+  );
+});
+
+test("keeps no-store caching for index and non-hashed files", async () => {
+  const { handler } = await createHandler();
+
+  const index = createResponse();
+  await handler(createRequest("GET", "/admin-next"), index.response);
+  assert.equal(
+    index.captured.headers["cache-control"],
+    "no-cache, no-store, must-revalidate",
+  );
+
+  const legacyAsset = createResponse();
+  await handler(
+    createRequest("GET", "/admin-legacy/index.html"),
+    legacyAsset.response,
+  );
+  assert.equal(
+    legacyAsset.captured.headers["cache-control"],
+    "no-cache, no-store, must-revalidate",
+  );
 });
 
 test("rejects path traversal outside the panel root", async () => {
