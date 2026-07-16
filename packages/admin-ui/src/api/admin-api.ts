@@ -2,6 +2,7 @@ import type { HttpClient } from "./http.js";
 import { toQueryString } from "./query-string.js";
 import type {
   AdminActionResult,
+  AdminConfigSummary,
   AdminLoginRequest,
   AdminLoginResult,
   AdminLogoutResult,
@@ -73,6 +74,9 @@ export function createAdminApi(client: HttpClient) {
         `/api/admin/rooms/${encodeURIComponent(roomCode)}/members/${encodeURIComponent(memberId)}/kick`,
         { method: "POST", body: { reason: reason || undefined } },
       );
+    },
+    getConfig(): Promise<AdminConfigSummary> {
+      return client.request("/api/admin/config");
     },
     listEvents(query: EventListQuery = {}): Promise<EventListResult> {
       return client.request(`/api/admin/events${toQueryString(query)}`);

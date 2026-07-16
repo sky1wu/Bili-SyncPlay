@@ -14,6 +14,7 @@ export function createStubApi(
     getRoomDetail: vi.fn(),
     listEvents: vi.fn(),
     listAuditLogs: vi.fn(),
+    getConfig: vi.fn(),
     closeRoom: vi.fn(),
     expireRoom: vi.fn(),
     clearRoomVideo: vi.fn(),
