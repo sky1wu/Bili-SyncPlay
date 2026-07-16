@@ -1,11 +1,16 @@
 import type { HttpClient } from "./http.js";
+import { toQueryString } from "./query-string.js";
 import type {
+  AdminActionResult,
   AdminLoginRequest,
   AdminLoginResult,
   AdminLogoutResult,
   AdminMeResult,
   AdminOverview,
   ReadyStatus,
+  RoomDetail,
+  RoomListQuery,
+  RoomListResult,
 } from "./types.js";
 
 export function createAdminApi(client: HttpClient) {
@@ -27,6 +32,52 @@ export function createAdminApi(client: HttpClient) {
     },
     getReady(): Promise<ReadyStatus> {
       return client.request("/readyz");
+    },
+    listRooms(query: RoomListQuery = {}): Promise<RoomListResult> {
+      return client.request(`/api/admin/rooms${toQueryString(query)}`);
+    },
+    getRoomDetail(roomCode: string): Promise<RoomDetail> {
+      return client.request(`/api/admin/rooms/${encodeURIComponent(roomCode)}`);
+    },
+    closeRoom(roomCode: string, reason?: string): Promise<AdminActionResult> {
+      return client.request(
+        `/api/admin/rooms/${encodeURIComponent(roomCode)}/close`,
+        { method: "POST", body: { reason: reason || undefined } },
+      );
+    },
+    expireRoom(roomCode: string, reason?: string): Promise<AdminActionResult> {
+      return client.request(
+        `/api/admin/rooms/${encodeURIComponent(roomCode)}/expire`,
+        { method: "POST", body: { reason: reason || undefined } },
+      );
+    },
+    clearRoomVideo(
+      roomCode: string,
+      reason?: string,
+    ): Promise<AdminActionResult> {
+      return client.request(
+        `/api/admin/rooms/${encodeURIComponent(roomCode)}/clear-video`,
+        { method: "POST", body: { reason: reason || undefined } },
+      );
+    },
+    kickMember(
+      roomCode: string,
+      memberId: string,
+      reason?: string,
+    ): Promise<AdminActionResult> {
+      return client.request(
+        `/api/admin/rooms/${encodeURIComponent(roomCode)}/members/${encodeURIComponent(memberId)}/kick`,
+        { method: "POST", body: { reason: reason || undefined } },
+      );
+    },
+    disconnectSession(
+      sessionId: string,
+      reason?: string,
+    ): Promise<AdminActionResult> {
+      return client.request(
+        `/api/admin/sessions/${encodeURIComponent(sessionId)}/disconnect`,
+        { method: "POST", body: { reason: reason || undefined } },
+      );
     },
   };
 }

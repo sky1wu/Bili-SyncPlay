@@ -30,5 +30,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./test/setup.ts"],
+    // antd 组件交互测试（userEvent + 弹窗/下拉）在 CI 覆盖率插桩下
+    // 会超过默认 5s，放宽到 15s。
+    testTimeout: 15_000,
   },
 });

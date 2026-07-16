@@ -5,6 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { AdminOverview, ReadyStatus } from "../src/api/types.js";
 import { AuthContext } from "../src/auth/auth-context.js";
 import type { AuthContextValue } from "../src/auth/auth-context.js";
+import {
+  createAuthValue as createTestAuthValue,
+  createStubApi,
+} from "./helpers.js";
 import { OverviewPage } from "../src/pages/overview/overview-page.js";
 
 function createOverviewFixture(
@@ -69,23 +73,11 @@ const readyFixture: ReadyStatus = {
 };
 
 function createAuthValue(api: Partial<AuthContextValue["api"]>) {
-  return {
+  return createTestAuthValue({
     token: "token-1",
     me: { id: "admin-1", username: "ops", role: "admin" },
-    initializing: false,
-    meError: "",
-    api: {
-      login: vi.fn(),
-      logout: vi.fn(),
-      getMe: vi.fn(),
-      getOverview: vi.fn(),
-      getReady: vi.fn(),
-      ...api,
-    },
-    signIn: vi.fn(),
-    signOut: vi.fn(),
-    retryLoadMe: vi.fn(),
-  } as AuthContextValue;
+    api: createStubApi(api),
+  });
 }
 
 function renderOverview(authValue: AuthContextValue) {

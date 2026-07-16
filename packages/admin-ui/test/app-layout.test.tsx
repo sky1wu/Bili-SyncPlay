@@ -1,31 +1,20 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { AuthContext } from "../src/auth/auth-context.js";
 import type { AuthContextValue } from "../src/auth/auth-context.js";
+import { createAuthValue } from "./helpers.js";
 import { AppLayout } from "../src/layout/app-layout.js";
 
-function createAuthValue(
+function createLayoutAuthValue(
   overrides: Partial<AuthContextValue> = {},
 ): AuthContextValue {
-  return {
+  return createAuthValue({
     token: "token-1",
     me: { id: "admin-1", username: "ops", role: "operator" },
-    initializing: false,
-    meError: "",
-    api: {
-      login: vi.fn(),
-      logout: vi.fn(),
-      getMe: vi.fn(),
-      getOverview: vi.fn(),
-      getReady: vi.fn(),
-    },
-    signIn: vi.fn().mockResolvedValue(undefined),
-    signOut: vi.fn().mockResolvedValue(undefined),
-    retryLoadMe: vi.fn(),
     ...overrides,
-  };
+  });
 }
 
 function renderLayout(authValue: AuthContextValue) {
@@ -45,7 +34,7 @@ function renderLayout(authValue: AuthContextValue) {
 
 describe("AppLayout", () => {
   it("renders navigation, user info and the active page content", () => {
-    renderLayout(createAuthValue());
+    renderLayout(createLayoutAuthValue());
 
     for (const label of [
       "概览",
@@ -64,7 +53,7 @@ describe("AppLayout", () => {
 
   it("signs out and navigates to login", async () => {
     const user = userEvent.setup();
-    const authValue = createAuthValue();
+    const authValue = createLayoutAuthValue();
     renderLayout(authValue);
 
     await user.click(screen.getByRole("button", { name: /退\s*出/ }));
