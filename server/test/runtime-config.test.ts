@@ -303,6 +303,31 @@ test("runtime config rejects unsupported admin config in file", async () => {
   });
 });
 
+test("runtime config tolerates deprecated adminUi.demoEnabled in file", async () => {
+  await withTempDir(async (tempDir) => {
+    await writeFile(
+      join(tempDir, "server.config.json"),
+      JSON.stringify({
+        adminUi: {
+          demoEnabled: true,
+          apiBaseUrl: "https://admin.example.com",
+        },
+      }),
+      "utf8",
+    );
+
+    // 已废弃的键必须被忽略而非拒绝启动（线上配置文件残留导致 crash loop）。
+    const config = await loadRuntimeConfig(
+      { ALLOW_MISSING_ORIGIN_IN_DEV: "true" },
+      { cwd: tempDir },
+    );
+    assert.deepEqual(config.adminUiConfig, {
+      apiBaseUrl: "https://admin.example.com",
+      enabled: true,
+    });
+  });
+});
+
 test("runtime config reports invalid JSON config files", async () => {
   await withTempDir(async (tempDir) => {
     await writeFile(join(tempDir, "server.config.json"), "{invalid", "utf8");

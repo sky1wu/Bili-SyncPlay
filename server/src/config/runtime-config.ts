@@ -101,15 +101,27 @@ function isPlainObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// 已从 schema 移除的历史配置键：容忍并告警，避免升级变成破坏性变更
+// （严格校验只用于拦截拼写错误，不应拒绝旧配置文件启动）。
+const DEPRECATED_CONFIG_KEYS = new Set(["adminUi.demoEnabled"]);
+
 function assertAllowedKeys(
   scope: string,
   value: JsonObject,
   allowedKeys: readonly string[],
 ): void {
   for (const key of Object.keys(value)) {
-    if (!allowedKeys.includes(key)) {
-      throw new Error(`Unsupported config key "${scope}${key}".`);
+    if (allowedKeys.includes(key)) {
+      continue;
     }
+    if (DEPRECATED_CONFIG_KEYS.has(`${scope}${key}`)) {
+      console.warn(
+        `[config] Ignoring deprecated config key "${scope}${key}"; remove it from the config file.`,
+      );
+      delete value[key];
+      continue;
+    }
+    throw new Error(`Unsupported config key "${scope}${key}".`);
   }
 }
 
