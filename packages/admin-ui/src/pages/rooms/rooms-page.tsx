@@ -19,6 +19,8 @@ import type {
 import { useAuth } from "../../auth/auth-context.js";
 import { formatTime } from "../../lib/format.js";
 import { canManage } from "../../lib/roles.js";
+import { BatchResultModal } from "./batch-result-modal.js";
+import type { BatchOutcome, BatchResult } from "./batch-result-modal.js";
 import { ReasonModal } from "./reason-modal.js";
 import type { PendingGovernanceAction } from "./reason-modal.js";
 import { RoomDetailDrawer } from "./room-detail-drawer.js";
@@ -66,6 +68,8 @@ export function RoomsPage() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [pendingAction, setPendingAction] =
     useState<PendingGovernanceAction | null>(null);
+  const [selectedRoomCodes, setSelectedRoomCodes] = useState<string[]>([]);
+  const [batchResult, setBatchResult] = useState<BatchResult | null>(null);
 
   const query = queryFromSearchParams(searchParams);
   const roomsQuery = useRoomsQuery(query, autoRefresh);
@@ -135,6 +139,63 @@ export function RoomsPage() {
     }),
   };
 
+  const runBatch = async (
+    roomCodes: string[],
+    title: string,
+    action: (roomCode: string, reason: string) => Promise<unknown>,
+    reason: string,
+  ) => {
+    const outcomes: BatchOutcome[] = [];
+    // 顺序执行避免瞬时打爆管理接口；管理场景下批量规模有限。
+    for (const roomCode of roomCodes) {
+      try {
+        await action(roomCode, reason);
+        outcomes.push({ roomCode, ok: true });
+      } catch (cause) {
+        outcomes.push({
+          roomCode,
+          ok: false,
+          message: cause instanceof Error ? cause.message : "请求失败。",
+        });
+      }
+    }
+    // 失败的房间保持勾选，便于修正后重试。
+    setSelectedRoomCodes(
+      outcomes
+        .filter((outcome) => !outcome.ok)
+        .map((outcome) => outcome.roomCode),
+    );
+    setBatchResult({ title, outcomes });
+    await queryClient.invalidateQueries({ queryKey: ["rooms"] });
+    await queryClient.invalidateQueries({ queryKey: ["room"] });
+  };
+
+  const batchGovernance = {
+    closeRooms: (roomCodes: string[]): PendingGovernanceAction => ({
+      title: `批量关闭 ${roomCodes.length} 个房间`,
+      description: "关闭后房间立即解散，所有在线成员会被断开。",
+      danger: true,
+      execute: (reason) =>
+        runBatch(
+          roomCodes,
+          "批量关闭结果",
+          (roomCode, batchReason) => api.closeRoom(roomCode, batchReason),
+          reason,
+        ),
+    }),
+    expireRooms: (roomCodes: string[]): PendingGovernanceAction => ({
+      title: `批量提前过期 ${roomCodes.length} 个房间`,
+      description: "仅空闲房间可提前过期；仍有在线成员的房间会失败并列出。",
+      execute: (reason) =>
+        runBatch(
+          roomCodes,
+          "批量提前过期结果",
+          (roomCode, batchReason) => api.expireRoom(roomCode, batchReason),
+          reason,
+        ),
+    }),
+  };
+
   const memberGovernance = {
     kickMember: (
       room: RoomSummary,
@@ -180,6 +241,41 @@ export function RoomsPage() {
               更新于 {formatTime(roomsQuery.dataUpdatedAt)}
             </Typography.Text>
           </Space>
+          {manageable && selectedRoomCodes.length > 0 ? (
+            <Space wrap>
+              <Typography.Text strong>
+                已选 {selectedRoomCodes.length} 个房间
+              </Typography.Text>
+              <Button
+                danger
+                size="small"
+                onClick={() =>
+                  setPendingAction(
+                    batchGovernance.closeRooms(selectedRoomCodes),
+                  )
+                }
+              >
+                批量关闭
+              </Button>
+              <Button
+                size="small"
+                onClick={() =>
+                  setPendingAction(
+                    batchGovernance.expireRooms(selectedRoomCodes),
+                  )
+                }
+              >
+                批量过期
+              </Button>
+              <Button
+                size="small"
+                type="text"
+                onClick={() => setSelectedRoomCodes([])}
+              >
+                取消选择
+              </Button>
+            </Space>
+          ) : null}
         </Space>
       </Card>
 
@@ -205,6 +301,8 @@ export function RoomsPage() {
           loading={roomsQuery.isPending}
           query={query}
           manageable={manageable}
+          selectedRoomCodes={selectedRoomCodes}
+          onSelectionChange={setSelectedRoomCodes}
           onQueryChange={updateQuery}
           onOpenRoom={openRoom}
           onAction={setPendingAction}
@@ -225,6 +323,11 @@ export function RoomsPage() {
       <ReasonModal
         pending={pendingAction}
         onClose={() => setPendingAction(null)}
+      />
+
+      <BatchResultModal
+        result={batchResult}
+        onClose={() => setBatchResult(null)}
       />
     </Space>
   );
