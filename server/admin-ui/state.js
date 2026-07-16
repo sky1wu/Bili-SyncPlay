@@ -62,12 +62,19 @@ export function resolveApiPath(path) {
   return `${baseUrl}${path}`;
 }
 
+// 面板可能挂在 /admin（历史入口）或 /admin-legacy（切换到新控制台后的
+// 回退入口），路由前缀按当前地址推导，不能写死。
+export function getBasePath(pathname = globalThis.location?.pathname) {
+  return pathname?.startsWith("/admin-legacy") ? "/admin-legacy" : "/admin";
+}
+
 export function normalizePath(pathname, token = state.token) {
-  if (!pathname.startsWith("/admin")) {
+  const basePath = getBasePath(pathname);
+  if (!pathname.startsWith(basePath)) {
     return "/login";
   }
 
-  const path = pathname.slice("/admin".length) || "/overview";
+  const path = pathname.slice(basePath.length) || "/overview";
   if (path === "/") {
     return token ? "/overview" : "/login";
   }
@@ -75,7 +82,7 @@ export function normalizePath(pathname, token = state.token) {
 }
 
 export function routeHref(path) {
-  return `/admin${path}`;
+  return `${getBasePath()}${path}`;
 }
 
 export function withDemoQuery(url, isDemo = state.demo) {
