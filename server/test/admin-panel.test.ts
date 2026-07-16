@@ -49,7 +49,7 @@ async function createFixtureDirs() {
   await writeFile(path.join(siblingDir, "leak.js"), "leaked-content");
   await writeFile(
     path.join(legacyDir, "index.html"),
-    '<title>legacy</title><script>window.__ADMIN_UI_CONFIG__ = "__ADMIN_UI_CONFIG__";</script>',
+    '<title>legacy</title><script>window.__ADMIN_UI_CONFIG__ = "__ADMIN_UI_CONFIG__";</script><script src="/admin/app.js"></script>',
   );
   await writeFile(
     path.join(nextDir, "index.html"),
@@ -61,22 +61,57 @@ async function createFixtureDirs() {
 
 async function createHandler() {
   const { legacyDir, nextDir, siblingDir } = await createFixtureDirs();
-  const handler = createAdminPanelHandler([
-    { basePath: "/admin-next", rootDir: nextDir },
-    { basePath: "/admin", rootDir: legacyDir },
-  ]);
+  const handler = createAdminPanelHandler(
+    [
+      { basePath: "/admin-next", rootDir: nextDir },
+      { basePath: "/admin-legacy", rootDir: legacyDir },
+    ],
+    [{ fromBasePath: "/admin", toBasePath: "/admin-next" }],
+  );
   return { handler, siblingDir };
 }
 
-test("serves the legacy panel index at /admin", async () => {
+test("redirects /admin to /admin-next preserving subpath and query", async () => {
+  const { handler } = await createHandler();
+
+  const root = createResponse();
+  assert.equal(
+    await handler(createRequest("GET", "/admin"), root.response),
+    true,
+  );
+  assert.equal(root.captured.statusCode, 302);
+  assert.equal(root.captured.headers["location"], "/admin-next");
+
+  const nested = createResponse();
+  assert.equal(
+    await handler(
+      createRequest("GET", "/admin/rooms?keyword=a&page=2"),
+      nested.response,
+    ),
+    true,
+  );
+  assert.equal(nested.captured.statusCode, 302);
+  assert.equal(
+    nested.captured.headers["location"],
+    "/admin-next/rooms?keyword=a&page=2",
+  );
+});
+
+test("serves the legacy panel at /admin-legacy with config injection", async () => {
   const { handler } = await createHandler();
   const { response, captured } = createResponse();
 
-  const handled = await handler(createRequest("GET", "/admin"), response);
+  const handled = await handler(
+    createRequest("GET", "/admin-legacy"),
+    response,
+  );
 
   assert.equal(handled, true);
   assert.equal(captured.statusCode, 200);
   assert.match(captured.body, /legacy/);
+  assert.doesNotMatch(captured.body, /"__ADMIN_UI_CONFIG__"/);
+  // 硬编码的 /admin/ 资源前缀被改写为实际挂载前缀。
+  assert.match(captured.body, /src="\/admin-legacy\/app\.js"/);
 });
 
 test("serves the next panel at /admin-next instead of the legacy index", async () => {

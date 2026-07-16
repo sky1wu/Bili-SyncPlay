@@ -96,6 +96,8 @@ export function createHttpRequestHandler(args: {
           pathname.startsWith("/admin/") ||
           pathname === "/admin-next" ||
           pathname.startsWith("/admin-next/") ||
+          pathname === "/admin-legacy" ||
+          pathname.startsWith("/admin-legacy/") ||
           pathname.startsWith("/api/admin/"))
       ) {
         response.writeHead(404, { "content-type": "application/json" });

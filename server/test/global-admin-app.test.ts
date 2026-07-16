@@ -76,7 +76,13 @@ test("global admin server starts without websocket runtime and serves admin endp
   const baseUrl = `http://127.0.0.1:${address.port}`;
 
   try {
-    const adminHtml = await fetch(`${baseUrl}/admin`);
+    const adminRedirect = await fetch(`${baseUrl}/admin`, {
+      redirect: "manual",
+    });
+    assert.equal(adminRedirect.status, 302);
+    assert.equal(adminRedirect.headers.get("location"), "/admin-next");
+
+    const adminHtml = await fetch(`${baseUrl}/admin-legacy`);
     assert.equal(adminHtml.status, 200);
     assert.equal(
       adminHtml.headers.get("content-type")?.includes("text/html"),

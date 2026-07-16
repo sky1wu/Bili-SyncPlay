@@ -13,9 +13,20 @@ export type AdminPanelTarget = {
   rootDir: string;
 };
 
+export type AdminPanelRedirect = {
+  fromBasePath: string;
+  toBasePath: string;
+};
+
 const defaultTargets: readonly AdminPanelTarget[] = [
   { basePath: "/admin-next", rootDir: nextAdminUiDir },
-  { basePath: "/admin", rootDir: legacyAdminUiDir },
+  // 旧面板保留在 /admin-legacy 作为切换后的回退入口，随删除 PR 下线。
+  { basePath: "/admin-legacy", rootDir: legacyAdminUiDir },
+];
+
+// /admin 正式指向新控制台：302 保留子路径与查询串。
+const defaultRedirects: readonly AdminPanelRedirect[] = [
+  { fromBasePath: "/admin", toBasePath: "/admin-next" },
 ];
 
 const defaultAdminUiConfig: AdminUiConfig = {
@@ -54,6 +65,7 @@ function matchTarget(
 
 export function createAdminPanelHandler(
   targets: readonly AdminPanelTarget[] = defaultTargets,
+  redirects: readonly AdminPanelRedirect[] = defaultRedirects,
 ) {
   return async function tryHandle(
     request: IncomingMessage,
@@ -69,6 +81,21 @@ export function createAdminPanelHandler(
     }
 
     const url = new URL(request.url ?? "/", "http://localhost");
+
+    for (const redirect of redirects) {
+      if (
+        url.pathname === redirect.fromBasePath ||
+        url.pathname.startsWith(`${redirect.fromBasePath}/`)
+      ) {
+        const location = `${redirect.toBasePath}${url.pathname.slice(
+          redirect.fromBasePath.length,
+        )}${url.search}`;
+        response.writeHead(302, { location });
+        response.end();
+        return true;
+      }
+    }
+
     const target = matchTarget(url.pathname, targets);
     if (!target) {
       return false;
@@ -124,18 +151,23 @@ export function createAdminPanelHandler(
       }
 
       if (shouldServeIndex) {
-        const html = body.toString("utf8").replace(
-          '"__ADMIN_UI_CONFIG__"',
-          JSON.stringify({
-            demoEnabled: adminUiConfig.demoEnabled === true,
-            apiBaseUrl:
-              typeof adminUiConfig.apiBaseUrl === "string" &&
-              adminUiConfig.apiBaseUrl.length > 0
-                ? adminUiConfig.apiBaseUrl
-                : undefined,
-            enabled: adminUiConfig.enabled ?? true,
-          }),
-        );
+        const html = body
+          .toString("utf8")
+          .replace(
+            '"__ADMIN_UI_CONFIG__"',
+            JSON.stringify({
+              demoEnabled: adminUiConfig.demoEnabled === true,
+              apiBaseUrl:
+                typeof adminUiConfig.apiBaseUrl === "string" &&
+                adminUiConfig.apiBaseUrl.length > 0
+                  ? adminUiConfig.apiBaseUrl
+                  : undefined,
+              enabled: adminUiConfig.enabled ?? true,
+            }),
+          )
+          // 旧面板 index.html 的资源引用硬编码 /admin/ 前缀；面板挂载
+          // 前缀可变（如回退入口 /admin-legacy），服务时改写为实际前缀。
+          .replaceAll('="/admin/', `="${target.basePath}/`);
         response.end(html);
         return true;
       }

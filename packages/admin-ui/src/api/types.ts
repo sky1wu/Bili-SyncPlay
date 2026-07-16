@@ -241,3 +241,37 @@ export type AuditLogListResult = {
   total: number;
   pagination: ListPaginationMeta;
 };
+
+export type AdminConfigSummary = {
+  instanceId: string;
+  persistence: {
+    provider: string;
+    emptyRoomTtlMs: number;
+    roomCleanupIntervalMs: number;
+    redisConfigured: boolean;
+  };
+  security: {
+    allowedOrigins: string[];
+    allowMissingOriginInDev: boolean;
+    allowAnyFirefoxExtensionOrigin: boolean;
+    trustedProxyAddresses: string[];
+    maxConnectionsPerIp: number;
+    connectionAttemptsPerMinute: number;
+    maxMembersPerRoom: number;
+    maxMessageBytes: number;
+    invalidMessageCloseThreshold: number;
+    wsHeartbeatEnabled: boolean;
+    wsHeartbeatIntervalMs: number;
+    rateLimits: Record<string, number>;
+  };
+  admin:
+    | {
+        configured: true;
+        username: string;
+        role: AdminRole;
+        sessionTtlMs: number;
+      }
+    | {
+        configured: false;
+      };
+};

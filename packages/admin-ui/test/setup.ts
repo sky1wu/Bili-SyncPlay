@@ -1,5 +1,9 @@
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach } from "vitest";
+
+// findBy*/waitFor 默认 1s，在 CI 覆盖率插桩 + 多 worker 争抢下不够，
+// 统一放宽（真正的失败仍会在 10s 内报出，只影响失败用例的等待时长）。
+configure({ asyncUtilTimeout: 10_000 });
 
 afterEach(() => {
   cleanup();

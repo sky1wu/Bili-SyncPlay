@@ -194,6 +194,7 @@ function bindPageButtons({
   history,
   state,
   rerender,
+  routeHref,
   basePath,
 }) {
   document.querySelectorAll("[data-page-target]").forEach((button) => {
@@ -203,7 +204,11 @@ function bindPageButtons({
       if (state.demo) {
         params.set("demo", "1");
       }
-      history.replaceState(null, "", `/admin${basePath}?${params.toString()}`);
+      history.replaceState(
+        null,
+        "",
+        `${routeHref(basePath)}?${params.toString()}`,
+      );
       rerender();
     });
   });
@@ -835,7 +840,7 @@ export function createPageLoaders(options) {
                   event.currentTarget.getAttribute("data-jump-events");
                 navigateToUrl(
                   withDemoQuery(
-                    `/admin/events?${new URLSearchParams({ roomCode: targetRoomCode }).toString()}`,
+                    `${routeHref("/events")}?${new URLSearchParams({ roomCode: targetRoomCode }).toString()}`,
                   ),
                   "/events",
                   true,

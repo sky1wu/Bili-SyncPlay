@@ -79,8 +79,9 @@ export function LoginPage() {
             message="新控制台暂不支持演示模式"
             description={
               <>
-                演示预览请使用旧面板 <a href="/admin?demo=1">/admin?demo=1</a>
-                ，新控制台的演示支持将随页面迁移逐步补齐。
+                演示预览请使用旧面板{" "}
+                <a href="/admin-legacy?demo=1">/admin-legacy?demo=1</a>
+                ，新控制台暂不提供演示数据。
               </>
             }
             showIcon

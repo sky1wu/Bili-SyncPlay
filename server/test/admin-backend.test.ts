@@ -227,15 +227,26 @@ test("admin endpoints support auth, overview, rooms, and events without breaking
   const server = await startAdminServer();
 
   try {
-    const adminHtml = await fetch(`${server.httpBaseUrl}/admin`);
-    assert.equal(adminHtml.status, 200);
+    // /admin 已切换为跳转到新控制台，旧面板保留在 /admin-legacy。
+    const adminRedirect = await fetch(`${server.httpBaseUrl}/admin`, {
+      redirect: "manual",
+    });
+    assert.equal(adminRedirect.status, 302);
+    assert.equal(adminRedirect.headers.get("location"), "/admin-next");
+
+    const legacyHtml = await fetch(`${server.httpBaseUrl}/admin-legacy`);
+    assert.equal(legacyHtml.status, 200);
     assert.equal(
-      adminHtml.headers.get("content-type")?.includes("text/html"),
+      legacyHtml.headers.get("content-type")?.includes("text/html"),
       true,
     );
-    assert.equal((await adminHtml.text()).includes("/admin/app.js"), true);
+    // 资源前缀在服务时被改写为实际挂载前缀。
+    assert.equal(
+      (await legacyHtml.text()).includes("/admin-legacy/app.js"),
+      true,
+    );
 
-    const adminAsset = await fetch(`${server.httpBaseUrl}/admin/app.js`);
+    const adminAsset = await fetch(`${server.httpBaseUrl}/admin-legacy/app.js`);
     assert.equal(adminAsset.status, 200);
     assert.equal(
       adminAsset.headers.get("content-type")?.includes("text/javascript"),
@@ -652,7 +663,7 @@ test("admin demo mode stays disabled by default and only enables when explicitly
   try {
     const defaultHtml = await requestText(
       defaultServer.httpBaseUrl,
-      "/admin/login?demo=1",
+      "/admin-legacy/login?demo=1",
     );
     assert.equal(defaultHtml.status, 200);
     assert.equal(defaultHtml.body.includes('"demoEnabled":false'), true);
@@ -670,7 +681,7 @@ test("admin demo mode stays disabled by default and only enables when explicitly
   try {
     const enabledHtml = await requestText(
       enabledServer.httpBaseUrl,
-      "/admin/login?demo=1",
+      "/admin-legacy/login?demo=1",
     );
     assert.equal(enabledHtml.status, 200);
     assert.equal(enabledHtml.body.includes('"demoEnabled":true'), true);
