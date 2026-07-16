@@ -23,7 +23,7 @@ function renderLogin(authValue: AuthContextValue, initialEntry = "/login") {
 
 describe("LoginPage", () => {
   it("submits trimmed credentials and navigates to overview", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const authValue = createAuthValue();
     renderLogin(authValue);
 
@@ -38,7 +38,7 @@ describe("LoginPage", () => {
   });
 
   it("shows the error message when sign-in fails", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const authValue = createAuthValue({
       signIn: vi.fn().mockRejectedValue(new Error("用户名或密码错误。")),
     });
@@ -52,7 +52,7 @@ describe("LoginPage", () => {
   });
 
   it("maps invalid_credentials to a friendly Chinese message", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const authValue = createAuthValue({
       signIn: vi
         .fn()

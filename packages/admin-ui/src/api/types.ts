@@ -170,3 +170,74 @@ export type RoomDetail = {
 };
 
 export type AdminActionResult = Record<string, unknown>;
+
+export type ListPaginationMeta = {
+  page: number;
+  pageSize: number;
+};
+
+export type EventListQuery = {
+  event?: string;
+  roomCode?: string;
+  sessionId?: string;
+  remoteAddress?: string;
+  origin?: string;
+  result?: string;
+  includeSystem?: boolean;
+  from?: number;
+  to?: number;
+  page?: number;
+  pageSize?: number;
+};
+
+export type EventListResult = {
+  items: RuntimeEventRecord[];
+  total: number;
+  pagination: ListPaginationMeta;
+};
+
+export type AuditTargetType =
+  "room" | "session" | "member" | "config" | "block";
+export type AuditResult = "ok" | "rejected" | "error";
+
+export type AuditActor = {
+  adminId: string;
+  username: string;
+  role: AdminRole;
+};
+
+export type AuditLogRecord = {
+  id: string;
+  timestamp: string;
+  actor: AuditActor;
+  action: string;
+  targetType: AuditTargetType;
+  targetId: string;
+  request: Record<string, unknown>;
+  result: AuditResult;
+  reason?: string;
+  instanceId?: string;
+  targetInstanceId?: string;
+  executorInstanceId?: string;
+  commandRequestId?: string;
+  commandStatus?: "ok" | "not_found" | "stale_target" | "error";
+  commandCode?: string;
+};
+
+export type AuditLogQuery = {
+  actor?: string;
+  action?: string;
+  targetId?: string;
+  targetType?: AuditTargetType;
+  result?: AuditResult;
+  from?: number;
+  to?: number;
+  page?: number;
+  pageSize?: number;
+};
+
+export type AuditLogListResult = {
+  items: AuditLogRecord[];
+  total: number;
+  pagination: ListPaginationMeta;
+};

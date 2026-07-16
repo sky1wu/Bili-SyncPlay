@@ -131,7 +131,7 @@ describe("OverviewPage", () => {
       .fn()
       .mockRejectedValueOnce(new Error("网络错误"))
       .mockResolvedValue(createOverviewFixture());
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderOverview(
       createAuthValue({
         getOverview,
@@ -148,7 +148,7 @@ describe("OverviewPage", () => {
 
   it("refetches when clicking manual refresh", async () => {
     const getOverview = vi.fn().mockResolvedValue(createOverviewFixture());
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderOverview(
       createAuthValue({
         getOverview,

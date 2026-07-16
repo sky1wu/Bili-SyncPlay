@@ -46,7 +46,7 @@ describe("RequireAuth", () => {
   });
 
   it("shows a retryable error instead of dropping the session on meError", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const authValue = createAuthValue({
       token: "token-1",
       meError: "服务暂时不可用",

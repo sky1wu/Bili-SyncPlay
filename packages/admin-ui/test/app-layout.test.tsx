@@ -52,7 +52,7 @@ describe("AppLayout", () => {
   });
 
   it("signs out and navigates to login", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const authValue = createLayoutAuthValue();
     renderLayout(authValue);
 

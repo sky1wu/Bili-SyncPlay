@@ -9,6 +9,8 @@ import { createQueryClient } from "./data/query-client.js";
 import { AppLayout } from "./layout/app-layout.js";
 import { NAV_ITEMS } from "./layout/nav-items.js";
 import { LoginPage } from "./pages/login-page.js";
+import { AuditLogsPage } from "./pages/audit/audit-page.js";
+import { EventsPage } from "./pages/events/events-page.js";
 import { OverviewPage } from "./pages/overview/overview-page.js";
 import { PlaceholderPage } from "./pages/placeholder-page.js";
 import { RoomsPage } from "./pages/rooms/rooms-page.js";
@@ -34,21 +36,22 @@ export function App() {
                   <Route path="/overview" element={<OverviewPage />} />
                   <Route path="/rooms" element={<RoomsPage />} />
                   <Route path="/rooms/:roomCode" element={<RoomsPage />} />
-                  {NAV_ITEMS.filter(
-                    (item) =>
-                      item.path !== "/overview" && item.path !== "/rooms",
-                  ).map((item) => (
-                    <Route
-                      key={item.path}
-                      path={item.path}
-                      element={
-                        <PlaceholderPage
-                          title={item.label}
-                          description={item.description}
-                        />
-                      }
-                    />
-                  ))}
+                  <Route path="/events" element={<EventsPage />} />
+                  <Route path="/audit-logs" element={<AuditLogsPage />} />
+                  {NAV_ITEMS.filter((item) => item.path === "/config").map(
+                    (item) => (
+                      <Route
+                        key={item.path}
+                        path={item.path}
+                        element={
+                          <PlaceholderPage
+                            title={item.label}
+                            description={item.description}
+                          />
+                        }
+                      />
+                    ),
+                  )}
                   <Route
                     path="*"
                     element={<Navigate to="/overview" replace />}

@@ -7,6 +7,10 @@ import type {
   AdminLogoutResult,
   AdminMeResult,
   AdminOverview,
+  AuditLogListResult,
+  AuditLogQuery,
+  EventListQuery,
+  EventListResult,
   ReadyStatus,
   RoomDetail,
   RoomListQuery,
@@ -69,6 +73,12 @@ export function createAdminApi(client: HttpClient) {
         `/api/admin/rooms/${encodeURIComponent(roomCode)}/members/${encodeURIComponent(memberId)}/kick`,
         { method: "POST", body: { reason: reason || undefined } },
       );
+    },
+    listEvents(query: EventListQuery = {}): Promise<EventListResult> {
+      return client.request(`/api/admin/events${toQueryString(query)}`);
+    },
+    listAuditLogs(query: AuditLogQuery = {}): Promise<AuditLogListResult> {
+      return client.request(`/api/admin/audit-logs${toQueryString(query)}`);
     },
     disconnectSession(
       sessionId: string,
