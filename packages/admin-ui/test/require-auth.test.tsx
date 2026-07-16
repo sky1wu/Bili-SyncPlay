@@ -4,29 +4,8 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { AuthContext } from "../src/auth/auth-context.js";
 import type { AuthContextValue } from "../src/auth/auth-context.js";
+import { createAuthValue } from "./helpers.js";
 import { RequireAuth } from "../src/auth/require-auth.js";
-
-function createAuthValue(
-  overrides: Partial<AuthContextValue> = {},
-): AuthContextValue {
-  return {
-    token: "",
-    me: null,
-    initializing: false,
-    meError: "",
-    api: {
-      login: vi.fn(),
-      logout: vi.fn(),
-      getMe: vi.fn(),
-      getOverview: vi.fn(),
-      getReady: vi.fn(),
-    },
-    signIn: vi.fn().mockResolvedValue(undefined),
-    signOut: vi.fn().mockResolvedValue(undefined),
-    retryLoadMe: vi.fn(),
-    ...overrides,
-  };
-}
 
 function LoginProbe() {
   const location = useLocation();

@@ -5,29 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../src/api/http.js";
 import { AuthContext } from "../src/auth/auth-context.js";
 import type { AuthContextValue } from "../src/auth/auth-context.js";
+import { createAuthValue } from "./helpers.js";
 import { LoginPage } from "../src/pages/login-page.js";
-
-function createAuthValue(
-  overrides: Partial<AuthContextValue> = {},
-): AuthContextValue {
-  return {
-    token: "",
-    me: null,
-    initializing: false,
-    meError: "",
-    api: {
-      login: vi.fn(),
-      logout: vi.fn(),
-      getMe: vi.fn(),
-      getOverview: vi.fn(),
-      getReady: vi.fn(),
-    },
-    signIn: vi.fn().mockResolvedValue(undefined),
-    signOut: vi.fn().mockResolvedValue(undefined),
-    retryLoadMe: vi.fn(),
-    ...overrides,
-  };
-}
 
 function renderLogin(authValue: AuthContextValue, initialEntry = "/login") {
   return render(

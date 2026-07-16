@@ -1,3 +1,5 @@
+import type { PlaybackState, SharedVideo } from "@bili-syncplay/protocol";
+
 export type AdminRole = "viewer" | "operator" | "admin";
 
 export type AdminIdentity = {
@@ -97,3 +99,74 @@ export type ReadyStatus = {
     redis: string;
   };
 };
+
+export type RoomStatusFilter = "all" | "active" | "idle";
+export type RoomSortBy = "lastActiveAt" | "createdAt";
+export type SortOrder = "asc" | "desc";
+
+export type RoomListQuery = {
+  status?: RoomStatusFilter;
+  keyword?: string;
+  page?: number;
+  pageSize?: number;
+  sortBy?: RoomSortBy;
+  sortOrder?: SortOrder;
+  includeExpired?: boolean;
+};
+
+export type RoomSummary = {
+  instanceId?: string;
+  roomCode: string;
+  createdAt: number;
+  ownerMemberId: string | null;
+  ownerDisplayName: string | null;
+  lastActiveAt: number;
+  expiresAt: number | null;
+  sharedVideo: SharedVideo | null;
+  playback: PlaybackState | null;
+  memberCount: number;
+  isActive: boolean;
+  instanceIds: string[];
+};
+
+export type PaginationMeta = {
+  page: number;
+  pageSize: number;
+  total: number;
+};
+
+export type RoomListResult = {
+  items: RoomSummary[];
+  pagination: PaginationMeta;
+};
+
+export type RoomDetailMember = {
+  sessionId: string;
+  memberId: string;
+  instanceId?: string;
+  displayName: string;
+  joinedAt: number;
+  remoteAddress: string | null;
+  origin: string | null;
+};
+
+export type RuntimeEventRecord = {
+  id: string;
+  timestamp: string;
+  event: string;
+  roomCode: string | null;
+  sessionId: string | null;
+  remoteAddress: string | null;
+  origin: string | null;
+  result: string | null;
+  details: Record<string, unknown>;
+};
+
+export type RoomDetail = {
+  instanceId?: string;
+  room: RoomSummary;
+  members: RoomDetailMember[];
+  recentEvents: RuntimeEventRecord[];
+};
+
+export type AdminActionResult = Record<string, unknown>;
