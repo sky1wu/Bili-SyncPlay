@@ -663,7 +663,7 @@ test("admin demo mode stays disabled by default and only enables when explicitly
   try {
     const defaultHtml = await requestText(
       defaultServer.httpBaseUrl,
-      "/admin/login?demo=1",
+      "/admin-legacy/login?demo=1",
     );
     assert.equal(defaultHtml.status, 200);
     assert.equal(defaultHtml.body.includes('"demoEnabled":false'), true);
@@ -681,7 +681,7 @@ test("admin demo mode stays disabled by default and only enables when explicitly
   try {
     const enabledHtml = await requestText(
       enabledServer.httpBaseUrl,
-      "/admin/login?demo=1",
+      "/admin-legacy/login?demo=1",
     );
     assert.equal(enabledHtml.status, 200);
     assert.equal(enabledHtml.body.includes('"demoEnabled":true'), true);
