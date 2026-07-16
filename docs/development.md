@@ -333,6 +333,7 @@ This command updates:
 
 - the root `package.json`
 - `packages/protocol/package.json`
+- `packages/admin-ui/package.json`
 - `server/package.json`
 - `extension/package.json`
 - `package-lock.json`
