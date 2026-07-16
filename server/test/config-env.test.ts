@@ -112,15 +112,13 @@ test("admin config parses role and session ttl", () => {
   });
 });
 
-test("admin ui config parses demo flag", () => {
+test("admin ui config parses base url and enabled flag", () => {
   assert.deepEqual(
     loadAdminUiConfig({
-      ADMIN_UI_DEMO_ENABLED: "true",
       GLOBAL_ADMIN_API_BASE_URL: " https://admin.example.com ",
       GLOBAL_ADMIN_ENABLED: "false",
     }),
     {
-      demoEnabled: true,
       apiBaseUrl: "https://admin.example.com",
       enabled: false,
     },

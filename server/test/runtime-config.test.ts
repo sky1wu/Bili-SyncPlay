@@ -170,7 +170,6 @@ test("runtime config maps JSON file values through existing loaders", async () =
           instanceId: "room-node-a",
         },
         adminUi: {
-          demoEnabled: true,
           apiBaseUrl: "https://admin.example.com",
           enabled: false,
         },
@@ -205,7 +204,6 @@ test("runtime config maps JSON file values through existing loaders", async () =
     assert.equal(config.persistenceConfig.redisNamespace, "myapp");
     assert.equal(config.persistenceConfig.instanceId, "room-node-a");
     assert.deepEqual(config.adminUiConfig, {
-      demoEnabled: true,
       apiBaseUrl: "https://admin.example.com",
       enabled: false,
     });

@@ -255,7 +255,7 @@ async function listenSingleNode(
     {
       logEvent: () => {},
       serviceVersion: "0.0.0-bench-single-node",
-      adminUiConfig: { enabled: false, demoEnabled: false },
+      adminUiConfig: { enabled: false },
     },
   );
 

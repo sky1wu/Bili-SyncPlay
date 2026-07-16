@@ -200,7 +200,6 @@ export const SERVER_CONFIG_FIELDS = [
   createField(["persistence", "redisUrl"], "REDIS_URL", "string"),
   createField(["persistence", "redisNamespace"], "REDIS_NAMESPACE", "string"),
   createField(["persistence", "instanceId"], "INSTANCE_ID", "string"),
-  createField(["adminUi", "demoEnabled"], "ADMIN_UI_DEMO_ENABLED", "boolean"),
   createField(["adminUi", "apiBaseUrl"], "GLOBAL_ADMIN_API_BASE_URL", "string"),
   createField(["adminUi", "enabled"], "GLOBAL_ADMIN_ENABLED", "boolean"),
 ] as const satisfies readonly ConfigField[];

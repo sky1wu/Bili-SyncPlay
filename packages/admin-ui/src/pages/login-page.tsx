@@ -1,10 +1,9 @@
 import { Alert, Button, Card, Form, Input, Typography } from "antd";
 import { LockOutlined, UserOutlined } from "@ant-design/icons";
 import { useState } from "react";
-import { Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { ApiError } from "../api/http.js";
 import { useAuth } from "../auth/auth-context.js";
-import { readAdminUiConfig } from "../config.js";
 
 type LoginFormValues = {
   username: string;
@@ -25,17 +24,9 @@ function resolveLoginErrorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : "登录失败。";
 }
 
-function isDemoPreviewRequest(search: string): boolean {
-  return (
-    readAdminUiConfig().demoEnabled &&
-    new URLSearchParams(search).get("demo") === "1"
-  );
-}
-
 export function LoginPage() {
   const { token, signIn } = useAuth();
   const navigate = useNavigate();
-  const location = useLocation();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -73,21 +64,6 @@ export function LoginPage() {
         <Typography.Paragraph type="secondary">
           登录管理控制台
         </Typography.Paragraph>
-        {isDemoPreviewRequest(location.search) ? (
-          <Alert
-            type="info"
-            message="新控制台暂不支持演示模式"
-            description={
-              <>
-                演示预览请使用旧面板{" "}
-                <a href="/admin-legacy?demo=1">/admin-legacy?demo=1</a>
-                ，新控制台暂不提供演示数据。
-              </>
-            }
-            showIcon
-            style={{ marginBottom: 16 }}
-          />
-        ) : null}
         {error ? (
           <Alert
             type="error"

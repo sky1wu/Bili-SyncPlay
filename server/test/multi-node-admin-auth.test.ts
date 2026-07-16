@@ -13,13 +13,11 @@ test("admin bearer sessions are shared across room nodes and revoked globally on
   const nodeA = await kit.startRoomNode("node-a", {
     adminUiConfig: {
       enabled: true,
-      demoEnabled: false,
     },
   });
   const nodeB = await kit.startRoomNode("node-b", {
     adminUiConfig: {
       enabled: true,
-      demoEnabled: false,
     },
   });
 

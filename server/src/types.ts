@@ -134,7 +134,6 @@ export type AdminConfig = {
 } | null;
 
 export type AdminUiConfig = {
-  demoEnabled: boolean;
   apiBaseUrl?: string;
   enabled?: boolean;
 };

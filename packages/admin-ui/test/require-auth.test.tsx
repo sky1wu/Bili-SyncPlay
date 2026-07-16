@@ -34,9 +34,9 @@ function renderGuard(authValue: AuthContextValue, initialEntry: string) {
 
 describe("RequireAuth", () => {
   it("preserves the query string when redirecting to login", () => {
-    renderGuard(createAuthValue(), "/overview?demo=1");
+    renderGuard(createAuthValue(), "/overview?keyword=abc");
 
-    expect(screen.getByText("login-search:?demo=1")).toBeTruthy();
+    expect(screen.getByText("login-search:?keyword=abc")).toBeTruthy();
   });
 
   it("renders protected content when authenticated", () => {

@@ -14,9 +14,9 @@
 Bili-SyncPlay is a monorepo for synchronized Bilibili video playback across multiple users. It consists of:
 
 - **`packages/protocol/`** — Shared TypeScript types, type guards, and URL normalization utilities
-- **`packages/admin-ui/`** — Admin console (React + Vite + Ant Design, served at `/admin-next`; `/admin` 302-redirects to it; the legacy panel in `server/admin-ui/` is temporarily kept at `/admin-legacy` as a rollback entry until removal)
+- **`packages/admin-ui/`** — Admin console (React + Vite + Ant Design, served at `/admin-next`; `/admin` 302-redirects to it)
 - **`extension/`** — Chrome/Edge browser extension (service worker + content scripts + popup)
-- **`server/`** — Node.js WebSocket server with admin panel
+- **`server/`** — Node.js WebSocket server with admin API
 
 ## Commands
 

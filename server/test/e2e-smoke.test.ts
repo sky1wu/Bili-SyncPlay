@@ -31,7 +31,7 @@ async function startSmokeServer() {
     {
       logEvent: () => {},
       serviceVersion: "0.0.0-e2e-smoke",
-      adminUiConfig: { enabled: false, demoEnabled: false },
+      adminUiConfig: { enabled: false },
     },
   );
 

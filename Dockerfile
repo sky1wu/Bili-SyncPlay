@@ -35,9 +35,7 @@ COPY --from=builder /app/packages/protocol/package.json packages/protocol/
 COPY --from=builder /app/packages/protocol/dist packages/protocol/dist
 COPY --from=builder /app/server/package.json server/
 COPY --from=builder /app/server/dist server/dist
-# 服务端按 dist/../admin-ui 解析旧管理面板静态资源，
-# 按 dist/../../packages/admin-ui/dist 解析新面板（/admin-next）构建产物。
-COPY server/admin-ui server/admin-ui
+# 服务端按 dist/../../packages/admin-ui/dist 解析管理面板构建产物。
 COPY --from=builder /app/packages/admin-ui/dist packages/admin-ui/dist
 
 # 运行阶段直接以 node 启动，用不到 npm/corepack/yarn；删除基础镜像自带的

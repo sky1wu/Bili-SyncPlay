@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import type { AdminUiConfig } from "./types.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-const legacyAdminUiDir = path.resolve(moduleDir, "../admin-ui");
 const nextAdminUiDir = path.resolve(moduleDir, "../../packages/admin-ui/dist");
 
 export type AdminPanelTarget = {
@@ -20,17 +19,14 @@ export type AdminPanelRedirect = {
 
 const defaultTargets: readonly AdminPanelTarget[] = [
   { basePath: "/admin-next", rootDir: nextAdminUiDir },
-  // 旧面板保留在 /admin-legacy 作为切换后的回退入口，随删除 PR 下线。
-  { basePath: "/admin-legacy", rootDir: legacyAdminUiDir },
 ];
 
-// /admin 正式指向新控制台：302 保留子路径与查询串。
+// /admin 指向新控制台：302 保留子路径与查询串（历史书签兼容）。
 const defaultRedirects: readonly AdminPanelRedirect[] = [
   { fromBasePath: "/admin", toBasePath: "/admin-next" },
 ];
 
 const defaultAdminUiConfig: AdminUiConfig = {
-  demoEnabled: false,
   apiBaseUrl: undefined,
   enabled: true,
 };
@@ -159,23 +155,17 @@ export function createAdminPanelHandler(
       }
 
       if (shouldServeIndex) {
-        const html = body
-          .toString("utf8")
-          .replace(
-            '"__ADMIN_UI_CONFIG__"',
-            JSON.stringify({
-              demoEnabled: adminUiConfig.demoEnabled === true,
-              apiBaseUrl:
-                typeof adminUiConfig.apiBaseUrl === "string" &&
-                adminUiConfig.apiBaseUrl.length > 0
-                  ? adminUiConfig.apiBaseUrl
-                  : undefined,
-              enabled: adminUiConfig.enabled ?? true,
-            }),
-          )
-          // 旧面板 index.html 的资源引用硬编码 /admin/ 前缀；面板挂载
-          // 前缀可变（如回退入口 /admin-legacy），服务时改写为实际前缀。
-          .replaceAll('="/admin/', `="${target.basePath}/`);
+        const html = body.toString("utf8").replace(
+          '"__ADMIN_UI_CONFIG__"',
+          JSON.stringify({
+            apiBaseUrl:
+              typeof adminUiConfig.apiBaseUrl === "string" &&
+              adminUiConfig.apiBaseUrl.length > 0
+                ? adminUiConfig.apiBaseUrl
+                : undefined,
+            enabled: adminUiConfig.enabled ?? true,
+          }),
+        );
         response.end(html);
         return true;
       }
