@@ -835,7 +835,7 @@ export function createPageLoaders(options) {
                   event.currentTarget.getAttribute("data-jump-events");
                 navigateToUrl(
                   withDemoQuery(
-                    `/admin/events?${new URLSearchParams({ roomCode: targetRoomCode }).toString()}`,
+                    `${routeHref("/events")}?${new URLSearchParams({ roomCode: targetRoomCode }).toString()}`,
                   ),
                   "/events",
                   true,
