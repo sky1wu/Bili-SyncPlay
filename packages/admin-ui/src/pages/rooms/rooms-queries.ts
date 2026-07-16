@@ -24,6 +24,7 @@ export function useRoomDetailQuery(
     queryFn: () => api.getRoomDetail(roomCode ?? ""),
     enabled: roomCode !== null,
     refetchInterval: autoRefresh ? ROOMS_REFRESH_MS : false,
-    placeholderData: keepPreviousData,
+    // 故意不用 keepPreviousData：切换房间瞬间若沿用上一个房间的 detail，
+    // 抽屉里的治理按钮会作用在错误的房间上，宁可显示加载态。
   });
 }

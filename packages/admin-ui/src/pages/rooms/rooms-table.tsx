@@ -44,17 +44,33 @@ export function RoomsTable({
     sorter: SorterResult<RoomSummary> | SorterResult<RoomSummary>[],
   ) => {
     const activeSorter = Array.isArray(sorter) ? sorter[0] : sorter;
-    const sortBy: RoomSortBy =
-      activeSorter?.field === "createdAt" && activeSorter.order
+    // 纯翻页触发的 onChange 携带空 sorter，此时保留 URL 中的排序，
+    // 避免分享链接一翻页排序就被重置。
+    const hasSorter = Boolean(activeSorter?.order);
+    const sortBy: RoomSortBy = hasSorter
+      ? activeSorter?.field === "createdAt"
         ? "createdAt"
-        : "lastActiveAt";
+        : "lastActiveAt"
+      : (query.sortBy ?? "lastActiveAt");
+    const sortOrder = hasSorter
+      ? activeSorter?.order === "ascend"
+        ? "asc"
+        : "desc"
+      : (query.sortOrder ?? "desc");
     onQueryChange({
       page: pagination.current ?? 1,
       pageSize: pagination.pageSize ?? 20,
       sortBy,
-      sortOrder: activeSorter?.order === "ascend" ? "asc" : "desc",
+      sortOrder,
     });
   };
+
+  const controlledSortOrder = (column: RoomSortBy) =>
+    (query.sortBy ?? "lastActiveAt") === column
+      ? (query.sortOrder ?? "desc") === "asc"
+        ? ("ascend" as const)
+        : ("descend" as const)
+      : null;
 
   return (
     <Table<RoomSummary>
@@ -119,13 +135,14 @@ export function RoomsTable({
           title: "最近活跃",
           dataIndex: "lastActiveAt",
           sorter: true,
-          defaultSortOrder: query.sortBy === "lastActiveAt" ? undefined : null,
+          sortOrder: controlledSortOrder("lastActiveAt"),
           render: (value: number) => formatDateTime(value),
         },
         {
           title: "创建时间",
           dataIndex: "createdAt",
           sorter: true,
+          sortOrder: controlledSortOrder("createdAt"),
           render: (value: number) => formatDateTime(value),
         },
         {

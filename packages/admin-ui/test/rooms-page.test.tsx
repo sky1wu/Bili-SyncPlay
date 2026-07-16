@@ -11,6 +11,7 @@ import type {
 } from "../src/api/types.js";
 import { AuthContext } from "../src/auth/auth-context.js";
 import type { AuthContextValue } from "../src/auth/auth-context.js";
+import { RoomsFilter } from "../src/pages/rooms/rooms-filter.js";
 import { RoomsPage } from "../src/pages/rooms/rooms-page.js";
 import { createAuthValue, createStubApi } from "./helpers.js";
 
@@ -209,6 +210,78 @@ describe("RoomsPage", () => {
     expect(screen.queryByRole("button", { name: /治\s*理/ })).toBeNull();
   });
 
+  it("shows an error state with retry when the rooms request fails", async () => {
+    const listRooms = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("后端故障"))
+      .mockResolvedValue(makeListResult([makeRoom()]));
+    const user = userEvent.setup();
+    renderRooms(createOperatorAuth({ listRooms }));
+
+    expect(await screen.findByText("房间列表加载失败")).toBeTruthy();
+    expect(screen.getByText("后端故障")).toBeTruthy();
+    expect(screen.queryByText("没有符合条件的房间。")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /重\s*试/ }));
+    expect(await screen.findByText("ROOM1")).toBeTruthy();
+  });
+
+  it("keeps URL sort when paginating", async () => {
+    const listRooms = vi.fn().mockResolvedValue({
+      items: [makeRoom()],
+      pagination: { page: 1, pageSize: 20, total: 45 },
+    });
+    const user = userEvent.setup();
+    renderRooms(
+      createOperatorAuth({ listRooms }),
+      "/rooms?sortBy=createdAt&sortOrder=asc",
+    );
+
+    expect(await screen.findByText("ROOM1")).toBeTruthy();
+    await user.click(screen.getByTitle("2"));
+
+    await waitFor(() => {
+      expect(listRooms).toHaveBeenCalledWith(
+        expect.objectContaining({
+          page: 2,
+          sortBy: "createdAt",
+          sortOrder: "asc",
+        }),
+      );
+    });
+  });
+
+  it("drops the previous room's detail while switching rooms", async () => {
+    const room1 = makeRoom();
+    const room2 = makeRoom({ roomCode: "ROOM2" });
+    const getRoomDetail = vi.fn((code: string) =>
+      code === "ROOM1"
+        ? Promise.resolve(makeDetail(room1))
+        : new Promise<never>(() => {}),
+    );
+    const user = userEvent.setup();
+    renderRooms(
+      createOperatorAuth({
+        listRooms: vi.fn().mockResolvedValue(makeListResult([room1, room2])),
+        getRoomDetail: getRoomDetail as never,
+      }),
+      "/rooms/ROOM1",
+    );
+
+    expect(await screen.findByText("小明")).toBeTruthy();
+
+    const room2Row = (await screen.findByText("ROOM2")).closest("tr");
+    await user.click(
+      within(room2Row as HTMLElement).getByRole("button", { name: /详\s*情/ }),
+    );
+
+    // ROOM2 的详情未返回前，不能继续展示 ROOM1 的成员，
+    // 否则抽屉里的治理按钮会作用在错误房间上。
+    await waitFor(() => {
+      expect(screen.queryByText("小明")).toBeNull();
+    });
+  });
+
   it("opens the detail drawer from the route and kicks a member", async () => {
     const room = makeRoom();
     const kickMember = vi.fn().mockResolvedValue({});
@@ -241,5 +314,19 @@ describe("RoomsPage", () => {
     await waitFor(() => {
       expect(kickMember).toHaveBeenCalledWith("ROOM1", "member-2", "");
     });
+  });
+});
+
+describe("RoomsFilter", () => {
+  it("syncs the keyword input when the routed query changes", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <RoomsFilter query={{ keyword: "abc" }} onChange={onChange} />,
+    );
+    const input = screen.getByPlaceholderText(/房间号/) as HTMLInputElement;
+    expect(input.value).toBe("abc");
+
+    rerender(<RoomsFilter query={{ keyword: "xyz" }} onChange={onChange} />);
+    expect(input.value).toBe("xyz");
   });
 });

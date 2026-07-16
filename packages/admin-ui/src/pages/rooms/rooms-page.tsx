@@ -1,6 +1,14 @@
 import { ReloadOutlined } from "@ant-design/icons";
 import { useQueryClient } from "@tanstack/react-query";
-import { App as AntdApp, Button, Card, Space, Switch, Typography } from "antd";
+import {
+  Alert,
+  App as AntdApp,
+  Button,
+  Card,
+  Space,
+  Switch,
+  Typography,
+} from "antd";
 import { useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import type {
@@ -175,16 +183,34 @@ export function RoomsPage() {
         </Space>
       </Card>
 
-      <RoomsTable
-        data={roomsQuery.data}
-        loading={roomsQuery.isPending}
-        query={query}
-        manageable={manageable}
-        onQueryChange={updateQuery}
-        onOpenRoom={openRoom}
-        onAction={setPendingAction}
-        governance={governance}
-      />
+      {roomsQuery.isError ? (
+        <Alert
+          type="error"
+          showIcon
+          message="房间列表加载失败"
+          description={
+            roomsQuery.error instanceof Error
+              ? roomsQuery.error.message
+              : "请求失败。"
+          }
+          action={
+            <Button size="small" onClick={refreshNow}>
+              重试
+            </Button>
+          }
+        />
+      ) : (
+        <RoomsTable
+          data={roomsQuery.data}
+          loading={roomsQuery.isPending}
+          query={query}
+          manageable={manageable}
+          onQueryChange={updateQuery}
+          onOpenRoom={openRoom}
+          onAction={setPendingAction}
+          governance={governance}
+        />
+      )}
 
       <RoomDetailDrawer
         roomCode={roomCode}
