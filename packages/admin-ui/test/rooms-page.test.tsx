@@ -317,6 +317,97 @@ describe("RoomsPage", () => {
   });
 });
 
+describe("RoomsPage batch governance", () => {
+  function makeTwoRooms() {
+    return [
+      makeRoom({ isActive: false, memberCount: 0 }),
+      makeRoom({ roomCode: "ROOM2", isActive: false, memberCount: 0 }),
+    ];
+  }
+
+  it("closes all selected rooms and clears the selection on success", async () => {
+    const closeRoom = vi.fn().mockResolvedValue({});
+    const user = userEvent.setup({ delay: null });
+    renderRooms(
+      createOperatorAuth({
+        listRooms: vi.fn().mockResolvedValue(makeListResult(makeTwoRooms())),
+        closeRoom,
+      }),
+    );
+
+    await screen.findByText("ROOM2");
+    // 第一个 checkbox 是表头全选。
+    // 页面里筛选区也有 checkbox（含已过期），全选框要在表格作用域内取。
+    await user.click(
+      within(screen.getByRole("table")).getAllByRole("checkbox")[0],
+    );
+    expect(await screen.findByText("已选 2 个房间")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /批量关闭/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(
+      within(dialog).getByPlaceholderText(/操作原因/),
+      "夜间清理",
+    );
+    await user.click(within(dialog).getByRole("button", { name: /确认执行/ }));
+
+    await waitFor(() => {
+      expect(closeRoom).toHaveBeenCalledWith("ROOM1", "夜间清理");
+      expect(closeRoom).toHaveBeenCalledWith("ROOM2", "夜间清理");
+    });
+    expect(await screen.findByText("成功 2 个，失败 0 个。")).toBeTruthy();
+    expect(screen.queryByText(/已选 \d+ 个房间/)).toBeNull();
+  });
+
+  it("keeps failed rooms selected and lists failures", async () => {
+    const expireRoom = vi.fn((roomCode: string) =>
+      roomCode === "ROOM2"
+        ? Promise.reject(new Error("房间仍有在线成员"))
+        : Promise.resolve({}),
+    );
+    const user = userEvent.setup({ delay: null });
+    renderRooms(
+      createOperatorAuth({
+        listRooms: vi.fn().mockResolvedValue(makeListResult(makeTwoRooms())),
+        expireRoom: expireRoom as never,
+      }),
+    );
+
+    await screen.findByText("ROOM2");
+    await user.click(
+      within(screen.getByRole("table")).getAllByRole("checkbox")[0],
+    );
+    await user.click(screen.getByRole("button", { name: /批量过期/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /确认执行/ }));
+
+    expect(
+      await screen.findByText(/成功 1 个，失败 1 个。失败的房间保持勾选/),
+    ).toBeTruthy();
+    expect(screen.getByText("房间仍有在线成员")).toBeTruthy();
+    // 失败的 ROOM2 保持勾选，可重试。
+    expect(await screen.findByText("已选 1 个房间")).toBeTruthy();
+  });
+
+  it("hides row selection for viewers", async () => {
+    renderRooms(
+      createAuthValue({
+        token: "token-1",
+        me: { id: "admin-2", username: "watcher", role: "viewer" },
+        api: createStubApi({
+          listRooms: vi.fn().mockResolvedValue(makeListResult(makeTwoRooms())),
+        }),
+      }),
+    );
+
+    expect(await screen.findByText("ROOM2")).toBeTruthy();
+    // viewer 仍能看到筛选区的 checkbox，但表格内不应有选择框。
+    expect(
+      within(screen.getByRole("table")).queryAllByRole("checkbox"),
+    ).toHaveLength(0);
+  });
+});
+
 describe("RoomsFilter", () => {
   it("syncs the keyword input when the routed query changes", () => {
     const onChange = vi.fn();

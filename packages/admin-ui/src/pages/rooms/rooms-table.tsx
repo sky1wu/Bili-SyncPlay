@@ -24,6 +24,8 @@ export function RoomsTable({
   loading,
   query,
   manageable,
+  selectedRoomCodes,
+  onSelectionChange,
   onQueryChange,
   onOpenRoom,
   onAction,
@@ -33,6 +35,8 @@ export function RoomsTable({
   loading: boolean;
   query: RoomListQuery;
   manageable: boolean;
+  selectedRoomCodes: string[];
+  onSelectionChange: (roomCodes: string[]) => void;
   onQueryChange: (patch: Partial<RoomListQuery>) => void;
   onOpenRoom: (roomCode: string) => void;
   onAction: (pending: PendingGovernanceAction) => void;
@@ -79,6 +83,16 @@ export function RoomsTable({
       loading={loading}
       dataSource={data?.items ?? []}
       locale={{ emptyText: "没有符合条件的房间。" }}
+      rowSelection={
+        manageable
+          ? {
+              selectedRowKeys: selectedRoomCodes,
+              onChange: (keys) => onSelectionChange(keys.map(String)),
+              // 翻页/筛选后不在当前页的选中项保留，便于跨页批量。
+              preserveSelectedRowKeys: true,
+            }
+          : undefined
+      }
       onChange={handleTableChange}
       pagination={{
         current: query.page ?? 1,
