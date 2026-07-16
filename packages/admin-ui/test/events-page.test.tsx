@@ -92,7 +92,7 @@ describe("EventsPage", () => {
 
   it("submits text filters and resets the page", async () => {
     const listEvents = vi.fn().mockResolvedValue(makeResult([]));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderEvents(createAuth({ listEvents }), "/events?page=3");
 
     await user.type(screen.getByPlaceholderText("事件名"), "room_created");
@@ -106,7 +106,7 @@ describe("EventsPage", () => {
   });
 
   it("opens the details JSON modal", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderEvents(
       createAuth({
         listEvents: vi.fn().mockResolvedValue(makeResult([makeEvent()])),
@@ -122,7 +122,7 @@ describe("EventsPage", () => {
       .fn()
       .mockRejectedValueOnce(new Error("事件存储不可用"))
       .mockResolvedValue(makeResult([makeEvent()]));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderEvents(createAuth({ listEvents }));
 
     expect(await screen.findByText("运行事件加载失败")).toBeTruthy();

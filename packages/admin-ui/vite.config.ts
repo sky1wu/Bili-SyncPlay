@@ -30,8 +30,9 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./test/setup.ts"],
-    // antd 组件交互测试（userEvent + 弹窗/下拉）在 CI 覆盖率插桩下
-    // 会超过默认 5s，放宽到 15s。
-    testTimeout: 15_000,
+    // antd 组件交互测试（userEvent + 弹窗/下拉）在 CI 覆盖率插桩 +
+    // 多 worker 争抢下明显变慢，放宽超时作为兜底；主要提速手段是
+    // 测试里 userEvent.setup({ delay: null }) 关闭逐键延迟。
+    testTimeout: 30_000,
   },
 });

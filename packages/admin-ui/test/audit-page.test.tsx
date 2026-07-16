@@ -113,7 +113,7 @@ describe("AuditLogsPage", () => {
   });
 
   it("opens the request JSON modal", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderAudit(
       createAuth({
         listAuditLogs: vi
@@ -131,7 +131,7 @@ describe("AuditLogsPage", () => {
       .fn()
       .mockRejectedValueOnce(new Error("审计存储不可用"))
       .mockResolvedValue(makeResult([makeAuditRecord()]));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderAudit(createAuth({ listAuditLogs }));
 
     expect(await screen.findByText("审计日志加载失败")).toBeTruthy();

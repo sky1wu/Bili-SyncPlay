@@ -155,7 +155,7 @@ describe("RoomsPage", () => {
 
   it("runs the close-room governance flow with a reason", async () => {
     const closeRoom = vi.fn().mockResolvedValue({});
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderRooms(
       createOperatorAuth({
         listRooms: vi.fn().mockResolvedValue(makeListResult([makeRoom()])),
@@ -179,7 +179,7 @@ describe("RoomsPage", () => {
   });
 
   it("disables early-expire for active rooms", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderRooms(
       createOperatorAuth({
         listRooms: vi.fn().mockResolvedValue(makeListResult([makeRoom()])),
@@ -215,7 +215,7 @@ describe("RoomsPage", () => {
       .fn()
       .mockRejectedValueOnce(new Error("后端故障"))
       .mockResolvedValue(makeListResult([makeRoom()]));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderRooms(createOperatorAuth({ listRooms }));
 
     expect(await screen.findByText("房间列表加载失败")).toBeTruthy();
@@ -231,7 +231,7 @@ describe("RoomsPage", () => {
       items: [makeRoom()],
       pagination: { page: 1, pageSize: 20, total: 45 },
     });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderRooms(
       createOperatorAuth({ listRooms }),
       "/rooms?sortBy=createdAt&sortOrder=asc",
@@ -259,7 +259,7 @@ describe("RoomsPage", () => {
         ? Promise.resolve(makeDetail(room1))
         : new Promise<never>(() => {}),
     );
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderRooms(
       createOperatorAuth({
         listRooms: vi.fn().mockResolvedValue(makeListResult([room1, room2])),
@@ -285,7 +285,7 @@ describe("RoomsPage", () => {
   it("opens the detail drawer from the route and kicks a member", async () => {
     const room = makeRoom();
     const kickMember = vi.fn().mockResolvedValue({});
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderRooms(
       createOperatorAuth({
         listRooms: vi.fn().mockResolvedValue(makeListResult([room])),
