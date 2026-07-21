@@ -153,3 +153,40 @@ test("keeps paused playback on the fast hard-seek path", () => {
   assert.equal(decision.reason, "paused-or-buffering");
   assert.ok(Math.abs(decision.delta - 0.4) < 0.001);
 });
+
+test("playing ignore threshold has hysteresis while a catch-up is running", () => {
+  const input = {
+    localCurrentTime: 27.36,
+    targetTime: 27.8,
+    playState: "playing" as const,
+    playbackRate: 1,
+  };
+
+  // 0.44s is inside the band that would never have started a correction...
+  assert.equal(
+    decidePlaybackReconcileMode({ ...input, hasActiveCatchUp: false }).mode,
+    "ignore",
+  );
+
+  // ...but once one is running, stopping here is what left the residual drift
+  // behind and let each buffer hiccup ratchet the offset up.
+  const duringCatchUp = decidePlaybackReconcileMode({
+    ...input,
+    hasActiveCatchUp: true,
+  });
+  assert.equal(duringCatchUp.mode, "rate-only");
+  assert.equal(duringCatchUp.reason, "playing-rate-adjust");
+});
+
+test("a catch-up still terminates once the drift is genuinely closed", () => {
+  const decision = decidePlaybackReconcileMode({
+    localCurrentTime: 29.78,
+    targetTime: 29.8,
+    playState: "playing",
+    playbackRate: 1,
+    hasActiveCatchUp: true,
+  });
+
+  assert.equal(decision.mode, "ignore");
+  assert.equal(decision.reason, "within-threshold");
+});

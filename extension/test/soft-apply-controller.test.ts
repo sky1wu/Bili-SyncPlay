@@ -343,3 +343,52 @@ test("relative-drift session settling via the timer still honors a sticky cooldo
     windowStub.restore();
   }
 });
+
+test("a steadily advancing peer no longer cancels a catch-up as target-shifted", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    let now = 20_000;
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url ?? null,
+      getVideoElement: () => null,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => now,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 24.8 }),
+      0.8,
+      {
+        armCooldownOnConverge: false,
+        relativeDriftClose: { driftSeconds: 0.8, rateOffsetSeconds: 0.12 },
+      },
+    );
+
+    // A routine heartbeat 3s later from a peer playing steadily at 1x. Against
+    // the frozen snapshot this looks like a 3s jump and used to cancel the
+    // session long before it could converge.
+    now = 23_000;
+    assert.equal(
+      controller.shouldCancelActiveSoftApplyForPlayback(
+        createPlayback({ currentTime: 27.8 }),
+      ),
+      null,
+    );
+
+    // A genuine unannounced jump still cancels: the peer is 2s past where
+    // steady playback would have put it.
+    assert.equal(
+      controller.shouldCancelActiveSoftApplyForPlayback(
+        createPlayback({ currentTime: 29.8 }),
+      ),
+      "target-shifted",
+    );
+  } finally {
+    windowStub.restore();
+  }
+});
