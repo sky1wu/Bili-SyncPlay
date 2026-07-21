@@ -233,3 +233,18 @@ test("a paused peer still aligns the room on its position", () => {
   assert.equal(decision.mode, "hard-seek");
   assert.equal(decision.reason, "paused-or-buffering");
 });
+
+test("a receiver behind a buffering peer still catches up to it", () => {
+  // The frozen position is not authoritative, but it is a valid lower bound on
+  // where the room has reached: a member that just joined or just finished
+  // loading must not be stranded at the old position until the peer recovers.
+  const decision = decidePlaybackReconcileMode({
+    localCurrentTime: 12,
+    targetTime: 511.94,
+    playState: "buffering",
+    playbackRate: 1,
+  });
+
+  assert.equal(decision.mode, "hard-seek");
+  assert.equal(decision.reason, "paused-or-buffering");
+});

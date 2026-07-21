@@ -97,14 +97,26 @@ export function decidePlaybackReconcileMode(args: {
   const delta = Math.abs(args.targetTime - args.localCurrentTime);
 
   // A buffering peer's `currentTime` is frozen wherever its player stalled, so
-  // it is not an authoritative target. Chasing it drags every healthy member
-  // backwards for a problem that is not theirs, and the longer the peer stalls
-  // the further back it pulls them. Report the drift but leave the playhead
-  // alone; the peer broadcasts a fresh position the moment it recovers, and a
-  // stall outliving `bufferPauseUpgradeMs` is upgraded to `paused`, which still
-  // aligns the room. A deliberate jump that happens to be reported mid-buffer
-  // carries `explicit-seek` and is followed below.
-  if (args.playState === "buffering" && !args.isExplicitSeek) {
+  // it is not an authoritative target — but the harm is one-directional. It is
+  // still a valid *lower bound* on where the room has reached, so a receiver
+  // that is BEHIND it (just joined, just finished loading, briefly lagging)
+  // must still catch up: skipping the write there would strand the playhead at
+  // the old position, and `applyPendingPlaybackApplication` neither seeks nor
+  // pauses for `buffering`, so it would keep playing from there until the
+  // stalled peer recovers.
+  //
+  // Only skip when we are AHEAD of the frozen target, which is the case that
+  // drags healthy members backwards for a problem that is not theirs — the
+  // longer the peer stalls, the further back it pulls them. The peer broadcasts
+  // a fresh position the moment it recovers, and a stall outliving
+  // `bufferPauseUpgradeMs` is upgraded to `paused`, which still aligns the room.
+  // A deliberate jump reported mid-buffer carries `explicit-seek` and is
+  // followed below regardless of direction.
+  if (
+    args.playState === "buffering" &&
+    !args.isExplicitSeek &&
+    args.localCurrentTime > args.targetTime
+  ) {
     return {
       mode: "ignore",
       delta,
