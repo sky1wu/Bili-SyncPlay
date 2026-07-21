@@ -176,7 +176,35 @@ export function createPlaybackBindingController(args: {
     }
   }
 
+  /**
+   * Whether the event being handled is our own programmatic apply echoing back
+   * rather than something the user did.
+   *
+   * Applying a remote state writes `currentTime`/`playbackRate` and calls
+   * `play()`/`pause()`, all of which dispatch exactly the DOM events a user
+   * would produce. The `rememberExplicit*` helpers below only ask whether *any*
+   * page gesture happened in the last `userGestureGraceMs`, so an unrelated
+   * click moments earlier is enough for those echoes to be recorded as
+   * deliberate user actions. They then feed the seek-intent tagging, the
+   * broadcast play-state forcing, and even `shouldSuppressProgrammaticEvent`'s
+   * own bypass — letting an apply wave itself back out to the room.
+   *
+   * A gesture made AFTER the window opened is still genuinely the user (they
+   * may well have grabbed the player mid-apply), so only echoes whose most
+   * recent gesture predates the window are discarded.
+   */
+  function isProgrammaticEventEcho(): boolean {
+    return (
+      nowOf() < args.runtimeState.programmaticApplyUntil &&
+      args.runtimeState.lastUserGestureAt <=
+        args.runtimeState.programmaticApplyAt
+    );
+  }
+
   function rememberExplicitPlaybackAction(playState: "playing" | "paused") {
+    if (isProgrammaticEventEcho()) {
+      return;
+    }
     if (
       nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
       args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
@@ -189,6 +217,9 @@ export function createPlaybackBindingController(args: {
   }
 
   function rememberExplicitUserAction(kind: ExplicitUserActionKind) {
+    if (isProgrammaticEventEcho()) {
+      return;
+    }
     if (
       nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
       args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt

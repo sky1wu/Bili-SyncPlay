@@ -3485,3 +3485,104 @@ test("playback binding controller upgrades an unobserved stall to paused after t
     dom.restore();
   }
 });
+
+function createEchoHarness(
+  runtimeState: ReturnType<typeof createContentRuntimeState>,
+  getNow: () => number,
+) {
+  return createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow,
+  });
+}
+
+test("playback binding controller does not record its own programmatic apply as a user action", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const now = 5_100;
+  // A remote state is being applied. The page gesture predates the window, so
+  // the seek/pause events it produces are our own echo, not the user.
+  runtimeState.programmaticApplyAt = 5_000;
+  runtimeState.programmaticApplyUntil = 5_700;
+  runtimeState.lastUserGestureAt = 4_900;
+
+  const controller = createEchoHarness(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+    assert.equal(runtimeState.lastExplicitUserAction, null);
+
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    assert.equal(runtimeState.lastExplicitUserAction, null);
+    assert.equal(runtimeState.lastExplicitPlaybackAction, null);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller still records a gesture made during a programmatic apply", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const now = 5_100;
+  runtimeState.programmaticApplyAt = 5_000;
+  runtimeState.programmaticApplyUntil = 5_700;
+  // The user grabbed the player AFTER the apply started — that is genuinely
+  // them, and must not be discarded along with the echo.
+  runtimeState.lastUserGestureAt = 5_050;
+
+  const controller = createEchoHarness(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 5_100,
+    });
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller records user actions normally once the apply window closes", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const now = 6_000;
+  runtimeState.programmaticApplyAt = 5_000;
+  runtimeState.programmaticApplyUntil = 5_700; // already elapsed
+  runtimeState.lastUserGestureAt = 5_900;
+
+  const controller = createEchoHarness(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 6_000,
+    });
+  } finally {
+    dom.restore();
+  }
+});

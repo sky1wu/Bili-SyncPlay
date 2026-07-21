@@ -131,6 +131,13 @@ export interface ContentRuntimeState {
   pauseHoldUntil: number;
   pendingPlaybackApplication: PlaybackState | null;
   programmaticApplyUntil: number;
+  /**
+   * When the current programmatic-apply window opened. Applying a remote state
+   * fires the same DOM events a user would, so distinguishing our own echo from
+   * a real interaction needs the window's *start*: only a gesture made after it
+   * can belong to the user.
+   */
+  programmaticApplyAt: number;
   programmaticApplySignature: ProgrammaticPlaybackSignature | null;
   softApplyCooldownUntil: number;
   softApplyCooldownUrl: string | null;
@@ -288,6 +295,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     pauseHoldUntil: 0,
     pendingPlaybackApplication: null,
     programmaticApplyUntil: 0,
+    programmaticApplyAt: 0,
     programmaticApplySignature: null,
     softApplyCooldownUntil: 0,
     softApplyCooldownUrl: null,
