@@ -192,11 +192,17 @@ export function createPlaybackBindingController(args: {
    * A gesture made AFTER the window opened is still genuinely the user (they
    * may well have grabbed the player mid-apply), so only echoes whose most
    * recent gesture predates the window are discarded.
+   *
+   * Both timestamps come from `Date.now()`, whose resolution browsers coarsen,
+   * so a gesture landing in the same tick as the window opening is genuinely
+   * ambiguous. Ties go to the user (`<`, not `<=`): mistaking an echo for a user
+   * action is merely the behaviour that existed before this guard, whereas
+   * discarding a real interaction would be a new harm introduced by it.
    */
   function isProgrammaticEventEcho(): boolean {
     return (
       nowOf() < args.runtimeState.programmaticApplyUntil &&
-      args.runtimeState.lastUserGestureAt <=
+      args.runtimeState.lastUserGestureAt <
         args.runtimeState.programmaticApplyAt
     );
   }

@@ -3586,3 +3586,30 @@ test("playback binding controller records user actions normally once the apply w
     dom.restore();
   }
 });
+
+test("playback binding controller gives a same-tick gesture to the user, not the echo", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const now = 5_100;
+  // Date.now() resolution is coarsened by browsers, so a user grabbing the
+  // player as the window opens can share its timestamp. That tie must resolve
+  // in the user's favour: losing a real interaction would be a new harm, while
+  // treating an echo as a user action is merely the pre-guard behaviour.
+  runtimeState.programmaticApplyAt = 5_000;
+  runtimeState.programmaticApplyUntil = 5_700;
+  runtimeState.lastUserGestureAt = 5_000;
+
+  const controller = createEchoHarness(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 5_100,
+    });
+  } finally {
+    dom.restore();
+  }
+});
