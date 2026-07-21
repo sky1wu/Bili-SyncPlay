@@ -2262,3 +2262,42 @@ test("a backward seek made while the local player is stalled still reaches the r
   assert.equal(sent.payload.syncIntent, "explicit-seek");
   assert.equal(sent.payload.currentTime, 480);
 });
+
+test("stall events after a seek from buffering intent stay buffering", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: false,
+    readyState: 2,
+    currentTime: 480,
+    playbackRate: 1,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.runtimeState.intendedPlayState = "buffering";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+  harness.runtimeState.lastUserGestureAt = 19_950;
+  harness.runtimeState.lastExplicitUserAction = { kind: "seek", at: 19_950 };
+
+  // `waiting` is not one of the sources derivePlaybackSyncIntent tags with
+  // `explicit-seek`, so forcing it to `playing` would ship this frozen
+  // currentTime as an ordinary playing snapshot — sneaking it past the guard
+  // that refuses to follow a buffering peer's position.
+  await harness.controller.broadcastPlayback(video, "waiting");
+
+  const sent = harness.runtimeMessages.at(-1) as {
+    payload: { playState: string; syncIntent?: string };
+  };
+  assert.equal(sent.payload.playState, "buffering");
+  assert.equal(sent.payload.syncIntent, undefined);
+});
