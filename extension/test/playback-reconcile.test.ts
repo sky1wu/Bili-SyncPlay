@@ -190,3 +190,46 @@ test("a catch-up still terminates once the drift is genuinely closed", () => {
   assert.equal(decision.mode, "ignore");
   assert.equal(decision.reason, "within-threshold");
 });
+
+test("a buffering peer's frozen position never drags the local playhead", () => {
+  // The peer stalled 3s ago and its reported position has not moved since.
+  const decision = decidePlaybackReconcileMode({
+    localCurrentTime: 514.9,
+    targetTime: 511.94,
+    playState: "buffering",
+    playbackRate: 1,
+  });
+
+  assert.equal(decision.mode, "ignore");
+  assert.equal(decision.reason, "buffering-not-authoritative");
+});
+
+test("a deliberate jump reported mid-buffer is still followed", () => {
+  const decision = decidePlaybackReconcileMode({
+    localCurrentTime: 514.9,
+    targetTime: 480,
+    playState: "buffering",
+    isExplicitSeek: shouldTreatAsExplicitSeek({
+      syncIntent: "explicit-seek",
+      playState: "buffering",
+    }),
+  });
+
+  // Guard, not a discriminator: this path hard-seeks both before and after the
+  // buffering change. It exists so the new "never chase a buffering peer" rule
+  // cannot later be widened into swallowing a deliberate jump.
+  assert.equal(decision.mode, "hard-seek");
+  assert.equal(decision.reason, "paused-or-buffering");
+});
+
+test("a paused peer still aligns the room on its position", () => {
+  const decision = decidePlaybackReconcileMode({
+    localCurrentTime: 514.9,
+    targetTime: 511.94,
+    playState: "paused",
+    playbackRate: 1,
+  });
+
+  assert.equal(decision.mode, "hard-seek");
+  assert.equal(decision.reason, "paused-or-buffering");
+});

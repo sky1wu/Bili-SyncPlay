@@ -9,6 +9,7 @@ export interface PlaybackReconcileDecision {
   reason:
     | "within-threshold"
     | "paused-or-buffering"
+    | "buffering-not-authoritative"
     | "playing-rate-adjust"
     | "playing-soft-drift"
     | "playing-hard-drift"
@@ -69,7 +70,15 @@ export function shouldTreatAsExplicitSeek(args: {
   syncIntent?: PlaybackState["syncIntent"];
   playState: PlaybackState["playState"];
 }): boolean {
-  return args.playState === "playing" && args.syncIntent === "explicit-seek";
+  // `buffering` counts too: a seek whose `canplay` lands while the player is
+  // still filling its buffer is broadcast as `buffering` (that event source is
+  // not in getBroadcastPlayState's force-`playing` list) but is still a
+  // deliberate jump the room must follow. Every other caller gates on
+  // `playing` before reaching here, so this only widens the reconcile path.
+  return (
+    (args.playState === "playing" || args.playState === "buffering") &&
+    args.syncIntent === "explicit-seek"
+  );
 }
 
 export function decidePlaybackReconcileMode(args: {
@@ -86,6 +95,22 @@ export function decidePlaybackReconcileMode(args: {
   hasActiveCatchUp?: boolean;
 }): PlaybackReconcileDecision {
   const delta = Math.abs(args.targetTime - args.localCurrentTime);
+
+  // A buffering peer's `currentTime` is frozen wherever its player stalled, so
+  // it is not an authoritative target. Chasing it drags every healthy member
+  // backwards for a problem that is not theirs, and the longer the peer stalls
+  // the further back it pulls them. Report the drift but leave the playhead
+  // alone; the peer broadcasts a fresh position the moment it recovers, and a
+  // stall outliving `bufferPauseUpgradeMs` is upgraded to `paused`, which still
+  // aligns the room. A deliberate jump that happens to be reported mid-buffer
+  // carries `explicit-seek` and is followed below.
+  if (args.playState === "buffering" && !args.isExplicitSeek) {
+    return {
+      mode: "ignore",
+      delta,
+      reason: "buffering-not-authoritative",
+    };
+  }
 
   if (args.playState !== "playing") {
     return {
