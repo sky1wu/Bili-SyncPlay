@@ -204,22 +204,32 @@ test("a buffering peer's frozen position never drags the local playhead", () => 
   assert.equal(decision.reason, "buffering-not-authoritative");
 });
 
-test("a deliberate jump reported mid-buffer is still followed", () => {
+test("a stale explicit-seek tag cannot drag an ahead receiver back", () => {
+  // The sender keeps tagging broadcasts `explicit-seek` for up to 2.5s after a
+  // seek but only forces `playing` for 1.2s, and never for canplay/timeupdate —
+  // so a frozen buffering snapshot can arrive still carrying the tag long after
+  // the jump. The receiver already followed the jump itself (its `seeking` /
+  // `seeked` broadcast IS forced to `playing`); being ahead is the evidence.
   const decision = decidePlaybackReconcileMode({
     localCurrentTime: 514.9,
-    targetTime: 480,
+    targetTime: 511.94,
     playState: "buffering",
-    isExplicitSeek: shouldTreatAsExplicitSeek({
+    isExplicitSeek: true,
+    playbackRate: 1,
+  });
+
+  assert.equal(decision.mode, "ignore");
+  assert.equal(decision.reason, "buffering-not-authoritative");
+});
+
+test("shouldTreatAsExplicitSeek stays scoped to playing", () => {
+  assert.equal(
+    shouldTreatAsExplicitSeek({
       syncIntent: "explicit-seek",
       playState: "buffering",
     }),
-  });
-
-  // Guard, not a discriminator: this path hard-seeks both before and after the
-  // buffering change. It exists so the new "never chase a buffering peer" rule
-  // cannot later be widened into swallowing a deliberate jump.
-  assert.equal(decision.mode, "hard-seek");
-  assert.equal(decision.reason, "paused-or-buffering");
+    false,
+  );
 });
 
 test("a paused peer still aligns the room on its position", () => {

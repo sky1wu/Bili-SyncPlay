@@ -70,15 +70,7 @@ export function shouldTreatAsExplicitSeek(args: {
   syncIntent?: PlaybackState["syncIntent"];
   playState: PlaybackState["playState"];
 }): boolean {
-  // `buffering` counts too: a seek whose `canplay` lands while the player is
-  // still filling its buffer is broadcast as `buffering` (that event source is
-  // not in getBroadcastPlayState's force-`playing` list) but is still a
-  // deliberate jump the room must follow. Every other caller gates on
-  // `playing` before reaching here, so this only widens the reconcile path.
-  return (
-    (args.playState === "playing" || args.playState === "buffering") &&
-    args.syncIntent === "explicit-seek"
-  );
+  return args.playState === "playing" && args.syncIntent === "explicit-seek";
 }
 
 export function decidePlaybackReconcileMode(args: {
@@ -110,11 +102,18 @@ export function decidePlaybackReconcileMode(args: {
   // longer the peer stalls, the further back it pulls them. The peer broadcasts
   // a fresh position the moment it recovers, and a stall outliving
   // `bufferPauseUpgradeMs` is upgraded to `paused`, which still aligns the room.
-  // A deliberate jump reported mid-buffer carries `explicit-seek` and is
-  // followed below regardless of direction.
+  // `explicit-seek` deliberately does NOT exempt this. The sender keeps tagging
+  // broadcasts with that intent for up to EXPLICIT_SEEK_BROADCAST_GRACE_MS
+  // (2.5s) after a seek — including `canplay`/`timeupdate`, which
+  // getBroadcastPlayState does not force to `playing` — so a frozen `buffering`
+  // snapshot can carry a stale seek tag long after the jump itself. Honouring it
+  // would drag receivers back to the sender's old position and reintroduce
+  // exactly the yank this branch exists to remove. The jump itself is never
+  // lost: its first broadcast goes out on `seeking`/`seeked`, which ARE forced
+  // to `playing`, so receivers have already followed it — being ahead of the
+  // frozen target is the evidence that they did.
   if (
     args.playState === "buffering" &&
-    !args.isExplicitSeek &&
     args.localCurrentTime > args.targetTime
   ) {
     return {
