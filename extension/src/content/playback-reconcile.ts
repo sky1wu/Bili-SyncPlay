@@ -9,6 +9,7 @@ export interface PlaybackReconcileDecision {
   reason:
     | "within-threshold"
     | "paused-or-buffering"
+    | "buffering-not-authoritative"
     | "playing-rate-adjust"
     | "playing-soft-drift"
     | "playing-hard-drift"
@@ -86,6 +87,48 @@ export function decidePlaybackReconcileMode(args: {
   hasActiveCatchUp?: boolean;
 }): PlaybackReconcileDecision {
   const delta = Math.abs(args.targetTime - args.localCurrentTime);
+
+  // A buffering peer's `currentTime` is frozen wherever its player stalled, so
+  // it is not an authoritative target — but the harm is one-directional. It is
+  // still a valid *lower bound* on where the room has reached, so a receiver
+  // that is BEHIND it (just joined, just finished loading, briefly lagging)
+  // must still catch up: skipping the write there would strand the playhead at
+  // the old position, and `applyPendingPlaybackApplication` neither seeks nor
+  // pauses for `buffering`, so it would keep playing from there until the
+  // stalled peer recovers.
+  //
+  // Only skip when we are AHEAD of the frozen target, which is the case that
+  // drags healthy members backwards for a problem that is not theirs — the
+  // longer the peer stalls, the further back it pulls them. The peer broadcasts
+  // a fresh position the moment it recovers, and a stall outliving
+  // `bufferPauseUpgradeMs` is upgraded to `paused`, which still aligns the room.
+  // `explicit-seek` deliberately does NOT exempt this. The sender keeps tagging
+  // broadcasts with that intent for up to EXPLICIT_SEEK_BROADCAST_GRACE_MS
+  // (2.5s) after a seek — including `canplay`/`timeupdate`, which
+  // getBroadcastPlayState does not force to `playing` — so a frozen `buffering`
+  // snapshot can carry a stale seek tag long after the jump itself. Honouring it
+  // would drag receivers back to the sender's old position and reintroduce
+  // exactly the yank this branch exists to remove.
+  //
+  // A seek made while the sender was ALREADY playing is unaffected: its
+  // `seeking`/`seeked` broadcasts are forced to `playing` (that rule requires
+  // `intendedPlayState === "playing"`), so receivers follow the jump through the
+  // playing path and being ahead of the frozen target is the evidence that they
+  // did. KNOWN GAP: a seek made while the sender was already stalled is not
+  // forced, so an ahead receiver will not follow it until the sender recovers or
+  // the stall upgrades to `paused` — both bounded by the stall itself. Closing
+  // that needs the sender-side broadcast rules to agree on `buffering`; tracked
+  // in issue #190 rather than patched at this call site.
+  if (
+    args.playState === "buffering" &&
+    args.localCurrentTime > args.targetTime
+  ) {
+    return {
+      mode: "ignore",
+      delta,
+      reason: "buffering-not-authoritative",
+    };
+  }
 
   if (args.playState !== "playing") {
     return {

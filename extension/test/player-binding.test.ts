@@ -285,3 +285,20 @@ test("buffering playback update does not force-pause an already playing video", 
   assert.equal(pauseCalls, 0);
   assert.equal(signatures.length, 0);
 });
+
+test("applying a buffering peer state leaves the local playhead untouched", () => {
+  const video = createVideo({ currentTime: 514.9, paused: false });
+
+  const applied = syncPlaybackPosition(
+    video,
+    511.94,
+    "buffering",
+    undefined,
+    1,
+  );
+
+  assert.ok(Math.abs(video.currentTime - 514.9) < 0.001);
+  assert.equal(applied.didWriteCurrentTime, false);
+  assert.equal(applied.mode, "ignore");
+  assert.equal(applied.reason, "buffering-not-authoritative");
+});

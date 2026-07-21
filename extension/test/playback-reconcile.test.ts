@@ -190,3 +190,71 @@ test("a catch-up still terminates once the drift is genuinely closed", () => {
   assert.equal(decision.mode, "ignore");
   assert.equal(decision.reason, "within-threshold");
 });
+
+test("a buffering peer's frozen position never drags the local playhead", () => {
+  // The peer stalled 3s ago and its reported position has not moved since.
+  const decision = decidePlaybackReconcileMode({
+    localCurrentTime: 514.9,
+    targetTime: 511.94,
+    playState: "buffering",
+    playbackRate: 1,
+  });
+
+  assert.equal(decision.mode, "ignore");
+  assert.equal(decision.reason, "buffering-not-authoritative");
+});
+
+test("a stale explicit-seek tag cannot drag an ahead receiver back", () => {
+  // The sender keeps tagging broadcasts `explicit-seek` for up to 2.5s after a
+  // seek but only forces `playing` for 1.2s, and never for canplay/timeupdate —
+  // so a frozen buffering snapshot can arrive still carrying the tag long after
+  // the jump. The receiver already followed the jump itself (its `seeking` /
+  // `seeked` broadcast IS forced to `playing`); being ahead is the evidence.
+  const decision = decidePlaybackReconcileMode({
+    localCurrentTime: 514.9,
+    targetTime: 511.94,
+    playState: "buffering",
+    isExplicitSeek: true,
+    playbackRate: 1,
+  });
+
+  assert.equal(decision.mode, "ignore");
+  assert.equal(decision.reason, "buffering-not-authoritative");
+});
+
+test("shouldTreatAsExplicitSeek stays scoped to playing", () => {
+  assert.equal(
+    shouldTreatAsExplicitSeek({
+      syncIntent: "explicit-seek",
+      playState: "buffering",
+    }),
+    false,
+  );
+});
+
+test("a paused peer still aligns the room on its position", () => {
+  const decision = decidePlaybackReconcileMode({
+    localCurrentTime: 514.9,
+    targetTime: 511.94,
+    playState: "paused",
+    playbackRate: 1,
+  });
+
+  assert.equal(decision.mode, "hard-seek");
+  assert.equal(decision.reason, "paused-or-buffering");
+});
+
+test("a receiver behind a buffering peer still catches up to it", () => {
+  // The frozen position is not authoritative, but it is a valid lower bound on
+  // where the room has reached: a member that just joined or just finished
+  // loading must not be stranded at the old position until the peer recovers.
+  const decision = decidePlaybackReconcileMode({
+    localCurrentTime: 12,
+    targetTime: 511.94,
+    playState: "buffering",
+    playbackRate: 1,
+  });
+
+  assert.equal(decision.mode, "hard-seek");
+  assert.equal(decision.reason, "paused-or-buffering");
+});
