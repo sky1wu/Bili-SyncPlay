@@ -64,6 +64,8 @@ export interface RemotePlayTransitionGuardInput {
 
 export interface ProgrammaticEventSuppressionInput {
   programmaticApplyUntil: number;
+  /** When the current programmatic-apply window opened. */
+  programmaticApplyAt: number;
   programmaticApplySignature: ProgrammaticPlaybackSignature | null;
   normalizedCurrentUrl: string | null;
   playState: PlaybackState["playState"];
@@ -326,9 +328,16 @@ export function shouldSuppressProgrammaticEvent(
   const matchedExplicitAction = mapEventSourceToExplicitAction(
     input.eventSource,
   );
+  // The bypass exists so a genuine user action DURING an apply is not mistaken
+  // for our own echo. An action recorded BEFORE the window opened is not
+  // evidence about anything happening inside it: the user may have seeked
+  // moments before a remote state arrived, and honouring that stale record here
+  // lets the apply's own `seeking`/`play` echo pass as an explicit action and be
+  // broadcast straight back to the room.
   if (
     matchedExplicitAction &&
     input.lastExplicitUserAction?.kind === matchedExplicitAction &&
+    input.lastExplicitUserAction.at >= input.programmaticApplyAt &&
     input.now - input.lastExplicitUserAction.at < input.userGestureGraceMs
   ) {
     return {

@@ -1095,6 +1095,7 @@ export function createSyncController(args: {
     }
     const programmaticDecision = shouldSuppressProgrammaticEventGuard({
       programmaticApplyUntil: args.runtimeState.programmaticApplyUntil,
+      programmaticApplyAt: args.runtimeState.programmaticApplyAt,
       programmaticApplySignature: args.runtimeState.programmaticApplySignature,
       normalizedCurrentUrl: normalizedCurrentVideoUrl,
       playState,

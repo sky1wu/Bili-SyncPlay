@@ -3546,8 +3546,10 @@ test("playback binding controller still records a gesture made during a programm
   runtimeState.programmaticApplyAt = 5_000;
   runtimeState.programmaticApplyUntil = 5_700;
   // The user grabbed the player AFTER the apply started — that is genuinely
-  // them, and must not be discarded along with the echo.
+  // them, and must not be discarded along with the echo. A real in-player
+  // gesture refreshes both timestamps.
   runtimeState.lastUserGestureAt = 5_050;
+  runtimeState.lastUserGestureInPlayerAt = 5_050;
 
   const controller = createEchoHarness(runtimeState, () => now);
 
@@ -3571,6 +3573,7 @@ test("playback binding controller records user actions normally once the apply w
   runtimeState.programmaticApplyAt = 5_000;
   runtimeState.programmaticApplyUntil = 5_700; // already elapsed
   runtimeState.lastUserGestureAt = 5_900;
+  runtimeState.lastUserGestureInPlayerAt = 5_900;
 
   const controller = createEchoHarness(runtimeState, () => now);
 
@@ -3598,6 +3601,7 @@ test("playback binding controller gives a same-tick gesture to the user, not the
   runtimeState.programmaticApplyAt = 5_000;
   runtimeState.programmaticApplyUntil = 5_700;
   runtimeState.lastUserGestureAt = 5_000;
+  runtimeState.lastUserGestureInPlayerAt = 5_000;
 
   const controller = createEchoHarness(runtimeState, () => now);
 
@@ -3609,6 +3613,31 @@ test("playback binding controller gives a same-tick gesture to the user, not the
       kind: "seek",
       at: 5_100,
     });
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not let a stray page click authorize apply echoes", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const now = 5_100;
+  runtimeState.programmaticApplyAt = 5_000;
+  runtimeState.programmaticApplyUntil = 5_700;
+  // A click on blank space / the danmaku box during the apply: the tracker is
+  // document-level so it refreshes `lastUserGestureAt`, but it expresses no
+  // intent to control the player and must not make the apply's own echoes look
+  // like deliberate user actions.
+  runtimeState.lastUserGestureAt = 5_050;
+  runtimeState.lastUserGestureInPlayerAt = 4_900;
+
+  const controller = createEchoHarness(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    assert.equal(runtimeState.lastExplicitUserAction, null);
   } finally {
     dom.restore();
   }

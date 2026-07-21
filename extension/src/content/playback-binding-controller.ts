@@ -189,9 +189,21 @@ export function createPlaybackBindingController(args: {
    * broadcast play-state forcing, and even `shouldSuppressProgrammaticEvent`'s
    * own bypass — letting an apply wave itself back out to the room.
    *
-   * A gesture made AFTER the window opened is still genuinely the user (they
-   * may well have grabbed the player mid-apply), so only echoes whose most
-   * recent gesture predates the window are discarded.
+   * Taking over the player mid-apply is still genuinely the user, so a gesture
+   * made AFTER the window opened lifts the guard — but it has to be an
+   * IN-PLAYER one. The tracker is document/window level, so a click on blank
+   * space or the danmaku box refreshes `lastUserGestureAt` without expressing
+   * any intent to control playback; accepting that would leave the exact hole
+   * this guard exists to close, since the echoes would then be recorded and go
+   * on to satisfy `shouldSuppressProgrammaticEvent`'s explicit-action bypass.
+   *
+   * Known limitation: `isGestureInsidePlayer` only counts play-toggle keys, so
+   * an arrow-key seek inside the (700ms) window is not recognised as taking
+   * over and its `explicit-seek` tag is dropped. The seek itself still reaches
+   * the room through the ordinary position path — it is just not flagged as
+   * deliberate. Widening the key set is deliberately avoided here because the
+   * same predicate authorizes playback on "load paused" pages, where arrow keys
+   * must NOT count.
    *
    * Both timestamps come from `Date.now()`, whose resolution browsers coarsen,
    * so a gesture landing in the same tick as the window opening is genuinely
@@ -202,7 +214,7 @@ export function createPlaybackBindingController(args: {
   function isProgrammaticEventEcho(): boolean {
     return (
       nowOf() < args.runtimeState.programmaticApplyUntil &&
-      args.runtimeState.lastUserGestureAt <
+      args.runtimeState.lastUserGestureInPlayerAt <
         args.runtimeState.programmaticApplyAt
     );
   }
