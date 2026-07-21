@@ -116,16 +116,27 @@ export function createSyncController(args: {
   const ignoredRemotePlaybackLogState = { key: null as string | null, at: 0 };
   const duplicateBroadcastLogState = { key: null as string | null, at: 0 };
   /**
-   * What the last `playback:update` actually put on the wire, for collapsing the
-   * burst of identical messages one player event produces. Cleared whenever the
-   * playback context resets so a duplicate can never be matched across videos.
+   * The last local playback state the room itself echoed back, for collapsing
+   * the burst of identical messages one player event produces.
+   *
+   * Deliberately keyed on the room's echo rather than on "we called send":
+   * neither the background nor the socket nor the server acknowledges a
+   * `playback:update` on the failure paths — the background answers `{ok:true}`
+   * even when it drops the message, `sendToServer` drops silently when the
+   * socket is not OPEN, and the server drops silently when the rate-limit
+   * bucket is empty. Suppressing a repeat because we *sent* something could
+   * therefore swallow the retry for an update the room never received; a repeat
+   * is only redundant once the room demonstrably already holds that state.
+   *
+   * Cleared whenever the playback context resets so a duplicate can never be
+   * matched across videos.
    */
-  let lastSentBroadcast: {
+  let roomConfirmedBroadcast: {
     normalizedUrl: string | null;
     playState: PlaybackState["playState"];
     syncIntent: PlaybackState["syncIntent"] | undefined;
     userInitiated: boolean;
-    naturalEnd: boolean | undefined;
+    naturalEnd: boolean;
     currentTime: number;
     playbackRate: number;
     at: number;
@@ -281,7 +292,7 @@ export function createSyncController(args: {
     softApply.clearSoftApplyCooldown();
     args.runtimeState.lastLocalPlaybackVersion = null;
     args.runtimeState.intendedPlaybackRate = 1;
-    lastSentBroadcast = null;
+    roomConfirmedBroadcast = null;
     args.runtimeState.lastNonSharedGuardUrl = null;
     args.runtimeState.lastExplicitPlaybackAction = null;
     // Preserve the user's authorization to keep watching a non-shared local video
@@ -1372,7 +1383,7 @@ export function createSyncController(args: {
     // sent. Anything peers act on differently — playState, url, rate, seek /
     // ratechange intent, the user-initiated and natural-end flags, or a
     // currentTime that actually advanced — makes this not a duplicate.
-    const duplicate = lastSentBroadcast;
+    const duplicate = roomConfirmedBroadcast;
     if (
       duplicate &&
       now - duplicate.at < args.duplicateBroadcastWindowMs &&
@@ -1380,7 +1391,7 @@ export function createSyncController(args: {
       duplicate.playState === playState &&
       duplicate.syncIntent === syncIntent &&
       duplicate.userInitiated === userInitiated &&
-      duplicate.naturalEnd === naturalEnd &&
+      duplicate.naturalEnd === (naturalEnd === true) &&
       Math.abs(duplicate.currentTime - video.currentTime) <=
         DUPLICATE_BROADCAST_TIME_EPSILON_SECONDS &&
       Math.abs(duplicate.playbackRate - video.playbackRate) <= 0.01 &&
@@ -1422,24 +1433,6 @@ export function createSyncController(args: {
       now,
     });
     pendingLocalOverride.rememberPendingLocalPlaybackOverride(payload, now);
-    // Registered from the payload (not the live element) and BEFORE the await:
-    // broadcasts are fire-and-forget, so the burst of repeats a single player
-    // event emits can all be in flight at once — comparing only against
-    // already-completed sends would let the whole burst through. Reading the
-    // element again after the await could also record a position that was never
-    // actually sent, which would then suppress the broadcast that legitimately
-    // reaches it.
-    const signature = {
-      normalizedUrl: normalizedCurrentVideoUrl,
-      playState,
-      syncIntent,
-      userInitiated,
-      naturalEnd,
-      currentTime: payload.currentTime,
-      playbackRate: payload.playbackRate,
-      at: now,
-    };
-    lastSentBroadcast = signature;
 
     if (eventSource === "timeupdate") {
       logHeartbeatMessage(
@@ -1454,19 +1447,10 @@ export function createSyncController(args: {
       );
     }
 
-    const response = await args.runtimeSendMessage<{ forwarded?: boolean }>({
+    const response = await args.runtimeSendMessage({
       type: "content:playback-update",
       payload,
     });
-    // The background answers `{ ok: true }` even when it drops the update
-    // (disconnected, no member token, not the active shared tab) and
-    // `sendToServer` drops again when the socket is not OPEN, so only an
-    // explicit `forwarded` means the room actually saw this. Otherwise retract
-    // the signature: the repeats that follow are this update's natural retry
-    // and must not be suppressed by a send that never landed.
-    if (response?.forwarded !== true && lastSentBroadcast === signature) {
-      lastSentBroadcast = null;
-    }
     if (response === null) {
       args.debugLog(
         `Dropped playback update actor=${payload.actorId} playState=${payload.playState} url=${payload.url} delta=0.00 result=no-response seq=${payload.seq} source=${eventSource} intent=${payload.syncIntent ?? "none"} rate=${payload.playbackRate.toFixed(2)}`,
@@ -1539,6 +1523,36 @@ export function createSyncController(args: {
     formatPlaybackDiagnostic,
   });
 
+  /**
+   * A `room:state` whose playback is attributed to us is the room telling us it
+   * holds that exact state — the only acknowledgement in the protocol that a
+   * `playback:update` actually landed. Record it as the dedupe baseline, then
+   * hand the state to the normal apply path unchanged.
+   */
+  async function recordRoomConfirmedBroadcast(
+    state: RoomState,
+    shareToast?: SharedVideoToastPayload | null,
+  ): Promise<void> {
+    const playback = state.playback;
+    if (
+      playback &&
+      args.runtimeState.localMemberId &&
+      playback.actorId === args.runtimeState.localMemberId
+    ) {
+      roomConfirmedBroadcast = {
+        normalizedUrl: args.normalizeUrl(playback.url),
+        playState: playback.playState,
+        syncIntent: playback.syncIntent,
+        userInitiated: playback.userInitiated === true,
+        naturalEnd: playback.naturalEnd === true,
+        currentTime: playback.currentTime,
+        playbackRate: playback.playbackRate,
+        at: nowOf(),
+      };
+    }
+    await roomStateApplyController.applyRoomState(state, shareToast);
+  }
+
   return {
     resetPlaybackSyncState,
     hasRecentRemoteStopIntent,
@@ -1546,7 +1560,7 @@ export function createSyncController(args: {
     maintainActiveSoftApply: softApply.maintainActiveSoftApply,
     applyPendingPlaybackApplication,
     broadcastPlayback,
-    applyRoomState: roomStateApplyController.applyRoomState,
+    applyRoomState: recordRoomConfirmedBroadcast,
     hydrateRoomState: roomStateApplyController.hydrateRoomState,
     scheduleHydrationRetry: roomStateApplyController.scheduleHydrationRetry,
     destroy() {

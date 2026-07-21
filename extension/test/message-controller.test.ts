@@ -34,7 +34,6 @@ function createControllerHarness(
       pageShareButtonEnabled: boolean;
     };
     isActiveSharedTab?: boolean;
-    sendToServerForwarded?: boolean;
     isRememberedSharedSourceTab?: boolean;
     canReclaimSharedSourceTab?: boolean;
     reclaimSharedSourceTabIfUnclaimed?: boolean;
@@ -253,8 +252,6 @@ function createControllerHarness(
     },
     sendToServer(message) {
       calls.sendToServer.push(message);
-      // Production returns whether the message actually reached the socket.
-      return overrides.sendToServerForwarded ?? true;
     },
     async updateServerUrl(serverUrl) {
       calls.updateServerUrl.push(serverUrl);
@@ -1621,52 +1618,4 @@ test("message controller forwards content playback updates only for the active s
   );
 
   assert.deepEqual(inactiveHarness.calls.sendToServer, []);
-});
-
-test("message controller reports whether a playback update actually reached the server", async () => {
-  const playbackMessage = {
-    type: "content:playback-update" as const,
-    payload: {
-      url: "https://www.bilibili.com/video/BV1xx411c7mD",
-      currentTime: 12,
-      paused: false,
-      playbackRate: 1,
-      timestamp: 123,
-      actorId: "remote-actor",
-    },
-  };
-
-  const responses: unknown[] = [];
-
-  // Forwarded: guards pass and the socket accepted it.
-  await createControllerHarness().controller.handleRuntimeMessage(
-    playbackMessage,
-    { tab: { id: 123 } },
-    (response) => responses.push(response),
-  );
-
-  // Dropped by the background's own guard — the room never saw it, even though
-  // the message itself was handled fine.
-  await createControllerHarness({
-    isActiveSharedTab: false,
-  }).controller.handleRuntimeMessage(
-    playbackMessage,
-    { tab: { id: 123 } },
-    (response) => responses.push(response),
-  );
-
-  // Reached sendToServer but the socket was not OPEN.
-  await createControllerHarness({
-    sendToServerForwarded: false,
-  }).controller.handleRuntimeMessage(
-    playbackMessage,
-    { tab: { id: 123 } },
-    (response) => responses.push(response),
-  );
-
-  assert.deepEqual(responses, [
-    { ok: true, forwarded: true },
-    { ok: true, forwarded: false },
-    { ok: true, forwarded: false },
-  ]);
 });

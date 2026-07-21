@@ -23,8 +23,7 @@ type PendingOutgoingPlaybackUpdate = {
 };
 
 export interface OutgoingMessageController {
-  /** Returns whether the message actually reached the socket. */
-  sendToServer(message: ClientMessage): boolean;
+  sendToServer(message: ClientMessage): void;
   consumeRoomState(roomState: RoomState): void;
 }
 
@@ -150,14 +149,14 @@ export function createOutgoingMessageController(args: {
     }
   }
 
-  function sendToServer(message: ClientMessage): boolean {
+  function sendToServer(message: ClientMessage): void {
     if (
       !args.connectionState.socket ||
       args.connectionState.socket.readyState !== WebSocket.OPEN
     ) {
       args.log(`Socket not ready for ${message.type}`);
       void args.connect();
-      return false;
+      return;
     }
 
     if (message.type === "playback:update") {
@@ -168,7 +167,6 @@ export function createOutgoingMessageController(args: {
     }
 
     args.connectionState.socket.send(JSON.stringify(message));
-    return true;
   }
 
   function consumeRoomState(roomState: RoomState): void {
