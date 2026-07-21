@@ -60,6 +60,7 @@ function createControllerHarness() {
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => now,
@@ -1591,6 +1592,7 @@ test("sync controller broadcasts buffering when active pause is classified as bu
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 20_400,
@@ -1655,6 +1657,7 @@ test("sync controller broadcasts paused once buffer-pause upgrade window elapses
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 21_700, // 1700ms after pauseStartedAt, past upgrade threshold
@@ -1766,6 +1769,7 @@ test("sync controller tags broadcast with userInitiated:true on a fresh user pau
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 20_400,
@@ -1835,6 +1839,7 @@ test("sync controller omits userInitiated when a pause is buffer-induced", async
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 20_400,
@@ -1909,6 +1914,7 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 21_700,
@@ -2093,6 +2099,7 @@ test("programmatic apply signature stores the normalized url for mismatched (fes
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 20_000,
@@ -2219,4 +2226,144 @@ test("sync controller converges a catch-up instead of stopping at the ignore thr
   } finally {
     windowHarness.restore();
   }
+});
+
+function createDedupeHarness() {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setNow(20_000);
+  const video = createVideo({ paused: true, currentTime: 511.94 });
+  harness.setVideoElement(video);
+  return { harness, video, sharedVideo };
+}
+
+/** The room echoing our own state back — the only real delivery acknowledgement. */
+async function echoOwnState(
+  harness: ReturnType<typeof createControllerHarness>,
+  overrides: Partial<PlaybackState> = {},
+) {
+  await harness.controller.applyRoomState(
+    createRoomState({
+      actorId: "local-member",
+      seq: 1,
+      serverTime: 19_900,
+      currentTime: 511.94,
+      playState: "paused",
+      playbackRate: 1,
+      ...overrides,
+    }),
+  );
+}
+
+test("sync controller collapses repeats once the room has echoed the state", async () => {
+  const { harness, video } = createDedupeHarness();
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  assert.equal(harness.runtimeMessages.length, 1);
+
+  await echoOwnState(harness);
+
+  harness.setNow(20_120);
+  await harness.controller.broadcastPlayback(video, "canplay");
+  harness.setNow(20_240);
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  assert.equal(harness.runtimeMessages.length, 1);
+});
+
+test("sync controller keeps re-sending until the room confirms the state", async () => {
+  // No echo: the update may have been dropped by the background, the socket, or
+  // the server's rate limiter — all of which are silent. The repeats a player
+  // event emits are the only retry, so they must go out.
+  const { harness, video } = createDedupeHarness();
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  harness.setNow(20_120);
+  await harness.controller.broadcastPlayback(video, "canplay");
+  harness.setNow(20_240);
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  assert.equal(harness.runtimeMessages.length, 3);
+});
+
+test("sync controller still sends once the duplicate window elapses", async () => {
+  const { harness, video } = createDedupeHarness();
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  await echoOwnState(harness);
+  harness.setNow(21_400); // > duplicateBroadcastWindowMs
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  assert.equal(harness.runtimeMessages.length, 2);
+});
+
+test("sync controller never collapses a state change into a duplicate", async () => {
+  const { harness, video } = createDedupeHarness();
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  await echoOwnState(harness);
+  assert.equal(harness.runtimeMessages.length, 1);
+
+  // playState change — the whole point of the message.
+  harness.setNow(20_100);
+  video.paused = false;
+  await harness.controller.broadcastPlayback(video, "play");
+  assert.equal(harness.runtimeMessages.length, 2);
+  await echoOwnState(harness, {
+    seq: 2,
+    playState: "playing",
+    serverTime: 20_050,
+  });
+
+  // Position actually advanced.
+  harness.setNow(20_200);
+  video.currentTime = 512.6;
+  await harness.controller.broadcastPlayback(video, "timeupdate");
+  assert.equal(harness.runtimeMessages.length, 3);
+});
+
+test("sync controller does not skip a duplicate that would still fix stale local intent", async () => {
+  const { harness, video } = createDedupeHarness();
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  await echoOwnState(harness);
+  assert.equal(harness.runtimeMessages.length, 1);
+
+  // Applying a remote state moved the local intent since the last broadcast.
+  // Skipping now would strand it, so the payload goes out even though the room
+  // already holds an identical one.
+  harness.runtimeState.intendedPlayState = "playing";
+  harness.setNow(20_100);
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.equal(harness.runtimeMessages.length, 2);
+  assert.equal(harness.runtimeState.intendedPlayState, "paused");
+});
+
+test("sync controller keeps refreshing the local intent guard while deduping", async () => {
+  const { harness, video } = createDedupeHarness();
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  await echoOwnState(harness);
+  assert.equal(harness.runtimeState.lastLocalIntentAt, 20_000);
+
+  // The repeat is dropped from the wire, but the guard that stops a stale
+  // remote `playing` from overriding this pause must still move forward.
+  harness.setNow(20_900);
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.equal(harness.runtimeMessages.length, 1);
+  assert.equal(harness.runtimeState.lastLocalIntentAt, 20_900);
+  assert.equal(harness.runtimeState.lastLocalIntentPlayState, "paused");
 });
