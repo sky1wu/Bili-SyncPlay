@@ -108,10 +108,17 @@ export function decidePlaybackReconcileMode(args: {
   // getBroadcastPlayState does not force to `playing` — so a frozen `buffering`
   // snapshot can carry a stale seek tag long after the jump itself. Honouring it
   // would drag receivers back to the sender's old position and reintroduce
-  // exactly the yank this branch exists to remove. The jump itself is never
-  // lost: its first broadcast goes out on `seeking`/`seeked`, which ARE forced
-  // to `playing`, so receivers have already followed it — being ahead of the
-  // frozen target is the evidence that they did.
+  // exactly the yank this branch exists to remove.
+  //
+  // A seek made while the sender was ALREADY playing is unaffected: its
+  // `seeking`/`seeked` broadcasts are forced to `playing` (that rule requires
+  // `intendedPlayState === "playing"`), so receivers follow the jump through the
+  // playing path and being ahead of the frozen target is the evidence that they
+  // did. KNOWN GAP: a seek made while the sender was already stalled is not
+  // forced, so an ahead receiver will not follow it until the sender recovers or
+  // the stall upgrades to `paused` — both bounded by the stall itself. Closing
+  // that needs the sender-side broadcast rules to agree on `buffering`; tracked
+  // in issue #190 rather than patched at this call site.
   if (
     args.playState === "buffering" &&
     args.localCurrentTime > args.targetTime

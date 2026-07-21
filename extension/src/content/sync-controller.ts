@@ -680,35 +680,15 @@ export function createSyncController(args: {
       argsForBroadcast.now - args.runtimeState.lastExplicitUserAction.at <
         args.userGestureGraceMs;
 
-    const isSeekEvent =
-      argsForBroadcast.eventSource === "seeking" ||
-      argsForBroadcast.eventSource === "seeked";
-    // The transient stall a seek drags behind it. Reporting these as `playing`
-    // keeps peers from seeing a spurious pause mid-jump.
-    const isSeekStallEvent =
-      argsForBroadcast.eventSource === "pause" ||
-      argsForBroadcast.eventSource === "waiting" ||
-      argsForBroadcast.eventSource === "stalled";
-    // Which events may be forced to `playing` depends on the intent we are
-    // seeking *from*:
-    //
-    // - `playing`: the whole chain qualifies (unchanged behaviour).
-    // - `buffering`: only the seek events themselves — the two sources that
-    //   `derivePlaybackSyncIntent` also tags `explicit-seek`. A user dragging
-    //   the progress bar while their own player is stalled still means
-    //   "everyone jump", and since the reconcile layer now refuses to follow a
-    //   `buffering` position, this is the only way such a seek reaches the room.
-    //   The stall events carry no seek tag and a frozen `currentTime`, so
-    //   forcing them would smuggle that frozen position past the reconcile
-    //   guard as an ordinary `playing` snapshot and reintroduce the yank.
-    // - `paused`: never — a seek while paused must not restart playback for
-    //   everyone.
-    const forcePlayingForSeek =
-      args.runtimeState.intendedPlayState === "playing"
-        ? isSeekEvent || isSeekStallEvent
-        : args.runtimeState.intendedPlayState === "buffering" && isSeekEvent;
-
-    if (hasRecentExplicitSeek && forcePlayingForSeek) {
+    if (
+      hasRecentExplicitSeek &&
+      args.runtimeState.intendedPlayState === "playing" &&
+      (argsForBroadcast.eventSource === "seeking" ||
+        argsForBroadcast.eventSource === "seeked" ||
+        argsForBroadcast.eventSource === "pause" ||
+        argsForBroadcast.eventSource === "waiting" ||
+        argsForBroadcast.eventSource === "stalled")
+    ) {
       return "playing";
     }
 
