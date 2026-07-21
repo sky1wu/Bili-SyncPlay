@@ -348,6 +348,12 @@ export function createSyncController(args: {
           });
           return;
         }
+        // Completing the no-op: a frozen `buffering` snapshot neither moves the
+        // playhead nor touches the rate, so it must not tear down an in-flight
+        // catch-up either.
+        if (adjustment.reason === "buffering-not-authoritative") {
+          return;
+        }
         softApply.cancelActiveSoftApply(
           args.getVideoElement(),
           `apply-${adjustment.mode}`,
@@ -680,9 +686,16 @@ export function createSyncController(args: {
       argsForBroadcast.now - args.runtimeState.lastExplicitUserAction.at <
         args.userGestureGraceMs;
 
+    // `buffering` counts as playing intent here. A user dragging the progress
+    // bar while their own player is stalled still means "everyone jump" — and
+    // since the reconcile layer now refuses to follow a `buffering` position
+    // that is behind the receiver, this is the only way such a backward seek
+    // reaches the room at all. `paused` intent is deliberately excluded: a seek
+    // while paused must not restart playback for everyone.
     if (
       hasRecentExplicitSeek &&
-      args.runtimeState.intendedPlayState === "playing" &&
+      (args.runtimeState.intendedPlayState === "playing" ||
+        args.runtimeState.intendedPlayState === "buffering") &&
       (argsForBroadcast.eventSource === "seeking" ||
         argsForBroadcast.eventSource === "seeked" ||
         argsForBroadcast.eventSource === "pause" ||

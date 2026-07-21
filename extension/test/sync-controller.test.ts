@@ -2220,3 +2220,45 @@ test("sync controller converges a catch-up instead of stopping at the ignore thr
     windowHarness.restore();
   }
 });
+
+test("a backward seek made while the local player is stalled still reaches the room", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  // Stalled: not paused, but starved of data — getPlayState would call this
+  // `buffering`, and the room intent already reflects that.
+  const video = createVideo({
+    paused: false,
+    readyState: 2,
+    currentTime: 480,
+    playbackRate: 1,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.runtimeState.intendedPlayState = "buffering";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+  // The user just dragged the progress bar backwards.
+  harness.runtimeState.lastUserGestureAt = 19_950;
+  harness.runtimeState.lastExplicitUserAction = { kind: "seek", at: 19_950 };
+
+  await harness.controller.broadcastPlayback(video, "seeking");
+
+  const sent = harness.runtimeMessages.at(-1) as {
+    payload: { playState: string; syncIntent?: string; currentTime: number };
+  };
+  // Reported as `playing`, not `buffering`: receivers ahead of this position
+  // now refuse to follow a `buffering` target, so a stalled sender's deliberate
+  // jump would otherwise never reach them.
+  assert.equal(sent.payload.playState, "playing");
+  assert.equal(sent.payload.syncIntent, "explicit-seek");
+  assert.equal(sent.payload.currentTime, 480);
+});
