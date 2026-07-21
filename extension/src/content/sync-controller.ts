@@ -1388,6 +1388,13 @@ export function createSyncController(args: {
       Math.abs(args.runtimeState.intendedPlaybackRate - video.playbackRate) <=
         0.01
     ) {
+      // Skipping the *message* must not skip the local-intent guard. That
+      // window (playback-apply's `ignore-local-guard`) is what stops a stale
+      // remote `playing` from overriding a pause we just made; the repeats a
+      // player event emits used to keep pushing it forward, so dropping them
+      // silently would shorten the protection.
+      args.runtimeState.lastLocalIntentAt = now;
+      args.runtimeState.lastLocalIntentPlayState = playState;
       logHeartbeatMessage(
         duplicateBroadcastLogState,
         `${playState}|${normalizedCurrentVideoUrl ?? currentVideo.url}`,
@@ -1415,6 +1422,24 @@ export function createSyncController(args: {
       now,
     });
     pendingLocalOverride.rememberPendingLocalPlaybackOverride(payload, now);
+    // Registered from the payload (not the live element) and BEFORE the await:
+    // broadcasts are fire-and-forget, so the burst of repeats a single player
+    // event emits can all be in flight at once — comparing only against
+    // already-completed sends would let the whole burst through. Reading the
+    // element again after the await could also record a position that was never
+    // actually sent, which would then suppress the broadcast that legitimately
+    // reaches it.
+    const signature = {
+      normalizedUrl: normalizedCurrentVideoUrl,
+      playState,
+      syncIntent,
+      userInitiated,
+      naturalEnd,
+      currentTime: payload.currentTime,
+      playbackRate: payload.playbackRate,
+      at: now,
+    };
+    lastSentBroadcast = signature;
 
     if (eventSource === "timeupdate") {
       logHeartbeatMessage(
@@ -1429,10 +1454,19 @@ export function createSyncController(args: {
       );
     }
 
-    const response = await args.runtimeSendMessage({
+    const response = await args.runtimeSendMessage<{ forwarded?: boolean }>({
       type: "content:playback-update",
       payload,
     });
+    // The background answers `{ ok: true }` even when it drops the update
+    // (disconnected, no member token, not the active shared tab) and
+    // `sendToServer` drops again when the socket is not OPEN, so only an
+    // explicit `forwarded` means the room actually saw this. Otherwise retract
+    // the signature: the repeats that follow are this update's natural retry
+    // and must not be suppressed by a send that never landed.
+    if (response?.forwarded !== true && lastSentBroadcast === signature) {
+      lastSentBroadcast = null;
+    }
     if (response === null) {
       args.debugLog(
         `Dropped playback update actor=${payload.actorId} playState=${payload.playState} url=${payload.url} delta=0.00 result=no-response seq=${payload.seq} source=${eventSource} intent=${payload.syncIntent ?? "none"} rate=${payload.playbackRate.toFixed(2)}`,
@@ -1443,19 +1477,7 @@ export function createSyncController(args: {
       serverTime: payload.serverTime,
       seq: payload.seq,
     };
-    // Recorded only once the message is actually on the wire. Registering it
-    // before the send would let a dropped update suppress the very re-broadcasts
-    // that otherwise act as its natural retry.
-    lastSentBroadcast = {
-      normalizedUrl: normalizedCurrentVideoUrl,
-      playState,
-      syncIntent,
-      userInitiated,
-      naturalEnd,
-      currentTime: video.currentTime,
-      playbackRate: video.playbackRate,
-      at: now,
-    };
+
     if (
       args.shouldLogHeartbeat(
         args.broadcastLogState,

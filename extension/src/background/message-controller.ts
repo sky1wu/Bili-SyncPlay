@@ -93,7 +93,8 @@ export function createMessageController(args: {
   socketController: {
     connect(): Promise<void>;
   };
-  sendToServer: (message: unknown) => void;
+  /** Returns whether the message actually reached the socket. */
+  sendToServer: (message: unknown) => boolean;
   updateServerUrl: (serverUrl: string) => Promise<void>;
   persistState: () => Promise<void>;
   persistProfileState: () => Promise<void>;
@@ -589,7 +590,12 @@ export function createMessageController(args: {
         }
         sendResponse({ ok: true });
         return;
-      case "content:playback-update":
+      case "content:playback-update": {
+        // `forwarded` distinguishes "reached the server" from "accepted by the
+        // background": the guards below and `sendToServer` itself both drop the
+        // message silently, and the content script needs to know so it does not
+        // treat a dropped update as delivered.
+        let forwarded = false;
         if (
           args.connectionState.connected &&
           args.roomSessionState.memberToken &&
@@ -598,7 +604,7 @@ export function createMessageController(args: {
             message.payload.url,
           )
         ) {
-          args.sendToServer({
+          forwarded = args.sendToServer({
             type: "playback:update",
             payload: {
               memberToken: args.roomSessionState.memberToken,
@@ -611,8 +617,9 @@ export function createMessageController(args: {
             },
           });
         }
-        sendResponse({ ok: true });
+        sendResponse({ ok: true, forwarded });
         return;
+      }
       case "content:get-room-state":
         if (args.roomSessionState.roomCode && !args.connectionState.connected) {
           void args.socketController.connect();

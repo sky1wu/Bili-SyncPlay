@@ -2232,7 +2232,9 @@ test("sync controller converges a catch-up instead of stopping at the ignore thr
 });
 
 function createDedupeHarness() {
-  const harness = createControllerHarness({ sendResponse: { ok: true } });
+  const harness = createControllerHarness({
+    sendResponse: { ok: true, forwarded: true },
+  });
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
     url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -2364,4 +2366,51 @@ test("sync controller does not dedupe against an update that never made it out",
   await harness.controller.broadcastPlayback(video, "canplay");
 
   assert.equal(harness.runtimeMessages.length, 2);
+});
+
+test("sync controller does not dedupe when the background accepted but did not forward", async () => {
+  // The background answers `{ ok: true }` even when it drops the update
+  // (disconnected, no member token, wrong tab) — only `forwarded` means the
+  // room actually saw it.
+  const harness = createControllerHarness({ sendResponse: { ok: true } });
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setNow(20_000);
+  const video = createVideo({ paused: true, currentTime: 511.94 });
+  harness.setVideoElement(video);
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  harness.setNow(20_120);
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.equal(harness.runtimeMessages.length, 2);
+});
+
+test("sync controller keeps refreshing the local intent guard while deduping", async () => {
+  const harness = createDedupeHarness();
+  const video = createVideo({ paused: true, currentTime: 511.94 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "paused";
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  assert.equal(harness.runtimeState.lastLocalIntentAt, 20_000);
+
+  // The repeat is dropped from the wire, but the guard that stops a stale
+  // remote `playing` from overriding this pause must still move forward.
+  harness.setNow(20_900);
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.equal(harness.runtimeMessages.length, 1);
+  assert.equal(harness.runtimeState.lastLocalIntentAt, 20_900);
+  assert.equal(harness.runtimeState.lastLocalIntentPlayState, "paused");
 });

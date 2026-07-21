@@ -368,8 +368,9 @@ function logServerError(code: string, message: string): void {
   );
 }
 
-function sendToServer(message: ClientMessage): void {
-  outgoingMessageController?.sendToServer(message);
+/** Returns whether the message actually reached the socket. */
+function sendToServer(message: ClientMessage): boolean {
+  return outgoingMessageController?.sendToServer(message) ?? false;
 }
 
 async function handleServerMessage(message: ServerMessage): Promise<void> {
