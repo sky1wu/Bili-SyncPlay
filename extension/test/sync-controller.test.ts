@@ -31,7 +31,7 @@ function installWindowStub() {
   };
 }
 
-function createControllerHarness() {
+function createControllerHarness(options: { sendResponse?: unknown } = {}) {
   const runtimeState = createContentRuntimeState();
   const lastAppliedVersionByActor = new Map<
     string,
@@ -60,6 +60,7 @@ function createControllerHarness() {
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => now,
@@ -69,7 +70,10 @@ function createControllerHarness() {
     shouldLogHeartbeat: () => true,
     runtimeSendMessage: async (message) => {
       runtimeMessages.push(message);
-      return null;
+      // Background answers `{ ok: true }` on success; `null` is what a failed
+      // message channel looks like. Default to the failure shape so existing
+      // tests keep their behaviour.
+      return (options.sendResponse ?? null) as never;
     },
     getHydrateRetryTimer: () => hydrateRetryTimer,
     setHydrateRetryTimer: (timer) => {
@@ -1591,6 +1595,7 @@ test("sync controller broadcasts buffering when active pause is classified as bu
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 20_400,
@@ -1655,6 +1660,7 @@ test("sync controller broadcasts paused once buffer-pause upgrade window elapses
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 21_700, // 1700ms after pauseStartedAt, past upgrade threshold
@@ -1766,6 +1772,7 @@ test("sync controller tags broadcast with userInitiated:true on a fresh user pau
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 20_400,
@@ -1835,6 +1842,7 @@ test("sync controller omits userInitiated when a pause is buffer-induced", async
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 20_400,
@@ -1909,6 +1917,7 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 21_700,
@@ -2093,6 +2102,7 @@ test("programmatic apply signature stores the normalized url for mismatched (fes
     userGestureGraceMs: 300,
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 20_000,
@@ -2219,4 +2229,139 @@ test("sync controller converges a catch-up instead of stopping at the ignore thr
   } finally {
     windowHarness.restore();
   }
+});
+
+function createDedupeHarness() {
+  const harness = createControllerHarness({ sendResponse: { ok: true } });
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setNow(20_000);
+  return harness;
+}
+
+test("sync controller collapses the identical burst one stall produces", async () => {
+  const harness = createDedupeHarness();
+  // A stalled player: currentTime frozen, the same state re-reported by
+  // seeked/canplay and their follow-up re-broadcasts.
+  const video = createVideo({ paused: true, currentTime: 511.94 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "paused";
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  const afterFirst = harness.runtimeMessages.length;
+
+  harness.setNow(20_120);
+  await harness.controller.broadcastPlayback(video, "canplay");
+  harness.setNow(20_240);
+  await harness.controller.broadcastPlayback(video, "seeked");
+  harness.setNow(20_360);
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.equal(afterFirst, 1);
+  assert.equal(harness.runtimeMessages.length, 1);
+});
+
+test("sync controller still sends once the duplicate window elapses", async () => {
+  const harness = createDedupeHarness();
+  const video = createVideo({ paused: true, currentTime: 511.94 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "paused";
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  harness.setNow(21_400); // > duplicateBroadcastWindowMs
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  assert.equal(harness.runtimeMessages.length, 2);
+});
+
+test("sync controller never collapses a state change into a duplicate", async () => {
+  const harness = createDedupeHarness();
+  const video = createVideo({ paused: true, currentTime: 511.94 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "paused";
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  assert.equal(harness.runtimeMessages.length, 1);
+
+  // playState change — the whole point of the message.
+  harness.setNow(20_100);
+  video.paused = false;
+  await harness.controller.broadcastPlayback(video, "play");
+  assert.equal(harness.runtimeMessages.length, 2);
+
+  // Position actually advanced.
+  harness.setNow(20_200);
+  video.currentTime = 512.6;
+  await harness.controller.broadcastPlayback(video, "timeupdate");
+  assert.equal(harness.runtimeMessages.length, 3);
+
+  // Rate change at an unchanged position. Needs a real ratechange gesture,
+  // otherwise shouldSuppressUnexpectedPlaybackRateBroadcast drops it for
+  // reasons unrelated to deduping.
+  harness.setNow(20_300);
+  video.playbackRate = 1.5;
+  harness.runtimeState.lastUserGestureAt = 20_290;
+  harness.runtimeState.lastExplicitUserAction = {
+    kind: "ratechange",
+    at: 20_290,
+  };
+  await harness.controller.broadcastPlayback(video, "ratechange");
+  assert.equal(harness.runtimeMessages.length, 4);
+});
+
+test("sync controller does not skip a duplicate that would still fix stale local intent", async () => {
+  const harness = createDedupeHarness();
+  const video = createVideo({ paused: true, currentTime: 511.94 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "paused";
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  assert.equal(harness.runtimeMessages.length, 1);
+
+  // Something else (e.g. applying a remote state) moved the local intent since
+  // the last broadcast. Skipping now would strand it, so the payload goes out
+  // even though it is byte-identical.
+  harness.runtimeState.intendedPlayState = "playing";
+  harness.setNow(20_100);
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.equal(harness.runtimeMessages.length, 2);
+  assert.equal(harness.runtimeState.intendedPlayState, "paused");
+});
+
+test("sync controller does not dedupe against an update that never made it out", async () => {
+  // `null` is what a failed message channel returns. The re-broadcasts a player
+  // event emits are that update's natural retry, so they must not be suppressed
+  // by a send that was itself dropped.
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setNow(20_000);
+  const video = createVideo({ paused: true, currentTime: 511.94 });
+  harness.setVideoElement(video);
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+  harness.setNow(20_120);
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.equal(harness.runtimeMessages.length, 2);
 });

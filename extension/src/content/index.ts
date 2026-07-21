@@ -41,6 +41,7 @@ const BUFFER_SIGNAL_WINDOW_MS = 300;
 const BUFFER_PAUSE_UPGRADE_MS = 1500;
 const VIDEO_REBIND_BUFFER_SIGNAL_MS = 1000;
 const REMOTE_PAUSE_DEBOUNCE_MS = 250;
+const DUPLICATE_BROADCAST_WINDOW_MS = 1000;
 const FESTIVAL_SNAPSHOT_TTL_MS = 1200;
 const NAVIGATION_WATCH_INTERVAL_MS = 400;
 const VIDEO_BIND_INTERVAL_MS = 250;
@@ -111,6 +112,7 @@ const syncController = createSyncController({
   userGestureGraceMs: USER_GESTURE_GRACE_MS,
   bufferPauseUpgradeMs: BUFFER_PAUSE_UPGRADE_MS,
   remotePauseDebounceMs: REMOTE_PAUSE_DEBOUNCE_MS,
+  duplicateBroadcastWindowMs: DUPLICATE_BROADCAST_WINDOW_MS,
   nextSeq: () => seq++,
   markBroadcastAt: (at) => {
     lastBroadcastAt = at;

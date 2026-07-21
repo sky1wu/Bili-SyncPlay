@@ -39,6 +39,9 @@ import type {
   LocalPlaybackEventSource,
 } from "./runtime-state";
 
+/** Tolerance for treating two broadcast positions as the same frozen instant. */
+const DUPLICATE_BROADCAST_TIME_EPSILON_SECONDS = 0.05;
+
 export interface SyncController {
   resetPlaybackSyncState(reason: string): void;
   hasRecentRemoteStopIntent(currentVideoUrl: string): boolean;
@@ -84,6 +87,11 @@ export function createSyncController(args: {
    * stalls. Set to 0 to disable.
    */
   remotePauseDebounceMs: number;
+  /**
+   * Window within which an otherwise identical `playback:update` is treated as
+   * a duplicate of the previous one and dropped.
+   */
+  duplicateBroadcastWindowMs: number;
   nextSeq: () => number;
   markBroadcastAt: (at: number) => void;
   getNow?: () => number;
@@ -106,6 +114,22 @@ export function createSyncController(args: {
 }): SyncController {
   const nowOf = () => args.getNow?.() ?? Date.now();
   const ignoredRemotePlaybackLogState = { key: null as string | null, at: 0 };
+  const duplicateBroadcastLogState = { key: null as string | null, at: 0 };
+  /**
+   * What the last `playback:update` actually put on the wire, for collapsing the
+   * burst of identical messages one player event produces. Cleared whenever the
+   * playback context resets so a duplicate can never be matched across videos.
+   */
+  let lastSentBroadcast: {
+    normalizedUrl: string | null;
+    playState: PlaybackState["playState"];
+    syncIntent: PlaybackState["syncIntent"] | undefined;
+    userInitiated: boolean;
+    naturalEnd: boolean | undefined;
+    currentTime: number;
+    playbackRate: number;
+    at: number;
+  } | null = null;
   const localEchoLogState = { key: null as string | null, at: 0 };
   const dispatchPlaybackLogState = { key: null as string | null, at: 0 };
 
@@ -257,6 +281,7 @@ export function createSyncController(args: {
     softApply.clearSoftApplyCooldown();
     args.runtimeState.lastLocalPlaybackVersion = null;
     args.runtimeState.intendedPlaybackRate = 1;
+    lastSentBroadcast = null;
     args.runtimeState.lastNonSharedGuardUrl = null;
     args.runtimeState.lastExplicitPlaybackAction = null;
     // Preserve the user's authorization to keep watching a non-shared local video
@@ -1315,35 +1340,75 @@ export function createSyncController(args: {
       return;
     }
 
+    const syncIntent = derivePlaybackSyncIntent({
+      eventSource,
+      lastExplicitUserAction: args.runtimeState.lastExplicitUserAction,
+      lastForcedPauseAt: args.runtimeState.lastForcedPauseAt,
+      now,
+      userGestureGraceMs: args.userGestureGraceMs,
+    });
+    const userInitiated = deriveUserInitiatedPause({
+      eventSource,
+      playState,
+      lastExplicitUserAction: args.runtimeState.lastExplicitUserAction,
+      lastForcedPauseAt: args.runtimeState.lastForcedPauseAt,
+      programmaticApplyUntil: args.runtimeState.programmaticApplyUntil,
+      programmaticApplyPlayState:
+        args.runtimeState.programmaticApplySignature?.playState ?? null,
+      now,
+      userGestureGraceMs: args.userGestureGraceMs,
+    });
+
+    // Collapse the burst a single player event produces. One stall emits
+    // seeking/seeked/canplay (each broadcasting) plus their 120-180ms follow-up
+    // re-broadcasts, so one hiccup shipped 8-9 identical `playback:update`
+    // messages — all carrying the same frozen currentTime, only the seq
+    // differing. Peers learn nothing from the repeats and it is the dominant
+    // source of server rate-limit pressure.
+    //
+    // The skip must be a genuine no-op, so it requires the local state below to
+    // already match what the duplicate would write: an identical payload that
+    // would nonetheless move `intendedPlayState`/`intendedPlaybackRate` is still
+    // sent. Anything peers act on differently — playState, url, rate, seek /
+    // ratechange intent, the user-initiated and natural-end flags, or a
+    // currentTime that actually advanced — makes this not a duplicate.
+    const duplicate = lastSentBroadcast;
+    if (
+      duplicate &&
+      now - duplicate.at < args.duplicateBroadcastWindowMs &&
+      duplicate.normalizedUrl === normalizedCurrentVideoUrl &&
+      duplicate.playState === playState &&
+      duplicate.syncIntent === syncIntent &&
+      duplicate.userInitiated === userInitiated &&
+      duplicate.naturalEnd === naturalEnd &&
+      Math.abs(duplicate.currentTime - video.currentTime) <=
+        DUPLICATE_BROADCAST_TIME_EPSILON_SECONDS &&
+      Math.abs(duplicate.playbackRate - video.playbackRate) <= 0.01 &&
+      args.runtimeState.intendedPlayState === playState &&
+      Math.abs(args.runtimeState.intendedPlaybackRate - video.playbackRate) <=
+        0.01
+    ) {
+      logHeartbeatMessage(
+        duplicateBroadcastLogState,
+        `${playState}|${normalizedCurrentVideoUrl ?? currentVideo.url}`,
+        `Skipped duplicate playback update playState=${playState} url=${currentVideo.url} t=${video.currentTime.toFixed(2)} source=${eventSource} sinceMs=${now - duplicate.at}`,
+        now,
+      );
+      return;
+    }
+
     args.markBroadcastAt(now);
     args.runtimeState.intendedPlayState = playState;
     args.runtimeState.intendedPlaybackRate = video.playbackRate;
     args.runtimeState.lastLocalIntentAt = now;
     args.runtimeState.lastLocalIntentPlayState = playState;
-
     const payload = createPlaybackBroadcastPayload({
       currentVideo,
       currentTime: video.currentTime,
       playState,
-      syncIntent: derivePlaybackSyncIntent({
-        eventSource,
-        lastExplicitUserAction: args.runtimeState.lastExplicitUserAction,
-        lastForcedPauseAt: args.runtimeState.lastForcedPauseAt,
-        now,
-        userGestureGraceMs: args.userGestureGraceMs,
-      }),
+      syncIntent,
       naturalEnd,
-      userInitiated: deriveUserInitiatedPause({
-        eventSource,
-        playState,
-        lastExplicitUserAction: args.runtimeState.lastExplicitUserAction,
-        lastForcedPauseAt: args.runtimeState.lastForcedPauseAt,
-        programmaticApplyUntil: args.runtimeState.programmaticApplyUntil,
-        programmaticApplyPlayState:
-          args.runtimeState.programmaticApplySignature?.playState ?? null,
-        now,
-        userGestureGraceMs: args.userGestureGraceMs,
-      }),
+      userInitiated,
       playbackRate: video.playbackRate,
       actorId: args.runtimeState.localMemberId ?? "local",
       seq: args.nextSeq(),
@@ -1377,6 +1442,19 @@ export function createSyncController(args: {
     args.runtimeState.lastLocalPlaybackVersion = {
       serverTime: payload.serverTime,
       seq: payload.seq,
+    };
+    // Recorded only once the message is actually on the wire. Registering it
+    // before the send would let a dropped update suppress the very re-broadcasts
+    // that otherwise act as its natural retry.
+    lastSentBroadcast = {
+      normalizedUrl: normalizedCurrentVideoUrl,
+      playState,
+      syncIntent,
+      userInitiated,
+      naturalEnd,
+      currentTime: video.currentTime,
+      playbackRate: video.playbackRate,
+      at: now,
     };
     if (
       args.shouldLogHeartbeat(
