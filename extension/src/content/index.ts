@@ -39,6 +39,7 @@ const PROGRAMMATIC_APPLY_WINDOW_MS = 700;
 const USER_GESTURE_GRACE_MS = 1200;
 const BUFFER_SIGNAL_WINDOW_MS = 300;
 const BUFFER_PAUSE_UPGRADE_MS = 1500;
+const VIDEO_REBIND_BUFFER_SIGNAL_MS = 1000;
 const REMOTE_PAUSE_DEBOUNCE_MS = 250;
 const FESTIVAL_SNAPSHOT_TTL_MS = 1200;
 const NAVIGATION_WATCH_INTERVAL_MS = 400;
@@ -133,6 +134,7 @@ const playbackBindingController = createPlaybackBindingController({
   initialRoomStatePauseHoldMs: INITIAL_ROOM_STATE_PAUSE_HOLD_MS,
   bufferSignalWindowMs: BUFFER_SIGNAL_WINDOW_MS,
   bufferPauseUpgradeMs: BUFFER_PAUSE_UPGRADE_MS,
+  videoRebindBufferSignalMs: VIDEO_REBIND_BUFFER_SIGNAL_MS,
   getSharedVideo: () => shareController.getSharedVideo(),
   hasRecentRemoteStopIntent: (currentVideoUrl) =>
     syncController.hasRecentRemoteStopIntent(currentVideoUrl),
