@@ -207,6 +207,14 @@ export interface ContentRuntimeState {
    */
   lastBufferSignalAt: number;
   /**
+   * Timestamp when playback listeners were most recently attached to a *new*
+   * `<video>` element. Bilibili's player recreates its media element to recover
+   * from a buffer stall, and the replacement element starts out paused — no
+   * `pause` event ever fires for it, so the pause classifier below has no other
+   * way to tell that stall apart from the user pressing pause.
+   */
+  lastVideoElementBoundAt: number;
+  /**
    * Timestamp when the local video most recently transitioned to `paused`.
    * Reset to 0 once playback resumes. Together with
    * [[pauseClassifiedAsBuffer]] this powers the "buffer-pause → buffering"
@@ -299,6 +307,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     sharedVideoNaturalEndAfterSeek: false,
     festivalSnapshot: null,
     lastBufferSignalAt: 0,
+    lastVideoElementBoundAt: 0,
     pauseStartedAt: 0,
     pauseClassifiedAsBuffer: false,
     deferredRemotePausedState: null,

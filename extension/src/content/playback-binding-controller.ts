@@ -40,6 +40,12 @@ export function createPlaybackBindingController(args: {
    * worst-case desync if a buffer stall turns into a real stop.
    */
   bufferPauseUpgradeMs: number;
+  /**
+   * Window after the local `<video>` element was (re)bound during which a
+   * paused element is presumed to be the player rebuilding itself rather than
+   * the user stopping playback. See {@link ContentRuntimeState.lastVideoElementBoundAt}.
+   */
+  videoRebindBufferSignalMs: number;
   getSharedVideo: () => SharedVideo | null;
   hasRecentRemoteStopIntent: (currentVideoUrl: string) => boolean;
   normalizeUrl: (url: string | undefined | null) => string | null;
@@ -103,6 +109,25 @@ export function createPlaybackBindingController(args: {
     args.runtimeState.pauseStartedAt = 0;
     args.runtimeState.pauseClassifiedAsBuffer = false;
     clearBufferUpgradeTimer();
+  };
+  /**
+   * Bound the `buffering` classification: if the element is still paused once
+   * the window elapses this was not a hiccup, so drop the classification and
+   * re-broadcast the real `paused` state to the room.
+   */
+  const armBufferPauseUpgrade = (video: HTMLVideoElement) => {
+    clearBufferUpgradeTimer();
+    pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
+      pauseBufferUpgradeTimerId = null;
+      if (!video.paused) {
+        return;
+      }
+      args.runtimeState.pauseClassifiedAsBuffer = false;
+      args.debugLog(
+        `Buffer-pause upgraded to paused after ${args.bufferPauseUpgradeMs}ms, re-broadcasting`,
+      );
+      void args.broadcastPlayback(video, "pause");
+    }, args.bufferPauseUpgradeMs);
   };
   const hasRecentUserGesture = () =>
     nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs;
@@ -183,6 +208,68 @@ export function createPlaybackBindingController(args: {
         at: nowOf(),
       };
     }
+  }
+
+  /**
+   * Whether a paused-apply we performed ourselves is still in flight. When we
+   * apply a remote `paused` we hard-seek and then call `video.pause()`, which
+   * trips the very events the buffer classifiers watch; treating those as a
+   * local stall would leak the applied state back out as `buffering`.
+   */
+  function isInsideProgrammaticPausedWindow(now: number): boolean {
+    const signature = args.runtimeState.programmaticApplySignature;
+    if (
+      signature === null ||
+      signature.playState !== "paused" ||
+      now >= args.runtimeState.programmaticApplyUntil
+    ) {
+      return false;
+    }
+
+    const normalizedSharedUrl = args.normalizeUrl(args.getSharedVideo()?.url);
+    return (
+      normalizedSharedUrl !== null && normalizedSharedUrl === signature.url
+    );
+  }
+
+  /**
+   * Classify a paused element that never emitted a `pause` event.
+   *
+   * Bilibili's player rebuilds its media element to recover from a buffer
+   * stall, and the replacement element *starts* paused — there is no state
+   * transition, so no `pause` event is dispatched and `onPause`'s classifier
+   * never runs. The element then emits `seeking`/`seeked`/`canplay` while it
+   * restores the playhead, and each of those broadcasts reports `paused` to the
+   * room: every peer stops, hard-seeks, and resumes about a second later.
+   *
+   * Detect it from the transport events instead — the element is paused, we
+   * never recorded a pause for it, the room still believes we are playing, and
+   * no user gesture accounts for it. Classifying it as buffer-induced routes
+   * the broadcast through the existing `buffering` state (which leaves peers
+   * playing) and arms the same bounded upgrade, so a stall that never recovers
+   * is still reported as a genuine `paused` afterwards.
+   */
+  function classifyUnobservedPauseAsBuffer(video: HTMLVideoElement): void {
+    const now = nowOf();
+    if (
+      !video.paused ||
+      args.runtimeState.pauseStartedAt > 0 ||
+      args.runtimeState.intendedPlayState !== "playing" ||
+      hasRecentUserGesture() ||
+      isInsideProgrammaticPausedWindow(now)
+    ) {
+      return;
+    }
+
+    args.runtimeState.pauseStartedAt = now;
+    args.runtimeState.pauseClassifiedAsBuffer = true;
+    const boundAt = args.runtimeState.lastVideoElementBoundAt;
+    args.debugLog(
+      `Classified unobserved pause as buffering (no pause event, boundAgo=${
+        boundAt > 0 ? now - boundAt : "n/a"
+      })`,
+    );
+    armBufferPauseUpgrade(video);
   }
 
   function shouldTreatRateChangeAsProgrammatic(
@@ -794,7 +881,7 @@ export function createPlaybackBindingController(args: {
       return false;
     };
 
-    bindVideoElement({
+    const boundNewElement = bindVideoElement({
       video,
       onPlay: () => {
         if (shouldPreRecordNonSharedExplicitPlay()) {
@@ -842,6 +929,16 @@ export function createPlaybackBindingController(args: {
           hasRecentUserGesture() &&
           args.runtimeState.lastUserGestureAt >
             args.runtimeState.lastForcedPauseAt;
+        // A player rebuilding its media element produces a stall the user never
+        // asked for, but no `waiting`/`stalled` precedes it. When the rebuilt
+        // element is bound early enough to still catch its `pause`, the recent
+        // (re)bind is the only evidence available — treat it as a buffer signal
+        // in its own right. (When we bind too late to see the `pause` at all,
+        // `classifyUnobservedPauseAsBuffer` covers the same stall instead.)
+        const recentVideoRebind =
+          args.runtimeState.lastVideoElementBoundAt > 0 &&
+          now - args.runtimeState.lastVideoElementBoundAt <
+            args.videoRebindBufferSignalMs;
         // When applying a remote `paused`, we hard-seek then call `video.pause()`.
         // The seek trips a `waiting` event milliseconds before the `pause`, so the
         // buffer-signal window will look "fresh" even though no real stall occurred.
@@ -851,34 +948,15 @@ export function createPlaybackBindingController(args: {
         // which blocks the peer's next `playing` via local-intent-guard for up
         // to LOCAL_INTENT_GUARD_MS — the visible "resume takes a few seconds"
         // symptom after a remote pause→play.
-        const programmaticSignature =
-          args.runtimeState.programmaticApplySignature;
-        const normalizedSharedUrl = args.normalizeUrl(currentVideo?.url);
-        const insideProgrammaticPausedWindow =
-          programmaticSignature !== null &&
-          programmaticSignature.playState === "paused" &&
-          now < args.runtimeState.programmaticApplyUntil &&
-          normalizedSharedUrl !== null &&
-          normalizedSharedUrl === programmaticSignature.url;
         const bufferInduced =
-          !insideProgrammaticPausedWindow &&
-          recentBufferSignal &&
+          !isInsideProgrammaticPausedWindow(now) &&
+          (recentBufferSignal || recentVideoRebind) &&
           !userInitiatedPause;
         args.runtimeState.pauseStartedAt = now;
         args.runtimeState.pauseClassifiedAsBuffer = bufferInduced;
         clearBufferUpgradeTimer();
         if (bufferInduced) {
-          pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
-            pauseBufferUpgradeTimerId = null;
-            if (!video.paused) {
-              return;
-            }
-            args.runtimeState.pauseClassifiedAsBuffer = false;
-            args.debugLog(
-              `Buffer-pause upgraded to paused after ${args.bufferPauseUpgradeMs}ms, re-broadcasting`,
-            );
-            void args.broadcastPlayback(video, "pause");
-          }, args.bufferPauseUpgradeMs);
+          armBufferPauseUpgrade(video);
         }
         rememberExplicitPlaybackAction("paused");
         rememberExplicitUserAction("pause");
@@ -903,10 +981,12 @@ export function createPlaybackBindingController(args: {
       },
       onWaiting: () => {
         args.runtimeState.lastBufferSignalAt = nowOf();
+        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "waiting");
       },
       onStalled: () => {
         args.runtimeState.lastBufferSignalAt = nowOf();
+        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "stalled");
       },
       onLoadedMetadata: () => {
@@ -918,6 +998,7 @@ export function createPlaybackBindingController(args: {
         if (!forcePauseWhileWaitingForInitialRoomState(video)) {
           args.applyPendingPlaybackApplication(video);
         }
+        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "canplay", 120);
       },
       onPlaying: () => {
@@ -937,6 +1018,7 @@ export function createPlaybackBindingController(args: {
           args.cancelActiveSoftApply(video, "seek");
         }
         rememberExplicitUserAction("seek");
+        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "seeking");
       },
       onSeeked: () => {
@@ -944,6 +1026,7 @@ export function createPlaybackBindingController(args: {
           args.cancelActiveSoftApply(video, "seek");
         }
         rememberExplicitUserAction("seek");
+        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "seeked", 120);
       },
       onRateChange: () => {
@@ -983,6 +1066,14 @@ export function createPlaybackBindingController(args: {
         }
       },
     });
+
+    if (boundNewElement) {
+      // A *replacement* element (the player rebuilt itself) is indistinguishable
+      // here from the first bind on a freshly loaded page; both leave an element
+      // whose paused state we never observed transitioning. The pause
+      // classifiers use this timestamp to avoid reporting either as a user pause.
+      args.runtimeState.lastVideoElementBoundAt = nowOf();
+    }
   }
 
   return {
