@@ -302,27 +302,3 @@ test("applying a buffering peer state leaves the local playhead untouched", () =
   assert.equal(applied.mode, "ignore");
   assert.equal(applied.reason, "buffering-not-authoritative");
 });
-
-test("a frozen buffering snapshot leaves an in-flight catch-up rate alone", () => {
-  // This client is mid catch-up (rate nudged to 1.12). A peer's stalled
-  // snapshot must be a true no-op: writing the sender's base rate back here
-  // would abort someone else's drift convergence.
-  const video = createVideo({
-    currentTime: 514.9,
-    paused: false,
-    playbackRate: 1.12,
-  });
-
-  const applied = syncPlaybackPosition(
-    video,
-    511.94,
-    "buffering",
-    undefined,
-    1,
-  );
-
-  assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
-  assert.equal(applied.didWritePlaybackRate, false);
-  assert.equal(applied.didChange, false);
-  assert.equal(applied.reason, "buffering-not-authoritative");
-});

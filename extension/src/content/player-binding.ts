@@ -248,12 +248,7 @@ export function syncPlaybackPosition(
     };
   }
 
-  // A frozen `buffering` snapshot must be a true no-op: writing the sender's
-  // base rate here would wipe out an in-flight catch-up rate on this (healthy)
-  // client, so a stalling peer would still interrupt someone else's drift
-  // convergence even though its position is being ignored.
   const shouldWritePlaybackRate =
-    decision.reason !== "buffering-not-authoritative" &&
     Math.abs(video.playbackRate - playbackRate) > 0.01;
   if (shouldWritePlaybackRate) {
     setVideoPlaybackRate(video, playbackRate);

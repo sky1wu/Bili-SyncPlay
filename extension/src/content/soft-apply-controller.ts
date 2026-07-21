@@ -283,15 +283,7 @@ export function createSoftApplyController(args: {
     if (!normalizedUrl || normalizedUrl !== activeSoftApply.normalizedUrl) {
       return "url-changed";
     }
-    // `buffering` is a transient stall of the *sender*, not a change to where
-    // the room is. Cancelling on it lets any member's hiccup abort a healthy
-    // member's drift convergence — the catch-up would restore its base rate and
-    // leave the residual behind, which is the ratchet #185 removed. Only a real
-    // `paused` (or any other non-playing state) ends the session.
-    if (
-      playback.playState !== "playing" &&
-      playback.playState !== "buffering"
-    ) {
+    if (playback.playState !== "playing") {
       return "play-state-changed";
     }
     if (

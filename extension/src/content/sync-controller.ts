@@ -348,12 +348,6 @@ export function createSyncController(args: {
           });
           return;
         }
-        // Completing the no-op: a frozen `buffering` snapshot neither moves the
-        // playhead nor touches the rate, so it must not tear down an in-flight
-        // catch-up either.
-        if (adjustment.reason === "buffering-not-authoritative") {
-          return;
-        }
         softApply.cancelActiveSoftApply(
           args.getVideoElement(),
           `apply-${adjustment.mode}`,
