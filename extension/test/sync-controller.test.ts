@@ -2139,3 +2139,84 @@ test("programmatic apply signature stores the normalized url for mismatched (fes
     windowHarness.restore();
   }
 });
+
+test("sync controller converges a catch-up instead of stopping at the ignore threshold", async () => {
+  const windowHarness = installWindowStub();
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: false,
+    currentTime: 24,
+    playbackRate: 1,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+
+  try {
+    // Drift 0.8s crosses the 0.45s threshold and starts a rate-only catch-up.
+    await harness.controller.applyRoomState(
+      createRoomState({
+        actorId: "remote-member",
+        seq: 10,
+        serverTime: 19_900,
+        currentTime: 24.8,
+        playState: "playing",
+        playbackRate: 1,
+      }),
+    );
+    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+
+    // A routine heartbeat 3s later. The peer advanced 3s; the local head
+    // advanced 3s at the elevated 1.12x, so the remaining drift is 0.44s —
+    // just under the threshold that started the catch-up.
+    harness.setNow(23_000);
+    video.currentTime = 27.36;
+    await harness.controller.applyRoomState(
+      createRoomState({
+        actorId: "remote-member",
+        seq: 11,
+        serverTime: 22_900,
+        currentTime: 27.8,
+        playState: "playing",
+        playbackRate: 1,
+      }),
+    );
+
+    // Previously this heartbeat killed the catch-up twice over: the frozen
+    // snapshot made it look like a 3s jump (`target-shifted`), and the `ignore`
+    // reconcile wrote the base rate back. Both left the 0.44s residual forever.
+    assert.equal(
+      harness.debugLogs.some((message) => message.includes("target-shifted")),
+      false,
+    );
+    assert.ok(video.playbackRate > 1.01);
+
+    // Once the drift really is closed the catch-up ends and the base rate is
+    // restored — the hysteresis lowers the floor, it does not remove it.
+    harness.setNow(26_000);
+    video.currentTime = 29.78;
+    await harness.controller.applyRoomState(
+      createRoomState({
+        actorId: "remote-member",
+        seq: 12,
+        serverTime: 25_900,
+        currentTime: 29.8,
+        playState: "playing",
+        playbackRate: 1,
+      }),
+    );
+
+    assert.ok(Math.abs(video.playbackRate - 1) < 0.001);
+  } finally {
+    windowHarness.restore();
+  }
+});

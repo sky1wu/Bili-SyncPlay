@@ -84,6 +84,10 @@ export function createSoftApplyController(args: {
     // the remote head keeps advancing, so converging on the stale target would
     // restore the base rate too early and leave residual drift behind.
     convergeByRelativeDrift: boolean;
+    // When `targetTime` was captured. The remote head keeps advancing from it,
+    // so any comparison against a *live* remote position has to age the
+    // snapshot by the elapsed time first.
+    startedAt: number;
   } | null = null;
   let activeSoftApplyTimer: number | null = null;
 
@@ -257,6 +261,7 @@ export function createSoftApplyController(args: {
       deadlineAt: nowOf() + timeoutMs,
       armCooldownOnConverge: nextArmCooldownOnConverge,
       convergeByRelativeDrift,
+      startedAt: nowOf(),
     };
     scheduleActiveSoftApplyTimeout();
     args.debugLog(
@@ -295,8 +300,25 @@ export function createSoftApplyController(args: {
     ) {
       return "rate-changed";
     }
+    // `targetTime` is a snapshot of the remote head taken when the session
+    // started, but the peer keeps playing. Comparing a live remote position
+    // against the frozen snapshot makes every routine heartbeat look like a
+    // jump once more than SOFT_APPLY_TARGET_SHIFT_CANCEL_THRESHOLD_SECONDS of
+    // content has elapsed — for a peer playing steadily and heartbeating every
+    // couple of seconds that is guaranteed to happen long before a catch-up can
+    // converge, so the session was always killed early and left residual drift
+    // behind. Age the snapshot by the elapsed wall time so this only fires for a
+    // genuine unannounced jump. (Announced ones are caught by the `explicit-seek`
+    // check above, and a stalled/paused peer by `play-state-changed`.)
+    const elapsedSeconds = Math.max(
+      0,
+      (nowOf() - activeSoftApply.startedAt) / 1_000,
+    );
+    const expectedTargetTime =
+      activeSoftApply.targetTime +
+      elapsedSeconds * activeSoftApply.restorePlaybackRate;
     if (
-      Math.abs(playback.currentTime - activeSoftApply.targetTime) >
+      Math.abs(playback.currentTime - expectedTargetTime) >
       SOFT_APPLY_TARGET_SHIFT_CANCEL_THRESHOLD_SECONDS
     ) {
       return "target-shifted";

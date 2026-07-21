@@ -287,9 +287,16 @@ export function createSyncController(args: {
   }
 
   function applyPendingPlaybackApplication(video: HTMLVideoElement): void {
+    const pending = args.runtimeState.pendingPlaybackApplication;
     const result = applyPendingPlaybackApplicationWithBinding({
       video,
-      pendingPlaybackApplication: args.runtimeState.pendingPlaybackApplication,
+      pendingPlaybackApplication: pending,
+      // While a catch-up is running for this video, converge on the drift
+      // instead of stopping as soon as it re-enters the (much wider) band that
+      // triggered the catch-up in the first place.
+      hasActiveCatchUp:
+        pending !== null &&
+        softApply.isActiveRateOnlyCatchUp(args.normalizeUrl(pending.url)),
       clearPendingPlaybackApplication: () => {
         args.runtimeState.pendingPlaybackApplication = null;
       },

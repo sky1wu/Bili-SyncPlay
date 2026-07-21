@@ -155,6 +155,7 @@ export function syncPlaybackPosition(
   playState: PlaybackState["playState"],
   syncIntent: PlaybackState["syncIntent"] | undefined,
   playbackRate: number,
+  hasActiveCatchUp = false,
 ): AppliedPlaybackAdjustment {
   const previousCurrentTime = video.currentTime;
   const decision = decidePlaybackReconcileMode({
@@ -162,6 +163,7 @@ export function syncPlaybackPosition(
     targetTime,
     playState,
     playbackRate,
+    hasActiveCatchUp,
     isExplicitSeek: shouldTreatAsExplicitSeek({
       syncIntent,
       playState,
@@ -268,6 +270,8 @@ export function syncPlaybackPosition(
 export function applyPendingPlaybackApplication(args: {
   video: HTMLVideoElement;
   pendingPlaybackApplication: PlaybackState | null;
+  /** See {@link syncPlaybackPosition}. */
+  hasActiveCatchUp?: boolean;
   clearPendingPlaybackApplication: () => void;
   onPlaybackAdjusted?: (
     adjustment: AppliedPlaybackAdjustment,
@@ -299,6 +303,7 @@ export function applyPendingPlaybackApplication(args: {
     playback.playState,
     playback.syncIntent,
     playback.playbackRate,
+    args.hasActiveCatchUp ?? false,
   );
   args.onPlaybackAdjusted?.(appliedSignature, playback);
   const needsPlayStateChange =
