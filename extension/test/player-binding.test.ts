@@ -302,3 +302,45 @@ test("applying a buffering peer state leaves the local playhead untouched", () =
   assert.equal(applied.mode, "ignore");
   assert.equal(applied.reason, "buffering-not-authoritative");
 });
+
+test("a frozen buffering snapshot leaves an in-flight catch-up rate alone", () => {
+  const video = createVideo({
+    currentTime: 514.9,
+    paused: false,
+    playbackRate: 1.12,
+  });
+
+  const applied = syncPlaybackPosition(
+    video,
+    511.94,
+    "buffering",
+    undefined,
+    1,
+  );
+
+  assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+  assert.equal(applied.didWritePlaybackRate, false);
+  assert.equal(applied.reason, "buffering-not-authoritative");
+});
+
+test("a deliberate rate change still applies even while the sender is buffering", () => {
+  // The sender's stall and their speed change are orthogonal — swallowing the
+  // latter would leave the room out of sync on rate until the peer recovers.
+  const video = createVideo({
+    currentTime: 514.9,
+    paused: false,
+    playbackRate: 1,
+  });
+
+  const applied = syncPlaybackPosition(
+    video,
+    511.94,
+    "buffering",
+    "explicit-ratechange",
+    1.5,
+  );
+
+  assert.ok(Math.abs(video.playbackRate - 1.5) < 0.001);
+  assert.equal(applied.didWritePlaybackRate, true);
+  assert.equal(applied.didWriteCurrentTime, false);
+});

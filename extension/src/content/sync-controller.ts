@@ -352,7 +352,15 @@ export function createSyncController(args: {
           (adjustment.mode === "rate-only" &&
             Math.abs(adjustment.playbackRate - adjustment.restorePlaybackRate) >
               0.01);
-        if (!isSelfRestoringRateAdjust) {
+        // Completing the no-op: a frozen `buffering` snapshot neither moves the
+        // playhead nor touches the rate, so it must not clear the cooldown a
+        // soft-apply convergence just armed either. `shouldSuppressByCooldown`
+        // only screens `playing` updates, so a lagging `buffering` would
+        // otherwise strip that protection and let the next ordinary drift
+        // re-trigger a correction immediately.
+        const isBufferingNoop =
+          adjustment.reason === "buffering-not-authoritative";
+        if (!isSelfRestoringRateAdjust && !isBufferingNoop) {
           softApply.clearSoftApplyCooldown();
         }
         args.debugLog(
@@ -364,6 +372,9 @@ export function createSyncController(args: {
             },
           )} wroteTime=${adjustment.didWriteCurrentTime} wroteRate=${adjustment.didWritePlaybackRate} targetTime=${adjustment.targetTime.toFixed(2)} appliedTime=${adjustment.currentTime.toFixed(2)} appliedRate=${adjustment.playbackRate.toFixed(2)} restoreRate=${adjustment.restorePlaybackRate.toFixed(2)}`,
         );
+        if (isBufferingNoop) {
+          return;
+        }
         if (isSelfRestoringRateAdjust) {
           const driftSeconds = Math.abs(
             adjustment.targetTime - adjustment.currentTime,

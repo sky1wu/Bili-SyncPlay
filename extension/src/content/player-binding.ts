@@ -248,8 +248,19 @@ export function syncPlaybackPosition(
     };
   }
 
+  // A frozen `buffering` snapshot must be a true no-op: writing the sender's
+  // base rate here would wipe out an in-flight catch-up rate on this (healthy)
+  // client, so a stalling peer would still interrupt someone else's drift
+  // convergence even though its position is being ignored.
+  //
+  // `explicit-ratechange` is exempt: the sender's stall and their deliberate
+  // speed change are orthogonal, and swallowing the latter would leave the room
+  // out of sync on playback rate until the peer recovers.
+  const isBufferingNoop =
+    decision.reason === "buffering-not-authoritative" &&
+    syncIntent !== "explicit-ratechange";
   const shouldWritePlaybackRate =
-    Math.abs(video.playbackRate - playbackRate) > 0.01;
+    !isBufferingNoop && Math.abs(video.playbackRate - playbackRate) > 0.01;
   if (shouldWritePlaybackRate) {
     setVideoPlaybackRate(video, playbackRate);
   }

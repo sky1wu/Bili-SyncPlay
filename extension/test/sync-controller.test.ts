@@ -2367,3 +2367,50 @@ test("sync controller keeps refreshing the local intent guard while deduping", a
   assert.equal(harness.runtimeState.lastLocalIntentAt, 20_900);
   assert.equal(harness.runtimeState.lastLocalIntentPlayState, "paused");
 });
+
+test("a lagging buffering snapshot does not strip the soft-apply cooldown", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: false,
+    currentTime: 514.9,
+    playbackRate: 1,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+
+  // A soft-apply convergence just armed the cooldown that keeps the next
+  // correction from firing immediately.
+  harness.runtimeState.softApplyCooldownUrl = sharedVideo.url;
+  harness.runtimeState.softApplyCooldownUntil = 22_500;
+
+  // A peer stalls behind us. Its frozen position is ignored — and because that
+  // is a true no-op it must not clear the cooldown either. `shouldSuppressByCooldown`
+  // only screens `playing` updates, so stripping it here would let the next
+  // ordinary drift re-trigger a correction right away.
+  await harness.controller.applyRoomState(
+    createRoomState({
+      actorId: "remote-member",
+      seq: 10,
+      serverTime: 19_900,
+      currentTime: 511.94,
+      playState: "buffering",
+      playbackRate: 1,
+    }),
+  );
+
+  assert.equal(harness.runtimeState.softApplyCooldownUntil, 22_500);
+  assert.equal(harness.runtimeState.softApplyCooldownUrl, sharedVideo.url);
+  assert.ok(Math.abs(video.currentTime - 514.9) < 0.001);
+});
