@@ -37,6 +37,7 @@ import { createPendingLocalOverrideController } from "./pending-local-override";
 import type {
   ContentRuntimeState,
   LocalPlaybackEventSource,
+  ProgrammaticApplyScope,
 } from "./runtime-state";
 
 /** Tolerance for treating two broadcast positions as the same frozen instant. */
@@ -240,6 +241,7 @@ export function createSyncController(args: {
     signature: ReturnType<typeof createProgrammaticPlaybackSignature>,
     reason: "pending" | "apply",
     actorId = "system",
+    scope: ProgrammaticApplyScope = "all",
   ): void {
     // Normalize the signature url at the single write point so every consumer
     // (programmatic-event guard, programmatic-paused window, programmatic
@@ -254,10 +256,11 @@ export function createSyncController(args: {
       url: normalizedSignatureUrl,
     };
     args.runtimeState.programmaticApplyAt = nowOf();
+    args.runtimeState.programmaticApplyScope = scope;
     args.runtimeState.programmaticApplyUntil =
       nowOf() + args.programmaticApplyWindowMs;
     args.debugLog(
-      `Programmatic apply window armed actor=${actorId} playState=${signature.playState} url=${signature.url} delta=n/a result=${reason} until=${args.runtimeState.programmaticApplyUntil}`,
+      `Programmatic apply window armed actor=${actorId} playState=${signature.playState} url=${signature.url} delta=n/a result=${reason} scope=${scope} until=${args.runtimeState.programmaticApplyUntil}`,
     );
   }
 
@@ -290,6 +293,7 @@ export function createSyncController(args: {
     pendingLocalOverride.clearPendingLocalPlaybackOverride("reset");
     args.runtimeState.programmaticApplyUntil = 0;
     args.runtimeState.programmaticApplyAt = 0;
+    args.runtimeState.programmaticApplyScope = "all";
     args.runtimeState.programmaticApplySignature = null;
     softApply.clearSoftApplyCooldown();
     args.runtimeState.lastLocalPlaybackVersion = null;
@@ -1117,6 +1121,7 @@ export function createSyncController(args: {
     const programmaticDecision = shouldSuppressProgrammaticEventGuard({
       programmaticApplyUntil: args.runtimeState.programmaticApplyUntil,
       programmaticApplyAt: args.runtimeState.programmaticApplyAt,
+      programmaticApplyScope: args.runtimeState.programmaticApplyScope,
       programmaticApplySignature: args.runtimeState.programmaticApplySignature,
       normalizedCurrentUrl: normalizedCurrentVideoUrl,
       playState,
@@ -1388,8 +1393,13 @@ export function createSyncController(args: {
       lastExplicitUserAction: args.runtimeState.lastExplicitUserAction,
       lastForcedPauseAt: args.runtimeState.lastForcedPauseAt,
       programmaticApplyUntil: args.runtimeState.programmaticApplyUntil,
+      // A ratechange-scoped window only restored a playback rate, so its
+      // signature playState is incidental (it is whatever the element happened
+      // to be doing) and must not veto the user-initiated flag on a real pause.
       programmaticApplyPlayState:
-        args.runtimeState.programmaticApplySignature?.playState ?? null,
+        args.runtimeState.programmaticApplyScope === "all"
+          ? (args.runtimeState.programmaticApplySignature?.playState ?? null)
+          : null,
       now,
       userGestureGraceMs: args.userGestureGraceMs,
     });

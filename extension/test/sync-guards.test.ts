@@ -522,3 +522,71 @@ test("does not let an explicit action from before the apply window bypass suppre
 
   assert.equal(decision.shouldSuppress, true);
 });
+
+test("a ratechange-scoped window does not swallow the seek that opened it", () => {
+  // Reproduces the observed "seek gets pulled back": the user's `onSeeking`
+  // handler cancels the active rate catch-up, the cancel restores the snapshot
+  // rate and arms a window microseconds later, and the window then matched the
+  // user's own `seeking` broadcast (same url, same time, same rate) and dropped
+  // it. With no broadcast, the next peer heartbeat hard-seeked them back.
+  const input = {
+    programmaticApplyAt: 10_000,
+    programmaticApplyUntil: 10_700,
+    programmaticApplySignature: {
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      playState: "buffering" as const,
+      currentTime: 119.49,
+      playbackRate: 2,
+    },
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "buffering" as const,
+    currentTime: 119.49,
+    playbackRate: 2,
+    eventSource: "seeking" as const,
+    // Swallowed by `isProgrammaticEventEcho`, so the record is still the stale
+    // ratechange from before the seek and cannot bypass the guard.
+    lastExplicitUserAction: { kind: "ratechange" as const, at: 9_000 },
+    now: 10_005,
+    userGestureGraceMs: 1_200,
+  };
+
+  assert.equal(
+    shouldSuppressProgrammaticEvent({
+      ...input,
+      programmaticApplyScope: "ratechange",
+    }).shouldSuppress,
+    false,
+  );
+  // A real apply of a remote state still suppresses the identical echo.
+  assert.equal(
+    shouldSuppressProgrammaticEvent({ ...input, programmaticApplyScope: "all" })
+      .shouldSuppress,
+    true,
+  );
+});
+
+test("a ratechange-scoped window still suppresses its own rate echo", () => {
+  const decision = shouldSuppressProgrammaticEvent({
+    programmaticApplyAt: 10_000,
+    programmaticApplyUntil: 10_700,
+    programmaticApplyScope: "ratechange",
+    programmaticApplySignature: {
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      playState: "playing",
+      currentTime: 119.49,
+      playbackRate: 2,
+    },
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "playing",
+    currentTime: 119.49,
+    playbackRate: 2,
+    eventSource: "ratechange",
+    lastExplicitUserAction: null,
+    now: 10_005,
+    userGestureGraceMs: 1_200,
+  });
+
+  assert.equal(decision.shouldSuppress, true);
+  // The window must survive so a follow-up rate echo is caught too.
+  assert.equal(decision.nextProgrammaticApplyUntil, 10_700);
+});

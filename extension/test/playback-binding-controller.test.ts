@@ -3642,3 +3642,113 @@ test("playback binding controller does not let a stray page click authorize appl
     dom.restore();
   }
 });
+
+test("a user seek that cancels an active rate catch-up is still recorded", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 1_000;
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
+  const events: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      events.push(eventSource ?? "manual");
+    },
+    // Mirror the real soft-apply cancel: restoring the snapshot rate arms a
+    // programmatic window whose start (1_100) post-dates the gesture (1_000)
+    // that triggered this very cancel.
+    cancelActiveSoftApply: () => {
+      runtimeState.programmaticApplyAt = 1_100;
+      runtimeState.programmaticApplyUntil = 1_800;
+      runtimeState.programmaticApplyScope = "ratechange";
+      runtimeState.programmaticApplySignature = {
+        url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+        playState: "buffering",
+        currentTime: 119.49,
+        playbackRate: 2,
+      };
+    },
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    // Without this the action stays null, `derivePlaybackSyncIntent` cannot tag
+    // the broadcast and the guard's explicit-action bypass has nothing to match,
+    // so the seek never leaves this client and the room pulls it back.
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 1_100,
+    });
+
+    await Promise.resolve();
+    assert.deepEqual(events, ["seeking"]);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("a user pause that cancels an active rate catch-up is still recorded", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 1_000;
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {
+      runtimeState.programmaticApplyAt = 1_100;
+      runtimeState.programmaticApplyUntil = 1_800;
+      runtimeState.programmaticApplyScope = "ratechange";
+      runtimeState.programmaticApplySignature = {
+        url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+        playState: "paused",
+        currentTime: 119.49,
+        playbackRate: 2,
+      };
+    },
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("pause")?.(new Event("pause"));
+
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "pause",
+      at: 1_100,
+    });
+    assert.deepEqual(runtimeState.lastExplicitPlaybackAction, {
+      playState: "paused",
+      at: 1_100,
+    });
+  } finally {
+    dom.restore();
+  }
+});

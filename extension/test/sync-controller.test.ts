@@ -2457,3 +2457,88 @@ test("a buffering apply that actually wrote the rate still clears the cooldown",
   assert.equal(harness.runtimeState.softApplyCooldownUntil, 0);
   assert.ok(Math.abs(video.currentTime - 514.9) < 0.001);
 });
+
+test("sync controller keeps userInitiated on a pause that cancelled a rate catch-up", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: true,
+    readyState: 4,
+    currentTime: 40,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.runtimeState.lastUserGestureAt = 20_350;
+  harness.runtimeState.lastForcedPauseAt = 0;
+  harness.runtimeState.lastExplicitUserAction = { kind: "pause", at: 20_350 };
+  harness.runtimeState.pauseStartedAt = 20_350;
+  harness.runtimeState.pauseClassifiedAsBuffer = false;
+  // The user's own `pause` handler cancelled the active catch-up, and the rate
+  // restore armed this window. Its signature playState is merely whatever the
+  // element was doing (paused) — it is NOT an in-flight remote paused-apply, so
+  // it must not strip the user-initiated flag and subject peers to the pause
+  // debounce.
+  harness.runtimeState.programmaticApplyAt = 20_360;
+  harness.runtimeState.programmaticApplyUntil = 21_060;
+  harness.runtimeState.programmaticApplyScope = "ratechange";
+  harness.runtimeState.programmaticApplySignature = {
+    url: sharedVideo.url,
+    playState: "paused",
+    currentTime: 40,
+    playbackRate: 1,
+  };
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  harness.controller = createSyncController({
+    runtimeState: harness.runtimeState,
+    lastAppliedVersionByActor: new Map(),
+    broadcastLogState: { key: null, at: 0 },
+    ignoredSelfPlaybackLogState: { key: null, at: 0 },
+    localIntentGuardMs: 500,
+    pauseHoldMs: 1_000,
+    initialRoomStatePauseHoldMs: 1_500,
+    remoteEchoSuppressionMs: 800,
+    remotePlayTransitionGuardMs: 500,
+    remoteFollowPlayingWindowMs: 3_000,
+    programmaticApplyWindowMs: 700,
+    userGestureGraceMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
+    nextSeq: () => 1,
+    markBroadcastAt: () => {},
+    getNow: () => 20_400,
+    debugLog: (message) => harness.debugLogs.push(message),
+    shouldLogHeartbeat: () => true,
+    runtimeSendMessage: async (message) => {
+      harness.runtimeMessages.push(message);
+      return null;
+    },
+    getVideoElement: () => video,
+    getCurrentPlaybackVideo: async () => sharedVideo,
+    getSharedVideo: () => sharedVideo,
+    normalizeUrl: (url) => url?.trim() ?? null,
+    notifyRoomStateToasts: () => {},
+    maybeShowSharedVideoToast: () => {},
+  });
+
+  await harness.controller.broadcastPlayback(video, "pause");
+
+  assert.equal(harness.runtimeMessages.length, 1);
+  const payload = (
+    harness.runtimeMessages[0] as {
+      payload: { playState: string; userInitiated?: boolean };
+    }
+  ).payload;
+  assert.equal(payload.playState, "paused");
+  assert.equal(payload.userInitiated, true);
+});
