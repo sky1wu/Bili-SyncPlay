@@ -683,6 +683,93 @@ test("sync controller allows explicit user seek inside the silence window", asyn
   );
 });
 
+function createSeekFromBufferingHarness() {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.hasReceivedInitialRoomState = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setNow(22_000);
+  harness.runtimeState.lastExplicitUserAction = { kind: "seek", at: 21_950 };
+
+  return { harness, sharedVideo };
+}
+
+function lastBroadcastPlayState(harness: {
+  runtimeMessages: Array<unknown>;
+}): string | undefined {
+  const message = harness.runtimeMessages.at(-1) as
+    { payload?: { playState?: string } } | undefined;
+  return message?.payload?.playState;
+}
+
+test("sync controller broadcasts a seek started while buffering as playing", async () => {
+  const { harness } = createSeekFromBufferingHarness();
+  // readyState < 3 with paused=false is exactly what getPlayState reads as
+  // `buffering`: this side is stalled, and the user seeks anyway.
+  const video = createVideo({ paused: false, readyState: 2, currentTime: 90 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "buffering";
+  harness.runtimeState.explicitSeekFromBufferingAt = 21_950;
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  // Without this the frozen target goes out as `buffering`, and receivers that
+  // are already ahead of it drop the jump via `buffering-not-authoritative`.
+  assert.equal(lastBroadcastPlayState(harness), "playing");
+});
+
+test("sync controller keeps stall events after a seek-from-buffering as buffering", async () => {
+  const { harness } = createSeekFromBufferingHarness();
+  const video = createVideo({ paused: false, readyState: 2, currentTime: 90 });
+  harness.setVideoElement(video);
+  // The forced `seeking` broadcast above already wrote `intendedPlayState` back
+  // to "playing", which is precisely why the stall branch cannot rely on it.
+  harness.runtimeState.intendedPlayState = "playing";
+  harness.runtimeState.explicitSeekFromBufferingAt = 21_950;
+
+  await harness.controller.broadcastPlayback(video, "waiting");
+
+  // Forcing this to `playing` would publish the still-frozen position as a
+  // healthy one and drag members who already followed the jump back to it.
+  assert.equal(lastBroadcastPlayState(harness), "buffering");
+});
+
+test("sync controller still forces stall events after a healthy seek to playing", async () => {
+  const { harness } = createSeekFromBufferingHarness();
+  const video = createVideo({ paused: false, readyState: 2, currentTime: 90 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "playing";
+  // The seek began from healthy playback, so the stall is the seek's own
+  // momentary rebuffer — unchanged behaviour.
+  harness.runtimeState.explicitSeekFromBufferingAt = 0;
+
+  await harness.controller.broadcastPlayback(video, "waiting");
+
+  assert.equal(lastBroadcastPlayState(harness), "playing");
+});
+
+test("sync controller stops suppressing stall events once the seek-from-buffering window lapses", async () => {
+  const { harness } = createSeekFromBufferingHarness();
+  const video = createVideo({ paused: false, readyState: 2, currentTime: 90 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "playing";
+  // userGestureGraceMs is 300 in this harness; 21_000 is well outside it.
+  harness.runtimeState.explicitSeekFromBufferingAt = 21_000;
+
+  await harness.controller.broadcastPlayback(video, "waiting");
+
+  assert.equal(lastBroadcastPlayState(harness), "playing");
+});
+
 test("sync controller does not treat a seek as explicit after a forced pause invalidates it", async () => {
   const harness = createControllerHarness();
   const sharedVideo = {

@@ -274,6 +274,14 @@ export function createPlaybackBindingController(args: {
         kind,
         at: nowOf(),
       };
+      if (kind === "seek") {
+        // Snapshot here, not at broadcast time: the first forced `seeking`
+        // broadcast writes `intendedPlayState` back to `playing`, after which
+        // this side is indistinguishable from one that seeked while healthy.
+        // See the field's doc comment in runtime-state.ts.
+        args.runtimeState.explicitSeekFromBufferingAt =
+          args.runtimeState.intendedPlayState === "playing" ? 0 : nowOf();
+      }
     }
   }
 
@@ -876,6 +884,7 @@ export function createPlaybackBindingController(args: {
           `Forced pause reapplied after seek-triggered autoplay intended=${args.runtimeState.intendedPlayState}`,
         );
         args.runtimeState.lastExplicitUserAction = null;
+        args.runtimeState.explicitSeekFromBufferingAt = 0;
         args.runtimeState.lastExplicitPlaybackAction = null;
         args.runtimeState.lastForcedPauseAt = nowOf();
         window.setTimeout(() => {

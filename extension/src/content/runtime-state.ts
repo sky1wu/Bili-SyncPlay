@@ -160,6 +160,26 @@ export interface ContentRuntimeState {
   suppressedRemotePlayback: SuppressedRemotePlayback | null;
   recentRemotePlayingIntent: RecentRemotePlayingIntent | null;
   lastExplicitUserAction: ExplicitUserAction | null;
+  /**
+   * When an explicit user seek was started while this side was ALREADY
+   * buffering, or 0 when the most recent seek began from healthy playback.
+   *
+   * `getBroadcastPlayState` forces the transport events that make up a seek to
+   * broadcast as `playing`, so a mid-seek stall cannot read to the room as a
+   * stop. That is correct for the seek events themselves, but the stall events
+   * which follow (`pause` / `waiting` / `stalled`) carry a `currentTime` that is
+   * frozen at the new target without playing from it — and unlike the seek
+   * events they are never tagged `explicit-seek`. Forcing THOSE to `playing`
+   * publishes a frozen position as a healthy one, which drags members who
+   * already followed the jump back to it.
+   *
+   * `intendedPlayState` cannot answer "did this seek start from a stall?" on its
+   * own: `broadcastPlayback` writes it back to whatever was just broadcast, so
+   * the first forced `seeking` flips it to `playing` and every later stall event
+   * looks like it came from healthy playback. This field snapshots the answer at
+   * the moment the seek is recorded, before that write-back can erase it.
+   */
+  explicitSeekFromBufferingAt: number;
   lastNonSharedGuardUrl: string | null;
   /**
    * Captures `activeSharedUrl` at the moment in-room SPA navigation is
@@ -273,6 +293,7 @@ export function resetUserGestureState(state: ContentRuntimeState): void {
   state.lastUserGestureInPlayerAt = 0;
   state.lastExplicitPlaybackAction = null;
   state.lastExplicitUserAction = null;
+  state.explicitSeekFromBufferingAt = 0;
   state.lastNonSharedGuardUrl = null;
   state.lastForcedPauseAt = 0;
   state.suppressedLocalEndPauseUrl = null;
@@ -319,6 +340,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     suppressedRemotePlayback: null,
     recentRemotePlayingIntent: null,
     lastExplicitUserAction: null,
+    explicitSeekFromBufferingAt: 0,
     lastNonSharedGuardUrl: null,
     postNavigationAnchorSharedUrl: null,
     postNavigationAnchorSetAt: 0,

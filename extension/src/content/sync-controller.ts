@@ -729,6 +729,19 @@ export function createSyncController(args: {
     return true;
   }
 
+  /**
+   * Whether the in-flight explicit seek was started while this side was already
+   * buffering. Bounded by the same gesture grace window as the seek itself, so
+   * it cannot outlive the broadcasts it governs.
+   */
+  function isInsideSeekFromBufferingWindow(now: number): boolean {
+    return (
+      args.runtimeState.explicitSeekFromBufferingAt > 0 &&
+      now - args.runtimeState.explicitSeekFromBufferingAt <
+        args.userGestureGraceMs
+    );
+  }
+
   function getBroadcastPlayState(argsForBroadcast: {
     video: HTMLVideoElement;
     eventSource: LocalPlaybackEventSource;
@@ -738,17 +751,46 @@ export function createSyncController(args: {
       argsForBroadcast.video,
       args.runtimeState.intendedPlayState,
     );
+    // Mirrors `derivePlaybackSyncIntent`'s `hasActiveExplicitUserAction`: a seek
+    // that predates a forced pause was invalidated by it and is not a user
+    // intent any more. The old single branch got this for free from its
+    // `intendedPlayState === "playing"` guard (a forced pause leaves that
+    // `paused`); the seek-event branch below deliberately drops that guard, so
+    // the check has to be stated here instead of inferred.
     const hasRecentExplicitSeek =
       args.runtimeState.lastExplicitUserAction?.kind === "seek" &&
+      args.runtimeState.lastExplicitUserAction.at >
+        args.runtimeState.lastForcedPauseAt &&
       argsForBroadcast.now - args.runtimeState.lastExplicitUserAction.at <
         args.userGestureGraceMs;
 
+    // The seek events themselves are the jump, and they always carry
+    // `explicit-seek`. Report them as `playing` regardless of what this side was
+    // doing beforehand: a seek made while already stalled is still a real change
+    // of room position, and leaving it as `buffering` makes receivers that are
+    // ahead of the (frozen) target skip it via `buffering-not-authoritative`
+    // until the stall resolves. See issue #198.
+    if (
+      hasRecentExplicitSeek &&
+      (argsForBroadcast.eventSource === "seeking" ||
+        argsForBroadcast.eventSource === "seeked")
+    ) {
+      return "playing";
+    }
+
+    // The stall events that FOLLOW a seek are a different matter. They are never
+    // tagged `explicit-seek`, and their `currentTime` is frozen at the target
+    // rather than playing from it, so forcing them to `playing` publishes a
+    // frozen position as a healthy one. That is tolerable when the seek came
+    // from healthy playback — the stall is the seek's own momentary rebuffer and
+    // resolves immediately — but not when this side was already stalled, where
+    // it would drag members who already followed the jump back to the frozen
+    // target, which is exactly the yank #189 removed.
     if (
       hasRecentExplicitSeek &&
       args.runtimeState.intendedPlayState === "playing" &&
-      (argsForBroadcast.eventSource === "seeking" ||
-        argsForBroadcast.eventSource === "seeked" ||
-        argsForBroadcast.eventSource === "pause" ||
+      !isInsideSeekFromBufferingWindow(argsForBroadcast.now) &&
+      (argsForBroadcast.eventSource === "pause" ||
         argsForBroadcast.eventSource === "waiting" ||
         argsForBroadcast.eventSource === "stalled")
     ) {
