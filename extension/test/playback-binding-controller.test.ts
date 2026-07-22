@@ -3752,3 +3752,87 @@ test("a user pause that cancels an active rate catch-up is still recorded", () =
     dom.restore();
   }
 });
+
+test("a ratechange is enough to classify an unobserved pause as buffering", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  // The player stalled and silently reset the catch-up rate: the element is
+  // paused, no `pause` event ever fired, and `ratechange` is the first handler
+  // to see it. Reporting that as a hard `paused` makes every peer stop and
+  // resume ~1s later, which is what the room observed.
+  (dom.video as { paused: boolean }).paused = true;
+  runtimeState.intendedPlayState = "playing";
+  runtimeState.pauseStartedAt = 0;
+  runtimeState.lastUserGestureAt = 0;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("ratechange")?.(new Event("ratechange"));
+
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+    assert.equal(runtimeState.pauseStartedAt, 10_000);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("a real user pause is not reclassified by the shared broadcast path", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  (dom.video as { paused: boolean }).paused = true;
+  runtimeState.intendedPlayState = "playing";
+  // A fresh in-player gesture accounts for this pause, so it is a real stop.
+  runtimeState.lastUserGestureAt = 9_900;
+  runtimeState.lastUserGestureInPlayerAt = 9_900;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 10_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("pause")?.(new Event("pause"));
+
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+  } finally {
+    dom.restore();
+  }
+});

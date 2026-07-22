@@ -168,6 +168,13 @@ export function createPlaybackBindingController(args: {
     eventSource: LocalPlaybackEventSource,
     followUpMs?: number,
   ) {
+    // Every DOM-event-driven broadcast funnels through here, so this is the one
+    // place guaranteed to see an unobserved pause before it is reported. Which
+    // event happens to notice first is not predictable — a stalled element has
+    // been observed surfacing through `ratechange` (the player resetting the
+    // rate) with no transport event ahead of it — so classifying per handler
+    // leaves a hole for every source that was not listed.
+    classifyUnobservedPauseAsBuffer(video);
     void args.broadcastPlayback(video, eventSource);
     if (followUpMs) {
       window.setTimeout(() => {
@@ -303,16 +310,22 @@ export function createPlaybackBindingController(args: {
    * Bilibili's player rebuilds its media element to recover from a buffer
    * stall, and the replacement element *starts* paused — there is no state
    * transition, so no `pause` event is dispatched and `onPause`'s classifier
-   * never runs. The element then emits `seeking`/`seeked`/`canplay` while it
-   * restores the playhead, and each of those broadcasts reports `paused` to the
-   * room: every peer stops, hard-seeks, and resumes about a second later.
+   * never runs. Whatever the element emits next reports `paused` to the room:
+   * every peer stops, hard-seeks, and resumes about a second later.
    *
-   * Detect it from the transport events instead — the element is paused, we
-   * never recorded a pause for it, the room still believes we are playing, and
-   * no user gesture accounts for it. Classifying it as buffer-induced routes
-   * the broadcast through the existing `buffering` state (which leaves peers
-   * playing) and arms the same bounded upgrade, so a stall that never recovers
-   * is still reported as a genuine `paused` afterwards.
+   * Detect it from the state instead — the element is paused, we never recorded
+   * a pause for it, the room still believes we are playing, and no user gesture
+   * accounts for it. Classifying it as buffer-induced routes the broadcast
+   * through the existing `buffering` state (which leaves peers playing) and arms
+   * the same bounded upgrade, so a stall that never recovers is still reported
+   * as a genuine `paused` afterwards.
+   *
+   * Called from `scheduleBroadcast` rather than from individual handlers: the
+   * event that first observes the stall varies (`seeking`/`canplay` were the
+   * originally handled cases, but `ratechange` has been observed arriving first
+   * when the player resets the playback rate), and every miss costs peers a
+   * spurious pause. All five preconditions below are event-agnostic, so running
+   * it on the shared path is both safe and complete.
    */
   function classifyUnobservedPauseAsBuffer(video: HTMLVideoElement): void {
     const now = nowOf();
@@ -1046,12 +1059,10 @@ export function createPlaybackBindingController(args: {
       },
       onWaiting: () => {
         args.runtimeState.lastBufferSignalAt = nowOf();
-        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "waiting");
       },
       onStalled: () => {
         args.runtimeState.lastBufferSignalAt = nowOf();
-        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "stalled");
       },
       onLoadedMetadata: () => {
@@ -1063,7 +1074,6 @@ export function createPlaybackBindingController(args: {
         if (!forcePauseWhileWaitingForInitialRoomState(video)) {
           args.applyPendingPlaybackApplication(video);
         }
-        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "canplay", 120);
       },
       onPlaying: () => {
@@ -1083,7 +1093,6 @@ export function createPlaybackBindingController(args: {
           args.cancelActiveSoftApply(video, "seek");
         }
         rememberExplicitUserAction("seek");
-        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "seeking");
       },
       onSeeked: () => {
@@ -1091,7 +1100,6 @@ export function createPlaybackBindingController(args: {
           args.cancelActiveSoftApply(video, "seek");
         }
         rememberExplicitUserAction("seek");
-        classifyUnobservedPauseAsBuffer(video);
         scheduleBroadcast(video, "seeked", 120);
       },
       onRateChange: () => {
