@@ -316,6 +316,7 @@ test("a frozen buffering snapshot leaves an in-flight catch-up rate alone", () =
     "buffering",
     undefined,
     1,
+    true, // a catch-up is running: its elevated rate must survive
   );
 
   assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
@@ -343,4 +344,29 @@ test("a deliberate rate change still applies even while the sender is buffering"
   assert.ok(Math.abs(video.playbackRate - 1.5) < 0.001);
   assert.equal(applied.didWritePlaybackRate, true);
   assert.equal(applied.didWriteCurrentTime, false);
+});
+
+test("a buffering snapshot still carries the room rate when nothing is catching up", () => {
+  // `syncIntent` only exists inside the short explicit-action window, so
+  // ordinary heartbeats are how the room's rate reaches us. A receiver that is
+  // not correcting anything has no catch-up rate to protect, so skipping the
+  // write would strand it on a stale rate until the stalled peer recovers.
+  const video = createVideo({
+    currentTime: 514.9,
+    paused: false,
+    playbackRate: 1,
+  });
+
+  const applied = syncPlaybackPosition(
+    video,
+    511.94,
+    "buffering",
+    undefined,
+    1.5,
+  );
+
+  assert.ok(Math.abs(video.playbackRate - 1.5) < 0.001);
+  assert.equal(applied.didWritePlaybackRate, true);
+  assert.equal(applied.didWriteCurrentTime, false);
+  assert.equal(applied.reason, "buffering-not-authoritative");
 });

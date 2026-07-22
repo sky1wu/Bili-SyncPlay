@@ -253,11 +253,18 @@ export function syncPlaybackPosition(
   // client, so a stalling peer would still interrupt someone else's drift
   // convergence even though its position is being ignored.
   //
-  // `explicit-ratechange` is exempt: the sender's stall and their deliberate
-  // speed change are orthogonal, and swallowing the latter would leave the room
-  // out of sync on playback rate until the peer recovers.
+  // Gated on there actually being a catch-up to protect. `syncIntent` only
+  // exists inside the short explicit-action window, so ordinary heartbeats are
+  // still how the room's current rate reaches us; skipping those on a receiver
+  // that is not correcting anything would strand it on a stale rate until the
+  // stalled peer recovers.
+  //
+  // `explicit-ratechange` is exempt regardless: the sender's stall and their
+  // deliberate speed change are orthogonal, and swallowing the latter would
+  // leave the room out of sync on playback rate until the peer recovers.
   const isBufferingNoop =
     decision.reason === "buffering-not-authoritative" &&
+    hasActiveCatchUp &&
     syncIntent !== "explicit-ratechange";
   const shouldWritePlaybackRate =
     !isBufferingNoop && Math.abs(video.playbackRate - playbackRate) > 0.01;

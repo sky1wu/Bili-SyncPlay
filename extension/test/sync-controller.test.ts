@@ -2414,3 +2414,46 @@ test("a lagging buffering snapshot does not strip the soft-apply cooldown", asyn
   assert.equal(harness.runtimeState.softApplyCooldownUrl, sharedVideo.url);
   assert.ok(Math.abs(video.currentTime - 514.9) < 0.001);
 });
+
+test("a buffering apply that actually wrote the rate still clears the cooldown", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({
+    paused: false,
+    currentTime: 514.9,
+    playbackRate: 1,
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_000);
+  harness.runtimeState.softApplyCooldownUrl = sharedVideo.url;
+  harness.runtimeState.softApplyCooldownUntil = 22_500;
+
+  // Nothing is catching up, so this buffering heartbeat does carry the room's
+  // new rate — it is not a no-op, and leaving the cooldown armed would suppress
+  // the next real position correction with nothing left to clear it.
+  await harness.controller.applyRoomState(
+    createRoomState({
+      actorId: "remote-member",
+      seq: 10,
+      serverTime: 19_900,
+      currentTime: 511.94,
+      playState: "buffering",
+      playbackRate: 1.5,
+    }),
+  );
+
+  assert.ok(Math.abs(video.playbackRate - 1.5) < 0.001);
+  assert.equal(harness.runtimeState.softApplyCooldownUntil, 0);
+  assert.ok(Math.abs(video.currentTime - 514.9) < 0.001);
+});

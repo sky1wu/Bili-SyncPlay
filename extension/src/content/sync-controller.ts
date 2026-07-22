@@ -352,15 +352,22 @@ export function createSyncController(args: {
           (adjustment.mode === "rate-only" &&
             Math.abs(adjustment.playbackRate - adjustment.restorePlaybackRate) >
               0.01);
-        // Completing the no-op: a frozen `buffering` snapshot neither moves the
-        // playhead nor touches the rate, so it must not clear the cooldown a
-        // soft-apply convergence just armed either. `shouldSuppressByCooldown`
-        // only screens `playing` updates, so a lagging `buffering` would
-        // otherwise strip that protection and let the next ordinary drift
-        // re-trigger a correction immediately.
-        const isBufferingNoop =
+        // A frozen `buffering` snapshot never moves the playhead, so it must
+        // not tear down an in-flight catch-up (see the early return below).
+        //
+        // Clearing the cooldown is a separate question: that bookkeeping may
+        // only be skipped when the apply genuinely wrote nothing. A buffering
+        // update still carries the room's rate (and an `explicit-ratechange`
+        // always applies), so treating those as no-ops would keep a stale
+        // cooldown alive — and `shouldSuppressByCooldown` only screens
+        // `playing` updates, so the next real position correction would be
+        // suppressed with nothing to clear it.
+        const isBufferingApply =
           adjustment.reason === "buffering-not-authoritative";
-        if (!isSelfRestoringRateAdjust && !isBufferingNoop) {
+        if (
+          !isSelfRestoringRateAdjust &&
+          !(isBufferingApply && !adjustment.didChange)
+        ) {
           softApply.clearSoftApplyCooldown();
         }
         args.debugLog(
@@ -372,7 +379,7 @@ export function createSyncController(args: {
             },
           )} wroteTime=${adjustment.didWriteCurrentTime} wroteRate=${adjustment.didWritePlaybackRate} targetTime=${adjustment.targetTime.toFixed(2)} appliedTime=${adjustment.currentTime.toFixed(2)} appliedRate=${adjustment.playbackRate.toFixed(2)} restoreRate=${adjustment.restorePlaybackRate.toFixed(2)}`,
         );
-        if (isBufferingNoop) {
+        if (isBufferingApply) {
           return;
         }
         if (isSelfRestoringRateAdjust) {
