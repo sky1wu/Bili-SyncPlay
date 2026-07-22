@@ -118,7 +118,7 @@ export function decidePlaybackReconcileMode(args: {
   // forced, so an ahead receiver will not follow it until the sender recovers or
   // the stall upgrades to `paused` — both bounded by the stall itself. Closing
   // that needs the sender-side broadcast rules to agree on `buffering`; tracked
-  // in issue #190 rather than patched at this call site.
+  // in issue #198 rather than patched at this call site.
   if (
     args.playState === "buffering" &&
     args.localCurrentTime > args.targetTime
