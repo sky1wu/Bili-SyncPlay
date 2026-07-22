@@ -230,6 +230,9 @@ test("treats buffering after a programmatic playing apply as the same suppressio
 test("allows explicit user actions to bypass programmatic suppression", () => {
   assert.equal(
     shouldSuppressProgrammaticEvent({
+      // Window opened at 9_800 (700ms), so the 10_000 action happened *during*
+      // the apply — a genuine user seek that must not be suppressed.
+      programmaticApplyAt: 9_800,
       programmaticApplyUntil: 10_500,
       programmaticApplySignature: {
         url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -488,4 +491,34 @@ test("applies self playback only when paused state, timeline, or rate actually d
     }),
     false,
   );
+});
+
+test("does not let an explicit action from before the apply window bypass suppression", () => {
+  const decision = shouldSuppressProgrammaticEvent({
+    // The user seeked at 9_700, then a remote state arrived and the apply
+    // window opened at 9_800. The `seeked` echo the apply produces must not be
+    // waved through by that earlier, unrelated action — doing so broadcasts the
+    // state we just applied straight back to the room.
+    programmaticApplyAt: 9_800,
+    programmaticApplyUntil: 10_500,
+    programmaticApplySignature: {
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      playState: "paused",
+      currentTime: 36,
+      playbackRate: 1,
+    },
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    playState: "paused",
+    currentTime: 36.1,
+    playbackRate: 1,
+    eventSource: "seeked",
+    lastExplicitUserAction: {
+      kind: "seek",
+      at: 9_700,
+    },
+    now: 10_100,
+    userGestureGraceMs: 1_200,
+  });
+
+  assert.equal(decision.shouldSuppress, true);
 });

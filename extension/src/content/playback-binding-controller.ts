@@ -176,7 +176,53 @@ export function createPlaybackBindingController(args: {
     }
   }
 
+  /**
+   * Whether the event being handled is our own programmatic apply echoing back
+   * rather than something the user did.
+   *
+   * Applying a remote state writes `currentTime`/`playbackRate` and calls
+   * `play()`/`pause()`, all of which dispatch exactly the DOM events a user
+   * would produce. The `rememberExplicit*` helpers below only ask whether *any*
+   * page gesture happened in the last `userGestureGraceMs`, so an unrelated
+   * click moments earlier is enough for those echoes to be recorded as
+   * deliberate user actions. They then feed the seek-intent tagging, the
+   * broadcast play-state forcing, and even `shouldSuppressProgrammaticEvent`'s
+   * own bypass — letting an apply wave itself back out to the room.
+   *
+   * Taking over the player mid-apply is still genuinely the user, so a gesture
+   * made AFTER the window opened lifts the guard — but it has to be an
+   * IN-PLAYER one. The tracker is document/window level, so a click on blank
+   * space or the danmaku box refreshes `lastUserGestureAt` without expressing
+   * any intent to control playback; accepting that would leave the exact hole
+   * this guard exists to close, since the echoes would then be recorded and go
+   * on to satisfy `shouldSuppressProgrammaticEvent`'s explicit-action bypass.
+   *
+   * Known limitation: `isGestureInsidePlayer` only counts play-toggle keys, so
+   * an arrow-key seek inside the (700ms) window is not recognised as taking
+   * over and its `explicit-seek` tag is dropped. The seek itself still reaches
+   * the room through the ordinary position path — it is just not flagged as
+   * deliberate. Widening the key set is deliberately avoided here because the
+   * same predicate authorizes playback on "load paused" pages, where arrow keys
+   * must NOT count.
+   *
+   * Both timestamps come from `Date.now()`, whose resolution browsers coarsen,
+   * so a gesture landing in the same tick as the window opening is genuinely
+   * ambiguous. Ties go to the user (`<`, not `<=`): mistaking an echo for a user
+   * action is merely the behaviour that existed before this guard, whereas
+   * discarding a real interaction would be a new harm introduced by it.
+   */
+  function isProgrammaticEventEcho(): boolean {
+    return (
+      nowOf() < args.runtimeState.programmaticApplyUntil &&
+      args.runtimeState.lastUserGestureInPlayerAt <
+        args.runtimeState.programmaticApplyAt
+    );
+  }
+
   function rememberExplicitPlaybackAction(playState: "playing" | "paused") {
+    if (isProgrammaticEventEcho()) {
+      return;
+    }
     if (
       nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
       args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
@@ -189,6 +235,9 @@ export function createPlaybackBindingController(args: {
   }
 
   function rememberExplicitUserAction(kind: ExplicitUserActionKind) {
+    if (isProgrammaticEventEcho()) {
+      return;
+    }
     if (
       nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
       args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt

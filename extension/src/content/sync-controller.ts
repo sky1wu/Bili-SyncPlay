@@ -253,6 +253,7 @@ export function createSyncController(args: {
       ...signature,
       url: normalizedSignatureUrl,
     };
+    args.runtimeState.programmaticApplyAt = nowOf();
     args.runtimeState.programmaticApplyUntil =
       nowOf() + args.programmaticApplyWindowMs;
     args.debugLog(
@@ -288,6 +289,7 @@ export function createSyncController(args: {
     args.runtimeState.pendingPlaybackApplication = null;
     pendingLocalOverride.clearPendingLocalPlaybackOverride("reset");
     args.runtimeState.programmaticApplyUntil = 0;
+    args.runtimeState.programmaticApplyAt = 0;
     args.runtimeState.programmaticApplySignature = null;
     softApply.clearSoftApplyCooldown();
     args.runtimeState.lastLocalPlaybackVersion = null;
@@ -1093,6 +1095,7 @@ export function createSyncController(args: {
     }
     const programmaticDecision = shouldSuppressProgrammaticEventGuard({
       programmaticApplyUntil: args.runtimeState.programmaticApplyUntil,
+      programmaticApplyAt: args.runtimeState.programmaticApplyAt,
       programmaticApplySignature: args.runtimeState.programmaticApplySignature,
       normalizedCurrentUrl: normalizedCurrentVideoUrl,
       playState,
