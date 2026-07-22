@@ -316,7 +316,8 @@ test("a frozen buffering snapshot leaves an in-flight catch-up rate alone", () =
     "buffering",
     undefined,
     1,
-    true, // a catch-up is running: its elevated rate must survive
+    false,
+    true, // a correction session is running: its elevated rate must survive
   );
 
   assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
@@ -368,5 +369,31 @@ test("a buffering snapshot still carries the room rate when nothing is catching 
   assert.ok(Math.abs(video.playbackRate - 1.5) < 0.001);
   assert.equal(applied.didWritePlaybackRate, true);
   assert.equal(applied.didWriteCurrentTime, false);
+  assert.equal(applied.reason, "buffering-not-authoritative");
+});
+
+test("a real soft-apply's elevated rate survives a lagging buffering snapshot", () => {
+  // `hasActiveCatchUp` is rate-only by construction, so gating the rate
+  // protection on it left real soft-apply sessions unprotected: a stalled
+  // peer's heartbeat would write the base rate back and silently interrupt the
+  // correction while the session itself was preserved.
+  const video = createVideo({
+    currentTime: 514.9,
+    paused: false,
+    playbackRate: 1.12,
+  });
+
+  const applied = syncPlaybackPosition(
+    video,
+    511.94,
+    "buffering",
+    undefined,
+    1,
+    false, // not a rate-only catch-up...
+    true, // ...but a soft-apply session is active
+  );
+
+  assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+  assert.equal(applied.didWritePlaybackRate, false);
   assert.equal(applied.reason, "buffering-not-authoritative");
 });

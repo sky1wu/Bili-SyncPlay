@@ -46,6 +46,12 @@ export interface SoftApplyController {
     now: number;
   }): boolean;
   isActiveRateOnlyCatchUp(normalizedUrl: string | null): boolean;
+  /**
+   * Whether ANY correction session is running for this url — a pure rate-only
+   * catch-up or a real soft-apply. Both elevate `playbackRate`, so both need
+   * that rate protected from being written back to the room's base value.
+   */
+  hasActiveCorrectionSession(normalizedUrl: string | null): boolean;
   shouldSuppressByCooldown(
     video: HTMLVideoElement,
     playback: PlaybackState,
@@ -412,6 +418,14 @@ export function createSoftApplyController(args: {
     );
   }
 
+  function hasActiveCorrectionSession(normalizedUrl: string | null): boolean {
+    return (
+      activeSoftApply !== null &&
+      normalizedUrl !== null &&
+      normalizedUrl === activeSoftApply.normalizedUrl
+    );
+  }
+
   function shouldSuppressByCooldown(
     video: HTMLVideoElement,
     playback: PlaybackState,
@@ -463,6 +477,7 @@ export function createSoftApplyController(args: {
     shouldCancelActiveSoftApplyForPlayback,
     shouldSuppressActiveSoftApplyBroadcast,
     isActiveRateOnlyCatchUp,
+    hasActiveCorrectionSession,
     shouldSuppressByCooldown,
     clearSoftApplyCooldown,
     destroy,

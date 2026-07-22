@@ -335,6 +335,9 @@ export function createSyncController(args: {
       hasActiveCatchUp:
         pending !== null &&
         softApply.isActiveRateOnlyCatchUp(args.normalizeUrl(pending.url)),
+      hasActiveCorrectionSession:
+        pending !== null &&
+        softApply.hasActiveCorrectionSession(args.normalizeUrl(pending.url)),
       clearPendingPlaybackApplication: () => {
         args.runtimeState.pendingPlaybackApplication = null;
       },

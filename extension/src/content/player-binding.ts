@@ -156,6 +156,13 @@ export function syncPlaybackPosition(
   syncIntent: PlaybackState["syncIntent"] | undefined,
   playbackRate: number,
   hasActiveCatchUp = false,
+  /**
+   * Whether a correction session (rate-only catch-up OR real soft-apply) is
+   * running for this video. Distinct from `hasActiveCatchUp`, which is
+   * rate-only and drives the reconcile hysteresis: both kinds elevate
+   * `playbackRate`, so both need that rate protected here.
+   */
+  hasActiveCorrectionSession = false,
 ): AppliedPlaybackAdjustment {
   const previousCurrentTime = video.currentTime;
   const decision = decidePlaybackReconcileMode({
@@ -253,18 +260,19 @@ export function syncPlaybackPosition(
   // client, so a stalling peer would still interrupt someone else's drift
   // convergence even though its position is being ignored.
   //
-  // Gated on there actually being a catch-up to protect. `syncIntent` only
+  // Gated on there actually being a correction to protect. `syncIntent` only
   // exists inside the short explicit-action window, so ordinary heartbeats are
   // still how the room's current rate reaches us; skipping those on a receiver
   // that is not correcting anything would strand it on a stale rate until the
-  // stalled peer recovers.
+  // stalled peer recovers. A real soft-apply counts as well as a rate-only
+  // catch-up — it elevates the rate the same way.
   //
   // `explicit-ratechange` is exempt regardless: the sender's stall and their
   // deliberate speed change are orthogonal, and swallowing the latter would
   // leave the room out of sync on playback rate until the peer recovers.
   const isBufferingNoop =
     decision.reason === "buffering-not-authoritative" &&
-    hasActiveCatchUp &&
+    hasActiveCorrectionSession &&
     syncIntent !== "explicit-ratechange";
   const shouldWritePlaybackRate =
     !isBufferingNoop && Math.abs(video.playbackRate - playbackRate) > 0.01;
@@ -290,6 +298,8 @@ export function applyPendingPlaybackApplication(args: {
   pendingPlaybackApplication: PlaybackState | null;
   /** See {@link syncPlaybackPosition}. */
   hasActiveCatchUp?: boolean;
+  /** See {@link syncPlaybackPosition}. */
+  hasActiveCorrectionSession?: boolean;
   clearPendingPlaybackApplication: () => void;
   onPlaybackAdjusted?: (
     adjustment: AppliedPlaybackAdjustment,
@@ -322,6 +332,7 @@ export function applyPendingPlaybackApplication(args: {
     playback.syncIntent,
     playback.playbackRate,
     args.hasActiveCatchUp ?? false,
+    args.hasActiveCorrectionSession ?? false,
   );
   args.onPlaybackAdjusted?.(appliedSignature, playback);
   const needsPlayStateChange =
