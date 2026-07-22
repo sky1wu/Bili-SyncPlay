@@ -744,10 +744,20 @@ export function createSyncController(args: {
     // `intendedPlayState === "playing"` guard (a forced pause leaves that
     // `paused`); the seek-event branch below deliberately drops that guard, so
     // the check has to be stated here instead of inferred.
+    //
+    // The `programmaticApplyAt` check is the same rule `sync-guards` applies:
+    // applying a remote state writes `currentTime`, which echoes back as
+    // `seeking`/`seeked`. Those echoes are not a new gesture, but a REAL user
+    // seek from moments earlier is still inside the grace window, so without
+    // this they would inherit its intent — and because the seek branch returns
+    // before the programmatic guard runs, a remote `paused` would be answered
+    // with `playing` + `explicit-seek` and restart the room.
     const hasRecentExplicitSeek =
       args.runtimeState.lastExplicitUserAction?.kind === "seek" &&
       args.runtimeState.lastExplicitUserAction.at >
         args.runtimeState.lastForcedPauseAt &&
+      args.runtimeState.lastExplicitUserAction.at >=
+        args.runtimeState.programmaticApplyAt &&
       argsForBroadcast.now - args.runtimeState.lastExplicitUserAction.at <
         args.userGestureGraceMs;
 

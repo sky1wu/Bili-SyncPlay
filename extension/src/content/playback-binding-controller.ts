@@ -281,8 +281,13 @@ export function createPlaybackBindingController(args: {
         // Re-snapshotting on `seeked` would therefore record the write-back
         // rather than the origin, erasing a `buffering` start. Only the first
         // event of a seek establishes the origin; the rest inherit it.
+        // A forced pause invalidates the seek that preceded it, so the next
+        // gesture starts a NEW seek even inside the grace window — inheriting
+        // the old origin there would let a `buffering` start survive into a
+        // scrub of the now-paused video and force it to `playing`.
         const continuesInFlightSeek =
           previousAction?.kind === "seek" &&
+          previousAction.at > args.runtimeState.lastForcedPauseAt &&
           nowOf() - previousAction.at < args.userGestureGraceMs;
         if (!continuesInFlightSeek) {
           args.runtimeState.explicitSeekOriginPlayState =

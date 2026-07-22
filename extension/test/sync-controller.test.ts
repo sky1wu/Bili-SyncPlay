@@ -2645,3 +2645,21 @@ test("sync controller keeps userInitiated on a pause that cancelled a rate catch
   assert.equal(payload.playState, "paused");
   assert.equal(payload.userInitiated, true);
 });
+
+test("sync controller does not reuse a pre-apply seek intent for programmatic echoes", async () => {
+  const { harness } = createSeekFromBufferingHarness();
+  const video = createVideo({ paused: true, readyState: 4, currentTime: 90 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.runtimeState.explicitSeekOriginPlayState = "playing";
+  // A remote `paused` arrived after the user's seek and is being applied; the
+  // currentTime write echoes back as `seeked`.
+  harness.runtimeState.programmaticApplyAt = 21_980;
+  harness.runtimeState.programmaticApplyUntil = 22_680;
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  // Treating the echo as the earlier user seek would answer the remote pause
+  // with `playing` and restart the room.
+  assert.notEqual(lastBroadcastPlayState(harness), "playing");
+});

@@ -3929,3 +3929,53 @@ test("playback binding controller re-snapshots the origin for a new seek gesture
     dom.restore();
   }
 });
+
+test("playback binding controller re-samples the seek origin after a forced pause", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 1_000;
+  runtimeState.intendedPlayState = "buffering";
+  let now = 1_100;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+    await Promise.resolve();
+    assert.equal(runtimeState.explicitSeekOriginPlayState, "buffering");
+
+    // A forced pause invalidates that seek. The user then scrubs the now-paused
+    // video, still inside the 1_200ms grace window of the first one.
+    now = 1_200;
+    runtimeState.lastForcedPauseAt = now;
+    runtimeState.intendedPlayState = "paused";
+    now = 1_300;
+    runtimeState.lastUserGestureAt = 1_250;
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+    await Promise.resolve();
+
+    // Inheriting "buffering" here would force this scrub to `playing` and start
+    // playback for the whole room.
+    assert.equal(runtimeState.explicitSeekOriginPlayState, "paused");
+  } finally {
+    dom.restore();
+  }
+});
