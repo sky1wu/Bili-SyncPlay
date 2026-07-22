@@ -11,6 +11,7 @@ import {
 import type {
   ContentRuntimeState,
   LocalPlaybackEventSource,
+  ProgrammaticApplyScope,
 } from "./runtime-state";
 
 const SOFT_APPLY_RECOVERY_THRESHOLD_SECONDS = 0.2;
@@ -72,6 +73,7 @@ export function createSoftApplyController(args: {
     signature: ReturnType<typeof createProgrammaticPlaybackSignature>,
     reason: "pending" | "apply",
     actorId?: string,
+    scope?: ProgrammaticApplyScope,
   ) => void;
 }): SoftApplyController {
   const nowOf = () => args.getNow?.() ?? Date.now();
@@ -159,6 +161,12 @@ export function createSoftApplyController(args: {
       Math.abs(video.playbackRate - session.restorePlaybackRate) > 0.01
     ) {
       setVideoPlaybackRate(video, session.restorePlaybackRate);
+      // Scope the window to `ratechange`: the rate write above is the only DOM
+      // event this cancel produces. Most cancels are triggered by the user —
+      // `onSeeking` / `onPause` call us before recording their explicit action —
+      // so an unscoped window would open microseconds after their gesture and
+      // then classify their own seek/pause as our echo, dropping both the
+      // recorded action and the broadcast. The room would then pull them back.
       args.armProgrammaticApplyWindow(
         {
           url: session.normalizedUrl,
@@ -167,6 +175,8 @@ export function createSoftApplyController(args: {
           playbackRate: session.restorePlaybackRate,
         },
         "apply",
+        "system",
+        "ratechange",
       );
     }
     if (

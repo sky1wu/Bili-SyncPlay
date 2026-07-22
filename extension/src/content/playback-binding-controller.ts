@@ -211,7 +211,18 @@ export function createPlaybackBindingController(args: {
    * action is merely the behaviour that existed before this guard, whereas
    * discarding a real interaction would be a new harm introduced by it.
    */
-  function isProgrammaticEventEcho(): boolean {
+  function isProgrammaticEventEcho(kind: ExplicitUserActionKind): boolean {
+    // A ratechange-scoped window only wrote a playback rate, so it can only
+    // explain a `ratechange`. It is typically armed BY the action being
+    // recorded here (`onSeeking` / `onPause` cancel the soft apply before
+    // recording), which would otherwise make every such gesture look like our
+    // own echo a few milliseconds after the user made it.
+    if (
+      args.runtimeState.programmaticApplyScope === "ratechange" &&
+      kind !== "ratechange"
+    ) {
+      return false;
+    }
     return (
       nowOf() < args.runtimeState.programmaticApplyUntil &&
       args.runtimeState.lastUserGestureInPlayerAt <
@@ -220,7 +231,7 @@ export function createPlaybackBindingController(args: {
   }
 
   function rememberExplicitPlaybackAction(playState: "playing" | "paused") {
-    if (isProgrammaticEventEcho()) {
+    if (isProgrammaticEventEcho(playState === "playing" ? "play" : "pause")) {
       return;
     }
     if (
@@ -235,7 +246,7 @@ export function createPlaybackBindingController(args: {
   }
 
   function rememberExplicitUserAction(kind: ExplicitUserActionKind) {
-    if (isProgrammaticEventEcho()) {
+    if (isProgrammaticEventEcho(kind)) {
       return;
     }
     if (
@@ -269,6 +280,11 @@ export function createPlaybackBindingController(args: {
     const signature = args.runtimeState.programmaticApplySignature;
     if (
       signature === null ||
+      // A ratechange-scoped window never applied a remote pause; its playState
+      // is only whatever the element happened to be doing when the rate was
+      // restored, so reading it as an in-flight paused-apply would suppress the
+      // buffer classification for a stall we really are experiencing.
+      args.runtimeState.programmaticApplyScope !== "all" ||
       signature.playState !== "paused" ||
       now >= args.runtimeState.programmaticApplyUntil
     ) {

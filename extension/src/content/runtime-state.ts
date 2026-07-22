@@ -54,6 +54,8 @@ export interface ProgrammaticPlaybackSignature {
   playbackRate: number;
 }
 
+export type ProgrammaticApplyScope = "all" | "ratechange";
+
 export type PendingLocalPlaybackOverrideKind = "seek" | "ratechange";
 
 export interface PendingLocalPlaybackOverride {
@@ -138,6 +140,18 @@ export interface ContentRuntimeState {
    * can belong to the user.
    */
   programmaticApplyAt: number;
+  /**
+   * Which local events the open window is allowed to explain.
+   *
+   * `"all"` is a real apply of a remote state: it writes currentTime and/or
+   * play/pause, so every transport event that follows may be its echo.
+   * `"ratechange"` is the soft-apply cancel restoring its snapshot playback
+   * rate — the only DOM event that write can produce. Scoping it matters
+   * because that cancel is usually triggered BY the user (their `seeking` /
+   * `pause` handler calls it): a window that also claimed their seek would
+   * discard the very interaction that opened it.
+   */
+  programmaticApplyScope: ProgrammaticApplyScope;
   programmaticApplySignature: ProgrammaticPlaybackSignature | null;
   softApplyCooldownUntil: number;
   softApplyCooldownUrl: string | null;
@@ -296,6 +310,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     pendingPlaybackApplication: null,
     programmaticApplyUntil: 0,
     programmaticApplyAt: 0,
+    programmaticApplyScope: "all",
     programmaticApplySignature: null,
     softApplyCooldownUntil: 0,
     softApplyCooldownUrl: null,

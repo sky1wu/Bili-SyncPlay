@@ -4,6 +4,7 @@ import type {
   ExplicitUserAction,
   ExplicitUserActionKind,
   LocalPlaybackEventSource,
+  ProgrammaticApplyScope,
   ProgrammaticPlaybackSignature,
   RecentRemotePlayingIntent,
   SuppressedRemotePlayback,
@@ -66,6 +67,8 @@ export interface ProgrammaticEventSuppressionInput {
   programmaticApplyUntil: number;
   /** When the current programmatic-apply window opened. */
   programmaticApplyAt: number;
+  /** Which event sources the open window is allowed to explain. */
+  programmaticApplyScope: ProgrammaticApplyScope;
   programmaticApplySignature: ProgrammaticPlaybackSignature | null;
   normalizedCurrentUrl: string | null;
   playState: PlaybackState["playState"];
@@ -317,6 +320,22 @@ export function shouldSuppressProgrammaticEvent(
   if (
     !input.normalizedCurrentUrl ||
     input.normalizedCurrentUrl !== input.programmaticApplySignature.url
+  ) {
+    return {
+      shouldSuppress: false,
+      nextProgrammaticApplyUntil: input.programmaticApplyUntil,
+      nextProgrammaticApplySignature: input.programmaticApplySignature,
+    };
+  }
+
+  // A ratechange-scoped window was opened by the soft-apply cancel restoring
+  // its snapshot rate, and a rate write produces exactly one DOM event. Any
+  // other transport event inside it belongs to whatever triggered the cancel —
+  // usually the user's own seek or pause, which must still reach the room.
+  // The window stays armed so the `ratechange` it exists for is still caught.
+  if (
+    input.programmaticApplyScope === "ratechange" &&
+    input.eventSource !== "ratechange"
   ) {
     return {
       shouldSuppress: false,

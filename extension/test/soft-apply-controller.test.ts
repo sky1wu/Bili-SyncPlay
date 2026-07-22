@@ -480,3 +480,40 @@ test("hasActiveCorrectionSession covers real soft-apply, not just rate-only catc
     windowStub.restore();
   }
 });
+
+test("the rate restore on cancel arms a ratechange-scoped window", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const video = createVideo({ currentTime: 24, playbackRate: 1 });
+    const armed: Array<{ actorId?: string; scope?: string }> = [];
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => 10_000,
+      armProgrammaticApplyWindow: (_signature, _reason, actorId, scope) => {
+        armed.push({ actorId, scope });
+      },
+    });
+
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25.4 }),
+      1.4,
+    );
+    // The reconcile (not the session) writes the elevated rate; mirror it so
+    // the cancel below has a rate to restore, which is what arms the window.
+    video.playbackRate = 1.25;
+
+    // `onSeeking` calls this before recording the user's explicit seek, so the
+    // window it opens must only claim the `ratechange` the restore produces.
+    controller.cancelActiveSoftApply(video, "seek");
+
+    assert.deepEqual(armed, [{ actorId: "system", scope: "ratechange" }]);
+  } finally {
+    windowStub.restore();
+  }
+});
