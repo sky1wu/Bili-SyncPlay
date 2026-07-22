@@ -517,3 +517,85 @@ test("the rate restore on cancel arms a ratechange-scoped window", () => {
     windowStub.restore();
   }
 });
+
+test("cancel restores an elevated defaultPlaybackRate the player already reset", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const video = createVideo({
+      currentTime: 24,
+      playbackRate: 1,
+      defaultPlaybackRate: 1,
+    });
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => 10_000,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25.4 }),
+      1.4,
+    );
+    // The catch-up elevates both rates (`setVideoPlaybackRate` writes the
+    // default too, so the elevated rate survives a media-element reload).
+    video.playbackRate = 1.12;
+    video.defaultPlaybackRate = 1.12;
+    // While stalled, the player resets only the LIVE rate back to its own
+    // setting; the elevated default is left behind.
+    video.playbackRate = 1;
+
+    controller.cancelActiveSoftApply(video, "buffer-interrupt");
+
+    assert.equal(video.playbackRate, 1);
+    assert.equal(
+      video.defaultPlaybackRate,
+      1,
+      "the stranded default would resurrect the catch-up rate on the next load",
+    );
+  } finally {
+    windowStub.restore();
+  }
+});
+
+test("cancel still leaves an explicit user rate alone", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const video = createVideo({
+      currentTime: 24,
+      playbackRate: 1,
+      defaultPlaybackRate: 1,
+    });
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => 10_000,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 25.4 }),
+      1.4,
+    );
+    // The user picked 2x from the speed menu, which sets both rates.
+    video.playbackRate = 2;
+    video.defaultPlaybackRate = 2;
+
+    controller.cancelActiveSoftApply(video, "user-ratechange");
+
+    assert.equal(video.playbackRate, 2);
+    assert.equal(video.defaultPlaybackRate, 2);
+  } finally {
+    windowStub.restore();
+  }
+});
