@@ -729,19 +729,6 @@ export function createSyncController(args: {
     return true;
   }
 
-  /**
-   * Whether the in-flight explicit seek was started while this side was already
-   * buffering. Bounded by the same gesture grace window as the seek itself, so
-   * it cannot outlive the broadcasts it governs.
-   */
-  function isInsideSeekFromBufferingWindow(now: number): boolean {
-    return (
-      args.runtimeState.explicitSeekFromBufferingAt > 0 &&
-      now - args.runtimeState.explicitSeekFromBufferingAt <
-        args.userGestureGraceMs
-    );
-  }
-
   function getBroadcastPlayState(argsForBroadcast: {
     video: HTMLVideoElement;
     eventSource: LocalPlaybackEventSource;
@@ -764,14 +751,24 @@ export function createSyncController(args: {
       argsForBroadcast.now - args.runtimeState.lastExplicitUserAction.at <
         args.userGestureGraceMs;
 
+    // Where the seek STARTED, not where this side is now — the first forced
+    // `seeking` broadcast writes `intendedPlayState` back to `playing`, so the
+    // current value cannot answer this for the rest of the same seek.
+    const seekOrigin = hasRecentExplicitSeek
+      ? args.runtimeState.explicitSeekOriginPlayState
+      : null;
+
     // The seek events themselves are the jump, and they always carry
-    // `explicit-seek`. Report them as `playing` regardless of what this side was
-    // doing beforehand: a seek made while already stalled is still a real change
-    // of room position, and leaving it as `buffering` makes receivers that are
-    // ahead of the (frozen) target skip it via `buffering-not-authoritative`
-    // until the stall resolves. See issue #198.
+    // `explicit-seek`. Report them as `playing` even when this side was already
+    // stalled: that is still a real change of room position, and leaving it as
+    // `buffering` makes receivers ahead of the (frozen) target skip it via
+    // `buffering-not-authoritative` until the stall resolves (#198).
+    //
+    // A seek that started from `paused` is excluded: scrubbing a paused video is
+    // not a request to play, and forcing it would tell the room to start.
     if (
       hasRecentExplicitSeek &&
+      seekOrigin !== "paused" &&
       (argsForBroadcast.eventSource === "seeking" ||
         argsForBroadcast.eventSource === "seeked")
     ) {
@@ -788,8 +785,8 @@ export function createSyncController(args: {
     // target, which is exactly the yank #189 removed.
     if (
       hasRecentExplicitSeek &&
+      seekOrigin !== "buffering" &&
       args.runtimeState.intendedPlayState === "playing" &&
-      !isInsideSeekFromBufferingWindow(argsForBroadcast.now) &&
       (argsForBroadcast.eventSource === "pause" ||
         argsForBroadcast.eventSource === "waiting" ||
         argsForBroadcast.eventSource === "stalled")

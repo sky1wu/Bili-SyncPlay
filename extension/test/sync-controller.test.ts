@@ -718,7 +718,7 @@ test("sync controller broadcasts a seek started while buffering as playing", asy
   const video = createVideo({ paused: false, readyState: 2, currentTime: 90 });
   harness.setVideoElement(video);
   harness.runtimeState.intendedPlayState = "buffering";
-  harness.runtimeState.explicitSeekFromBufferingAt = 21_950;
+  harness.runtimeState.explicitSeekOriginPlayState = "buffering";
 
   await harness.controller.broadcastPlayback(video, "seeked");
 
@@ -734,7 +734,7 @@ test("sync controller keeps stall events after a seek-from-buffering as bufferin
   // The forced `seeking` broadcast above already wrote `intendedPlayState` back
   // to "playing", which is precisely why the stall branch cannot rely on it.
   harness.runtimeState.intendedPlayState = "playing";
-  harness.runtimeState.explicitSeekFromBufferingAt = 21_950;
+  harness.runtimeState.explicitSeekOriginPlayState = "buffering";
 
   await harness.controller.broadcastPlayback(video, "waiting");
 
@@ -750,24 +750,40 @@ test("sync controller still forces stall events after a healthy seek to playing"
   harness.runtimeState.intendedPlayState = "playing";
   // The seek began from healthy playback, so the stall is the seek's own
   // momentary rebuffer — unchanged behaviour.
-  harness.runtimeState.explicitSeekFromBufferingAt = 0;
+  harness.runtimeState.explicitSeekOriginPlayState = "playing";
 
   await harness.controller.broadcastPlayback(video, "waiting");
 
   assert.equal(lastBroadcastPlayState(harness), "playing");
 });
 
-test("sync controller stops suppressing stall events once the seek-from-buffering window lapses", async () => {
+test("sync controller keeps a seek started while paused as paused", async () => {
+  const { harness } = createSeekFromBufferingHarness();
+  // Scrubbing a paused video: the element stays paused throughout.
+  const video = createVideo({ paused: true, readyState: 4, currentTime: 90 });
+  harness.setVideoElement(video);
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.runtimeState.explicitSeekOriginPlayState = "paused";
+
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  // Forcing this to `playing` would tell every member to start playing.
+  assert.equal(lastBroadcastPlayState(harness), "paused");
+});
+
+test("sync controller lets the seek grace window expire back to the real state", async () => {
   const { harness } = createSeekFromBufferingHarness();
   const video = createVideo({ paused: false, readyState: 2, currentTime: 90 });
   harness.setVideoElement(video);
   harness.runtimeState.intendedPlayState = "playing";
-  // userGestureGraceMs is 300 in this harness; 21_000 is well outside it.
-  harness.runtimeState.explicitSeekFromBufferingAt = 21_000;
+  harness.runtimeState.explicitSeekOriginPlayState = "buffering";
+  // userGestureGraceMs is 300 in this harness, so the recorded seek at 21_950
+  // is no longer recent and stops governing the broadcast at all.
+  harness.setNow(23_000);
 
-  await harness.controller.broadcastPlayback(video, "waiting");
+  await harness.controller.broadcastPlayback(video, "seeked");
 
-  assert.equal(lastBroadcastPlayState(harness), "playing");
+  assert.equal(lastBroadcastPlayState(harness), "buffering");
 });
 
 test("sync controller does not treat a seek as explicit after a forced pause invalidates it", async () => {

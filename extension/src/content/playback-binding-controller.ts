@@ -270,17 +270,26 @@ export function createPlaybackBindingController(args: {
       ) {
         return;
       }
+      const previousAction = args.runtimeState.lastExplicitUserAction;
       args.runtimeState.lastExplicitUserAction = {
         kind,
         at: nowOf(),
       };
       if (kind === "seek") {
-        // Snapshot here, not at broadcast time: the first forced `seeking`
-        // broadcast writes `intendedPlayState` back to `playing`, after which
-        // this side is indistinguishable from one that seeked while healthy.
-        // See the field's doc comment in runtime-state.ts.
-        args.runtimeState.explicitSeekFromBufferingAt =
-          args.runtimeState.intendedPlayState === "playing" ? 0 : nowOf();
+        // One gesture produces `seeking` AND `seeked`, and the `seeking`
+        // broadcast in between writes `intendedPlayState` back to `playing`.
+        // Re-snapshotting on `seeked` would therefore record the write-back
+        // rather than the origin, erasing a `buffering` start. Only the first
+        // event of a seek establishes the origin; the rest inherit it.
+        const continuesInFlightSeek =
+          previousAction?.kind === "seek" &&
+          nowOf() - previousAction.at < args.userGestureGraceMs;
+        if (!continuesInFlightSeek) {
+          args.runtimeState.explicitSeekOriginPlayState =
+            args.runtimeState.intendedPlayState;
+        }
+      } else {
+        args.runtimeState.explicitSeekOriginPlayState = null;
       }
     }
   }
@@ -884,7 +893,7 @@ export function createPlaybackBindingController(args: {
           `Forced pause reapplied after seek-triggered autoplay intended=${args.runtimeState.intendedPlayState}`,
         );
         args.runtimeState.lastExplicitUserAction = null;
-        args.runtimeState.explicitSeekFromBufferingAt = 0;
+        args.runtimeState.explicitSeekOriginPlayState = null;
         args.runtimeState.lastExplicitPlaybackAction = null;
         args.runtimeState.lastForcedPauseAt = nowOf();
         window.setTimeout(() => {
