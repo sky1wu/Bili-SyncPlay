@@ -153,13 +153,24 @@ export function derivePlaybackSyncIntent(args: {
     return "explicit-ratechange";
   }
 
+  // `timeupdate` is deliberately absent. It is a periodic heartbeat, not part of
+  // the seek: it fires whenever 2s have passed since the last broadcast, which
+  // lands it squarely inside EXPLICIT_SEEK_BROADCAST_GRACE_MS after every user
+  // seek. Receivers turn `playing` + `explicit-seek` into an UNCONDITIONAL
+  // hard-seek (drift thresholds bypassed) that also tears down any in-flight
+  // correction session and arms the soft-apply cooldown — so tagging the
+  // heartbeat forced every peer to jump, and blacked out corrections, roughly
+  // two seconds after each seek even when they were already within 0.02s.
+  //
+  // The jump itself is never lost: the events below ARE the seek, and a seek
+  // large enough to matter still crosses the ordinary `playing-hard-drift`
+  // threshold if they were all suppressed.
   if (
     (args.eventSource !== "seeking" &&
       args.eventSource !== "seeked" &&
       args.eventSource !== "play" &&
       args.eventSource !== "playing" &&
-      args.eventSource !== "canplay" &&
-      args.eventSource !== "timeupdate") ||
+      args.eventSource !== "canplay") ||
     !hasActiveExplicitUserAction ||
     args.lastExplicitUserAction.kind !== "seek" ||
     args.now - args.lastExplicitUserAction.at >=
