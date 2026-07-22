@@ -155,10 +155,22 @@ export function createSoftApplyController(args: {
     // When the user explicitly changes the playback rate, they have taken over
     // the rate — restoring the stale snapshot rate here would silently undo
     // their change once the session deadline elapses, so skip the restore.
+    //
+    // Both rates have to be checked, because the catch-up elevated both:
+    // `setVideoPlaybackRate` writes `defaultPlaybackRate` as well, and a media
+    // element resets `playbackRate` from that default on its next load. When the
+    // player has already reset the LIVE rate on its own (it does this while
+    // recovering from a stall), testing only `playbackRate` skips the restore
+    // and strands the elevated default. The element then resurrects the catch-up
+    // rate on the next load with no session left to undo it, and every broadcast
+    // is dropped by the unexpected-rate guard until some remote apply happens to
+    // write the rate back.
     if (
       reason !== "user-ratechange" &&
       video &&
-      Math.abs(video.playbackRate - session.restorePlaybackRate) > 0.01
+      (Math.abs(video.playbackRate - session.restorePlaybackRate) > 0.01 ||
+        Math.abs(video.defaultPlaybackRate - session.restorePlaybackRate) >
+          0.01)
     ) {
       setVideoPlaybackRate(video, session.restorePlaybackRate);
       // Scope the window to `ratechange`: the rate write above is the only DOM
