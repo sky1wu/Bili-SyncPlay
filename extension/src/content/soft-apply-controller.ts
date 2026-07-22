@@ -46,6 +46,12 @@ export interface SoftApplyController {
     now: number;
   }): boolean;
   isActiveRateOnlyCatchUp(normalizedUrl: string | null): boolean;
+  /**
+   * Whether ANY correction session is running for this url — a pure rate-only
+   * catch-up or a real soft-apply. Both elevate `playbackRate`, so both need
+   * that rate protected from being written back to the room's base value.
+   */
+  hasActiveCorrectionSession(normalizedUrl: string | null): boolean;
   shouldSuppressByCooldown(
     video: HTMLVideoElement,
     playback: PlaybackState,
@@ -283,7 +289,17 @@ export function createSoftApplyController(args: {
     if (!normalizedUrl || normalizedUrl !== activeSoftApply.normalizedUrl) {
       return "url-changed";
     }
-    if (playback.playState !== "playing") {
+    // `buffering` is a transient stall of the SENDER, not a change to where the
+    // room is. Treating it as a state change lets any member's hiccup abort a
+    // healthy member's drift convergence — the session would restore its base
+    // rate and leave the residual behind, re-creating the ratchet #185 removed.
+    // A real `paused` (or anything else non-playing) still ends the session, and
+    // the behind-a-stalled-peer case still tears it down through the normal
+    // `apply-hard-seek` path.
+    if (
+      playback.playState !== "playing" &&
+      playback.playState !== "buffering"
+    ) {
       return "play-state-changed";
     }
     if (
@@ -310,6 +326,14 @@ export function createSoftApplyController(args: {
     // behind. Age the snapshot by the elapsed wall time so this only fires for a
     // genuine unannounced jump. (Announced ones are caught by the `explicit-seek`
     // check above, and a stalled/paused peer by `play-state-changed`.)
+    // A stalled sender's `currentTime` is frozen, so it falls behind the
+    // extrapolated target by exactly the stall duration and would read as a jump
+    // after ~SOFT_APPLY_TARGET_SHIFT_CANCEL_THRESHOLD_SECONDS — cancelling the
+    // very session the check above just preserved. A frozen position is not
+    // comparable; skip it and let a real state change end the session.
+    if (playback.playState === "buffering") {
+      return null;
+    }
     const elapsedSeconds = Math.max(
       0,
       (nowOf() - activeSoftApply.startedAt) / 1_000,
@@ -394,6 +418,14 @@ export function createSoftApplyController(args: {
     );
   }
 
+  function hasActiveCorrectionSession(normalizedUrl: string | null): boolean {
+    return (
+      activeSoftApply !== null &&
+      normalizedUrl !== null &&
+      normalizedUrl === activeSoftApply.normalizedUrl
+    );
+  }
+
   function shouldSuppressByCooldown(
     video: HTMLVideoElement,
     playback: PlaybackState,
@@ -445,6 +477,7 @@ export function createSoftApplyController(args: {
     shouldCancelActiveSoftApplyForPlayback,
     shouldSuppressActiveSoftApplyBroadcast,
     isActiveRateOnlyCatchUp,
+    hasActiveCorrectionSession,
     shouldSuppressByCooldown,
     clearSoftApplyCooldown,
     destroy,

@@ -392,3 +392,91 @@ test("a steadily advancing peer no longer cancels a catch-up as target-shifted",
     windowStub.restore();
   }
 });
+
+test("a peer's buffering does not abort an active catch-up, a real pause still does", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    let now = 20_000;
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url ?? null,
+      getVideoElement: () => null,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => now,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 24.8 }),
+      0.8,
+      {
+        armCooldownOnConverge: false,
+        relativeDriftClose: { driftSeconds: 0.8, rateOffsetSeconds: 0.12 },
+      },
+    );
+
+    // A transient stall of the sender is not a change to where the room is.
+    assert.equal(
+      controller.shouldCancelActiveSoftApplyForPlayback(
+        createPlayback({ currentTime: 24.8, playState: "buffering" }),
+      ),
+      null,
+    );
+
+    // Its frozen position falls further behind the extrapolated target the
+    // longer it stalls; that must not read as an unannounced jump either.
+    now = 23_000;
+    assert.equal(
+      controller.shouldCancelActiveSoftApplyForPlayback(
+        createPlayback({ currentTime: 24.8, playState: "buffering" }),
+      ),
+      null,
+    );
+
+    // A real stop still ends the session.
+    assert.equal(
+      controller.shouldCancelActiveSoftApplyForPlayback(
+        createPlayback({ currentTime: 24.8, playState: "paused" }),
+      ),
+      "play-state-changed",
+    );
+  } finally {
+    windowStub.restore();
+  }
+});
+
+test("hasActiveCorrectionSession covers real soft-apply, not just rate-only catch-ups", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url ?? null,
+      getVideoElement: () => null,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getNow: () => 20_000,
+      armProgrammaticApplyWindow: () => {},
+    });
+    const url = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+
+    // A real soft-apply: it writes currentTime AND elevates the rate, so
+    // `isActiveRateOnlyCatchUp` deliberately excludes it — but its rate needs
+    // the same protection from being written back to the room's base value.
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 24.8 }),
+      1.1,
+    );
+
+    assert.equal(controller.isActiveRateOnlyCatchUp(url), false);
+    assert.equal(controller.hasActiveCorrectionSession(url), true);
+    assert.equal(controller.hasActiveCorrectionSession("https://other"), false);
+    assert.equal(controller.hasActiveCorrectionSession(null), false);
+  } finally {
+    windowStub.restore();
+  }
+});

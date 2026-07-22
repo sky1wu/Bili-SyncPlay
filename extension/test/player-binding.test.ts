@@ -302,3 +302,98 @@ test("applying a buffering peer state leaves the local playhead untouched", () =
   assert.equal(applied.mode, "ignore");
   assert.equal(applied.reason, "buffering-not-authoritative");
 });
+
+test("a frozen buffering snapshot leaves an in-flight catch-up rate alone", () => {
+  const video = createVideo({
+    currentTime: 514.9,
+    paused: false,
+    playbackRate: 1.12,
+  });
+
+  const applied = syncPlaybackPosition(
+    video,
+    511.94,
+    "buffering",
+    undefined,
+    1,
+    false,
+    true, // a correction session is running: its elevated rate must survive
+  );
+
+  assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+  assert.equal(applied.didWritePlaybackRate, false);
+  assert.equal(applied.reason, "buffering-not-authoritative");
+});
+
+test("a deliberate rate change still applies even while the sender is buffering", () => {
+  // The sender's stall and their speed change are orthogonal — swallowing the
+  // latter would leave the room out of sync on rate until the peer recovers.
+  const video = createVideo({
+    currentTime: 514.9,
+    paused: false,
+    playbackRate: 1,
+  });
+
+  const applied = syncPlaybackPosition(
+    video,
+    511.94,
+    "buffering",
+    "explicit-ratechange",
+    1.5,
+  );
+
+  assert.ok(Math.abs(video.playbackRate - 1.5) < 0.001);
+  assert.equal(applied.didWritePlaybackRate, true);
+  assert.equal(applied.didWriteCurrentTime, false);
+});
+
+test("a buffering snapshot still carries the room rate when nothing is catching up", () => {
+  // `syncIntent` only exists inside the short explicit-action window, so
+  // ordinary heartbeats are how the room's rate reaches us. A receiver that is
+  // not correcting anything has no catch-up rate to protect, so skipping the
+  // write would strand it on a stale rate until the stalled peer recovers.
+  const video = createVideo({
+    currentTime: 514.9,
+    paused: false,
+    playbackRate: 1,
+  });
+
+  const applied = syncPlaybackPosition(
+    video,
+    511.94,
+    "buffering",
+    undefined,
+    1.5,
+  );
+
+  assert.ok(Math.abs(video.playbackRate - 1.5) < 0.001);
+  assert.equal(applied.didWritePlaybackRate, true);
+  assert.equal(applied.didWriteCurrentTime, false);
+  assert.equal(applied.reason, "buffering-not-authoritative");
+});
+
+test("a real soft-apply's elevated rate survives a lagging buffering snapshot", () => {
+  // `hasActiveCatchUp` is rate-only by construction, so gating the rate
+  // protection on it left real soft-apply sessions unprotected: a stalled
+  // peer's heartbeat would write the base rate back and silently interrupt the
+  // correction while the session itself was preserved.
+  const video = createVideo({
+    currentTime: 514.9,
+    paused: false,
+    playbackRate: 1.12,
+  });
+
+  const applied = syncPlaybackPosition(
+    video,
+    511.94,
+    "buffering",
+    undefined,
+    1,
+    false, // not a rate-only catch-up...
+    true, // ...but a soft-apply session is active
+  );
+
+  assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+  assert.equal(applied.didWritePlaybackRate, false);
+  assert.equal(applied.reason, "buffering-not-authoritative");
+});
