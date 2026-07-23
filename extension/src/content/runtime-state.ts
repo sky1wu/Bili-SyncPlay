@@ -160,6 +160,33 @@ export interface ContentRuntimeState {
   suppressedRemotePlayback: SuppressedRemotePlayback | null;
   recentRemotePlayingIntent: RecentRemotePlayingIntent | null;
   lastExplicitUserAction: ExplicitUserAction | null;
+  /**
+   * What this side was doing when the in-flight explicit seek STARTED, or null
+   * when no seek is in flight. Read together with `lastExplicitUserAction`,
+   * which bounds its lifetime.
+   *
+   * `getBroadcastPlayState` needs the origin, not the current state, and needs
+   * all three values:
+   *
+   * - `playing` / `buffering` origin — the seek moves the room, so the events
+   *   that make it up must broadcast as `playing` even mid-stall, otherwise
+   *   receivers ahead of the frozen target skip the jump entirely (#198).
+   * - `paused` origin — scrubbing a paused video must stay `paused`. Forcing it
+   *   would broadcast `playing` and start playback for the whole room.
+   * - `buffering` origin additionally suppresses the `pause`/`waiting`/`stalled`
+   *   events that FOLLOW the seek. Those never carry `explicit-seek` and their
+   *   `currentTime` is frozen at the target without playing from it, so forcing
+   *   them publishes a frozen position as a healthy one and drags members who
+   *   already followed the jump back to it.
+   *
+   * `intendedPlayState` cannot answer this on its own: `broadcastPlayback`
+   * writes it back to whatever was just broadcast, so the first forced `seeking`
+   * flips it to `playing` and every later event of the same seek looks like it
+   * came from healthy playback. Snapshotted when the seek is first recorded,
+   * before that write-back — and deliberately NOT re-snapshotted by the
+   * `seeked` that follows the same gesture, which would read the flipped value.
+   */
+  explicitSeekOriginPlayState: PlaybackState["playState"] | null;
   lastNonSharedGuardUrl: string | null;
   /**
    * Captures `activeSharedUrl` at the moment in-room SPA navigation is
@@ -273,6 +300,7 @@ export function resetUserGestureState(state: ContentRuntimeState): void {
   state.lastUserGestureInPlayerAt = 0;
   state.lastExplicitPlaybackAction = null;
   state.lastExplicitUserAction = null;
+  state.explicitSeekOriginPlayState = null;
   state.lastNonSharedGuardUrl = null;
   state.lastForcedPauseAt = 0;
   state.suppressedLocalEndPauseUrl = null;
@@ -319,6 +347,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     suppressedRemotePlayback: null,
     recentRemotePlayingIntent: null,
     lastExplicitUserAction: null,
+    explicitSeekOriginPlayState: null,
     lastNonSharedGuardUrl: null,
     postNavigationAnchorSharedUrl: null,
     postNavigationAnchorSetAt: 0,

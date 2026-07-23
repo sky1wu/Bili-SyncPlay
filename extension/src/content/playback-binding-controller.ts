@@ -270,10 +270,32 @@ export function createPlaybackBindingController(args: {
       ) {
         return;
       }
+      const previousAction = args.runtimeState.lastExplicitUserAction;
       args.runtimeState.lastExplicitUserAction = {
         kind,
         at: nowOf(),
       };
+      if (kind === "seek") {
+        // One gesture produces `seeking` AND `seeked`, and the `seeking`
+        // broadcast in between writes `intendedPlayState` back to `playing`.
+        // Re-snapshotting on `seeked` would therefore record the write-back
+        // rather than the origin, erasing a `buffering` start. Only the first
+        // event of a seek establishes the origin; the rest inherit it.
+        // A forced pause invalidates the seek that preceded it, so the next
+        // gesture starts a NEW seek even inside the grace window — inheriting
+        // the old origin there would let a `buffering` start survive into a
+        // scrub of the now-paused video and force it to `playing`.
+        const continuesInFlightSeek =
+          previousAction?.kind === "seek" &&
+          previousAction.at > args.runtimeState.lastForcedPauseAt &&
+          nowOf() - previousAction.at < args.userGestureGraceMs;
+        if (!continuesInFlightSeek) {
+          args.runtimeState.explicitSeekOriginPlayState =
+            args.runtimeState.intendedPlayState;
+        }
+      } else {
+        args.runtimeState.explicitSeekOriginPlayState = null;
+      }
     }
   }
 
@@ -876,6 +898,7 @@ export function createPlaybackBindingController(args: {
           `Forced pause reapplied after seek-triggered autoplay intended=${args.runtimeState.intendedPlayState}`,
         );
         args.runtimeState.lastExplicitUserAction = null;
+        args.runtimeState.explicitSeekOriginPlayState = null;
         args.runtimeState.lastExplicitPlaybackAction = null;
         args.runtimeState.lastForcedPauseAt = nowOf();
         window.setTimeout(() => {
