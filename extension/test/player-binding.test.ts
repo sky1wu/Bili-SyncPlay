@@ -31,12 +31,12 @@ test("rate-only adjustment nudges playback rate without rewriting current time f
   const applied = syncPlaybackPosition(video, 12.8, "playing", undefined, 1);
 
   assert.ok(Math.abs(video.currentTime - 12) < 0.001);
-  assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+  assert.ok(Math.abs(video.playbackRate - 1.16) < 0.001);
   assert.equal(applied.mode, "rate-only");
   assert.equal(applied.targetTime, 12.8);
   assert.equal(applied.restorePlaybackRate, 1);
   assert.equal(applied.currentTime, 12);
-  assert.equal(applied.playbackRate, 1.12);
+  assert.equal(applied.playbackRate, 1.16);
   assert.equal(applied.reason, "playing-rate-adjust");
   assert.ok(Math.abs(applied.delta - 0.8) < 0.001);
   assert.equal(applied.didWriteCurrentTime, false);
@@ -52,12 +52,12 @@ test("rate-only adjustment slows playback without rewriting current time when lo
   const applied = syncPlaybackPosition(video, 12, "playing", undefined, 1);
 
   assert.ok(Math.abs(video.currentTime - 12.8) < 0.001);
-  assert.ok(Math.abs(video.playbackRate - 0.88) < 0.001);
+  assert.ok(Math.abs(video.playbackRate - 0.84) < 0.001);
   assert.equal(applied.mode, "rate-only");
   assert.equal(applied.targetTime, 12);
   assert.equal(applied.restorePlaybackRate, 1);
   assert.equal(applied.currentTime, 12.8);
-  assert.equal(applied.playbackRate, 0.88);
+  assert.equal(applied.playbackRate, 0.84);
   assert.equal(applied.reason, "playing-rate-adjust");
   assert.ok(Math.abs(applied.delta - 0.8) < 0.001);
   assert.equal(applied.didWriteCurrentTime, false);
@@ -74,7 +74,7 @@ test("rate-only adjustment widens playback-rate correction at 2x", () => {
 
   assert.equal(applied.mode, "rate-only");
   assert.ok(Math.abs(video.currentTime - 12) < 0.001);
-  assert.ok(Math.abs(video.playbackRate - 2.198) < 0.001);
+  assert.ok(Math.abs(video.playbackRate - 2.26) < 0.001);
   assert.equal(applied.didWriteCurrentTime, false);
   assert.equal(applied.didWritePlaybackRate, true);
 });
@@ -114,7 +114,7 @@ test("programmatic apply signature tracks the soft-applied position instead of t
   assert.equal(applied.didChange, true);
   assert.equal(signatures.length, 1);
   assert.ok(Math.abs(signatures[0]!.currentTime - 12.4) < 0.001);
-  assert.ok(Math.abs(signatures[0]!.playbackRate - 1.12) < 0.001);
+  assert.ok(Math.abs(signatures[0]!.playbackRate - 1.16) < 0.001);
 });
 
 test("soft apply uses a more conservative time step than the raw drift", () => {
@@ -142,7 +142,7 @@ test("soft apply keeps a smaller time step but a wider rate offset at 2x", () =>
   assert.equal(applied.mode, "soft-apply");
   assert.ok(video.currentTime > 12);
   assert.ok(video.currentTime < 12.4);
-  assert.ok(Math.abs(video.playbackRate - 2.22) < 0.001);
+  assert.ok(Math.abs(video.playbackRate - 2.26) < 0.001);
   assert.equal(applied.didWriteCurrentTime, true);
   assert.equal(applied.didWritePlaybackRate, true);
 });
