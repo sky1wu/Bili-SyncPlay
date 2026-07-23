@@ -7,7 +7,13 @@ import type { ProgrammaticPlaybackSignature } from "./runtime-state";
 
 const SOFT_APPLY_STEP_SECONDS = 0.22;
 const SOFT_APPLY_MAX_STEP_SECONDS = 0.4;
-const SOFT_APPLY_RATE_OFFSET = 0.12;
+// Peak rate offset a catch-up may apply at base 1x (i.e. up to 1.16x). The
+// remote head advances at the base rate, so this offset *is* the relative
+// closing speed: at 0.16 a drift takes drift / 0.16 seconds to absorb. Kept
+// modest so the pitch shift stays barely perceptible, but high enough that
+// autoplay-next hand-offs and steady drift converge in a few seconds rather
+// than a dozen.
+const SOFT_APPLY_RATE_OFFSET = 0.16;
 
 interface AppliedPlaybackAdjustment {
   mode: "ignore" | "rate-only" | "soft-apply" | "hard-seek";
@@ -136,8 +142,12 @@ function getRateAdjustedPlaybackRate(args: {
 }): number {
   const tuning = getPlaybackAdjustmentTuning(args.basePlaybackRate);
   const drift = args.targetTime - args.localCurrentTime;
+  // Proportional gain: the rate hits its cap once |drift| exceeds
+  // rateOffsetLimit / 0.3 (~0.53s at base 1x) and holds there through most of
+  // the correction, so the asymptotic tail that dominated convergence time
+  // stays near the cap far longer before tapering to zero.
   const rateOffset = clamp(
-    drift * 0.18,
+    drift * 0.3,
     -tuning.rateOffsetLimit,
     tuning.rateOffsetLimit,
   );

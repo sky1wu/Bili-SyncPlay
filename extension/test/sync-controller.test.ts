@@ -314,7 +314,7 @@ test("sync controller uses rate-only reconcile for medium playing drift", async 
     );
 
     assert.ok(Math.abs(video.currentTime - 24) < 0.001);
-    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+    assert.ok(Math.abs(video.playbackRate - 1.16) < 0.001);
     assert.equal(
       harness.debugLogs.some(
         (message) =>
@@ -336,12 +336,12 @@ test("sync controller uses rate-only reconcile for medium playing drift", async 
 
     // Reaching the stale snapshot target must NOT restore the base rate early:
     // the remote head keeps advancing, so converging on the old target would
-    // leave residual drift. The drift (0.8s) at a 0.12x offset needs ~6.7s to
+    // leave residual drift. The drift (0.8s) at a 0.16x offset needs ~5s to
     // close, well beyond the moment the playhead passes the snapshot target.
     video.currentTime = 24.8;
     harness.setNow(20_500);
     harness.controller.maintainActiveSoftApply(video);
-    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+    assert.ok(Math.abs(video.playbackRate - 1.16) < 0.001);
 
     // Once enough real time has elapsed for the rate offset to absorb the drift,
     // the base rate is restored instead of running ahead forever.
@@ -973,7 +973,7 @@ test("sync controller suppresses repeated apply during the soft-apply cooldown w
     );
 
     assert.ok(Math.abs(video.currentTime - 24.4) < 0.001);
-    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+    assert.ok(Math.abs(video.playbackRate - 1.16) < 0.001);
 
     video.currentTime = 25;
     harness.controller.maintainActiveSoftApply(video);
@@ -1075,7 +1075,7 @@ test("sync controller does not arm cooldown when soft apply times out", async ()
     );
 
     assert.ok(Math.abs(video.currentTime - 26.4) < 0.001);
-    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+    assert.ok(Math.abs(video.playbackRate - 1.16) < 0.001);
     assert.equal(
       harness.debugLogs.some(
         (message) =>
@@ -2111,7 +2111,7 @@ test("sync controller abandons a rate-only catch-up to broadcast a real stall wi
   harness.setNow(20_000);
 
   try {
-    // A medium drift registers a pure rate-only catch-up (rate bumped to 1.12)
+    // A medium drift registers a pure rate-only catch-up (rate bumped to 1.16)
     // and arms the remote-follow window by following the remote playing state.
     await harness.controller.applyRoomState(
       createRoomState({
@@ -2123,11 +2123,11 @@ test("sync controller abandons a rate-only catch-up to broadcast a real stall wi
         playbackRate: 1,
       }),
     );
-    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+    assert.ok(Math.abs(video.playbackRate - 1.16) < 0.001);
 
     // A genuine stall interrupts the catch-up after the 700ms programmatic
     // window (so it is not mistaken for the rate-apply echo) but well within the
-    // ~6.7s relative-drift window and the 3s remote-follow window.
+    // ~5s relative-drift window and the 3s remote-follow window.
     harness.setNow(21_000);
     video.readyState = 2;
     await harness.controller.broadcastPlayback(video, "waiting");
@@ -2283,13 +2283,13 @@ test("sync controller converges a catch-up instead of stopping at the ignore thr
         playbackRate: 1,
       }),
     );
-    assert.ok(Math.abs(video.playbackRate - 1.12) < 0.001);
+    assert.ok(Math.abs(video.playbackRate - 1.16) < 0.001);
 
     // A routine heartbeat 3s later. The peer advanced 3s; the local head
-    // advanced 3s at the elevated 1.12x, so the remaining drift is 0.44s —
+    // advanced 3s at the elevated 1.16x, so the remaining drift is 0.32s —
     // just under the threshold that started the catch-up.
     harness.setNow(23_000);
-    video.currentTime = 27.36;
+    video.currentTime = 27.48;
     await harness.controller.applyRoomState(
       createRoomState({
         actorId: "remote-member",
@@ -2303,7 +2303,7 @@ test("sync controller converges a catch-up instead of stopping at the ignore thr
 
     // Previously this heartbeat killed the catch-up twice over: the frozen
     // snapshot made it look like a 3s jump (`target-shifted`), and the `ignore`
-    // reconcile wrote the base rate back. Both left the 0.44s residual forever.
+    // reconcile wrote the base rate back. Both left the 0.32s residual forever.
     assert.equal(
       harness.debugLogs.some((message) => message.includes("target-shifted")),
       false,
