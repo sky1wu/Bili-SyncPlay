@@ -188,12 +188,23 @@ export async function createRedisRoomStore(
     } while (cursor !== "0");
   }
 
-  try {
-    await backfillRoomIndex();
-  } catch {
-    // Best effort: startup must not hinge on repairing a legacy index, and
-    // the next process start retries it.
+  // Started here but deliberately not awaited: createSyncServer resolves
+  // before httpServer.listen, so awaiting a full keyspace walk would delay
+  // readiness and can trip deployment health-check timeouts on a Redis shared
+  // with other services. Enumeration is the only thing that depends on the
+  // repair, so fetchRooms awaits it instead — the cost lands on the first
+  // listing rather than on startup, and only once per process.
+  let indexBackfill: Promise<void> | null = null;
+
+  function repairRoomIndex(): Promise<void> {
+    indexBackfill ??= backfillRoomIndex().catch(() => {
+      // Best effort: a failed repair leaves legacy rooms unlisted exactly as
+      // before this change, and the next process start retries it.
+    });
+    return indexBackfill;
   }
+
+  void repairRoomIndex();
 
   async function fetchRooms(
     query: Pick<
@@ -206,6 +217,10 @@ export async function createRedisRoomStore(
       | "sortOrder"
     >,
   ) {
+    // Legacy rooms must be indexed before the index can be trusted as the
+    // sole enumeration source; after the first call this is a settled promise.
+    await repairRoomIndex();
+
     // Both sort orders enumerate through the room index. Its members are the
     // room codes themselves, so sorting by createdAt needs nothing more than
     // the room bodies this function already loads — the previous KEYS scan

@@ -193,7 +193,8 @@ test("redis room store backfills index entries missing from legacy databases", a
 
     store = await createRedisRoomStore(REDIS_URL, { namespace });
 
-    assert.equal(await redis.zscore(indexKey, "LEGACY"), "60");
+    // The repair runs off the startup path so readiness is not delayed by a
+    // keyspace walk; listing is what awaits it, so assert through a listing.
     const rooms = await store.listRooms({
       keyword: undefined,
       includeExpired: true,
@@ -206,6 +207,7 @@ test("redis room store backfills index entries missing from legacy databases", a
       rooms.map((listed) => listed.code),
       ["LEGACY"],
     );
+    assert.equal(await redis.zscore(indexKey, "LEGACY"), "60");
   } finally {
     await redis.del(
       `${namespace}:room:LEGACY`,
