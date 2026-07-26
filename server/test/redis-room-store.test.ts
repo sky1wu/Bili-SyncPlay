@@ -917,3 +917,60 @@ test("redis room reaper survives a body corrupted into a JSON scalar", async (t)
     await store.close();
   }
 });
+
+test("redis room count and listing agree about an unreadable room body", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("quarantine");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  let clock = 1_000_000;
+  const store = await createRedisRoomStore(REDIS_URL, {
+    namespace,
+    now: () => clock,
+  });
+  const redis = await connect();
+
+  try {
+    await store.createRoom({
+      code: "STAYOK",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    const doomed = await store.createRoom({
+      code: "ROTTEN",
+      joinToken: "join-token-123456",
+      createdAt: 2,
+    });
+    assert.equal(await store.countRooms({ includeExpired: true }), 2);
+
+    // An indexed room whose body later becomes unreadable. Enumeration skips
+    // it, so leaving it in the set makes ZCARD report a row listRooms will
+    // never return — the admin table's total exceeds the page it can render.
+    await redis.set(`${namespace}:room:${doomed.code}`, "{not valid json");
+
+    const listed = await store.listRooms(LIST_ALL);
+    assert.deepEqual(
+      listed.map((room) => room.code),
+      ["STAYOK"],
+    );
+    assert.equal(await store.countRooms({ includeExpired: true }), 1);
+    assert.equal(await redis.zscore(roomsKey, "ROTTEN"), null);
+
+    // The body is kept: it cannot be interpreted, so deleting it would be a
+    // guess. It also must not creep back into the set on the next reconcile.
+    assert.equal(await redis.exists(`${namespace}:room:ROTTEN`), 1);
+    clock += 900_000;
+    assert.equal(await store.countRooms({ includeExpired: true }), 1);
+  } finally {
+    await redis.del(
+      `${namespace}:room:STAYOK`,
+      `${namespace}:room:ROTTEN`,
+      roomsKey,
+    );
+    await redis.quit();
+    await store.close();
+  }
+});

@@ -50,6 +50,25 @@ redis.call("ZADD", roomsKey, ARGV[2], ARGV[3])
 return 1
 `;
 
+// Drops the member of a body that exists but cannot be read. Enumeration
+// already skips such a room, so leaving it in the set made ZCARD count a row
+// listRooms would never return — the admin table reports a total larger than
+// the page it can render, and rooms_non_expired stays inflated. Guarded by the
+// bytes the caller read, so a body repaired in the meantime keeps its member.
+//
+// The body itself is deliberately left in place: it cannot be interpreted, so
+// deleting it would destroy data on a guess.
+const QUARANTINE_MEMBER_LUA = `
+local roomsKey = KEYS[1]
+local roomKey = KEYS[2]
+
+if redis.call("GET", roomKey) ~= ARGV[1] then
+  return 0
+end
+
+return redis.call("ZREM", roomsKey, ARGV[2])
+`;
+
 // SET NX and the membership write must succeed or fail together, or a losing
 // create would still stamp its score over the winner's membership.
 //
@@ -363,6 +382,25 @@ export async function createRedisRoomStore(
           ),
         ),
       );
+
+      // A body that exists but cannot be read must leave the set, or counting
+      // and enumeration disagree about it for as long as it sits there.
+      const unreadable = loaded.filter(
+        ({ raw, room, score }) =>
+          room === null && raw !== null && score !== null,
+      );
+      await Promise.all(
+        unreadable.map(async ({ code, raw }) =>
+          redis.eval(
+            QUARANTINE_MEMBER_LUA,
+            2,
+            roomsByExpiryKey,
+            roomKey(code),
+            raw as string,
+            code,
+          ),
+        ),
+      );
     } while (cursor !== "0");
   }
 
@@ -466,17 +504,16 @@ export async function createRedisRoomStore(
     for (let offset = 0; offset < codes.length; offset += REPAIR_CHUNK_SIZE) {
       const batch = codes.slice(offset, offset + REPAIR_CHUNK_SIZE);
       const loaded = await Promise.all(
-        batch.map(async (code) => ({
-          code,
-          room: parseRoomOrNull(await redis.get(roomKey(code))),
-        })),
+        batch.map(async (code) => {
+          const raw = await redis.get(roomKey(code));
+          return { code, raw, room: parseRoomOrNull(raw) };
+        }),
       );
 
-      // Only codes with no body at all are prune candidates; the script
-      // re-checks EXISTS anyway, so a corrupt-but-present body keeps its
-      // membership instead of being silently dropped from the set.
+      // Codes with no body at all: the script re-checks EXISTS, so a body
+      // written between the read and the prune keeps its membership.
       const orphanedCodes = loaded
-        .filter(({ room }) => room === null)
+        .filter(({ raw }) => raw === null)
         .map(({ code }) => code);
       if (orphanedCodes.length > 0) {
         try {
@@ -489,6 +526,31 @@ export async function createRedisRoomStore(
           );
         } catch {
           // Best effort: a failed prune only means the next call retries it.
+        }
+      }
+
+      // Bodies that exist but cannot be read leave the set here too, not just
+      // on the next reconcile, so a listing and the count it is paired with
+      // never disagree about how many rooms there are.
+      const unreadable = loaded.filter(
+        ({ raw, room }) => raw !== null && room === null,
+      );
+      if (unreadable.length > 0) {
+        try {
+          await Promise.all(
+            unreadable.map(async ({ code, raw }) =>
+              redis.eval(
+                QUARANTINE_MEMBER_LUA,
+                2,
+                roomsByExpiryKey,
+                roomKey(code),
+                raw as string,
+                code,
+              ),
+            ),
+          );
+        } catch {
+          // Best effort, same as the prune above.
         }
       }
 
