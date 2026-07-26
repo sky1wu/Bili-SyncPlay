@@ -457,3 +457,117 @@ test("redis room update preserves playback number precision through the CAS scri
     await store.close();
   }
 });
+
+test("redis room count answers from the indexes without loading room bodies", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = `bsp-test-count-${Date.now().toString(36)}`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  try {
+    const live = await store.createRoom({
+      code: "LIVEAA",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    const expiring = await store.createRoom({
+      code: "GONEBB",
+      joinToken: "join-token-123456",
+      createdAt: 2,
+    });
+    const future = await store.createRoom({
+      code: "LATERC",
+      joinToken: "join-token-123456",
+      createdAt: 3,
+    });
+
+    // Already past, so it must not count as non-expired.
+    const expired = await store.updateRoom(expiring.code, expiring.version, {
+      expiresAt: 1,
+      lastActiveAt: 2,
+    });
+    assert.equal(expired.ok, true);
+    // Far future, so it still counts.
+    const pending = await store.updateRoom(future.code, future.version, {
+      expiresAt: Date.now() + 3_600_000,
+      lastActiveAt: 3,
+    });
+    assert.equal(pending.ok, true);
+
+    assert.equal(await store.countRooms({ includeExpired: true }), 3);
+    assert.equal(await store.countRooms({ includeExpired: false }), 2);
+
+    // Keyword filtering runs on index members, and still honours expiry.
+    assert.equal(
+      await store.countRooms({ keyword: "gone", includeExpired: true }),
+      1,
+    );
+    assert.equal(
+      await store.countRooms({ keyword: "gone", includeExpired: false }),
+      0,
+    );
+    assert.equal(
+      await store.countRooms({ keyword: "zzz", includeExpired: true }),
+      0,
+    );
+
+    // Counts must agree with what listing reports.
+    const listed = await store.listRooms({
+      keyword: undefined,
+      includeExpired: false,
+      page: 1,
+      pageSize: 50,
+      sortBy: "lastActiveAt",
+      sortOrder: "desc",
+    });
+    assert.equal(listed.length, 2);
+    assert.equal(live.code, "LIVEAA");
+  } finally {
+    await store.deleteRoom("LIVEAA");
+    await store.deleteRoom("GONEBB");
+    await store.deleteRoom("LATERC");
+    await redis.del(`${namespace}:room-index`, `${namespace}:room-expiry`);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room index repair sweeps orphaned members so counts stay honest", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = `bsp-test-sweep-${Date.now().toString(36)}`;
+  const indexKey = `${namespace}:room-index`;
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
+  try {
+    // Members left behind by a pre-fix reaper. countRooms no longer loads
+    // bodies, so only the startup sweep can clear these — otherwise every
+    // count and the rooms_non_expired metric would stay inflated forever.
+    await redis.zadd(indexKey, "10", "GHOSTA", "20", "GHOSTB");
+    assert.equal(await redis.zcard(indexKey), 2);
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+    assert.equal(await store.countRooms({ includeExpired: true }), 0);
+    assert.equal(await redis.zcard(indexKey), 0);
+  } finally {
+    await redis.del(indexKey, `${namespace}:room-expiry`);
+    await redis.quit();
+    await store?.close();
+  }
+});
