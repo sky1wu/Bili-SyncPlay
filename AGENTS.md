@@ -122,7 +122,7 @@ Single source of truth for `ClientMessage`, `ServerMessage`, domain types (`Room
 - ALWAYS create a feature branch before making changes; NEVER push directly to `main`.
 - Do not rewrite published history unless explicitly requested by the repository maintainer.
 - Before every `git push`, run `npm run format:check` and the full pre-commit check sequence to avoid CI failures.
-- Before committing changes, run `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm run build`, and `npm test`.
+- Before committing changes, run `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm run build`, `npm test`, and `npm run audit`.
 - Keep formatting-only changes separate from behavior changes whenever practical.
 - Do not mix unrelated refactors, docs updates, and feature or bug-fix changes in a single commit when they can be reviewed independently.
 - Prefer small, reviewable commits that preserve behavior at each step of a refactor.
