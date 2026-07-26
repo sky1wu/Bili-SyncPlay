@@ -165,6 +165,24 @@ end
 return "ok"
 `;
 
+// ioredis resolves exec() with a per-command [error, value] tuple array and
+// does not reject when an individual command fails, so discarding the result
+// silently accepts partial transactions — a saveRoom whose expiry write failed
+// would report success while leaving the sorted sets disagreeing with the body.
+function unwrapTransaction(
+  results: [Error | null, unknown][] | null,
+): unknown[] {
+  if (results === null) {
+    throw new Error("Redis transaction was aborted.");
+  }
+  return results.map(([error, value]) => {
+    if (error) {
+      throw error;
+    }
+    return value;
+  });
+}
+
 function serializeRoom(room: PersistedRoom): string {
   return JSON.stringify(room);
 }
@@ -499,7 +517,7 @@ export async function createRedisRoomStore(
       } else {
         transaction.zadd(roomExpiryKey, String(room.expiresAt), room.code);
       }
-      await transaction.exec();
+      unwrapTransaction(await transaction.exec());
       return room;
     },
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
@@ -548,7 +566,7 @@ export async function createRedisRoomStore(
       transaction.del(roomKey(code));
       transaction.zrem(roomExpiryKey, code);
       transaction.zrem(roomIndexKey, code);
-      await transaction.exec();
+      unwrapTransaction(await transaction.exec());
     },
     async deleteExpiredRooms(now) {
       const deletedCount = await redis.eval(
@@ -592,29 +610,38 @@ export async function createRedisRoomStore(
         // or a reaper deleting a room between them yields a count that never
         // existed. Both are O(log N) with no per-member work, so holding the
         // server for the transaction costs nothing measurable.
-        const snapshot = await redis
-          .multi()
-          .zcard(roomIndexKey)
-          .zcount(roomExpiryKey, "-inf", currentTime)
-          .exec();
-        const total = Number(snapshot?.[0]?.[1] ?? 0);
-        const expired = Number(snapshot?.[1]?.[1] ?? 0);
+        const [total, expired] = unwrapTransaction(
+          await redis
+            .multi()
+            .zcard(roomIndexKey)
+            .zcount(roomExpiryKey, "-inf", currentTime)
+            .exec(),
+        ) as [number, number];
         return Math.max(total - expired, 0);
       }
 
       // Keyword search still has to look at every code, but codes come
-      // straight out of the index — no room bodies are fetched.
+      // straight out of the index — no room bodies are fetched. Both reads go
+      // in one transaction for the same reason as the branch above: the reaper
+      // deleting a matching expired room between them would drop it from the
+      // expiry set while it still sits in `matching`, counting it as live.
       const keyword = query.keyword.toLowerCase();
-      const matching = (await redis.zrange(roomIndexKey, 0, -1)).filter(
-        (code) => code.toLowerCase().includes(keyword),
+      const [indexedCodes, expiredMembers] = unwrapTransaction(
+        await redis
+          .multi()
+          .zrange(roomIndexKey, 0, -1)
+          .zrangebyscore(roomExpiryKey, "-inf", currentTime)
+          .exec(),
+      ) as [string[], string[]];
+
+      const matching = indexedCodes.filter((code) =>
+        code.toLowerCase().includes(keyword),
       );
       if (query.includeExpired) {
         return matching.length;
       }
 
-      const expiredCodes = new Set(
-        await redis.zrangebyscore(roomExpiryKey, "-inf", currentTime),
-      );
+      const expiredCodes = new Set(expiredMembers);
       return matching.filter((code) => !expiredCodes.has(code)).length;
     },
     async isReady() {

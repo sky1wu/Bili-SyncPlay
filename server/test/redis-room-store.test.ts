@@ -764,3 +764,47 @@ test("redis room store reconciles indexed legacy rooms whose expiry entry was lo
     await store?.close();
   }
 });
+
+test("redis room save surfaces per-command transaction failures", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = `bsp-test-txerr-${Date.now().toString(36)}`;
+  const expiryKey = `${namespace}:room-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  try {
+    const room = await store.createRoom({
+      code: "TXFAIL",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+
+    // Wrong type for the expiry key: the ZADD inside the transaction fails,
+    // but ioredis reports it per command rather than rejecting exec(). If the
+    // result were discarded, saveRoom would claim success while the body and
+    // index moved on without the expiry entry — the room would be counted
+    // wrong and the reaper would never find it.
+    await redis.del(expiryKey);
+    await redis.set(expiryKey, "not-a-sorted-set");
+
+    await assert.rejects(() =>
+      store.saveRoom({ ...room, expiresAt: 500, lastActiveAt: 400 }),
+    );
+  } finally {
+    await redis.del(
+      `${namespace}:room:TXFAIL`,
+      `${namespace}:room-index`,
+      expiryKey,
+    );
+    await redis.quit();
+    await store.close();
+  }
+});
