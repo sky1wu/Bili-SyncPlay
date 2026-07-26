@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { ActiveRoomRegistry } from "./active-room-registry.js";
 import {
   normalizeBilibiliUrl,
   type ClientMessage,
@@ -65,6 +66,14 @@ export class RoomServiceError extends Error {
   }
 }
 
+/**
+ * 房间服务实际依赖的运行时存储子集。`registerSession` / `flush` 在服务内均以可选
+ * 调用（`?.`）访问，因此只要求 `ActiveRoomRegistry` 那一组方法；完整的
+ * `RuntimeStore` 是它的超集，仍可直接传入。
+ */
+export type RoomServiceRuntimeStore = ActiveRoomRegistry &
+  Partial<Pick<RuntimeStore, "registerSession" | "flush">>;
+
 type JoinedRoomAccess = {
   session: Session;
   persistedRoom: PersistedRoom;
@@ -107,8 +116,8 @@ export function createRoomService(options: {
   config: SecurityConfig;
   persistence: PersistenceConfig;
   roomStore: RoomStore;
-  runtimeStore?: RuntimeStore;
-  activeRooms?: RuntimeStore;
+  runtimeStore?: RoomServiceRuntimeStore;
+  activeRooms?: RoomServiceRuntimeStore;
   createRoomCode?: () => string;
   generateToken: () => string;
   logEvent: LogEvent;
@@ -177,7 +186,7 @@ export function createRoomService(options: {
   if (!runtimeStoreOption) {
     throw new Error("RuntimeStore is required");
   }
-  const runtimeStore: RuntimeStore = runtimeStoreOption;
+  const runtimeStore: RoomServiceRuntimeStore = runtimeStoreOption;
   const resolveActiveRoom =
     options.resolveActiveRoom ??
     ((roomCode: string) => Promise.resolve(runtimeStore.getRoom(roomCode)));

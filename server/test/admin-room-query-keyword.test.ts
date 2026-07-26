@@ -4,7 +4,7 @@ import { createAdminRoomQueryService } from "../src/admin/room-query-service.js"
 import type { GlobalEventStore } from "../src/admin/global-event-store.js";
 import { createInMemoryRoomStore } from "../src/room-store.js";
 import { createInMemoryRuntimeStore } from "../src/runtime-store.js";
-import type { Session } from "../src/types.js";
+import type { AttachedSession, Session } from "../src/types.js";
 
 const INSTANCE_ID = "instance-test";
 
@@ -23,7 +23,7 @@ function makeSession(overrides: {
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     instanceId: INSTANCE_ID,
     remoteAddress: "127.0.0.1",
     origin: "chrome-extension://allowed-extension",
@@ -46,9 +46,27 @@ function makeSession(overrides: {
 }
 
 const stubEventStore: GlobalEventStore = {
-  async append() {},
+  async append(input) {
+    return {
+      id: "evt-stub",
+      timestamp: input.timestamp ?? new Date().toISOString(),
+      event: input.event,
+      roomCode: null,
+      sessionId: null,
+      remoteAddress: null,
+      origin: null,
+      result: null,
+      details: { ...input.data },
+    };
+  },
   async query() {
-    return { items: [], pagination: { page: 1, pageSize: 0, total: 0 } };
+    return { items: [], total: 0 };
+  },
+  totalCountsByEvent() {
+    return {};
+  },
+  countsByEventInWindow() {
+    return {};
   },
 };
 

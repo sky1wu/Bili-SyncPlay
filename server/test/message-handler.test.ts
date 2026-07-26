@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getDefaultSecurityConfig } from "../src/app.js";
 import { createMessageHandler } from "../src/message-handler.js";
 import { createSessionRateLimitState } from "../src/rate-limit.js";
-import type { Session } from "../src/types.js";
+import type { AttachedSession, SecurityConfig, Session } from "../src/types.js";
 
-const CONFIG = {
+const CONFIG: SecurityConfig = {
+  ...getDefaultSecurityConfig(),
   maxMembersPerRoom: 8,
   rateLimits: {
+    ...getDefaultSecurityConfig().rateLimits,
     roomCreatePerMinute: 3,
     roomJoinPerMinute: 10,
     videoSharePer10Seconds: 3,
@@ -18,7 +21,10 @@ const CONFIG = {
   },
 };
 
-function createSession(id: string, overrides: Partial<Session> = {}): Session {
+function createSession(
+  id: string,
+  overrides: Partial<AttachedSession> = {},
+): Session {
   return {
     id,
     connectionState: "attached",
@@ -28,7 +34,7 @@ function createSession(id: string, overrides: Partial<Session> = {}): Session {
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     instanceId: "node-a",
     remoteAddress: "127.0.0.1",
     origin: "chrome-extension://allowed-extension",
@@ -367,12 +373,14 @@ test("message handler skips room state publish when playback update is ignored",
     payload: {
       memberToken: "member-token-1",
       playback: {
+        url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
         currentTime: 12,
         playState: "playing",
         playbackRate: 1,
         updatedAt: 100,
         serverTime: 0,
         actorId: "member-1",
+        seq: 1,
       },
     },
   });
@@ -688,6 +696,7 @@ test("message handler records monitored duration metrics for critical room paths
     payload: {
       memberToken: "member-token-1",
       playback: {
+        url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
         currentTime: 5,
         playState: "playing",
         playbackRate: 1,
@@ -1685,7 +1694,8 @@ test("publish backpressure caps in-flight publishes under concurrent load", asyn
   // remaining four calls should be parked in the backpressure wait.
   assert.equal(inFlight, 2);
   assert.equal(maxInFlight, 2);
-  assert.equal(releases.length, 2);
+  const initialReleaseCount = releases.length;
+  assert.equal(initialReleaseCount, 2);
 
   // Drain releases until every started publish has resolved. Each release
   // wakes every waiter, but only one of them grabs the freed slot

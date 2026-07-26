@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
-import type { Session } from "../src/types.js";
+import type { AttachedSession, Session } from "../src/types.js";
 
 const REDIS_URL = process.env.REDIS_URL;
 
@@ -19,7 +19,7 @@ function createSession(id: string): Session {
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     instanceId: `${id}-node`,
     remoteAddress: "127.0.0.1",
     origin: "chrome-extension://allowed-extension",
@@ -119,6 +119,10 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
       return "OK";
     },
     async del() {
+      return null;
+    },
+    // 仅用于 releaseRoomLock 的 CAS 脚本;这些用例不走锁路径,返回 null 表示未释放。
+    async eval() {
       return null;
     },
   };

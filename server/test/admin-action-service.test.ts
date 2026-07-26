@@ -6,7 +6,7 @@ import {
 } from "../src/admin/action-service.js";
 import { createAuditLogService } from "../src/admin/audit-log.js";
 import type { AdminSession } from "../src/admin/types.js";
-import type { PersistedRoom, Session } from "../src/types.js";
+import type { AttachedSession, PersistedRoom, Session } from "../src/types.js";
 
 const ACTOR: AdminSession = {
   id: "admin-session",
@@ -18,7 +18,7 @@ const ACTOR: AdminSession = {
   lastSeenAt: 1,
 };
 
-function createSession(overrides: Partial<Session> = {}): Session {
+function createSession(overrides: Partial<AttachedSession> = {}): Session {
   return {
     id: "session-1",
     connectionState: "attached",
@@ -28,7 +28,7 @@ function createSession(overrides: Partial<Session> = {}): Session {
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     instanceId: "node-a",
     remoteAddress: "127.0.0.1",
     origin: "chrome-extension://allowed-extension",
@@ -83,9 +83,13 @@ function createService(options: {
         throw new Error("updateRoom should not be called in this test");
       },
       deleteRoom: options.deleteRoom ?? (async () => {}),
-      listRooms: async () => ({ items: [], total: 0 }),
+      listRooms: async () => [],
+      countRooms: async () => 0,
       isReady: async () => true,
-      close: async () => {},
+      saveRoom: async () => {
+        throw new Error("saveRoom should not be called in this test");
+      },
+      deleteExpiredRooms: async () => 0,
       createRoom: async () => {
         throw new Error("createRoom should not be called in this test");
       },

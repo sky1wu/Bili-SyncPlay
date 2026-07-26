@@ -8,7 +8,7 @@ export type RoomReaper = {
 
 export function createRoomReaper(options: {
   intervalMs: number;
-  deleteExpiredRooms: (now?: number) => Promise<number>;
+  deleteExpiredRooms: (now: number) => Promise<number>;
   logEvent: LogEvent;
   now?: () => number;
 }): RoomReaper {

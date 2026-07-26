@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { getDefaultSecurityConfig } from "../src/app.js";
 import { createHttpRequestHandler } from "../src/bootstrap/http-handler.js";
 import { createSecurityPolicy } from "../src/security.js";
 
@@ -19,25 +20,28 @@ function createRequest(args: {
   } as IncomingMessage;
 }
 
-function createResponse() {
-  return {
+type FakeServerResponse = ServerResponse & {
+  statusCode: number;
+  headers: Record<string, string>;
+  body: string;
+};
+
+function createResponse(): FakeServerResponse {
+  const response = {
     statusCode: 0,
     headers: {} as Record<string, string>,
     body: "",
     writeHead(statusCode: number, headers: Record<string, string>) {
-      this.statusCode = statusCode;
-      this.headers = headers;
-      return this;
+      response.statusCode = statusCode;
+      response.headers = headers;
+      return response;
     },
     end(body?: string) {
-      this.body = body ?? "";
-      return this;
+      response.body = body ?? "";
+      return response;
     },
-  } as unknown as ServerResponse & {
-    statusCode: number;
-    headers: Record<string, string>;
-    body: string;
   };
+  return response as unknown as FakeServerResponse;
 }
 
 function createHandler(adminHandled = false) {
@@ -58,6 +62,7 @@ function createHandler(adminHandled = false) {
       },
     },
     securityPolicy: createSecurityPolicy({
+      ...getDefaultSecurityConfig(),
       allowedOrigins: ["chrome-extension://allowed"],
       allowMissingOriginInDev: false,
       connectionAttemptsPerMinute: 10,
@@ -65,12 +70,10 @@ function createHandler(adminHandled = false) {
       maxMembersPerRoom: 8,
       trustedProxyAddresses: [],
       rateLimits: {
+        ...getDefaultSecurityConfig().rateLimits,
         roomCreatePerMinute: 5,
         roomJoinPerMinute: 10,
-        videoSharePerMinute: 20,
         playbackUpdatePerSecond: 30,
-        profileUpdatePerMinute: 20,
-        syncPingPerMinute: 30,
         syncPingBurst: 5,
       },
     }),
@@ -181,6 +184,7 @@ test("http handler returns 404 for /metrics when metrics are routed to a dedicat
       },
     },
     securityPolicy: createSecurityPolicy({
+      ...getDefaultSecurityConfig(),
       allowedOrigins: ["chrome-extension://allowed"],
       allowMissingOriginInDev: false,
       connectionAttemptsPerMinute: 10,
@@ -188,12 +192,10 @@ test("http handler returns 404 for /metrics when metrics are routed to a dedicat
       maxMembersPerRoom: 8,
       trustedProxyAddresses: [],
       rateLimits: {
+        ...getDefaultSecurityConfig().rateLimits,
         roomCreatePerMinute: 5,
         roomJoinPerMinute: 10,
-        videoSharePerMinute: 20,
         playbackUpdatePerSecond: 30,
-        profileUpdatePerMinute: 20,
-        syncPingPerMinute: 30,
         syncPingBurst: 5,
       },
     }),
@@ -245,6 +247,7 @@ test("http handler returns a stable 500 payload when downstream routing throws",
       },
     },
     securityPolicy: createSecurityPolicy({
+      ...getDefaultSecurityConfig(),
       allowedOrigins: ["chrome-extension://allowed"],
       allowMissingOriginInDev: false,
       connectionAttemptsPerMinute: 10,
@@ -252,12 +255,10 @@ test("http handler returns a stable 500 payload when downstream routing throws",
       maxMembersPerRoom: 8,
       trustedProxyAddresses: [],
       rateLimits: {
+        ...getDefaultSecurityConfig().rateLimits,
         roomCreatePerMinute: 5,
         roomJoinPerMinute: 10,
-        videoSharePerMinute: 20,
         playbackUpdatePerSecond: 30,
-        profileUpdatePerMinute: 20,
-        syncPingPerMinute: 30,
         syncPingBurst: 5,
       },
     }),

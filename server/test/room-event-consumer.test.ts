@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createInMemoryRoomEventBus } from "../src/room-event-bus.js";
 import { createRoomEventConsumer } from "../src/room-event-consumer.js";
-import type { Session } from "../src/types.js";
+import type { AttachedSession, Session } from "../src/types.js";
 
 function createSession(
   id: string,
@@ -18,7 +18,7 @@ function createSession(
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     instanceId: "instance-a",
     remoteAddress: "127.0.0.1",
     origin: "chrome-extension://allowed-extension",
@@ -69,6 +69,9 @@ test("room event consumer sends room state only to local room sessions", async (
       return roomCode === "ROOM01" ? [localRoomSession] : [otherRoomSession];
     },
     send(socket, message) {
+      if (message.type !== "room:state") {
+        throw new Error(`unexpected message type: ${message.type}`);
+      }
       const session =
         socket === localRoomSession.socket
           ? localRoomSession
@@ -379,6 +382,9 @@ test("room event consumer emits an empty state for deleted rooms", async () => {
       return [localRoomSession];
     },
     send(_socket, message) {
+      if (message.type !== "room:state") {
+        throw new Error(`unexpected message type: ${message.type}`);
+      }
       sent.push({
         roomCode: message.payload.roomCode,
         members: message.payload.members.length,

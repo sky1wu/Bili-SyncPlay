@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createInMemoryAdminCommandBus } from "../src/admin-command-bus.js";
 import { createAdminCommandConsumer } from "../src/admin-command-consumer.js";
-import type { Session } from "../src/types.js";
+import type { AttachedSession, Session } from "../src/types.js";
 
 function createSession(
   id: string,
@@ -18,7 +18,7 @@ function createSession(
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     instanceId: "node-a",
     remoteAddress: "127.0.0.1",
     origin: "chrome-extension://allowed-extension",
@@ -155,9 +155,6 @@ test("admin command consumer does not disconnect a member when token blocking fa
     });
 
     assert.equal(result.status, "error");
-    if (result.status === "ok") {
-      throw new Error("Expected kick_member to fail.");
-    }
     assert.equal(result.code, "block_failed");
     assert.equal(disconnected, false);
   } finally {
@@ -199,9 +196,6 @@ test("admin command consumer keeps a kick block when disconnect fails", async ()
     });
 
     assert.equal(result.status, "error");
-    if (result.status === "ok") {
-      throw new Error("Expected kick_member to fail.");
-    }
     assert.equal(result.code, "disconnect_failed");
     assert.deepEqual(blocked, ["token-member-d"]);
   } finally {

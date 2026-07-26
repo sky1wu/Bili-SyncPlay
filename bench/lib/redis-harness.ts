@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -58,13 +58,13 @@ async function waitForPort(port: number, timeoutMs: number) {
   throw new Error(`Timed out waiting for redis-server on port ${port}.`);
 }
 
-function waitForProcessExit(processRef: ChildProcessWithoutNullStreams) {
+function waitForProcessExit(processRef: ChildProcess) {
   return new Promise<number | null>((resolve) => {
     processRef.once("exit", (code) => resolve(code));
   });
 }
 
-function waitForProcessError(processRef: ChildProcessWithoutNullStreams) {
+function waitForProcessError(processRef: ChildProcess) {
   return new Promise<never>((_, reject) => {
     processRef.once("error", (error) => {
       reject(

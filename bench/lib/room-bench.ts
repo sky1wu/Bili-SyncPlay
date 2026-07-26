@@ -14,10 +14,14 @@ import {
 } from "../../server/test/multi-node-test-kit.js";
 import { type RawData } from "ws";
 
-type MessageSocket = Pick<
-  Awaited<ReturnType<typeof connectClient>>,
-  "on" | "off"
->;
+/**
+ * 收集器只需要订阅/退订 "message" 事件,不依赖 ws.WebSocket 的其余接口。
+ * 用结构化契约声明,真实 socket 与测试里的 EventEmitter 桩都能直接传入。
+ */
+type MessageSocket = {
+  on: (event: "message", listener: (raw: RawData) => void) => unknown;
+  off: (event: "message", listener: (raw: RawData) => void) => unknown;
+};
 
 type Collector = {
   next: (type: string, timeoutMs?: number) => Promise<Record<string, unknown>>;

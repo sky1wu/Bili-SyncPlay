@@ -58,10 +58,9 @@ test("roomStateOf serializes persisted room state with active members", () => {
     joinToken: "join-token",
     createdAt: 1,
     sharedVideo: {
+      videoId: "BV1xx411c7mD",
       url: "https://www.bilibili.com/video/BV1xx411c7mD",
       title: "Video",
-      ownerName: "Owner",
-      bvid: "BV1xx411c7mD",
       sharedByMemberId: "member-1",
     },
     playback: {

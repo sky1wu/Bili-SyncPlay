@@ -1486,7 +1486,10 @@ test("admin action endpoints return stale target errors when command routing is 
         },
       );
       assert.equal(closeRoom.status, 409);
-      assert.equal(closeRoom.body.error.code, "command_bus_disabled");
+      assert.equal(
+        (closeRoom.body.error as { code?: string }).code,
+        "command_bus_disabled",
+      );
       assert.equal(
         (
           closeRoom.body.error as {
