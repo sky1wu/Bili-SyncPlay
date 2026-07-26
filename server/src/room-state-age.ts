@@ -12,11 +12,21 @@ import type { RoomState, RoomStatePayload } from "@bili-syncplay/protocol";
  * This must be called at each send, never stored: an age is only true at the
  * instant it is sent, and a stored one is just a timestamp in disguise.
  *
- * The clamp covers the one case where the two timestamps are not from the same
- * clock after all: in a multi-node deployment the snapshot may have been
- * stamped by another node, whose clock can sit slightly behind this one's. A
- * negative result is meaningless as a duration (and rejected by the protocol
- * guard), so report the snapshot as current instead.
+ * The clamp exists to satisfy the protocol, not to correct clocks: a negative
+ * duration is meaningless and the guard rejects it, so the floor keeps a
+ * malformed frame off the wire. It is deliberately not a skew filter — bounding
+ * an implausibly *large* age is the receiver's call, since only the receiver
+ * knows what its own extrapolation is worth (`MAX_TRUSTED_PLAYBACK_AGE_MS`).
+ *
+ * Known limitation, multi-node only: `serverTime` may have been stamped by a
+ * different node, so the two readings can come from two clocks after all. A
+ * peer node running behind makes the age negative and the floor reports the
+ * snapshot as current; a peer running ahead inflates it, and only the receiver's
+ * bound catches that. Cluster nodes are NTP-synced to within milliseconds, which
+ * is orders of magnitude below the ~2.1s staleness this recovers, so the trade
+ * is worth taking — closing it properly needs a cluster-wide time source for
+ * `serverTime` itself, which is a change to the playback write path rather than
+ * to this function.
  */
 export function withPlaybackAge(
   state: RoomState,

@@ -195,6 +195,10 @@ export async function createSyncServer(
     send,
     instanceId: persistenceConfig.instanceId,
     logEvent,
+    // The same clock the room service stamps `playback.serverTime` with, so the
+    // snapshot age this consumer reports is a difference of two readings from
+    // one time base rather than of two unrelated ones.
+    now,
   });
   const adminCommandConsumer = await createAdminCommandConsumer({
     instanceId: persistenceConfig.instanceId,

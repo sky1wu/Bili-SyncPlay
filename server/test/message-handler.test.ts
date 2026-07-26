@@ -952,7 +952,7 @@ test("message handler accepts room:create without protocolVersion (legacy client
   assert.ok(events.includes("room_created"));
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:created");
-  assert.equal(sent[0].serverProtocolVersion, 3);
+  assert.equal(sent[0].serverProtocolVersion, 4);
   assert.equal(sent[1].type, "room:state");
 });
 
@@ -1145,20 +1145,21 @@ test("message handler accepts room:join with matching protocolVersion and return
     payload: {
       roomCode: "ROOM01",
       joinToken: "join-token-1",
-      protocolVersion: 3,
+      protocolVersion: 4,
     },
   });
 
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 3);
+  assert.equal(sent[0].serverProtocolVersion, 4);
   assert.equal(sent[1].type, "room:state");
 });
 
 test("message handler accepts room:join from a still-supported older protocol version", async () => {
   // v2 clients (below CURRENT but >= MIN) stay in the compatibility window: the
   // server accepts them and advertises its CURRENT version. The v3 `naturalEnd`
-  // playback flag is additive, so these older clients simply ignore it.
+  // playback flag and the v4 `room:state.playbackAgeMs` are both additive, so
+  // these older clients simply ignore them.
   const sent: Array<{ type: string; serverProtocolVersion?: number }> = [];
   const session = createSession("older-joiner");
 
@@ -1233,7 +1234,7 @@ test("message handler accepts room:join from a still-supported older protocol ve
 
   assert.equal(session.protocolVersion, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 3);
+  assert.equal(sent[0].serverProtocolVersion, 4);
   assert.equal(sent[1].type, "room:state");
 });
 
