@@ -181,7 +181,8 @@ function ensureHistogramSample(
 
 export function createMetricsCollector(options: {
   runtimeStore: RuntimeStore;
-  roomStore: RoomStore;
+  /** 只用于统计未过期房间数,不需要完整的 RoomStore。 */
+  roomStore: Pick<RoomStore, "countRooms">;
   serviceVersion?: string;
 }): MetricsCollector {
   let runtimeStore = options.runtimeStore;

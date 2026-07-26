@@ -1,4 +1,8 @@
-import { type BackgroundToContentMessage } from "../shared/messages";
+import {
+  type BackgroundToContentMessage,
+  type PlaybackUpdateAck,
+  type RoomStateHydrationResponse,
+} from "../shared/messages";
 import { normalizeSharedVideoUrl } from "../shared/url";
 import { createAutoShareNextController } from "./auto-share-next-controller";
 import { runtimeSendMessage } from "./content-messaging";
@@ -119,7 +123,15 @@ const syncController = createSyncController({
   },
   debugLog,
   shouldLogHeartbeat,
-  runtimeSendMessage,
+  sendPlaybackUpdate: (payload) =>
+    runtimeSendMessage<PlaybackUpdateAck>({
+      type: "content:playback-update",
+      payload,
+    }),
+  requestRoomStateHydration: () =>
+    runtimeSendMessage<RoomStateHydrationResponse>({
+      type: "content:get-room-state",
+    }),
   getVideoElement,
   getCurrentPlaybackVideo: () => shareController.getCurrentPlaybackVideo(),
   getSharedVideo: () => shareController.getSharedVideo(),

@@ -203,15 +203,25 @@ A new package picks whichever applies — do not add an unnecessary
 
 Keep fixtures honest rather than casting past the checker: a fixture that no
 longer matches its type usually means the type moved (a field was renamed,
-removed, or became required), and the fix belongs in the fixture. Two casts to
-avoid specifically, because both re-open the gap this gate exists to close:
+removed, or became required), and the fix belongs in the fixture. Three casts to
+avoid specifically, because each re-opens the gap this gate exists to close:
 
-- `as unknown as <DomainType>` on a fixture (`RoomState`, `PlaybackState`,
-  `Session`) — it silences exactly the missing-required-field error you want.
+- `as unknown as <DomainType>` / `as never` on a fixture (`RoomState`,
+  `PlaybackState`, `Session`, `RoomStore`) — it silences exactly the
+  missing-required-field error you want to see.
 - A stub satisfying an unconstrained `<T>(…) => Promise<T>` via `as T`. No value
-  inhabits every `T`, so the cast is unconditional. If a contract has one real
-  response type, declare it; if the response must be runtime-guarded anyway,
-  declare `Promise<unknown>` and let the guard narrow it.
+  inhabits every `T`, so the cast is unconditional.
+- A stub satisfying a contract that lumps several request/response pairs into
+  one all-optional response type. `{}` then satisfies everything and nothing is
+  checked — `#211` shipped this mistake once before catching it.
+
+When a callback serves one request/response pair, declare that pair. When it
+serves several, split it into one callback per pair (`sendPlaybackUpdate` /
+`requestRoomStateHydration`) rather than widening the response. When the payload
+genuinely cannot be modelled and must be runtime-guarded anyway, declare
+`Promise<unknown>` and let the guard narrow it. If a consumer only touches part
+of a large interface, its parameter should say so (`Pick<RoomStore,
+"countRooms">`) — that removes the fake's need to cast at all.
 
 `as unknown as T` is fine for genuinely unfakeable platform/library objects
 (`ws.WebSocket`, `chrome.tabs.Tab`, `HTMLVideoElement`, `IncomingMessage`);

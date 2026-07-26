@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RoomState, SharedVideo } from "@bili-syncplay/protocol";
-import type {
-  ContentToBackgroundMessage,
-  RoomStateHydrationResponse,
-} from "../src/shared/messages";
+import type { RoomStateHydrationResponse } from "../src/shared/messages";
 import { createContentRuntimeState } from "../src/content/runtime-state";
 import { createRoomStateApplyController } from "../src/content/room-state-apply-controller";
 
@@ -36,9 +33,7 @@ function createController(overrides: {
   remotePauseDebounceMs?: number;
   normalizeUrl?: (url: string | undefined | null) => string | null;
   currentVideo?: SharedVideo | null;
-  runtimeSendMessage?: (
-    message: ContentToBackgroundMessage,
-  ) => Promise<RoomStateHydrationResponse | null>;
+  requestRoomStateHydration?: () => Promise<RoomStateHydrationResponse | null>;
   rememberRemotePlaybackForSuppression?: (
     playback: import("@bili-syncplay/protocol").PlaybackState,
   ) => void;
@@ -72,7 +67,8 @@ function createController(overrides: {
     getNow: () => overrides.now ?? 10_000,
     debugLog: (msg) => logs.push(msg),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: overrides.runtimeSendMessage ?? (async () => null),
+    requestRoomStateHydration:
+      overrides.requestRoomStateHydration ?? (async () => null),
     getVideoElement: () => video,
     getSharedVideo: () =>
       overrides.currentVideo === undefined
@@ -618,7 +614,7 @@ test("ignores non-shared paused room state without debouncing or pausing", async
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
 
     assert.equal(harness.runtimeState.deferredRemotePausedState, null);
@@ -654,13 +650,12 @@ test("does not pre-pause non-shared video during paused room hydration", async (
         url: "https://www.bilibili.com/video/BVother?p=1",
         title: "Other Video",
       },
-      runtimeSendMessage: async () =>
-        ({
-          ok: true,
-          roomState,
-          memberId: "local-member",
-          roomCode: "ROOM01",
-        }) as never,
+      requestRoomStateHydration: async () => ({
+        ok: true,
+        roomState,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
     });
 
     await harness.controller.hydrateRoomState();
@@ -736,13 +731,12 @@ test("hydrates paused room state while page bridge is not ready", async () => {
       video,
       now: 30_000,
       currentVideo: null,
-      runtimeSendMessage: async () =>
-        ({
-          ok: true,
-          roomState,
-          memberId: "local-member",
-          roomCode: "ROOM01",
-        }) as never,
+      requestRoomStateHydration: async () => ({
+        ok: true,
+        roomState,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
     });
     harness.runtimeState.pendingRoomStateHydration = true;
     harness.runtimeState.lastUserGestureAt = 29_500;
@@ -784,13 +778,12 @@ test("clears stale sync state when hydration switches shared video before page b
       now: 30_000,
       currentVideo: null,
       resetPlaybackSyncState: (reason) => resetReasons.push(reason),
-      runtimeSendMessage: async () =>
-        ({
-          ok: true,
-          roomState,
-          memberId: "local-member",
-          roomCode: "ROOM01",
-        }) as never,
+      requestRoomStateHydration: async () => ({
+        ok: true,
+        roomState,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
     });
     // A previous shared video is still recorded; switching to a different
     // shared video while the page bridge is not ready must not strand its
@@ -841,7 +834,7 @@ test("defers remote paused room state when remotePauseDebounceMs > 0", async () 
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
 
     assert.equal(
@@ -883,7 +876,7 @@ test("deferring initial paused marks room state received but keeps hydration pen
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
 
     assert.equal(
@@ -931,7 +924,7 @@ test("drops deferred paused when matching playing arrives within debounce window
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
     assert.equal(harness.runtimeState.deferredRemotePausedState !== null, true);
 
@@ -943,7 +936,7 @@ test("drops deferred paused when matching playing arrives within debounce window
         playState: "playing",
         actorId: "remote-member",
         seq: 6,
-      }) as never,
+      }),
     );
 
     assert.equal(harness.runtimeState.deferredRemotePausedState, null);
@@ -980,7 +973,7 @@ test("drops deferred paused when a newer-versioned state arrives even if t-delta
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
     assert.equal(harness.runtimeState.deferredRemotePausedState !== null, true);
 
@@ -994,7 +987,7 @@ test("drops deferred paused when a newer-versioned state arrives even if t-delta
         playState: "playing",
         actorId: "remote-member",
         seq: 6,
-      }) as never,
+      }),
     );
 
     assert.equal(harness.runtimeState.deferredRemotePausedState, null);
@@ -1025,7 +1018,7 @@ test("drops deferred paused when an empty-playback room state arrives", async ()
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
     assert.equal(harness.runtimeState.deferredRemotePausedState !== null, true);
 
@@ -1060,7 +1053,7 @@ test("deferred timer is a no-op when fire-time freshness check sees a newer appl
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
     assert.equal(win.scheduled.length, 1);
     const fired = win.scheduled[0];
@@ -1108,7 +1101,7 @@ test("does not debounce self-playback paused", async () => {
         playState: "paused",
         actorId: "local-member",
         seq: 5,
-      }) as never,
+      }),
     );
 
     assert.equal(harness.runtimeState.deferredRemotePausedState, null);
@@ -1136,7 +1129,7 @@ test("debounce off when remotePauseDebounceMs is 0 — paused applies synchronou
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
 
     assert.equal(harness.runtimeState.deferredRemotePausedState, null);
@@ -1164,7 +1157,7 @@ test("deferred timer fires and applies paused when no playing arrives in window"
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
 
     assert.equal(win.scheduled.length, 1);
@@ -1201,7 +1194,7 @@ test("applies remote paused immediately when peer marks it userInitiated, bypass
         actorId: "remote-member",
         seq: 5,
         userInitiated: true,
-      }) as never,
+      }),
     );
 
     // No defer timer is scheduled; the paused state is applied synchronously
@@ -1232,7 +1225,7 @@ test("userInitiated remote paused cancels any already-deferred paused snapshot",
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
     assert.notEqual(harness.runtimeState.deferredRemotePausedState, null);
     assert.equal(win.scheduled.length, 1);
@@ -1250,7 +1243,7 @@ test("userInitiated remote paused cancels any already-deferred paused snapshot",
         actorId: "remote-member",
         seq: 6,
         userInitiated: true,
-      }) as never,
+      }),
     );
 
     assert.equal(harness.runtimeState.deferredRemotePausedState, null);
@@ -1283,14 +1276,10 @@ test("older userInitiated remote paused neither short-circuits nor overwrites th
         playState: "paused",
         actorId: "remote-member",
         seq: 10,
-      }) as never,
+      }),
     );
     assert.equal(
-      (
-        harness.runtimeState.deferredRemotePausedState as never as {
-          playback: { seq: number };
-        }
-      )?.playback.seq,
+      harness.runtimeState.deferredRemotePausedState?.playback?.seq,
       10,
     );
     assert.equal(win.scheduled.length, 1);
@@ -1309,7 +1298,7 @@ test("older userInitiated remote paused neither short-circuits nor overwrites th
         actorId: "remote-member",
         seq: 8,
         userInitiated: true,
-      }) as never,
+      }),
     );
 
     assert.equal(applyPending, 0);
@@ -1320,11 +1309,7 @@ test("older userInitiated remote paused neither short-circuits nor overwrites th
       newerDeferredRef,
     );
     assert.equal(
-      (
-        harness.runtimeState.deferredRemotePausedState as never as {
-          playback: { seq: number };
-        }
-      )?.playback.seq,
+      harness.runtimeState.deferredRemotePausedState?.playback?.seq,
       10,
     );
     // No additional debounce timer was scheduled by the older arrival.
@@ -1352,7 +1337,7 @@ test("older non-userInitiated remote paused does not overwrite the newer in-flig
         playState: "paused",
         actorId: "remote-member",
         seq: 10,
-      }) as never,
+      }),
     );
     const newerDeferredRef = harness.runtimeState.deferredRemotePausedState;
     assert.equal(win.scheduled.length, 1);
@@ -1366,7 +1351,7 @@ test("older non-userInitiated remote paused does not overwrite the newer in-flig
         playState: "paused",
         actorId: "remote-member",
         seq: 8,
-      }) as never,
+      }),
     );
 
     assert.equal(
@@ -1397,7 +1382,7 @@ test("legacy remote paused (no userInitiated field) still goes through the debou
         playState: "paused",
         actorId: "remote-member",
         seq: 5,
-      }) as never,
+      }),
     );
 
     // Legacy senders omit the field → backward-compatible behavior preserved.

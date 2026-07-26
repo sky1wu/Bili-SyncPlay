@@ -4,7 +4,7 @@ import type {
   SharedVideo,
 } from "@bili-syncplay/protocol";
 import type {
-  ContentToBackgroundMessage,
+  PlaybackUpdateAck,
   RoomStateHydrationResponse,
   SharedVideoToastPayload,
 } from "../shared/messages";
@@ -106,9 +106,15 @@ export function createSyncController(args: {
     key: string,
     now?: number,
   ) => boolean;
-  runtimeSendMessage: (
-    message: ContentToBackgroundMessage,
-  ) => Promise<RoomStateHydrationResponse | null>;
+  /**
+   * 发 `content:playback-update` 并等回执。两个回调分开声明,是因为它们的响应
+   * 形状不同 —— 合成一个"所有消息共用一种响应"的契约会让任一方的桩都失去约束。
+   */
+  sendPlaybackUpdate: (
+    payload: PlaybackState,
+  ) => Promise<PlaybackUpdateAck | null>;
+  /** 转交给 room-state-apply-controller,见其同名参数。 */
+  requestRoomStateHydration: () => Promise<RoomStateHydrationResponse | null>;
   getVideoElement: () => HTMLVideoElement | null;
   getCurrentPlaybackVideo: () => Promise<SharedVideo | null>;
   getSharedVideo: () => SharedVideo | null;
@@ -1536,10 +1542,7 @@ export function createSyncController(args: {
       );
     }
 
-    const response = await args.runtimeSendMessage({
-      type: "content:playback-update",
-      payload,
-    });
+    const response = await args.sendPlaybackUpdate(payload);
     if (response === null) {
       args.debugLog(
         `Dropped playback update actor=${payload.actorId} playState=${payload.playState} url=${payload.url} delta=0.00 result=no-response seq=${payload.seq} source=${eventSource} intent=${payload.syncIntent ?? "none"} rate=${payload.playbackRate.toFixed(2)}`,
@@ -1584,7 +1587,7 @@ export function createSyncController(args: {
     getNow: args.getNow,
     debugLog: args.debugLog,
     shouldLogHeartbeat: args.shouldLogHeartbeat,
-    runtimeSendMessage: args.runtimeSendMessage,
+    requestRoomStateHydration: args.requestRoomStateHydration,
     getVideoElement: args.getVideoElement,
     getSharedVideo: args.getSharedVideo,
     normalizeUrl: args.normalizeUrl,
