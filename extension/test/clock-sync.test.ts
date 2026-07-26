@@ -6,7 +6,7 @@ import {
   CLOCK_SAMPLE_MAX_AGE_MS,
   CLOCK_SAMPLE_MIN_TRUSTED_SIZE,
   CLOCK_SAMPLE_WINDOW_SIZE,
-  compensateRoomStateForClock,
+  extrapolatePlayingRoomState,
   updateClockSample,
   type ClockSample,
 } from "../src/background/clock-sync";
@@ -318,48 +318,54 @@ function playingRoomState(args: {
   } as unknown as RoomState;
 }
 
-test("extrapolates a playing snapshot by the estimated elapsed time", () => {
-  const compensated = compensateRoomStateForClock(
+test("extrapolates a playing snapshot by the elapsed time", () => {
+  const advanced = extrapolatePlayingRoomState(
     playingRoomState({ currentTime: 100, serverTime: 5_000 }),
-    200,
-    6_000,
+    1_200,
   );
 
-  // 6000 + 200 - 5000 = 1200ms of room time has passed since the snapshot.
-  assert.ok(Math.abs(compensated.playback!.currentTime - 101.2) < 0.001);
+  assert.ok(Math.abs(advanced.playback!.currentTime - 101.2) < 0.001);
 });
 
 test("scales the extrapolation by the room playback rate", () => {
-  const compensated = compensateRoomStateForClock(
+  const advanced = extrapolatePlayingRoomState(
     playingRoomState({ currentTime: 100, serverTime: 5_000, playbackRate: 2 }),
-    0,
-    6_000,
+    1_000,
   );
 
-  assert.ok(Math.abs(compensated.playback!.currentTime - 102) < 0.001);
+  assert.ok(Math.abs(advanced.playback!.currentTime - 102) < 0.001);
 });
 
-test("a snapshot that would predate its own stamp is treated as current", () => {
-  const compensated = compensateRoomStateForClock(
+test("never rewinds the room on a negative elapsed time", () => {
+  const advanced = extrapolatePlayingRoomState(
     playingRoomState({ currentTime: 100, serverTime: 5_000 }),
     -800,
-    5_200,
   );
 
-  assert.equal(compensated.playback!.currentTime, 100);
+  assert.equal(advanced.playback!.currentTime, 100);
 });
 
-test("leaves paused states and unknown offsets untouched", () => {
-  const paused = playingRoomState({ currentTime: 100, serverTime: 5_000 });
-  paused.playback!.playState = "paused";
-  assert.equal(
-    compensateRoomStateForClock(paused, 200, 9_000).playback!.currentTime,
-    100,
+test("ignores serverTime entirely", () => {
+  // The snapshot's own stamp is irrelevant to the extrapolation: it belongs to
+  // the server's clock, which this no longer compares against a local one.
+  const stale = extrapolatePlayingRoomState(
+    playingRoomState({ currentTime: 100, serverTime: 0 }),
+    500,
+  );
+  const future = extrapolatePlayingRoomState(
+    playingRoomState({ currentTime: 100, serverTime: 9_999_999 }),
+    500,
   );
 
-  const playing = playingRoomState({ currentTime: 100, serverTime: 5_000 });
+  assert.equal(stale.playback!.currentTime, future.playback!.currentTime);
+});
+
+test("leaves non-playing states untouched", () => {
+  const paused = playingRoomState({ currentTime: 100, serverTime: 5_000 });
+  paused.playback!.playState = "paused";
+
   assert.equal(
-    compensateRoomStateForClock(playing, null, 9_000).playback!.currentTime,
+    extrapolatePlayingRoomState(paused, 4_000).playback!.currentTime,
     100,
   );
 });

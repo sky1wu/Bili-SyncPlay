@@ -31,15 +31,12 @@ export const CLOCK_SAMPLE_MIN_TRUSTED_SIZE = 3;
  * How far the robust estimate has to move before the *published* offset follows
  * it.
  *
- * Stability matters more here than absolute accuracy. A residual bias shifts a
- * receiver a fixed amount from the room and is invisible while watching; an
- * offset that wanders re-times every extrapolated target, which the drift
- * controller cannot tell apart from real drift — it answers with a playback-rate
- * correction, and a wandering offset therefore produces a permanent rate wobble
- * (see PLAYING_CATCH_UP_IGNORE_THRESHOLD_SECONDS, whose 0.05s exit threshold sits
- * far below the noise this filter exists to remove). Holding the published value
- * still inside the deadband keeps extrapolated targets advancing at exactly real
- * time, which is what makes a measured drift mean real drift.
+ * The offset is a diagnostic here, not an input to playback: positions are
+ * extrapolated from a local monotonic anchor instead (see
+ * `extrapolatePlayingRoomState`), precisely because no filter can make a
+ * two-clock comparison trustworthy. It is still filtered rather than smoothed so
+ * that the number shown in the popup reflects what the clocks are doing instead
+ * of jumping with every sample.
  */
 export const CLOCK_OFFSET_DEADBAND_MS = 120;
 
@@ -183,41 +180,44 @@ export function updateClockSample(args: {
   };
 }
 
-export function compensateRoomStateForClock(
+/**
+ * Advance a playing snapshot by the time that has passed since it was taken.
+ *
+ * `elapsedMs` is measured locally — see `ClockController.compensateRoomState` —
+ * rather than derived from `serverTime` and a clock offset. Comparing a server
+ * timestamp against a local one spans two clocks, so their disagreement lands
+ * directly in the extrapolated position: a client whose clock sits 500ms from
+ * the server's aims 500ms away from the room, and every time that disagreement
+ * moves, the target moves with it. The drift controller cannot tell that apart
+ * from real drift and answers with a playback-rate correction, so a clock that
+ * wanders produces a permanent rate wobble.
+ *
+ * Measuring the elapsed time on one clock removes the comparison — and with it
+ * the entire class of failure. A dev setup with the server in WSL and the
+ * browser on the Windows host (two clocks in one box, resynced by the
+ * hypervisor) showed samples spanning -893ms to +1264ms within a minute over a
+ * 1ms loopback round trip; no filter can recover a stable offset from that,
+ * because there is no stable offset to find.
+ */
+export function extrapolatePlayingRoomState(
   state: RoomState,
-  clockOffsetMs: number | null,
-  now = Date.now(),
+  elapsedMs: number,
 ): RoomState {
-  if (
-    !state.playback ||
-    clockOffsetMs === null ||
-    state.playback.playState !== "playing"
-  ) {
+  if (!state.playback || state.playback.playState !== "playing") {
     return state;
   }
 
-  const estimatedServerNow = now + clockOffsetMs;
-  // A state cannot reach us before the server stamped it, so a negative estimate
-  // is always offset error rather than information: pinning it to zero (i.e.
-  // "this snapshot is current") is strictly the better guess, and it bounds how
-  // far a bad offset can drag the target. The clamp is one-sided on purpose —
-  // the upper side has to stay open because `serverTime` is legitimately old
-  // whenever a stored state is replayed (a member joining a room that has been
-  // playing for a while, or a tab binding late), and those must extrapolate the
-  // full elapsed time.
-  //
-  // It does mean an offset estimate crossing zero steps the target by whatever
-  // the estimate was off by. That is why the estimate is filtered for stability
-  // rather than just smoothed (see CLOCK_OFFSET_DEADBAND_MS); the clamp cannot
-  // paper over a wandering offset, it only bounds one side of it.
-  const elapsedMs = Math.max(0, estimatedServerNow - state.playback.serverTime);
+  // Time does not run backwards on the clock this is measured with, so a
+  // negative value would have to be a caller bug; ignore it rather than rewind
+  // the room.
+  const advanceMs = Math.max(0, elapsedMs);
   return {
     ...state,
     playback: {
       ...state.playback,
       currentTime:
         state.playback.currentTime +
-        (elapsedMs / 1000) * state.playback.playbackRate,
+        (advanceMs / 1000) * state.playback.playbackRate,
     },
   };
 }
