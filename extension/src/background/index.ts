@@ -124,8 +124,8 @@ const roomSessionController = createRoomSessionController({
   flushPendingShare,
   ensureSharedVideoOpen: () => tabController.ensureSharedVideoOpen(),
   notifyContentScripts,
-  compensateRoomState: (state, receivedAtMs) =>
-    clockController.compensateRoomState(state, receivedAtMs),
+  compensateRoomState: (state, anchorAtMs) =>
+    clockController.compensateRoomState(state, anchorAtMs),
   markPlaybackArrival: (playback, atMs) =>
     clockController.markPlaybackArrival(playback, atMs),
   clearPendingLocalShare: (reason) =>

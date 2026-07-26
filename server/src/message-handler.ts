@@ -19,6 +19,7 @@ import {
   CURRENT_PROTOCOL_VERSION,
 } from "./messages.js";
 import { RoomServiceError } from "./room-service.js";
+import { withPlaybackAge } from "./room-state-age.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
 import { hasAttachedSocket } from "./types.js";
 import type { LogEvent, SendError, SendMessage, Session } from "./types.js";
@@ -183,9 +184,11 @@ export function createMessageHandler(options: {
       if (!hasAttachedSocket(session)) {
         return;
       }
+      // Aged at the send, not at the read: `getRoomStateForSession` awaits the
+      // store, and the room kept playing through it.
       send(session.socket, {
         type: "room:state",
-        payload: state,
+        payload: withPlaybackAge(state, now()),
       });
     } catch (error) {
       logEvent("room_state_bootstrap_failed", {
@@ -754,7 +757,7 @@ export function createMessageHandler(options: {
             );
             send(socket, {
               type: "room:state",
-              payload: state,
+              payload: withPlaybackAge(state, now()),
             });
           });
           return;

@@ -197,6 +197,51 @@ export function updateClockSample(args: {
 }
 
 /**
+ * Largest snapshot age still treated as evidence of a room that is playing right
+ * now. Roughly five broadcast intervals (a playing member re-broadcasts about
+ * every 2.1s).
+ *
+ * Past that, no broadcast has refreshed the snapshot for long enough that the
+ * simplest explanation is not a slow join but a room nobody is playing any more
+ * — its last member closed the tab while the state still read `playing` — or a
+ * server whose clock stepped between stamping the snapshot and sending it.
+ * Crediting the whole gap would then hurl the position forward by however long
+ * that lasted, so fall back to the conservative reading: take the position as
+ * sent, the pre-#212 behaviour. Under a live room this bound is never anywhere
+ * near reached.
+ */
+export const MAX_TRUSTED_PLAYBACK_AGE_MS = 10_000;
+
+/**
+ * Resolve the local monotonic time at which a received snapshot's position was
+ * true, from when it arrived and how old the server said it already was.
+ *
+ * The age is what makes joining a playing room land on the right position: the
+ * server hands a new member the last broadcast snapshot, which is up to one
+ * broadcast interval old, and without this the receiver would take it as
+ * current and start behind. A duration is the only form this can safely take —
+ * a timestamp would have to be compared against this machine's clock, which is
+ * the two-clock comparison `extrapolatePlayingRoomState` exists to avoid.
+ *
+ * Missing (legacy server), non-finite, negative, or beyond
+ * `MAX_TRUSTED_PLAYBACK_AGE_MS` all resolve to the arrival time itself.
+ */
+export function resolvePlaybackAnchorAtMs(
+  receivedAtMs: number,
+  playbackAgeMs: number | undefined,
+): number {
+  if (
+    playbackAgeMs === undefined ||
+    !Number.isFinite(playbackAgeMs) ||
+    playbackAgeMs <= 0 ||
+    playbackAgeMs > MAX_TRUSTED_PLAYBACK_AGE_MS
+  ) {
+    return receivedAtMs;
+  }
+  return receivedAtMs - playbackAgeMs;
+}
+
+/**
  * Advance a playing snapshot by the time that has passed since it was taken.
  *
  * `elapsedMs` is measured locally — see `ClockController.compensateRoomState` —

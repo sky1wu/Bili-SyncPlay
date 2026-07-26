@@ -24,7 +24,7 @@ function createControllerHarness(options?: {
   const clearPendingLocalShareReasons: string[] = [];
   const compensateCalls: Array<{
     state: RoomState;
-    receivedAtMs: number | undefined;
+    anchorAtMs: number | undefined;
   }> = [];
   const arrivalMarks: Array<{
     currentTime: number | undefined;
@@ -77,8 +77,8 @@ function createControllerHarness(options?: {
     notifyContentScripts: async (message) => {
       notifyContentMessages.push(message);
     },
-    compensateRoomState: (state, receivedAtMs) => {
-      compensateCalls.push({ state, receivedAtMs });
+    compensateRoomState: (state, anchorAtMs) => {
+      compensateCalls.push({ state, anchorAtMs });
       return state;
     },
     markPlaybackArrival: (playback, atMs) => {
@@ -288,7 +288,9 @@ test("room session controller confirms pending local share and notifies content 
     "share confirmation received",
   ]);
   assert.equal(harness.runtimeState.room.roomCode, "ROOM03");
-  assert.equal(harness.runtimeState.room.roomState, nextRoomState);
+  // Not identity: the payload's `playbackAgeMs` is stripped before the state is
+  // stored, so what is stored is a copy of everything else.
+  assert.deepEqual(harness.runtimeState.room.roomState, nextRoomState);
   assert.equal(harness.ensureSharedVideoOpenCalls.length, 1);
   assert.equal(
     (
@@ -303,7 +305,7 @@ test("room session controller confirms pending local share and notifies content 
     ).type,
     "background:apply-room-state",
   );
-  assert.equal(
+  assert.deepEqual(
     (
       harness.notifyContentMessages[0] as {
         payload: RoomState;
@@ -794,11 +796,89 @@ test("anchors an incoming room state on arrival, not after the work it triggers"
   } satisfies ServerMessage);
 
   assert.equal(harness.compensateCalls.length, 1);
-  assert.equal(harness.compensateCalls[0]?.receivedAtMs, 1_000);
+  assert.equal(harness.compensateCalls[0]?.anchorAtMs, 1_000);
   // Paired with the snapshot this handler is responsible for.
   assert.equal(harness.compensateCalls[0]?.state.playback?.currentTime, 42);
   // Proof the stamp is not simply "now": the awaited work moved the clock on.
   assert.equal(monotonicNow, 1_800);
+});
+
+test("a snapshot the server reported as stale anchors before it arrived", async () => {
+  // Joining a room mid-playback: the server hands over the last broadcast, which
+  // was already one broadcast interval old. Anchoring at arrival would take that
+  // position as current and start playback ~2.1s behind the room.
+  const monotonicNow = 10_000;
+  const harness = createControllerHarness({
+    getMonotonicNow: () => monotonicNow,
+  });
+
+  await harness.controller.handleServerMessage({
+    type: "room:state",
+    payload: {
+      roomCode: "ROOM12",
+      sharedVideo: null,
+      playback: {
+        actorId: "peer",
+        seq: 1,
+        url: "https://www.bilibili.com/video/BV1",
+        playState: "playing",
+        currentTime: 42,
+        playbackRate: 1,
+        serverTime: 1,
+        updatedAt: 1,
+      },
+      members: [{ id: "member-1", name: "Alice" }],
+      playbackAgeMs: 2_100,
+    },
+  } satisfies ServerMessage);
+
+  assert.equal(harness.arrivalMarks[0]?.atMs, 7_900);
+  assert.equal(harness.compensateCalls[0]?.anchorAtMs, 7_900);
+  // Never stored or forwarded: the age is only true at the instant it was sent,
+  // and this state goes on to storage and to member-delta rewraps.
+  assert.ok(
+    !("playbackAgeMs" in (harness.runtimeState.room.roomState ?? {})),
+    "playbackAgeMs must not survive into the stored room state",
+  );
+  assert.ok(
+    !(
+      "playbackAgeMs" in
+      ((
+        harness.notifyContentMessages[0] as { payload: Record<string, unknown> }
+      ).payload ?? {})
+    ),
+    "playbackAgeMs must not be forwarded to content scripts",
+  );
+});
+
+test("a room state without a playback age anchors at arrival", async () => {
+  // Backward compatibility with a server predating #212.
+  const monotonicNow = 10_000;
+  const harness = createControllerHarness({
+    getMonotonicNow: () => monotonicNow,
+  });
+
+  await harness.controller.handleServerMessage({
+    type: "room:state",
+    payload: {
+      roomCode: "ROOM13",
+      sharedVideo: null,
+      playback: {
+        actorId: "peer",
+        seq: 1,
+        url: "https://www.bilibili.com/video/BV1",
+        playState: "playing",
+        currentTime: 42,
+        playbackRate: 1,
+        serverTime: 1,
+        updatedAt: 1,
+      },
+      members: [{ id: "member-1", name: "Alice" }],
+    },
+  } satisfies ServerMessage);
+
+  assert.equal(harness.arrivalMarks[0]?.atMs, 10_000);
+  assert.equal(harness.compensateCalls[0]?.anchorAtMs, 10_000);
 });
 
 test("member deltas keep the anchor of the snapshot that arrived", async () => {
@@ -835,7 +915,7 @@ test("member deltas keep the anchor of the snapshot that arrived", async () => {
   } satisfies ServerMessage);
 
   assert.equal(harness.compensateCalls.length, 1);
-  assert.equal(harness.compensateCalls[0]?.receivedAtMs, undefined);
+  assert.equal(harness.compensateCalls[0]?.anchorAtMs, undefined);
 });
 
 test("drops a room state that a later one superseded while it awaited", async () => {

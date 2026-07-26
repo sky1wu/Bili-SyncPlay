@@ -952,7 +952,7 @@ test("message handler accepts room:create without protocolVersion (legacy client
   assert.ok(events.includes("room_created"));
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:created");
-  assert.equal(sent[0].serverProtocolVersion, 3);
+  assert.equal(sent[0].serverProtocolVersion, 4);
   assert.equal(sent[1].type, "room:state");
 });
 
@@ -1145,20 +1145,21 @@ test("message handler accepts room:join with matching protocolVersion and return
     payload: {
       roomCode: "ROOM01",
       joinToken: "join-token-1",
-      protocolVersion: 3,
+      protocolVersion: 4,
     },
   });
 
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 3);
+  assert.equal(sent[0].serverProtocolVersion, 4);
   assert.equal(sent[1].type, "room:state");
 });
 
 test("message handler accepts room:join from a still-supported older protocol version", async () => {
   // v2 clients (below CURRENT but >= MIN) stay in the compatibility window: the
   // server accepts them and advertises its CURRENT version. The v3 `naturalEnd`
-  // playback flag is additive, so these older clients simply ignore it.
+  // playback flag and the v4 `room:state.playbackAgeMs` are both additive, so
+  // these older clients simply ignore them.
   const sent: Array<{ type: string; serverProtocolVersion?: number }> = [];
   const session = createSession("older-joiner");
 
@@ -1233,7 +1234,7 @@ test("message handler accepts room:join from a still-supported older protocol ve
 
   assert.equal(session.protocolVersion, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 3);
+  assert.equal(sent[0].serverProtocolVersion, 4);
   assert.equal(sent[1].type, "room:state");
 });
 
@@ -1840,4 +1841,83 @@ test("publish wrapper times out so a hung publish frees its slot", async () => {
   assert.equal(timeoutEvents[0].timeoutMs, 30);
   // Underlying publish never rejected, so the failed-event log must stay quiet.
   assert.equal(failedEvents.length, 0);
+});
+
+test("room:state is aged at the send, not at the room-store read", async () => {
+  // The age must cover the store read too: `getRoomStateForSession` awaits, and
+  // the room keeps playing through it. Anchoring at the read would hand the
+  // receiver a position already staler than the age admits.
+  const sentPayloads: Array<Record<string, unknown>> = [];
+  let clock = 10_000;
+  const session = createSession("member-age", {
+    roomCode: "ROOM-AGE",
+    memberId: "member-age",
+    memberToken: "member-token-age",
+    joinedAt: 0,
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    now: () => clock,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession() {
+        return { room: null };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        // The store read costs 400ms of room time before the send happens.
+        clock += 400;
+        return {
+          roomCode: "ROOM-AGE",
+          sharedVideo: null,
+          playback: {
+            url: "https://www.bilibili.com/video/BV1xx411c7mD",
+            currentTime: 42,
+            playState: "playing",
+            playbackRate: 1,
+            updatedAt: 8_000,
+            serverTime: 8_000,
+            actorId: "member-age",
+            seq: 7,
+          },
+          members: [{ id: "member-age", name: "Alice" }],
+        };
+      },
+    },
+    logEvent() {},
+    send(_socket, message) {
+      if (message.type === "room:state") {
+        sentPayloads.push(
+          message.payload as unknown as Record<string, unknown>,
+        );
+      }
+    },
+    sendError() {
+      throw new Error("sendError should not be called");
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "sync:request",
+    payload: { memberToken: "member-token-age" },
+  });
+
+  assert.equal(sentPayloads.length, 1);
+  assert.equal(sentPayloads[0].playbackAgeMs, 2_400);
 });

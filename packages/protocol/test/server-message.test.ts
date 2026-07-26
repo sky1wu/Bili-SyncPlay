@@ -538,3 +538,87 @@ test("rejects room:joined when serverProtocolVersion is negative", () => {
     false,
   );
 });
+
+function roomStatePayload(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    roomCode: "ABC123",
+    sharedVideo: {
+      videoId: "BV1xx411c7mD",
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+      title: "Video",
+    },
+    playback: {
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+      currentTime: 12,
+      playState: "playing",
+      playbackRate: 1,
+      updatedAt: 1,
+      serverTime: 1,
+      actorId: "member-1",
+      seq: 1,
+    },
+    members: [{ id: "member-1", name: "Alice" }],
+    ...overrides,
+  };
+}
+
+test("accepts room:state carrying a playback age", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: roomStatePayload({ playbackAgeMs: 2_100 }),
+    }),
+    true,
+  );
+});
+
+test("accepts room:state from a server that omits the playback age", () => {
+  assert.equal(
+    isServerMessage({ type: "room:state", payload: roomStatePayload() }),
+    true,
+  );
+});
+
+test("accepts a zero playback age", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: roomStatePayload({ playbackAgeMs: 0 }),
+    }),
+    true,
+  );
+});
+
+test("rejects a negative playback age", () => {
+  // A duration cannot be negative, and a receiver that had to interpret one
+  // would be extrapolating a snapshot from the future.
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: roomStatePayload({ playbackAgeMs: -1 }),
+    }),
+    false,
+  );
+});
+
+test("rejects a non-numeric playback age", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: roomStatePayload({ playbackAgeMs: "2100" }),
+    }),
+    false,
+  );
+});
+
+test("rejects a non-finite playback age", () => {
+  assert.equal(
+    isServerMessage({
+      type: "room:state",
+      payload: roomStatePayload({ playbackAgeMs: Number.POSITIVE_INFINITY }),
+    }),
+    false,
+  );
+});

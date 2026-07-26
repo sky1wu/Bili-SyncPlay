@@ -7,6 +7,8 @@ import {
   CLOCK_SAMPLE_MIN_TRUSTED_SIZE,
   CLOCK_SAMPLE_WINDOW_SIZE,
   extrapolatePlayingRoomState,
+  MAX_TRUSTED_PLAYBACK_AGE_MS,
+  resolvePlaybackAnchorAtMs,
   updateClockSample,
   type ClockSample,
 } from "../src/background/clock-sync";
@@ -435,4 +437,46 @@ test("keeps the published offset when nothing in the window is believable", () =
 
   assert.ok(second.sample.rttMs < 0);
   assert.equal(second.clockOffsetMs, 200);
+});
+
+test("a reported snapshot age moves the anchor back before arrival", () => {
+  // The joining case: the server handed over a snapshot that was already one
+  // broadcast interval old, so it was current 2.1s before it reached us.
+  assert.equal(resolvePlaybackAnchorAtMs(10_000, 2_100), 7_900);
+});
+
+test("a legacy server without an age anchors at arrival", () => {
+  assert.equal(resolvePlaybackAnchorAtMs(10_000, undefined), 10_000);
+});
+
+test("a zero age anchors at arrival", () => {
+  assert.equal(resolvePlaybackAnchorAtMs(10_000, 0), 10_000);
+});
+
+test("a negative age cannot push the anchor forward", () => {
+  // Only reachable from a broken or hostile server — the guard rejects these —
+  // but pushing the anchor past arrival would rewind the room on every replay.
+  assert.equal(resolvePlaybackAnchorAtMs(10_000, -5_000), 10_000);
+});
+
+test("a non-finite age is ignored rather than poisoning the anchor", () => {
+  assert.equal(resolvePlaybackAnchorAtMs(10_000, Number.NaN), 10_000);
+  assert.equal(
+    resolvePlaybackAnchorAtMs(10_000, Number.POSITIVE_INFINITY),
+    10_000,
+  );
+});
+
+test("an age past the trust bound falls back to anchoring at arrival", () => {
+  // No broadcast has refreshed this snapshot for five intervals: more likely a
+  // room nobody is playing, or a server clock step, than a very slow join. The
+  // fallback is the conservative one — take the position as sent.
+  assert.equal(
+    resolvePlaybackAnchorAtMs(10_000, MAX_TRUSTED_PLAYBACK_AGE_MS),
+    10_000 - MAX_TRUSTED_PLAYBACK_AGE_MS,
+  );
+  assert.equal(
+    resolvePlaybackAnchorAtMs(10_000, MAX_TRUSTED_PLAYBACK_AGE_MS + 1),
+    10_000,
+  );
 });

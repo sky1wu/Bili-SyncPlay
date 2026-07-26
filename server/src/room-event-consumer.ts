@@ -6,6 +6,7 @@ import {
 } from "./types.js";
 import type { RoomEventBus, RoomEventBusMessage } from "./room-event-bus.js";
 import type { ServerMessage } from "@bili-syncplay/protocol";
+import { withPlaybackAge } from "./room-state-age.js";
 
 const MEMBER_DELTA_PROTOCOL_VERSION = 2;
 type MemberDeltaMessage = Extract<
@@ -73,7 +74,9 @@ export async function createRoomEventConsumer(options: {
   send: SendMessage;
   instanceId?: string;
   logEvent?: import("./types.js").LogEvent;
+  now?: () => number;
 }): Promise<{ close: () => Promise<void> }> {
+  const now = options.now ?? Date.now;
   const unsubscribe = await options.roomEventBus.subscribe(async (message) => {
     try {
       const localSessions = options.listLocalSessionsByRoom(message.roomCode);
@@ -111,9 +114,12 @@ export async function createRoomEventConsumer(options: {
           if (!roomState || !isMemberDeltaRecipient(session, message)) {
             continue;
           }
+          // A legacy client gets a member delta as a full room state, which
+          // carries the playback snapshot the room has been holding since well
+          // before this join/leave — exactly the case the age exists for.
           options.send(session.socket, {
             type: "room:state",
-            payload: roomState,
+            payload: withPlaybackAge(roomState, now()),
           });
         }
 
@@ -160,7 +166,7 @@ export async function createRoomEventConsumer(options: {
           }
           options.send(session.socket, {
             type: "room:state",
-            payload: state,
+            payload: withPlaybackAge(state, now()),
           });
         }
       }

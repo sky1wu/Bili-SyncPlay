@@ -5,6 +5,7 @@ import type {
   RoomMemberJoinedMessage,
   RoomMemberLeftMessage,
   RoomStateMessage,
+  RoomStatePayload,
   ServerMessage,
   SyncPongMessage,
 } from "../types/server-message.js";
@@ -116,9 +117,24 @@ function isRoomJoinedMessage(value: unknown): value is RoomJoinedMessage {
   );
 }
 
+export function isRoomStatePayload(value: unknown): value is RoomStatePayload {
+  if (!isRecord(value) || !isRoomState(value)) {
+    return false;
+  }
+  const { playbackAgeMs } = value;
+  // A negative age is not a duration; rejecting it here keeps receivers from
+  // having to decide what "the snapshot is from the future" means.
+  return (
+    playbackAgeMs === undefined ||
+    (isFiniteNumber(playbackAgeMs) && playbackAgeMs >= 0)
+  );
+}
+
 function isRoomStateMessage(value: unknown): value is RoomStateMessage {
   return (
-    isRecord(value) && value.type === "room:state" && isRoomState(value.payload)
+    isRecord(value) &&
+    value.type === "room:state" &&
+    isRoomStatePayload(value.payload)
   );
 }
 
