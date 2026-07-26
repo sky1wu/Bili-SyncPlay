@@ -84,7 +84,7 @@ test("instrumented room store preserves the underlying close hook", async () => 
       async close() {
         closed += 1;
       },
-    } as never,
+    },
     recorder.collector,
   );
 

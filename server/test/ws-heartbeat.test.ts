@@ -4,7 +4,7 @@ import {
   createWsHeartbeat,
   type HeartbeatSocket,
 } from "../src/ws-heartbeat.js";
-import type { LogEvent, Session } from "../src/types.js";
+import type { AttachedSession, LogEvent, Session } from "../src/types.js";
 
 type FakeSocket = HeartbeatSocket & {
   pingCount: number;
@@ -54,7 +54,7 @@ function createSession(id: string, roomCode: string | null = null): Session {
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     instanceId: "test-node",
     remoteAddress: null,
     origin: null,

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
 import { createRuntimeIndexReaper } from "../src/runtime-index-reaper.js";
-import type { Session } from "../src/types.js";
+import type { AttachedSession, Session } from "../src/types.js";
 
 const REDIS_URL = process.env.REDIS_URL;
 
@@ -21,7 +21,7 @@ function createSession(id: string, instanceId: string): Session {
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     remoteAddress: "127.0.0.1",
     origin: "chrome-extension://allowed-extension",
     roomCode: null,

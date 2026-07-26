@@ -184,6 +184,49 @@ Refactors touching these areas require regression coverage:
 - Protocol validation (type guards)
 - Server room lifecycle and admin routing
 
+### Test directories are inside typecheck
+
+The rule is: **every package's `test/**` must be inside `npm run typecheck`.**
+Otherwise a signature change that misses a test call site passes the gate
+silently — and can hide the behaviour regression the missed argument causes
+(`#210` / `#211`). How a package satisfies it depends on whether src and tests
+can share one compiler configuration:
+
+- `protocol`, `server`, `extension` need a second project, because their tests
+  need `node` types (and `server`'s reach into `bench/`) that the src build must
+  not carry. Their `typecheck` runs `tsconfig.json` then `tsconfig.test.json`.
+- `admin-ui` needs no second project: its `tsconfig.json` already includes
+  `test` (its src is browser code compiled by Vite, so no split is required).
+
+A new package picks whichever applies — do not add an unnecessary
+`tsconfig.test.json` just to match the majority.
+
+Keep fixtures honest rather than casting past the checker: a fixture that no
+longer matches its type usually means the type moved (a field was renamed,
+removed, or became required), and the fix belongs in the fixture. Three casts to
+avoid specifically, because each re-opens the gap this gate exists to close:
+
+- `as unknown as <DomainType>` / `as never` on a fixture (`RoomState`,
+  `PlaybackState`, `Session`, `RoomStore`) — it silences exactly the
+  missing-required-field error you want to see.
+- A stub satisfying an unconstrained `<T>(…) => Promise<T>` via `as T`. No value
+  inhabits every `T`, so the cast is unconditional.
+- A stub satisfying a contract that lumps several request/response pairs into
+  one all-optional response type. `{}` then satisfies everything and nothing is
+  checked — `#211` shipped this mistake once before catching it.
+
+When a callback serves one request/response pair, declare that pair. When it
+serves several, split it into one callback per pair (`sendPlaybackUpdate` /
+`requestRoomStateHydration`) rather than widening the response. When the payload
+genuinely cannot be modelled and must be runtime-guarded anyway, declare
+`Promise<unknown>` and let the guard narrow it. If a consumer only touches part
+of a large interface, its parameter should say so (`Pick<RoomStore,
+"countRooms">`) — that removes the fake's need to cast at all.
+
+`as unknown as T` is fine for genuinely unfakeable platform/library objects
+(`ws.WebSocket`, `chrome.tabs.Tab`, `HTMLVideoElement`, `IncomingMessage`);
+prefer one shared constructor over per-call-site casts.
+
 ## Agent Execution Rules
 
 - Do not perform destructive git operations such as `git reset --hard`, force-pushes, or overwriting unrelated uncommitted user changes unless explicitly requested.

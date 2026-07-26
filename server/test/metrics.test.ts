@@ -11,7 +11,7 @@ test("metrics collector renders event counters, histograms, and redis failure co
       async countRooms() {
         return 2;
       },
-    } as never,
+    },
     serviceVersion: "9.9.9-test",
   });
 
@@ -224,7 +224,7 @@ test("metrics collector can rebind to the effective runtime store", async () => 
       async countRooms() {
         return 0;
       },
-    } as never,
+    },
   });
 
   sharedRuntimeStore.registerSession({

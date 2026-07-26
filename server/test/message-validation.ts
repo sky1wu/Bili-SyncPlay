@@ -223,9 +223,11 @@ function createMessageCollector(socket: WebSocket): {
         }, timeoutMs);
 
         const typedWaiters = waiters.get(type) ?? [];
+        // 队列按消息 type 分桶,取出的消息必然与 TType 匹配;但 TS 无法把
+        // 未解析的分配式 Extract<> 与 resolve 的形参对齐,这里显式放宽形参。
+        const resolveMessage = resolve as (message: ServerMessage) => void;
         typedWaiters.push({
-          resolve: (message) =>
-            resolve(message as Extract<ServerMessage, { type: TType }>),
+          resolve: (message) => resolveMessage(message),
           reject,
           timeoutId,
         });

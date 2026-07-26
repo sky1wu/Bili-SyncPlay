@@ -39,7 +39,6 @@ function createControllerHarness() {
   >();
   const debugLogs: string[] = [];
   const runtimeMessages: Array<unknown> = [];
-  let hydrateRetryTimer: number | null = null;
   let now = 10_000;
   let currentPlaybackVideo: SharedVideo | null = null;
   let sharedVideo: SharedVideo | null = null;
@@ -68,14 +67,11 @@ function createControllerHarness() {
       debugLogs.push(message);
     },
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
-      runtimeMessages.push(message);
+    sendPlaybackUpdate: async (payload) => {
+      runtimeMessages.push({ type: "content:playback-update", payload });
       return null;
     },
-    getHydrateRetryTimer: () => hydrateRetryTimer,
-    setHydrateRetryTimer: (timer) => {
-      hydrateRetryTimer = timer;
-    },
+    requestRoomStateHydration: async () => null,
     getVideoElement: () => videoElement,
     getCurrentPlaybackVideo: async () => currentPlaybackVideo,
     getSharedVideo: () => sharedVideo,
@@ -100,9 +96,6 @@ function createControllerHarness() {
     },
     setVideoElement(video: HTMLVideoElement | null) {
       videoElement = video;
-    },
-    get hydrateRetryTimer() {
-      return hydrateRetryTimer;
     },
   };
 }
@@ -139,9 +132,18 @@ function createRoomState(
   };
 }
 
+/**
+ * `paused` / `readyState` 在 lib.dom 里是只读的,但这些用例要直接改写它们来模拟
+ * 播放器状态变化,所以桩类型把这两项放开为可写。
+ */
+type StubVideoElement = Omit<HTMLVideoElement, "paused" | "readyState"> & {
+  paused: boolean;
+  readyState: number;
+};
+
 function createVideo(
   overrides: Partial<HTMLVideoElement> = {},
-): HTMLVideoElement {
+): StubVideoElement {
   return {
     paused: false,
     readyState: 4,
@@ -151,7 +153,7 @@ function createVideo(
     pause() {},
     play: async () => undefined,
     ...overrides,
-  } as HTMLVideoElement;
+  } as unknown as StubVideoElement;
 }
 
 test("sync controller skips playback broadcast before hydration becomes ready", async () => {
@@ -208,6 +210,9 @@ test("sync controller schedules hydration retry when room exists but initial roo
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 10_000,
@@ -215,12 +220,11 @@ test("sync controller schedules hydration retry when room exists but initial roo
       harness.debugLogs.push(message);
     },
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async () => ({
+    sendPlaybackUpdate: async () => null,
+    requestRoomStateHydration: async () => ({
       memberId: "member-2",
       roomCode: "ROOM02",
     }),
-    getHydrateRetryTimer: () => harness.hydrateRetryTimer,
-    setHydrateRetryTimer: (_timer) => {},
     getVideoElement: () => null,
     getCurrentPlaybackVideo: async () => null,
     getSharedVideo: () => null,
@@ -1701,10 +1705,14 @@ test("sync controller broadcasts buffering when active pause is classified as bu
     getNow: () => 20_400,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
-      harness.runtimeMessages.push(message);
+    sendPlaybackUpdate: async (payload) => {
+      harness.runtimeMessages.push({
+        type: "content:playback-update",
+        payload,
+      });
       return null;
     },
+    requestRoomStateHydration: async () => null,
     getVideoElement: () => video,
     getCurrentPlaybackVideo: async () => sharedVideo,
     getSharedVideo: () => sharedVideo,
@@ -1766,10 +1774,14 @@ test("sync controller broadcasts paused once buffer-pause upgrade window elapses
     getNow: () => 21_700, // 1700ms after pauseStartedAt, past upgrade threshold
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
-      harness.runtimeMessages.push(message);
+    sendPlaybackUpdate: async (payload) => {
+      harness.runtimeMessages.push({
+        type: "content:playback-update",
+        payload,
+      });
       return null;
     },
+    requestRoomStateHydration: async () => null,
     getVideoElement: () => video,
     getCurrentPlaybackVideo: async () => sharedVideo,
     getSharedVideo: () => sharedVideo,
@@ -1878,10 +1890,14 @@ test("sync controller tags broadcast with userInitiated:true on a fresh user pau
     getNow: () => 20_400,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
-      harness.runtimeMessages.push(message);
+    sendPlaybackUpdate: async (payload) => {
+      harness.runtimeMessages.push({
+        type: "content:playback-update",
+        payload,
+      });
       return null;
     },
+    requestRoomStateHydration: async () => null,
     getVideoElement: () => video,
     getCurrentPlaybackVideo: async () => sharedVideo,
     getSharedVideo: () => sharedVideo,
@@ -1948,10 +1964,14 @@ test("sync controller omits userInitiated when a pause is buffer-induced", async
     getNow: () => 20_400,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
-      harness.runtimeMessages.push(message);
+    sendPlaybackUpdate: async (payload) => {
+      harness.runtimeMessages.push({
+        type: "content:playback-update",
+        payload,
+      });
       return null;
     },
+    requestRoomStateHydration: async () => null,
     getVideoElement: () => video,
     getCurrentPlaybackVideo: async () => sharedVideo,
     getSharedVideo: () => sharedVideo,
@@ -2023,10 +2043,14 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
     getNow: () => 21_700,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
-      harness.runtimeMessages.push(message);
+    sendPlaybackUpdate: async (payload) => {
+      harness.runtimeMessages.push({
+        type: "content:playback-update",
+        payload,
+      });
       return null;
     },
+    requestRoomStateHydration: async () => null,
     getVideoElement: () => video,
     getCurrentPlaybackVideo: async () => sharedVideo,
     getSharedVideo: () => sharedVideo,
@@ -2208,12 +2232,14 @@ test("programmatic apply signature stores the normalized url for mismatched (fes
     getNow: () => 20_000,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
-      harness.runtimeMessages.push(message);
+    sendPlaybackUpdate: async (payload) => {
+      harness.runtimeMessages.push({
+        type: "content:playback-update",
+        payload,
+      });
       return null;
     },
-    getHydrateRetryTimer: () => null,
-    setHydrateRetryTimer: () => {},
+    requestRoomStateHydration: async () => null,
     getVideoElement: () => video,
     getCurrentPlaybackVideo: async () => sharedVideo,
     getSharedVideo: () => sharedVideo,
@@ -2622,10 +2648,14 @@ test("sync controller keeps userInitiated on a pause that cancelled a rate catch
     getNow: () => 20_400,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
-      harness.runtimeMessages.push(message);
+    sendPlaybackUpdate: async (payload) => {
+      harness.runtimeMessages.push({
+        type: "content:playback-update",
+        payload,
+      });
       return null;
     },
+    requestRoomStateHydration: async () => null,
     getVideoElement: () => video,
     getCurrentPlaybackVideo: async () => sharedVideo,
     getSharedVideo: () => sharedVideo,

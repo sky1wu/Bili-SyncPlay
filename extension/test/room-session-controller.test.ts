@@ -787,6 +787,7 @@ test("anchors an incoming room state on arrival, not after the work it triggers"
         currentTime: 42,
         playbackRate: 1,
         serverTime: 1,
+        updatedAt: 1,
       },
       members: [{ id: "member-1", name: "Alice" }],
     },
@@ -819,9 +820,10 @@ test("member deltas keep the anchor of the snapshot that arrived", async () => {
       currentTime: 42,
       playbackRate: 1,
       serverTime: 1,
+      updatedAt: 1,
     },
     members: [{ id: "member-1", name: "Alice" }],
-  } as unknown as RoomState;
+  } satisfies RoomState;
 
   monotonicNow = 9_000;
   await harness.controller.handleServerMessage({
@@ -851,9 +853,10 @@ test("drops a room state that a later one superseded while it awaited", async ()
       currentTime: 99,
       playbackRate: 1,
       serverTime: 9_000,
+      updatedAt: 9_000,
     },
     members: [{ id: "member-1", name: "Alice" }],
-  } as unknown as RoomState;
+  } satisfies RoomState;
 
   const harness = createControllerHarness({
     onEnsureSharedVideoOpen: () => {
@@ -874,6 +877,7 @@ test("drops a room state that a later one superseded while it awaited", async ()
         currentTime: 42,
         playbackRate: 1,
         serverTime: 1_000,
+        updatedAt: 1_000,
       },
       members: [{ id: "member-1", name: "Alice" }],
     },
@@ -912,6 +916,7 @@ test("marks the arrival before the state is observable or anything awaits", asyn
         currentTime: 42,
         playbackRate: 1,
         serverTime: 1_000,
+        updatedAt: 1_000,
       },
       members: [{ id: "member-1", name: "Alice" }],
     },
@@ -938,9 +943,10 @@ test("drops a member delta that a later room state superseded", async () => {
       currentTime: 99,
       playbackRate: 1,
       serverTime: 9_000,
+      updatedAt: 9_000,
     },
     members: [{ id: "member-1", name: "Alice" }],
-  } as unknown as RoomState;
+  } satisfies RoomState;
 
   const harness = createControllerHarness({
     persistState: (callCount) => {
@@ -961,9 +967,10 @@ test("drops a member delta that a later room state superseded", async () => {
       currentTime: 42,
       playbackRate: 1,
       serverTime: 1_000,
+      updatedAt: 1_000,
     },
     members: [{ id: "member-1", name: "Alice" }],
-  } as unknown as RoomState;
+  } satisfies RoomState;
 
   await harness.controller.handleServerMessage({
     type: "room:member-joined",

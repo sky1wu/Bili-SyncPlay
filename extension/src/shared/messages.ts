@@ -122,6 +122,22 @@ export interface ActiveVideoResponse {
   error?: string;
 }
 
+/** `content:playback-update` 的确认。后台只回执,不带载荷。 */
+export interface PlaybackUpdateAck {
+  ok: boolean;
+}
+
+/**
+ * `content:get-room-state` 的响应。字段全部可选:后台可能在房间尚未就绪时只回
+ * 一部分,内容脚本按存在与否分支处理。
+ */
+export interface RoomStateHydrationResponse {
+  ok?: boolean;
+  roomState?: RoomState;
+  memberId?: string | null;
+  roomCode?: string | null;
+}
+
 export interface ShareContextResponse {
   ok: boolean;
   roomCode: string | null;

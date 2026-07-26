@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import { createRedisRoomStore, expiryScore } from "../src/redis-room-store.js";
 
 const REDIS_URL = process.env.REDIS_URL;
@@ -473,6 +473,7 @@ test("redis room update preserves playback number precision", async (t) => {
     // No script may re-encode the room body: Redis's cjson formats numbers
     // with %.14g, which rounds these away.
     const playback = {
+      url: "https://www.bilibili.com/video/BV1xx411c7mD",
       currentTime: 1234.5678901234567,
       playState: "playing" as const,
       playbackRate: 1.25,

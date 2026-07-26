@@ -11,10 +11,18 @@ type RoomStoreMetricsCollector = Pick<
  * (and a failure counter on throw). Applied to the Redis-backed store only —
  * the in-memory store is synchronous and would just add noise.
  */
+/**
+ * Redis 版实现额外带一个 RoomStore 契约之外的 close() 钩子,关服时按结构探测
+ * (见 server-bootstrap 的 hasClose)。把它写进类型里,包装前后都不必强转。
+ */
+export type CloseableRoomStore = RoomStore & {
+  close?: () => Promise<void>;
+};
+
 export function instrumentRoomStore(
-  roomStore: RoomStore,
+  roomStore: CloseableRoomStore,
   metricsCollector: RoomStoreMetricsCollector,
-): RoomStore {
+): CloseableRoomStore {
   function measure<Args extends unknown[], Result>(
     operation: string,
     run: (...args: Args) => Promise<Result>,
@@ -51,14 +59,10 @@ export function instrumentRoomStore(
     isReady: measure("is_ready", () => roomStore.isReady()),
   };
 
-  // The Redis-backed store carries a close() hook outside the RoomStore
-  // contract, and shutdown probes for it structurally (hasClose) — it must
-  // survive wrapping or server.close() would leak the Redis connection.
-  const underlying = roomStore as RoomStore & {
-    close?: () => Promise<void>;
-  };
-  if (typeof underlying.close === "function") {
-    const close = underlying.close.bind(underlying);
+  // close() must survive wrapping or server.close() would leak the Redis
+  // connection.
+  if (typeof roomStore.close === "function") {
+    const close = roomStore.close.bind(roomStore);
     return Object.assign(instrumented, { close });
   }
   return instrumented;

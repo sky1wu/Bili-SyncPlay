@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRuntimeRegistry } from "../src/admin/runtime-registry.js";
-import type { Session } from "../src/types.js";
+import type { AttachedSession, Session } from "../src/types.js";
 
 function createSession(id: string): Session {
   return {
@@ -13,7 +13,7 @@ function createSession(id: string): Session {
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     remoteAddress: null,
     origin: null,
     roomCode: null,

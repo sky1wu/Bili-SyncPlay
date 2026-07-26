@@ -263,7 +263,7 @@ test("logEffectiveOriginPolicy prints final origins and dev override once", () =
       allowedOrigins: ["https://a.example", "https://b.example"],
       allowMissingOriginInDev: false,
       allowAnyFirefoxExtensionOrigin: false,
-    } as ReturnType<typeof loadSecurityConfig>,
+    },
     log,
   );
   logEffectiveOriginPolicy(
@@ -271,7 +271,7 @@ test("logEffectiveOriginPolicy prints final origins and dev override once", () =
       allowedOrigins: [],
       allowMissingOriginInDev: true,
       allowAnyFirefoxExtensionOrigin: true,
-    } as ReturnType<typeof loadSecurityConfig>,
+    },
     log,
   );
 

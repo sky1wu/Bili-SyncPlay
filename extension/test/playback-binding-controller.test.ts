@@ -8,6 +8,15 @@ import { createToastCoordinatorState } from "../src/content/toast";
 
 type ListenerMap = Map<string, EventListener>;
 
+/**
+ * `paused` / `duration` 在 lib.dom 里是只读的,但这些用例需要直接改写它们来模拟
+ * 播放器状态变化,所以桩类型把这两项放开为可写。
+ */
+type StubVideoElement = Omit<HTMLVideoElement, "paused" | "duration"> & {
+  paused: boolean;
+  duration: number;
+};
+
 function installDomStub() {
   const originalDocument = globalThis.document;
   const originalWindow = globalThis.window;
@@ -18,7 +27,7 @@ function installDomStub() {
     addEventListener(type: string, listener: EventListener) {
       listeners.set(type, listener);
     },
-  } as unknown as HTMLVideoElement;
+  } as unknown as StubVideoElement;
 
   Object.assign(globalThis, {
     document: {
@@ -65,6 +74,9 @@ test("playback binding controller forwards ratechange event source", async () =>
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -110,6 +122,9 @@ test("playback binding controller cancels active soft apply on pause and seek", 
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -148,6 +163,9 @@ test("playback binding controller does not cancel active soft apply for programm
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -186,6 +204,9 @@ test("playback binding controller preserves explicit seek intent across immediat
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -233,6 +254,9 @@ test("playback binding controller does not mark programmatic ratechange as expli
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BV1xx411c7mD:p1",
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -281,6 +305,9 @@ test("playback binding controller re-pauses seek-triggered autoplay when intende
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BV1xx411c7mD:p1",
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -342,6 +369,9 @@ test("playback binding controller keeps hydration pause guard when shared url is
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BV1xx411c7mD:p1",
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -428,6 +458,7 @@ test("playback binding controller keeps hydration guard after direct room switch
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVnew:p1",
       url: currentUrl,
@@ -503,6 +534,9 @@ test("playback binding controller keeps hydration pause guard for unstable festi
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "/festival/demo",
       url: "https://www.bilibili.com/festival/demo",
@@ -570,6 +604,7 @@ test("playback binding controller reapplies pause hold for unstable identity aft
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "/festival/demo",
       url: "https://www.bilibili.com/festival/demo",
@@ -639,6 +674,7 @@ test("playback binding controller reapplies pause hold for unstable room shared 
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "ep1231523",
       url: "https://www.bilibili.com/bangumi/play/ep1231523",
@@ -700,6 +736,9 @@ test("playback binding controller clears explicit seek intent after seek-trigger
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BV1xx411c7mD:p1",
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -759,6 +798,9 @@ test("playback binding controller allows manual play after a newer gesture follo
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BV1xx411c7mD:p1",
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -823,6 +865,9 @@ test("playback binding controller holds a page-load autoplay authorized only by 
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -916,6 +961,9 @@ test("playback binding controller still holds the delayed autoplay when the only
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -991,6 +1039,9 @@ test("playback binding controller holds a seek-triggered non-shared autoplay, th
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -1073,6 +1124,9 @@ test("playback binding controller allows explicit play on a non-shared page", as
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -1130,6 +1184,9 @@ test("playback binding controller suppresses auto-resumed non-shared broadcast a
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -1208,6 +1265,9 @@ test("playback binding controller pauses delayed non-sharer autoplay into a non-
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVnext:p1",
       url: "https://www.bilibili.com/video/BVnext?p=1",
@@ -1279,6 +1339,9 @@ test("playback binding controller pauses delayed non-sharer autoplay even after 
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVnext:p1",
       url: "https://www.bilibili.com/video/BVnext?p=1",
@@ -1349,6 +1412,9 @@ test("playback binding controller lets the user watch an explicitly opened local
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -1416,6 +1482,9 @@ test("playback binding controller pauses an unmarked non-shared page reached by 
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -1490,6 +1559,9 @@ test("playback binding controller pauses a non-shared video even when room inten
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -1552,6 +1624,9 @@ test("playback binding controller periodic tick pauses a non-shared video alread
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -1642,6 +1717,9 @@ test("playback binding controller holds a play while the page bridge is resolvin
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     // Page bridge not ready yet — current video is unknown until `resolvedVideo`.
     getSharedVideo: () => resolvedVideo,
     hasRecentRemoteStopIntent: () => false,
@@ -1735,6 +1813,9 @@ test("playback binding controller stops force-pausing an unresolved non-shared p
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     // Page bridge still has not resolved the URL when the play arrives.
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
@@ -1810,6 +1891,9 @@ test("playback binding controller does not re-pause an authorized non-shared pla
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => currentVideo,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -1896,6 +1980,9 @@ test("playback binding controller preserves the explicit non-shared authorizatio
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => currentVideo,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -1964,6 +2051,9 @@ test("playback binding controller re-pauses a pre-pause stale gesture while the 
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2028,6 +2118,9 @@ test("playback binding controller still holds an unsolicited autoplay while the 
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2087,6 +2180,9 @@ test("playback binding controller allows manual play on non-shared page after au
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -2174,6 +2270,9 @@ test("playback binding controller suppresses non-shared autoplay replayed after 
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVother:p1",
       url: "https://www.bilibili.com/video/BVother?p=1",
@@ -2245,6 +2344,7 @@ test("playback binding controller holds a non-sharer at the shared video natural
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared:p1",
       url: "https://www.bilibili.com/video/BVshared?p=1",
@@ -2320,6 +2420,7 @@ test("playback binding controller does not pause the sharer at the shared video 
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared:p1",
       url: "https://www.bilibili.com/video/BVshared?p=1",
@@ -2384,6 +2485,7 @@ test("playback binding controller does not pause a non-sharer before the shared 
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared:p1",
       url: "https://www.bilibili.com/video/BVshared?p=1",
@@ -2450,6 +2552,7 @@ test("playback binding controller re-pauses non-sharer multi-part autoplay after
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared:p1",
       url: "https://www.bilibili.com/video/BVshared?p=1",
@@ -2518,6 +2621,7 @@ test("playback binding controller classifies pause as buffer when waiting fired 
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2561,6 +2665,7 @@ test("playback binding controller treats pause as user-initiated when fresh gest
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2603,6 +2708,7 @@ test("playback binding controller clears buffer-pause classification on resume",
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2668,6 +2774,7 @@ test("playback binding controller does not classify pause as buffer-induced insi
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BV1xx411c7mD:p1",
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -2727,6 +2834,7 @@ test("playback binding controller still classifies pause as buffer-induced when 
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BV1xx411c7mD:p1",
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -2779,6 +2887,7 @@ test("playback binding controller re-broadcasts paused after buffer-pause upgrad
     initialRoomStatePauseHoldMs: 3_000,
     bufferSignalWindowMs: 300,
     bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -2843,6 +2952,9 @@ test("playback binding controller suppresses the natural-end pause for a non-sha
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared",
       url: "https://www.bilibili.com/video/BVshared",
@@ -2915,6 +3027,9 @@ test("playback binding controller suppresses the natural-end pause broadcast for
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared",
       url: "https://www.bilibili.com/video/BVshared",
@@ -2999,6 +3114,9 @@ test("playback binding controller records the seek-to-end flag when a seek prece
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared",
       url: sharedUrl,
@@ -3061,6 +3179,9 @@ test("playback binding controller flushes the sharer's terminal paused state whe
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared",
       url: sharedUrl,
@@ -3137,6 +3258,9 @@ test("playback binding controller does not flush a sharer end state once autopla
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared",
       url: sharedUrl,
@@ -3198,6 +3322,9 @@ test("playback binding controller does not arm sharer end suppression for a non-
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => ({
       videoId: "BVshared",
       url: "https://www.bilibili.com/video/BVshared",
@@ -3655,6 +3782,9 @@ test("a user seek that cancels an active rate catch-up is still recorded", async
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -3713,6 +3843,9 @@ test("a user pause that cancels an active rate catch-up is still recorded", () =
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -3850,6 +3983,9 @@ test("playback binding controller keeps the seek origin across seeking and seeke
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -3897,6 +4033,9 @@ test("playback binding controller re-snapshots the origin for a new seek gesture
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -3942,6 +4081,9 @@ test("playback binding controller re-samples the seek origin after a forced paus
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
     initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
     getSharedVideo: () => null,
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,

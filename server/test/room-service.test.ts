@@ -8,7 +8,7 @@ import {
   getDefaultSecurityConfig,
 } from "../src/app.js";
 import { createSessionRateLimitState } from "../src/rate-limit.js";
-import { createInMemoryRoomStore } from "../src/room-store.js";
+import { createInMemoryRoomStore, type RoomStore } from "../src/room-store.js";
 import { createRoomService } from "../src/room-service.js";
 import {
   createInMemoryRuntimeStore,
@@ -291,7 +291,7 @@ test("room service restores member state when empty-room expiry scheduling fails
     now: () => 1_000,
     createRoomCode: () => "ROOM01",
   });
-  const failingRoomStore = {
+  const failingRoomStore: RoomStore = {
     ...roomStore,
     async updateRoom(code, expectedVersion, patch) {
       if (patch.expiresAt !== undefined) {
@@ -457,7 +457,7 @@ test("room service skips leave recovery when room is concurrently deleted", asyn
   // Make updateRoom fail on expiry writes and delete the room from persistence
   // after the failed attempt to simulate concurrent deletion before the
   // catch block's existence check.
-  const concurrentDeleteRoomStore = {
+  const concurrentDeleteRoomStore: RoomStore = {
     ...roomStore,
     async updateRoom(code, expectedVersion, patch) {
       if (patch.expiresAt !== undefined) {
@@ -530,7 +530,7 @@ test("room service skips leave recovery when socket is already closed", async ()
     now: () => 1_000,
     createRoomCode: () => "ROOM01",
   });
-  const failingRoomStore = {
+  const failingRoomStore: RoomStore = {
     ...roomStore,
     async updateRoom(code, expectedVersion, patch) {
       if (patch.expiresAt !== undefined) {
@@ -998,6 +998,9 @@ test("room service flushes pending runtime store writes before exposing updated 
     async purgeNodeStatus() {},
     async countClusterActiveRooms() {
       return 0;
+    },
+    async listClusterActiveRoomCodes() {
+      return Array.from(clusterSessionsByRoom.keys()).sort();
     },
     async listClusterSessionsByRoom(roomCode) {
       return clusterSessionsByRoom.get(roomCode) ?? [];
@@ -2543,7 +2546,7 @@ test("join admission restores previous reconnect session when rollback follows r
   );
   const originalMemberId = originalJoiner.memberId;
 
-  assert.notEqual(originalMemberId, null);
+  assert.ok(originalMemberId);
   expireAfterNextFlush = true;
 
   const reconnectingJoiner = createSession("joiner-reconnect");

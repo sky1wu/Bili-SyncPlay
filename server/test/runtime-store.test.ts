@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createInMemoryRuntimeStore } from "../src/runtime-store.js";
-import type { Session } from "../src/types.js";
+import type { AttachedSession, Session } from "../src/types.js";
 
 function createSession(id: string): Session {
   return {
@@ -13,7 +13,7 @@ function createSession(id: string): Session {
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     instanceId: "test-node",
     remoteAddress: null,
     origin: null,

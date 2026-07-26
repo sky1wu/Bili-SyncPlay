@@ -30,7 +30,7 @@ npm test
 - `npm run lint:fix`：执行可安全应用的 ESLint 自动修复
 - `npm run format`：用 Prettier 重写格式
 - `npm run format:check`：只检查格式，不改文件
-- `npm run typecheck`：执行 protocol、server、extension 源码的 TypeScript 语义检查
+- `npm run typecheck`：执行 protocol、server、extension、admin-ui 的 TypeScript 语义检查，**源码与 `test/**` 都在范围内**。前三个包通过第二份 project（`tsconfig.test.json`）覆盖测试目录，admin-ui 则由其单一 `tsconfig.json` 一并覆盖。改动被测函数签名却漏改测试调用点，会在这一步失败。
 - `npm run build`：按依赖顺序构建 `protocol`、`server`、`extension`
 - `npm test`：执行 audit gate 测试，以及 protocol、server、extension 的全仓测试
 - `npm run audit`：执行依赖审计门禁；未进入白名单的 `high` 或 `critical` 漏洞会导致失败

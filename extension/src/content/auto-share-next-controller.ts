@@ -65,7 +65,13 @@ export function createAutoShareNextController(args: {
    * time is used unchanged.
    */
   getActiveSharedUrl?: () => string | null;
-  runtimeSendMessage: <T>(message: unknown) => Promise<T | null>;
+  /**
+   * 这里只发一种消息、只等一种响应,所以契约写成具体类型而不是无约束泛型 ——
+   * 泛型版本让任何桩都能冒充任意响应,响应字段改名时测试仍能编译通过。
+   */
+  runtimeSendMessage: (
+    message: ContentToBackgroundMessage,
+  ) => Promise<ShareCurrentVideoResponse | null>;
   debugLog: (message: string) => void;
 }): AutoShareNextController {
   const maxAttempts = args.maxAttempts ?? 4;
@@ -169,8 +175,7 @@ export function createAutoShareNextController(args: {
     args.debugLog(
       `Auto-share sending to background target=${pending.targetNormalizedUrl} from=${previousSharedUrl} attempt=${pending.attempt}/${maxAttempts} gen=${pending.generation}`,
     );
-    const response =
-      await args.runtimeSendMessage<ShareCurrentVideoResponse>(message);
+    const response = await args.runtimeSendMessage(message);
 
     // A newer navigation arrived while this request was in flight (it bumped the
     // generation, even if it targets the same URL). Abandon this stale request

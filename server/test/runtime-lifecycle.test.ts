@@ -14,7 +14,7 @@ import {
 import { createWsConnectionHandler } from "../src/ws-session-handler.js";
 import { createRedisRoomStore } from "../src/redis-room-store.js";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
-import type { Session } from "../src/types.js";
+import type { AttachedSession, Session } from "../src/types.js";
 
 const ALLOWED_ORIGIN = "chrome-extension://allowed-extension";
 const REDIS_URL = process.env.REDIS_URL;
@@ -110,7 +110,7 @@ function createSession(id: string): Session {
       send() {},
       close() {},
       terminate() {},
-    } as Session["socket"],
+    } as unknown as AttachedSession["socket"],
     instanceId: "runtime-test-node",
     remoteAddress: "127.0.0.1",
     origin: ALLOWED_ORIGIN,
@@ -147,7 +147,7 @@ test("cleanupSessionAfterClose unregisters and decrements even when leaveRoom fa
       },
     },
     runtimeStore: {
-      unregisterSession(sessionId) {
+      unregisterSession(sessionId: string) {
         unregistered.push(sessionId);
       },
     },
@@ -240,7 +240,7 @@ test("ws close cleanup proceeds after drain timeout when handler is hung", async
     instanceId: "drain-timeout-node",
     runtimeStore: {
       registerSession() {},
-      unregisterSession(sessionId) {
+      unregisterSession(sessionId: string) {
         unregistered.push(sessionId);
       },
       markSessionJoinedRoom() {},

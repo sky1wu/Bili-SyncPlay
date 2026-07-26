@@ -77,8 +77,16 @@ export function assertAllowedOriginsStartupPolicy(
 
 export type OriginPolicyLogger = (message: string) => void;
 
+/** 启动日志只读取来源策略这三项,不需要完整的 SecurityConfig。 */
+export type EffectiveOriginPolicy = Pick<
+  SecurityConfig,
+  | "allowedOrigins"
+  | "allowMissingOriginInDev"
+  | "allowAnyFirefoxExtensionOrigin"
+>;
+
 export function logEffectiveOriginPolicy(
-  config: SecurityConfig,
+  config: EffectiveOriginPolicy,
   log: OriginPolicyLogger = (message) => {
     console.log(message);
   },

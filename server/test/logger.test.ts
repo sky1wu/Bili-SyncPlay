@@ -1,17 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { GlobalEventStoreAppendInput } from "../src/admin/global-event-store.js";
-import type { RuntimeEvent } from "../src/admin/types.js";
+import type {
+  GlobalEventStore,
+  GlobalEventStoreAppendInput,
+} from "../src/admin/global-event-store.js";
 import { createStructuredLogger, inferLogLevel } from "../src/logger.js";
 import { createInMemoryRuntimeStore } from "../src/runtime-store.js";
 
 function createCapturingEventStore(): {
   appendedEvents: GlobalEventStoreAppendInput[];
-  store: {
-    append: (input: GlobalEventStoreAppendInput) => Promise<RuntimeEvent>;
-    query: () => never;
-    totalCountsByEvent: () => Record<string, number>;
-  };
+  store: GlobalEventStore;
 } {
   const appendedEvents: GlobalEventStoreAppendInput[] = [];
   return {
@@ -35,6 +33,9 @@ function createCapturingEventStore(): {
         throw new Error("query should not be called in this test");
       },
       totalCountsByEvent() {
+        return {};
+      },
+      countsByEventInWindow() {
         return {};
       },
     },

@@ -17,9 +17,13 @@ import {
 import { areSharedVideoUrlsEqual } from "../shared/url";
 import { setShadowRootTemplate } from "./shadow-template";
 
-type RuntimeSendMessage = <T>(
+/**
+ * 跨进程边界的响应必须在运行时用 type guard 收窄(见下方各调用点),所以契约就是
+ * `unknown`。写成无约束泛型只会让桩冒充任意响应类型,却给不出任何编译期保证。
+ */
+type RuntimeSendMessage = (
   message: ContentToBackgroundMessage,
-) => Promise<T | null>;
+) => Promise<unknown>;
 
 export type PageShareActionResult =
   "shared" | "cancelled" | "no-video" | "context-error" | "share-error";
@@ -88,7 +92,7 @@ export async function shareCurrentPageVideoFromContent(args: {
       return "no-video";
     }
 
-    const contextResponse = await args.runtimeSendMessage<unknown>({
+    const contextResponse = await args.runtimeSendMessage({
       type: "content:get-share-context",
     });
     if (!isShareContextResponse(contextResponse) || !contextResponse.ok) {
@@ -126,7 +130,7 @@ export async function shareCurrentPageVideoFromContent(args: {
       }
     }
 
-    const shareResponse = await args.runtimeSendMessage<unknown>({
+    const shareResponse = await args.runtimeSendMessage({
       type: "content:share-current-video",
     });
     if (!isShareCurrentVideoResponse(shareResponse) || !shareResponse.ok) {
@@ -420,7 +424,7 @@ export function createPageShareButtonController(args: {
     popoverError = null;
     render();
     try {
-      const response = await args.runtimeSendMessage<unknown>({
+      const response = await args.runtimeSendMessage({
         type: "content:get-share-context",
       });
       if (requestSeq !== popoverRequestSeq) {
@@ -485,7 +489,7 @@ export function createPageShareButtonController(args: {
     settingsPending = true;
     render();
     try {
-      const response = await args.runtimeSendMessage<unknown>({
+      const response = await args.runtimeSendMessage({
         type: "content:set-page-share-button-enabled",
         enabled: nextEnabled,
       });
