@@ -61,6 +61,18 @@ return 1
 const QUARANTINE_MEMBER_LUA = `
 local roomsKey = KEYS[1]
 local roomKey = KEYS[2]
+local kind = redis.call("TYPE", roomKey)["ok"]
+
+if kind == "none" then
+  -- No body at all; the orphan prune owns that case.
+  return 0
+end
+
+if kind ~= "string" then
+  -- GET would raise WRONGTYPE, so the caller could not have read bytes to
+  -- compare. Such a key can never be enumerated, so its member has to go.
+  return redis.call("ZREM", roomsKey, ARGV[2])
+end
 
 if redis.call("GET", roomKey) ~= ARGV[1] then
   return 0
@@ -186,9 +198,16 @@ local deletedCount = 0
 
 for _, code in ipairs(candidates) do
   local key = roomKeyPrefix .. code
-  local rawRoom = redis.call("GET", key)
+  -- A body of the wrong type makes GET raise, which would abort the whole
+  -- run: the member stays a candidate and every expired room ordered after
+  -- it stops being collected too.
+  local readable, rawRoom = pcall(function()
+    return redis.call("GET", key)
+  end)
 
-  if not rawRoom then
+  if not readable then
+    redis.call("ZREM", roomsKey, code)
+  elseif not rawRoom then
     redis.call("ZREM", roomsKey, code)
   else
     local ok, room = pcall(cjson.decode, rawRoom)
@@ -328,6 +347,20 @@ export async function createRedisRoomStore(
     return `${roomKeyPrefix}${code}`;
   }
 
+  // A room key of the wrong type — corruption, or a namespace collision with
+  // another user of this Redis — makes GET raise WRONGTYPE. Batches read many
+  // keys at once, so letting that escape would reject the whole batch and,
+  // through it, the reconcile the reaper waits on: one bad key would stop
+  // every other expired room from ever being collected. Null here means the
+  // body could not be read, which callers already treat as unusable.
+  async function readRoomBody(code: string): Promise<string | null> {
+    try {
+      return await redis.get(roomKey(code));
+    } catch {
+      return null;
+    }
+  }
+
   await redis.connect();
 
   // Walks room bodies and points the set at each one. On a database written
@@ -353,8 +386,10 @@ export async function createRedisRoomStore(
       // batch rather than paying a round trip each.
       const loaded = await Promise.all(
         codes.map(async (code) => {
+          // One key of the wrong type must not reject the whole batch and,
+          // with it, the reconcile the reaper waits on.
           const [raw, score] = await Promise.all([
-            redis.get(roomKey(code)),
+            readRoomBody(code),
             redis.zscore(roomsByExpiryKey, code),
           ]);
           return { code, raw, score, room: parseRoomOrNull(raw) };
@@ -386,8 +421,7 @@ export async function createRedisRoomStore(
       // A body that exists but cannot be read must leave the set, or counting
       // and enumeration disagree about it for as long as it sits there.
       const unreadable = loaded.filter(
-        ({ raw, room, score }) =>
-          room === null && raw !== null && score !== null,
+        ({ room, score }) => room === null && score !== null,
       );
       await Promise.all(
         unreadable.map(async ({ code, raw }) =>
@@ -396,7 +430,9 @@ export async function createRedisRoomStore(
             2,
             roomsByExpiryKey,
             roomKey(code),
-            raw as string,
+            // Empty when the read itself failed; the script's type check
+            // decides that case without consulting these bytes.
+            raw ?? "",
             code,
           ),
         ),
@@ -505,7 +541,7 @@ export async function createRedisRoomStore(
       const batch = codes.slice(offset, offset + REPAIR_CHUNK_SIZE);
       const loaded = await Promise.all(
         batch.map(async (code) => {
-          const raw = await redis.get(roomKey(code));
+          const raw = await readRoomBody(code);
           return { code, raw, room: parseRoomOrNull(raw) };
         }),
       );
@@ -532,9 +568,7 @@ export async function createRedisRoomStore(
       // Bodies that exist but cannot be read leave the set here too, not just
       // on the next reconcile, so a listing and the count it is paired with
       // never disagree about how many rooms there are.
-      const unreadable = loaded.filter(
-        ({ raw, room }) => raw !== null && room === null,
-      );
+      const unreadable = loaded.filter(({ room }) => room === null);
       if (unreadable.length > 0) {
         try {
           await Promise.all(

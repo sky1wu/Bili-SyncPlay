@@ -75,11 +75,31 @@ try {
       continue;
     }
 
-    const bodies = await Promise.all(keys.map((key) => redis.get(key)));
+    // A key of the wrong type makes GET raise WRONGTYPE. Reading them as one
+    // Promise.all would reject the whole batch, abort the rebuild mid-rollback
+    // and leave the legacy index incomplete, so each read is isolated.
+    const bodies = await Promise.all(
+      keys.map(async (key) => {
+        try {
+          return await redis.get(key);
+        } catch (error) {
+          console.warn(
+            `skipping unreadable key ${key}: ${error?.message ?? error}`,
+          );
+          // Counted here, not at the null check below, so the summary an
+          // operator reads to judge the rebuild separates unreadable keys
+          // from ones that simply vanished mid-scan.
+          skipped += 1;
+          return null;
+        }
+      }),
+    );
     const pending = [];
     for (const [index, raw] of bodies.entries()) {
       scanned += 1;
       if (!raw) {
+        // Either genuinely absent or unreadable; the warning above covers the
+        // latter, and neither can contribute an expiry entry.
         continue;
       }
       let room;

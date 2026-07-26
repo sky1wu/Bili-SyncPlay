@@ -974,3 +974,128 @@ test("redis room count and listing agree about an unreadable room body", async (
     await store.close();
   }
 });
+
+test("redis room store isolates a room key of the wrong type", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("wrongtype");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    await store.createRoom({
+      code: "OKROOM",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    const doomed = await store.createRoom({
+      code: "WRONGT",
+      joinToken: "join-token-123456",
+      createdAt: 2,
+    });
+    const victim = await store.createRoom({
+      code: "EXPIRE",
+      joinToken: "join-token-123456",
+      createdAt: 3,
+    });
+    const expiring = await store.updateRoom(victim.code, victim.version, {
+      expiresAt: 10,
+      lastActiveAt: 3,
+    });
+    assert.equal(expiring.ok, true);
+
+    // Corruption or a namespace collision leaves a room key that is not a
+    // string. GET raises WRONGTYPE, and reading a batch as one Promise.all
+    // would reject the whole reconcile — which the reaper waits on, so every
+    // other expired room would stop being collected.
+    await redis.del(`${namespace}:room:${doomed.code}`);
+    await redis.hset(`${namespace}:room:${doomed.code}`, "field", "value");
+    // Make it a reaper candidate too, so the Lua path is exercised.
+    await redis.zadd(roomsKey, "5", doomed.code);
+
+    const listed = await store.listRooms(LIST_ALL);
+    assert.deepEqual(listed.map((room) => room.code).sort(), [
+      "EXPIRE",
+      "OKROOM",
+    ]);
+    assert.equal(await store.countRooms({ includeExpired: true }), 2);
+    assert.equal(await redis.zscore(roomsKey, doomed.code), null);
+
+    // The genuinely expired room is still collected.
+    assert.equal(await store.deleteExpiredRooms(100), 1);
+    assert.equal(await redis.exists(`${namespace}:room:EXPIRE`), 0);
+    // The wrong-type key itself is left alone rather than destroyed.
+    assert.equal(await redis.exists(`${namespace}:room:WRONGT`), 1);
+  } finally {
+    await redis.del(
+      `${namespace}:room:OKROOM`,
+      `${namespace}:room:WRONGT`,
+      `${namespace}:room:EXPIRE`,
+      roomsKey,
+    );
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room reaper survives a candidate whose key turns the wrong type", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("reapwrong");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const doomed = await store.createRoom({
+      code: "BADKEY",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    const victim = await store.createRoom({
+      code: "REAPME",
+      joinToken: "join-token-123456",
+      createdAt: 2,
+    });
+    for (const [room, expiresAt] of [
+      [doomed, 10],
+      [victim, 20],
+    ] as const) {
+      const updated = await store.updateRoom(room.code, room.version, {
+        expiresAt,
+        lastActiveAt: 5,
+      });
+      assert.equal(updated.ok, true);
+    }
+
+    // Settle the reconcile first, then corrupt the key inside the cooldown
+    // window: the member is still a reaper candidate, so the Lua script is
+    // what has to survive the WRONGTYPE — nothing quarantined it beforehand.
+    await store.countRooms({ includeExpired: true });
+    await redis.del(`${namespace}:room:${doomed.code}`);
+    await redis.hset(`${namespace}:room:${doomed.code}`, "field", "value");
+    assert.notEqual(await redis.zscore(roomsKey, doomed.code), null);
+
+    // Without the guard the script raises on the first candidate and the room
+    // ordered after it is never collected.
+    assert.equal(await store.deleteExpiredRooms(100), 1);
+    assert.equal(await redis.exists(`${namespace}:room:REAPME`), 0);
+    assert.equal(await redis.zscore(roomsKey, doomed.code), null);
+    assert.equal(await redis.exists(`${namespace}:room:BADKEY`), 1);
+  } finally {
+    await redis.del(
+      `${namespace}:room:BADKEY`,
+      `${namespace}:room:REAPME`,
+      roomsKey,
+    );
+    await redis.quit();
+    await store.close();
+  }
+});
