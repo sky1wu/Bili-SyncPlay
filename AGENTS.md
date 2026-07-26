@@ -59,8 +59,14 @@ npm run release:version        # Bump version numbers
 **Before every commit**, run in order:
 
 ```bash
-npm run format:check && npm run lint && npm run typecheck && npm run build && npm test
+npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
 ```
+
+`npm run audit` is the same dependency gate CI runs in the `verify` job. It is
+not covered by `npm test`, and it can start failing without any local change
+when a new advisory is published — so run it before pushing, not only after CI
+turns red. Findings that do not apply to this repository go in
+`audit-allowlist.json` with a reason and a mandatory expiry date.
 
 ## Architecture
 
