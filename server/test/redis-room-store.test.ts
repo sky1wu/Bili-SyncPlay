@@ -5,78 +5,109 @@ import { createRedisRoomStore } from "../src/redis-room-store.js";
 
 const REDIS_URL = process.env.REDIS_URL;
 
-test("redis room reaper does not delete rooms whose expiresAt was cleared after zset candidate selection", async (t) => {
+type Store = Awaited<ReturnType<typeof createRedisRoomStore>>;
+
+function uniqueNamespace(label: string): string {
+  return `bsp-test-${label}-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 7)}`;
+}
+
+async function connect(): Promise<Redis> {
+  const redis = new Redis(REDIS_URL as string, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+  return redis;
+}
+
+function legacyRoomBody(
+  code: string,
+  overrides: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    code,
+    joinToken: "join-token-123456",
+    createdAt: 50,
+    ownerMemberId: null,
+    ownerDisplayName: null,
+    sharedVideo: null,
+    playback: null,
+    version: 0,
+    lastActiveAt: 60,
+    expiresAt: null,
+    ...overrides,
+  });
+}
+
+const LIST_ALL = {
+  keyword: undefined,
+  includeExpired: true,
+  page: 1,
+  pageSize: 50,
+  sortBy: "lastActiveAt",
+  sortOrder: "desc",
+} as const;
+
+test("redis room store scores non-expiring rooms at +inf and expiring ones at their expiry", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  const store = await createRedisRoomStore(REDIS_URL);
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
-
-  const roomCode = `T${Date.now().toString(36).slice(-5).toUpperCase()}`
-    .padEnd(6, "A")
-    .slice(0, 6);
+  const namespace = uniqueNamespace("score");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
 
   try {
     const room = await store.createRoom({
-      code: roomCode,
+      code: "SCORE1",
       joinToken: "join-token-123456",
       createdAt: 1,
     });
+    // A brand new room never expires, so it sits above every timestamp and can
+    // never be picked up as a reaper candidate.
+    assert.equal(await redis.zscore(roomsKey, room.code), "inf");
 
-    const expired = await store.updateRoom(room.code, room.version, {
-      expiresAt: 10,
-      lastActiveAt: 2,
+    const expiring = await store.updateRoom(room.code, room.version, {
+      expiresAt: 900,
+      lastActiveAt: 800,
     });
-    assert.equal(expired.ok, true);
-    if (!expired.ok) {
+    assert.equal(expiring.ok, true);
+    assert.equal(await redis.zscore(roomsKey, room.code), "900");
+
+    if (!expiring.ok) {
       throw new Error("Expected update to succeed.");
     }
-
-    const revived = await store.updateRoom(room.code, expired.room.version, {
+    const revived = await store.updateRoom(room.code, expiring.room.version, {
       expiresAt: null,
-      lastActiveAt: 3,
+      lastActiveAt: 850,
     });
     assert.equal(revived.ok, true);
-    if (!revived.ok) {
-      throw new Error("Expected room revival to succeed.");
-    }
+    assert.equal(await redis.zscore(roomsKey, room.code), "inf");
 
-    await redis.zadd("bsp:room-expiry", "10", room.code);
-
-    const deletedCount = await store.deleteExpiredRooms(10);
-    assert.equal(deletedCount, 0);
-
-    const remainingRoom = await store.getRoom(room.code);
-    assert.ok(remainingRoom);
-    assert.equal(remainingRoom?.expiresAt, null);
-    assert.equal(await redis.zscore("bsp:room-expiry", room.code), null);
+    await store.saveRoom({ ...room, expiresAt: 1_500, lastActiveAt: 900 });
+    assert.equal(await redis.zscore(roomsKey, room.code), "1500");
   } finally {
-    await store.deleteRoom(roomCode);
+    await store.deleteRoom("SCORE1");
+    await redis.del(roomsKey);
     await redis.quit();
     await store.close();
   }
 });
 
-test("redis room reaper drops reaped rooms from the room index", async (t) => {
+test("redis room reaper deletes expired rooms and drops their membership", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  const namespace = `bsp-test-reap-${Date.now().toString(36)}`;
-  const indexKey = `${namespace}:room-index`;
+  const namespace = uniqueNamespace("reap");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
+  const redis = await connect();
 
   try {
     const room = await store.createRoom({
@@ -84,8 +115,6 @@ test("redis room reaper drops reaped rooms from the room index", async (t) => {
       joinToken: "join-token-123456",
       createdAt: 1,
     });
-    assert.notEqual(await redis.zscore(indexKey, room.code), null);
-
     const expiring = await store.updateRoom(room.code, room.version, {
       expiresAt: 10,
       lastActiveAt: 2,
@@ -93,34 +122,173 @@ test("redis room reaper drops reaped rooms from the room index", async (t) => {
     assert.equal(expiring.ok, true);
 
     assert.equal(await store.deleteExpiredRooms(10), 1);
-
-    // The reaper used to delete the room body and its expiry entry while
-    // leaving the index entry behind, so the index grew by one per expired
-    // room forever and every listing scanned all of them.
-    assert.equal(await redis.zscore(indexKey, room.code), null);
-    assert.equal(await redis.zcard(indexKey), 0);
+    assert.equal(await store.getRoom(room.code), null);
+    assert.equal(await redis.zscore(roomsKey, room.code), null);
     assert.equal(await store.countRooms({ includeExpired: true }), 0);
   } finally {
-    await redis.del(indexKey, `${namespace}:room-expiry`);
+    await redis.del(roomsKey);
     await redis.quit();
     await store.close();
   }
 });
 
-test("redis room listing prunes index entries left by older builds", async (t) => {
+test("redis room reaper rescores rather than deletes a room whose expiry was cleared", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  const namespace = `bsp-test-stale-${Date.now().toString(36)}`;
-  const indexKey = `${namespace}:room-index`;
+  const namespace = uniqueNamespace("revive");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
+  const redis = await connect();
+
+  try {
+    const room = await store.createRoom({
+      code: "REVIVE",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    // Stale low score against a body that no longer expires: the reaper picks
+    // it up as a candidate and must repair it instead of deleting the room.
+    await redis.zadd(roomsKey, "10", room.code);
+
+    assert.equal(await store.deleteExpiredRooms(10), 0);
+    assert.ok(await store.getRoom(room.code));
+    assert.equal(await redis.zscore(roomsKey, room.code), "inf");
+  } finally {
+    await store.deleteRoom("REVIVE");
+    await redis.del(roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room store migrates a database that predates the sorted set", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("migrate");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const redis = await connect();
+
+  let store: Store | null = null;
+  try {
+    // Room bodies with no membership at all, as every database looks before
+    // this set exists. Reads must not report them missing.
+    await redis.set(`${namespace}:room:OLDONE`, legacyRoomBody("OLDONE"));
+    await redis.set(
+      `${namespace}:room:OLDTWO`,
+      legacyRoomBody("OLDTWO", { expiresAt: 70, lastActiveAt: 65 }),
+    );
+    assert.equal(await redis.exists(roomsKey), 0);
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+
+    const rooms = await store.listRooms(LIST_ALL);
+    assert.deepEqual(rooms.map((listed) => listed.code).sort(), [
+      "OLDONE",
+      "OLDTWO",
+    ]);
+    assert.equal(await redis.zscore(roomsKey, "OLDONE"), "inf");
+    // The expiring one is now reapable, which it was not before migration.
+    assert.equal(await redis.zscore(roomsKey, "OLDTWO"), "70");
+    assert.equal(await store.countRooms({ includeExpired: true }), 2);
+    assert.equal(await store.countRooms({ includeExpired: false }), 1);
+    assert.equal(await store.deleteExpiredRooms(100), 1);
+  } finally {
+    await redis.del(
+      `${namespace}:room:OLDONE`,
+      `${namespace}:room:OLDTWO`,
+      roomsKey,
+    );
+    await redis.quit();
+    await store?.close();
+  }
+});
+
+test("redis room store migration escapes glob metacharacters in the namespace", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // Square brackets are a Redis glob character class, so an unescaped
+  // SCAN MATCH would match nothing here and silently skip the migration.
+  const namespace = uniqueNamespace("glob[x]");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const redis = await connect();
+
+  let store: Store | null = null;
+  try {
+    await redis.set(`${namespace}:room:BRACKT`, legacyRoomBody("BRACKT"));
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+    const rooms = await store.listRooms(LIST_ALL);
+
+    assert.deepEqual(
+      rooms.map((listed) => listed.code),
+      ["BRACKT"],
+    );
+  } finally {
+    await redis.del(`${namespace}:room:BRACKT`, roomsKey);
+    await redis.quit();
+    await store?.close();
+  }
+});
+
+test("redis room store reconcile does not replay a stale body snapshot", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("snapshot");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const redis = await connect();
+
+  let store: Store | null = null;
+  try {
+    await redis.set(`${namespace}:room:RACING`, legacyRoomBody("RACING"));
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+    await store.listRooms(LIST_ALL);
+
+    const current = await store.getRoom("RACING");
+    assert.ok(current);
+    const updated = await store.updateRoom("RACING", current.version, {
+      expiresAt: 4_000,
+      lastActiveAt: 200,
+    });
+    assert.equal(updated.ok, true);
+    assert.equal(await redis.zscore(roomsKey, "RACING"), "4000");
+
+    // A reconcile that runs later must take the score from the body as it is
+    // now, never from a snapshot read before that update landed — restoring
+    // "+inf" here would make the room unreapable forever.
+    await redis.del(roomsKey);
+    await store.close();
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+    await store.listRooms(LIST_ALL);
+    assert.equal(await redis.zscore(roomsKey, "RACING"), "4000");
+  } finally {
+    await redis.del(`${namespace}:room:RACING`, roomsKey);
+    await redis.quit();
+    await store?.close();
+  }
+});
+
+test("redis room listing prunes members whose room body is gone", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("orphan");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
 
   try {
     const room = await store.createRoom({
@@ -128,150 +296,57 @@ test("redis room listing prunes index entries left by older builds", async (t) =
       joinToken: "join-token-123456",
       createdAt: 1,
     });
-    // Stands in for an entry a pre-fix reaper left behind: indexed, but with
-    // no room body to load.
-    await redis.zadd(indexKey, "5", "GHOST1");
-    assert.equal(await redis.zcard(indexKey), 2);
+    await redis.zadd(roomsKey, "+inf", "GHOST1");
+    assert.equal(await redis.zcard(roomsKey), 2);
 
-    const rooms = await store.listRooms({
-      keyword: undefined,
-      includeExpired: true,
-      page: 1,
-      pageSize: 50,
-      sortBy: "lastActiveAt",
-      sortOrder: "desc",
-    });
+    const rooms = await store.listRooms(LIST_ALL);
 
     assert.deepEqual(
       rooms.map((listed) => listed.code),
       [room.code],
     );
-    assert.equal(await redis.zscore(indexKey, "GHOST1"), null);
-    assert.equal(await redis.zcard(indexKey), 1);
+    assert.equal(await redis.zscore(roomsKey, "GHOST1"), null);
   } finally {
     await store.deleteRoom("LIVE01");
-    await redis.del(indexKey, `${namespace}:room-expiry`);
+    await redis.del(roomsKey);
     await redis.quit();
     await store.close();
   }
 });
 
-test("redis room store backfills index entries missing from legacy databases", async (t) => {
+test("redis room reconcile sweeps orphans again once the cooldown lapses", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  const namespace = `bsp-test-backfill-${Date.now().toString(36)}`;
-  const indexKey = `${namespace}:room-index`;
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
+  const namespace = uniqueNamespace("resweep");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  let clock = 1_000_000;
+  const store = await createRedisRoomStore(REDIS_URL, {
+    namespace,
+    now: () => clock,
   });
-  await redis.connect();
+  const redis = await connect();
 
-  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
   try {
-    // A room body with no index member: exactly the shape left by databases
-    // created before the room index existed, which shipped without a backfill.
-    await redis.set(
-      `${namespace}:room:LEGACY`,
-      JSON.stringify({
-        code: "LEGACY",
-        joinToken: "join-token-123456",
-        createdAt: 50,
-        ownerMemberId: null,
-        ownerDisplayName: null,
-        sharedVideo: null,
-        playback: null,
-        version: 0,
-        lastActiveAt: 60,
-        expiresAt: null,
-      }),
-    );
-    assert.equal(await redis.zcard(indexKey), 0);
+    assert.equal(await store.countRooms({ includeExpired: true }), 0);
 
-    store = await createRedisRoomStore(REDIS_URL, { namespace });
+    // Stands in for a node still on an older build reaping a room without
+    // touching this set, after this process already reconciled.
+    await redis.zadd(roomsKey, "+inf", "LATEGH");
+    assert.equal(await store.countRooms({ includeExpired: true }), 1);
 
-    // The repair runs off the startup path so readiness is not delayed by a
-    // keyspace walk; listing is what awaits it, so assert through a listing.
-    const rooms = await store.listRooms({
-      keyword: undefined,
-      includeExpired: true,
-      page: 1,
-      pageSize: 50,
-      sortBy: "createdAt",
-      sortOrder: "desc",
-    });
-    assert.deepEqual(
-      rooms.map((listed) => listed.code),
-      ["LEGACY"],
-    );
-    assert.equal(await redis.zscore(indexKey, "LEGACY"), "60");
+    clock += 60_000;
+    assert.equal(await store.countRooms({ includeExpired: true }), 1);
+
+    clock += 900_000;
+    assert.equal(await store.countRooms({ includeExpired: true }), 0);
+    assert.equal(await redis.zcard(roomsKey), 0);
   } finally {
-    await redis.del(
-      `${namespace}:room:LEGACY`,
-      indexKey,
-      `${namespace}:room-expiry`,
-    );
+    await redis.del(roomsKey);
     await redis.quit();
-    await store?.close();
-  }
-});
-
-test("redis room index backfill escapes glob metacharacters in the namespace", async (t) => {
-  if (!REDIS_URL) {
-    t.skip("REDIS_URL is not configured.");
-    return;
-  }
-
-  // Square brackets are a Redis glob character class, so an unescaped
-  // SCAN MATCH would match nothing here and silently skip the repair.
-  const namespace = `bsp-test[glob]-${Date.now().toString(36)}`;
-  const indexKey = `${namespace}:room-index`;
-  const roomBodyKey = `${namespace}:room:BRACKT`;
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
-
-  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
-  try {
-    await redis.set(
-      roomBodyKey,
-      JSON.stringify({
-        code: "BRACKT",
-        joinToken: "join-token-123456",
-        createdAt: 50,
-        ownerMemberId: null,
-        ownerDisplayName: null,
-        sharedVideo: null,
-        playback: null,
-        version: 0,
-        lastActiveAt: 60,
-        expiresAt: null,
-      }),
-    );
-
-    store = await createRedisRoomStore(REDIS_URL, { namespace });
-    const rooms = await store.listRooms({
-      keyword: undefined,
-      includeExpired: true,
-      page: 1,
-      pageSize: 50,
-      sortBy: "lastActiveAt",
-      sortOrder: "desc",
-    });
-
-    assert.deepEqual(
-      rooms.map((listed) => listed.code),
-      ["BRACKT"],
-    );
-  } finally {
-    await redis.del(roomBodyKey, indexKey, `${namespace}:room-expiry`);
-    await redis.quit();
-    await store?.close();
+    await store.close();
   }
 });
 
@@ -281,13 +356,9 @@ test("redis room listing sorts by createdAt without a keyspace scan", async (t) 
     return;
   }
 
-  const namespace = `bsp-test-created-${Date.now().toString(36)}`;
+  const namespace = uniqueNamespace("sort");
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
+  const redis = await connect();
 
   try {
     await store.createRoom({
@@ -301,13 +372,8 @@ test("redis room listing sorts by createdAt without a keyspace scan", async (t) 
       createdAt: 200,
     });
 
-    // createdAt ordering used to come from a KEYS scan; it now reads the same
-    // index as lastActiveAt and sorts the loaded bodies.
     const descending = await store.listRooms({
-      keyword: undefined,
-      includeExpired: true,
-      page: 1,
-      pageSize: 50,
+      ...LIST_ALL,
       sortBy: "createdAt",
       sortOrder: "desc",
     });
@@ -317,10 +383,7 @@ test("redis room listing sorts by createdAt without a keyspace scan", async (t) 
     );
 
     const ascending = await store.listRooms({
-      keyword: undefined,
-      includeExpired: true,
-      page: 1,
-      pageSize: 50,
+      ...LIST_ALL,
       sortBy: "createdAt",
       sortOrder: "asc",
     });
@@ -331,27 +394,21 @@ test("redis room listing sorts by createdAt without a keyspace scan", async (t) 
   } finally {
     await store.deleteRoom("OLDER1");
     await store.deleteRoom("NEWER1");
-    await redis.del(`${namespace}:room-index`, `${namespace}:room-expiry`);
+    await redis.del(`${namespace}:rooms-by-expiry`);
     await redis.quit();
     await store.close();
   }
 });
 
-test("redis room update applies the patch, bumps version, and maintains both indexes", async (t) => {
+test("redis room update applies the patch, bumps version, and rejects stale writers", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  const namespace = `bsp-test-cas-${Date.now().toString(36)}`;
-  const indexKey = `${namespace}:room-index`;
-  const expiryKey = `${namespace}:room-expiry`;
+  const namespace = uniqueNamespace("cas");
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
+  const redis = await connect();
 
   try {
     const room = await store.createRoom({
@@ -369,32 +426,18 @@ test("redis room update applies the patch, bumps version, and maintains both ind
       throw new Error("Expected update to succeed.");
     }
     assert.equal(updated.room.version, room.version + 1);
-    assert.equal(updated.room.expiresAt, 900);
     assert.equal(updated.room.createdAt, 1);
     assert.deepEqual(await store.getRoom(room.code), updated.room);
-    assert.equal(await redis.zscore(indexKey, room.code), "800");
-    assert.equal(await redis.zscore(expiryKey, room.code), "900");
 
-    // Clearing expiresAt must drop the expiry entry but keep the room indexed.
-    const revived = await store.updateRoom(room.code, updated.room.version, {
-      expiresAt: null,
-      lastActiveAt: 850,
-    });
-    assert.equal(revived.ok, true);
-    assert.equal(await redis.zscore(expiryKey, room.code), null);
-    assert.equal(await redis.zscore(indexKey, room.code), "850");
-
-    // A stale expected version must lose, and must not write anything.
     const stale = await store.updateRoom(room.code, room.version, {
       lastActiveAt: 999,
     });
     assert.equal(stale.ok, false);
     if (stale.ok) {
-      throw new Error("Expected stale update to be rejected.");
+      throw new Error("Expected the stale update to be rejected.");
     }
     assert.equal(stale.reason, "version_conflict");
-    assert.equal(await redis.zscore(indexKey, room.code), "850");
-    assert.equal((await store.getRoom(room.code))?.lastActiveAt, 850);
+    assert.equal((await store.getRoom(room.code))?.lastActiveAt, 800);
 
     const missing = await store.updateRoom("NOSUCH", 0, { lastActiveAt: 1 });
     assert.equal(missing.ok, false);
@@ -404,25 +447,21 @@ test("redis room update applies the patch, bumps version, and maintains both ind
     assert.equal(missing.reason, "not_found");
   } finally {
     await store.deleteRoom("CASRM1");
-    await redis.del(indexKey, expiryKey);
+    await redis.del(`${namespace}:rooms-by-expiry`);
     await redis.quit();
     await store.close();
   }
 });
 
-test("redis room update preserves playback number precision through the CAS script", async (t) => {
+test("redis room update preserves playback number precision", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  const namespace = `bsp-test-precision-${Date.now().toString(36)}`;
+  const namespace = uniqueNamespace("precision");
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
+  const redis = await connect();
 
   try {
     const room = await store.createRoom({
@@ -431,8 +470,8 @@ test("redis room update preserves playback number precision through the CAS scri
       createdAt: 1,
     });
 
-    // The CAS script must never re-encode the room body: cjson formats numbers
-    // with %.14g, which would round these away.
+    // No script may re-encode the room body: Redis's cjson formats numbers
+    // with %.14g, which rounds these away.
     const playback = {
       currentTime: 1234.5678901234567,
       playState: "playing" as const,
@@ -448,32 +487,72 @@ test("redis room update preserves playback number precision through the CAS scri
     });
     assert.equal(updated.ok, true);
 
-    const stored = await store.getRoom(room.code);
-    assert.deepEqual(stored?.playback, playback);
+    assert.deepEqual((await store.getRoom(room.code))?.playback, playback);
   } finally {
     await store.deleteRoom("PRECIS");
-    await redis.del(`${namespace}:room-index`, `${namespace}:room-expiry`);
+    await redis.del(`${namespace}:rooms-by-expiry`);
     await redis.quit();
     await store.close();
   }
 });
 
-test("redis room count answers from the indexes without loading room bodies", async (t) => {
+test("redis room create leaves the winner untouched when a code collides", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  const namespace = `bsp-test-count-${Date.now().toString(36)}`;
+  const namespace = uniqueNamespace("collide");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
+  const redis = await connect();
 
   try {
-    const live = await store.createRoom({
+    const winner = await store.createRoom({
+      code: "COLLID",
+      joinToken: "join-token-winner",
+      createdAt: 1,
+    });
+    const expiring = await store.updateRoom(winner.code, winner.version, {
+      expiresAt: 5_000,
+      lastActiveAt: 100,
+    });
+    assert.equal(expiring.ok, true);
+
+    await assert.rejects(() =>
+      store.createRoom({
+        code: "COLLID",
+        joinToken: "join-token-loser",
+        createdAt: 2,
+      }),
+    );
+
+    // The losing create must not have rewritten the body or the score.
+    assert.equal(
+      (await store.getRoom("COLLID"))?.joinToken,
+      "join-token-winner",
+    );
+    assert.equal(await redis.zscore(roomsKey, "COLLID"), "5000");
+  } finally {
+    await store.deleteRoom("COLLID");
+    await redis.del(roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room count answers every filter from the sorted set alone", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("count");
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    await store.createRoom({
       code: "LIVEAA",
       joinToken: "join-token-123456",
       createdAt: 1,
@@ -504,8 +583,6 @@ test("redis room count answers from the indexes without loading room bodies", as
 
     assert.equal(await store.countRooms({ includeExpired: true }), 3);
     assert.equal(await store.countRooms({ includeExpired: false }), 2);
-
-    // Keyword filtering runs on index members, and still honours expiry.
     assert.equal(
       await store.countRooms({ keyword: "gone", includeExpired: true }),
       1,
@@ -519,249 +596,19 @@ test("redis room count answers from the indexes without loading room bodies", as
       0,
     );
 
-    // Counts must agree with what listing reports.
+    // Counting and listing must agree.
     const listed = await store.listRooms({
-      keyword: undefined,
+      ...LIST_ALL,
       includeExpired: false,
-      page: 1,
-      pageSize: 50,
-      sortBy: "lastActiveAt",
-      sortOrder: "desc",
     });
     assert.equal(listed.length, 2);
-    assert.equal(live.code, "LIVEAA");
   } finally {
     await store.deleteRoom("LIVEAA");
     await store.deleteRoom("GONEBB");
     await store.deleteRoom("LATERC");
-    await redis.del(`${namespace}:room-index`, `${namespace}:room-expiry`);
+    await redis.del(`${namespace}:rooms-by-expiry`);
     await redis.quit();
     await store.close();
-  }
-});
-
-test("redis room index repair sweeps orphaned members so counts stay honest", async (t) => {
-  if (!REDIS_URL) {
-    t.skip("REDIS_URL is not configured.");
-    return;
-  }
-
-  const namespace = `bsp-test-sweep-${Date.now().toString(36)}`;
-  const indexKey = `${namespace}:room-index`;
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
-
-  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
-  try {
-    // Members left behind by a pre-fix reaper. countRooms no longer loads
-    // bodies, so only the startup sweep can clear these — otherwise every
-    // count and the rooms_non_expired metric would stay inflated forever.
-    await redis.zadd(indexKey, "10", "GHOSTA", "20", "GHOSTB");
-    assert.equal(await redis.zcard(indexKey), 2);
-
-    store = await createRedisRoomStore(REDIS_URL, { namespace });
-    assert.equal(await store.countRooms({ includeExpired: true }), 0);
-    assert.equal(await redis.zcard(indexKey), 0);
-  } finally {
-    await redis.del(indexKey, `${namespace}:room-expiry`);
-    await redis.quit();
-    await store?.close();
-  }
-});
-
-test("redis room count is unaffected by expiry members left over from older builds", async (t) => {
-  if (!REDIS_URL) {
-    t.skip("REDIS_URL is not configured.");
-    return;
-  }
-
-  const namespace = `bsp-test-orphanexp-${Date.now().toString(36)}`;
-  const expiryKey = `${namespace}:room-expiry`;
-  const indexKey = `${namespace}:room-index`;
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
-
-  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
-  try {
-    // Expiry members whose rooms are long gone, as a pre-fix delete would
-    // leave them. ZCARD minus ZCOUNT would charge these against unrelated
-    // live rooms and could report 0, so the startup sweep has to clear them.
-    await redis.zadd(expiryKey, "1", "DEADAA", "2", "DEADBB", "3", "DEADCC");
-
-    store = await createRedisRoomStore(REDIS_URL, { namespace });
-    await store.createRoom({
-      code: "ALIVEA",
-      joinToken: "join-token-123456",
-      createdAt: 1,
-    });
-    await store.createRoom({
-      code: "ALIVEB",
-      joinToken: "join-token-123456",
-      createdAt: 2,
-    });
-
-    assert.equal(await store.countRooms({ includeExpired: false }), 2);
-    assert.equal(await store.countRooms({ includeExpired: true }), 2);
-    assert.equal(await redis.zcard(expiryKey), 0);
-  } finally {
-    await store?.deleteRoom("ALIVEA");
-    await store?.deleteRoom("ALIVEB");
-    await redis.del(indexKey, expiryKey);
-    await redis.quit();
-    await store?.close();
-  }
-});
-
-test("redis room create clears a stale expiry member for a reused code", async (t) => {
-  if (!REDIS_URL) {
-    t.skip("REDIS_URL is not configured.");
-    return;
-  }
-
-  const namespace = `bsp-test-reuse-${Date.now().toString(36)}`;
-  const expiryKey = `${namespace}:room-expiry`;
-  const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
-
-  try {
-    // The code is handed out again while its previous occupant's expiry
-    // member is still around; the new room has no expiresAt, so counting it
-    // as expired would under-report until the next reaper cycle.
-    await redis.zadd(expiryKey, "1", "REUSED");
-
-    const room = await store.createRoom({
-      code: "REUSED",
-      joinToken: "join-token-123456",
-      createdAt: 1,
-    });
-    assert.equal(room.expiresAt, null);
-    assert.equal(await redis.zscore(expiryKey, "REUSED"), null);
-    assert.equal(await store.countRooms({ includeExpired: false }), 1);
-
-    // A losing create must leave the winner's entries untouched.
-    await assert.rejects(() =>
-      store.createRoom({
-        code: "REUSED",
-        joinToken: "join-token-other",
-        createdAt: 2,
-      }),
-    );
-    assert.equal(
-      (await store.getRoom("REUSED"))?.joinToken,
-      "join-token-123456",
-    );
-    assert.equal(await store.countRooms({ includeExpired: false }), 1);
-  } finally {
-    await store.deleteRoom("REUSED");
-    await redis.del(`${namespace}:room-index`, expiryKey);
-    await redis.quit();
-    await store.close();
-  }
-});
-
-test("redis room index repair sweeps again once the reconcile cooldown lapses", async (t) => {
-  if (!REDIS_URL) {
-    t.skip("REDIS_URL is not configured.");
-    return;
-  }
-
-  const namespace = `bsp-test-resweep-${Date.now().toString(36)}`;
-  const indexKey = `${namespace}:room-index`;
-  let clock = 1_000_000;
-  const store = await createRedisRoomStore(REDIS_URL, {
-    namespace,
-    now: () => clock,
-  });
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
-
-  try {
-    assert.equal(await store.countRooms({ includeExpired: true }), 0);
-
-    // Stands in for a node still on the old build reaping a room without
-    // removing its index member, after this process already swept.
-    await redis.zadd(indexKey, "10", "LATEGH");
-    assert.equal(await store.countRooms({ includeExpired: true }), 1);
-
-    // Inside the cooldown nothing re-sweeps, so the orphan still counts.
-    clock += 60_000;
-    assert.equal(await store.countRooms({ includeExpired: true }), 1);
-
-    // Past the cooldown the sweep runs again and the orphan is gone.
-    clock += 300_000;
-    assert.equal(await store.countRooms({ includeExpired: true }), 0);
-    assert.equal(await redis.zcard(indexKey), 0);
-  } finally {
-    await redis.del(indexKey, `${namespace}:room-expiry`);
-    await redis.quit();
-    await store.close();
-  }
-});
-
-test("redis room store reconciles indexed legacy rooms whose expiry entry was lost", async (t) => {
-  if (!REDIS_URL) {
-    t.skip("REDIS_URL is not configured.");
-    return;
-  }
-
-  const namespace = `bsp-test-lostexp-${Date.now().toString(36)}`;
-  const indexKey = `${namespace}:room-index`;
-  const expiryKey = `${namespace}:room-expiry`;
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
-
-  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
-  try {
-    // The pre-fix saveRoom wrote body + index in one MULTI but updated expiry
-    // in a separate call, so a crash in between left exactly this: an indexed
-    // room carrying an expiresAt that no expiry member records. It would be
-    // counted as alive forever and the reaper would never find it.
-    await redis.set(
-      `${namespace}:room:LOSTEX`,
-      JSON.stringify({
-        code: "LOSTEX",
-        joinToken: "join-token-123456",
-        createdAt: 50,
-        ownerMemberId: null,
-        ownerDisplayName: null,
-        sharedVideo: null,
-        playback: null,
-        version: 3,
-        lastActiveAt: 60,
-        expiresAt: 70,
-      }),
-    );
-    await redis.zadd(indexKey, "60", "LOSTEX");
-    assert.equal(await redis.zcard(expiryKey), 0);
-
-    store = await createRedisRoomStore(REDIS_URL, { namespace });
-
-    assert.equal(await store.countRooms({ includeExpired: true }), 1);
-    // Its expiresAt is in the past, so once reconciled it must not count as
-    // live, and the reaper must be able to find it.
-    assert.equal(await store.countRooms({ includeExpired: false }), 0);
-    assert.equal(await redis.zscore(expiryKey, "LOSTEX"), "70");
-    assert.equal(await store.deleteExpiredRooms(100), 1);
-  } finally {
-    await redis.del(`${namespace}:room:LOSTEX`, indexKey, expiryKey);
-    await redis.quit();
-    await store?.close();
   }
 });
 
@@ -771,14 +618,10 @@ test("redis room save surfaces per-command transaction failures", async (t) => {
     return;
   }
 
-  const namespace = `bsp-test-txerr-${Date.now().toString(36)}`;
-  const expiryKey = `${namespace}:room-expiry`;
+  const namespace = uniqueNamespace("txerr");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = new Redis(REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  await redis.connect();
+  const redis = await connect();
 
   try {
     const room = await store.createRoom({
@@ -787,23 +630,18 @@ test("redis room save surfaces per-command transaction failures", async (t) => {
       createdAt: 1,
     });
 
-    // Wrong type for the expiry key: the ZADD inside the transaction fails,
-    // but ioredis reports it per command rather than rejecting exec(). If the
-    // result were discarded, saveRoom would claim success while the body and
-    // index moved on without the expiry entry — the room would be counted
-    // wrong and the reaper would never find it.
-    await redis.del(expiryKey);
-    await redis.set(expiryKey, "not-a-sorted-set");
+    // Wrong type for the set key: the ZADD inside the transaction fails, but
+    // ioredis reports it per command rather than rejecting exec(). Discarding
+    // the result would let saveRoom claim success while the body moved on
+    // without its membership — miscounted, and never reaped.
+    await redis.del(roomsKey);
+    await redis.set(roomsKey, "not-a-sorted-set");
 
     await assert.rejects(() =>
       store.saveRoom({ ...room, expiresAt: 500, lastActiveAt: 400 }),
     );
   } finally {
-    await redis.del(
-      `${namespace}:room:TXFAIL`,
-      `${namespace}:room-index`,
-      expiryKey,
-    );
+    await redis.del(`${namespace}:room:TXFAIL`, roomsKey);
     await redis.quit();
     await store.close();
   }
