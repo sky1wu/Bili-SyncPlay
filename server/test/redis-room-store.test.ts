@@ -572,7 +572,7 @@ test("redis room index repair sweeps orphaned members so counts stay honest", as
   }
 });
 
-test("redis room count ignores expiry members that are no longer indexed", async (t) => {
+test("redis room count is unaffected by expiry members left over from older builds", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
@@ -580,14 +580,21 @@ test("redis room count ignores expiry members that are no longer indexed", async
 
   const namespace = `bsp-test-orphanexp-${Date.now().toString(36)}`;
   const expiryKey = `${namespace}:room-expiry`;
-  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const indexKey = `${namespace}:room-index`;
   const redis = new Redis(REDIS_URL, {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
   });
   await redis.connect();
 
+  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
   try {
+    // Expiry members whose rooms are long gone, as a pre-fix delete would
+    // leave them. ZCARD minus ZCOUNT would charge these against unrelated
+    // live rooms and could report 0, so the startup sweep has to clear them.
+    await redis.zadd(expiryKey, "1", "DEADAA", "2", "DEADBB", "3", "DEADCC");
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
     await store.createRoom({
       code: "ALIVEA",
       joinToken: "join-token-123456",
@@ -599,16 +606,63 @@ test("redis room count ignores expiry members that are no longer indexed", async
       createdAt: 2,
     });
 
-    // Expiry members whose rooms are long gone — left by a pre-fix delete or
-    // simply not swept yet. Subtracting them blindly from ZCARD would charge
-    // them against unrelated live rooms and could report 0.
-    await redis.zadd(expiryKey, "1", "DEADAA", "2", "DEADBB", "3", "DEADCC");
-
     assert.equal(await store.countRooms({ includeExpired: false }), 2);
     assert.equal(await store.countRooms({ includeExpired: true }), 2);
+    assert.equal(await redis.zcard(expiryKey), 0);
   } finally {
-    await store.deleteRoom("ALIVEA");
-    await store.deleteRoom("ALIVEB");
+    await store?.deleteRoom("ALIVEA");
+    await store?.deleteRoom("ALIVEB");
+    await redis.del(indexKey, expiryKey);
+    await redis.quit();
+    await store?.close();
+  }
+});
+
+test("redis room create clears a stale expiry member for a reused code", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = `bsp-test-reuse-${Date.now().toString(36)}`;
+  const expiryKey = `${namespace}:room-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  try {
+    // The code is handed out again while its previous occupant's expiry
+    // member is still around; the new room has no expiresAt, so counting it
+    // as expired would under-report until the next reaper cycle.
+    await redis.zadd(expiryKey, "1", "REUSED");
+
+    const room = await store.createRoom({
+      code: "REUSED",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    assert.equal(room.expiresAt, null);
+    assert.equal(await redis.zscore(expiryKey, "REUSED"), null);
+    assert.equal(await store.countRooms({ includeExpired: false }), 1);
+
+    // A losing create must leave the winner's entries untouched.
+    await assert.rejects(() =>
+      store.createRoom({
+        code: "REUSED",
+        joinToken: "join-token-other",
+        createdAt: 2,
+      }),
+    );
+    assert.equal(
+      (await store.getRoom("REUSED"))?.joinToken,
+      "join-token-123456",
+    );
+    assert.equal(await store.countRooms({ includeExpired: false }), 1);
+  } finally {
+    await store.deleteRoom("REUSED");
     await redis.del(`${namespace}:room-index`, expiryKey);
     await redis.quit();
     await store.close();

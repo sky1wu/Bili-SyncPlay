@@ -46,10 +46,13 @@ return deletedCount
 
 // Re-checks each candidate inside the script so a code cannot be dropped from
 // the index between the caller's read and the removal: createRoom may reuse a
-// just-reaped code, and its SET+ZADD transaction would otherwise be undone by
-// a ZREM decided against the previous occupant of that code.
+// just-reaped code, and its write would otherwise be undone by a ZREM decided
+// against the previous occupant of that code. Both sorted sets are cleared
+// together to keep the expiry set a subset of the index — see
+// COUNT_NON_EXPIRED_ROOMS below.
 const PRUNE_STALE_INDEX_ENTRIES_LUA = `
 local indexKey = KEYS[1]
+local expiryKey = KEYS[2]
 local roomKeyPrefix = ARGV[1]
 local removed = 0
 
@@ -57,6 +60,7 @@ for index = 2, #ARGV do
   local code = ARGV[index]
   if redis.call("EXISTS", roomKeyPrefix .. code) == 0 then
     removed = removed + redis.call("ZREM", indexKey, code)
+    redis.call("ZREM", expiryKey, code)
   end
 end
 
@@ -66,39 +70,50 @@ return removed
 // Same check-then-act hazard as the prune, mirrored: the room may be deleted
 // between the caller reading its body and this write, and an unconditional
 // ZADD would resurrect an index entry for a room that no longer exists.
+// Restores the expiry entry alongside the index one, so a legacy room that
+// already carries an expiresAt becomes reapable and countable in one step.
 const BACKFILL_INDEX_ENTRY_LUA = `
 local indexKey = KEYS[1]
-local roomKey = KEYS[2]
+local expiryKey = KEYS[2]
+local roomKey = KEYS[3]
 
 if redis.call("EXISTS", roomKey) == 0 then
   return 0
 end
 
-return redis.call("ZADD", indexKey, ARGV[1], ARGV[2])
-`;
+redis.call("ZADD", indexKey, ARGV[1], ARGV[2])
 
-// Counts non-expired rooms in one round trip. It deliberately does not just
-// subtract ZCOUNT(expiry) from ZCARD(index): an expiry member whose room body
-// and index entry are already gone — left by a pre-fix delete, or by a reaper
-// sweep that has not run yet — would be subtracted from live rooms it has
-// nothing to do with, and a large enough backlog would drive the count to 0.
-// Only expiry codes that are still present in the index may be subtracted.
-const COUNT_NON_EXPIRED_ROOMS_LUA = `
-local indexKey = KEYS[1]
-local expiryKey = KEYS[2]
-local total = redis.call("ZCARD", indexKey)
-local expired = redis.call("ZRANGEBYSCORE", expiryKey, "-inf", ARGV[1])
-local expiredInIndex = 0
-
-for _, code in ipairs(expired) do
-  if redis.call("ZSCORE", indexKey, code) then
-    expiredInIndex = expiredInIndex + 1
-  end
+if ARGV[3] == "" then
+  redis.call("ZREM", expiryKey, ARGV[2])
+else
+  redis.call("ZADD", expiryKey, ARGV[3], ARGV[2])
 end
 
-return total - expiredInIndex
+return 1
 `;
 
+// SET NX and the index writes must succeed or fail together: the previous
+// MULTI wrote the index unconditionally, so a losing create still reset the
+// winner's index score, and clearing a reused code's stale expiry entry could
+// not be done there at all without also clearing the live room's.
+const CREATE_ROOM_LUA = `
+if not redis.call("SET", KEYS[1], ARGV[1], "NX") then
+  return "exists"
+end
+
+redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
+redis.call("ZREM", KEYS[3], ARGV[3])
+
+return "ok"
+`;
+
+// Counting non-expired rooms is ZCARD minus ZCOUNT, with no per-member work:
+// every writer above moves the index and expiry sets together, so an expiry
+// member is always an index member whose body carries exactly that expiresAt.
+// An earlier revision verified each expired code against the index inside a
+// Lua loop; that made a metrics scrape's cost grow with the expiry backlog
+// while EVAL held Redis, which is precisely the stall this file exists to
+// avoid.
 // Chunk both the prune and the backfill: a first run against an index that
 // leaked for months must not build one multi-megabyte command or hold Redis
 // inside a single long-running script.
@@ -180,18 +195,6 @@ function matchesQuery(
   return true;
 }
 
-async function updateExpiryIndex(
-  redis: Redis,
-  roomExpiryKey: string,
-  room: PersistedRoom,
-): Promise<void> {
-  if (room.expiresAt === null) {
-    await redis.zrem(roomExpiryKey, room.code);
-    return;
-  }
-  await redis.zadd(roomExpiryKey, String(room.expiresAt), room.code);
-}
-
 export async function createRedisRoomStore(
   redisUrl: string,
   options: {
@@ -248,11 +251,13 @@ export async function createRedisRoomStore(
         if (room) {
           await redis.eval(
             BACKFILL_INDEX_ENTRY_LUA,
-            2,
+            3,
             roomIndexKey,
+            roomExpiryKey,
             roomKey(code),
             String(room.lastActiveAt),
             room.code,
+            room.expiresAt === null ? "" : String(room.expiresAt),
           );
         }
       }
@@ -264,11 +269,11 @@ export async function createRedisRoomStore(
   // loads bodies at all, so without a sweep here a leaked index would keep
   // inflating every count and metric for the life of the deployment. ZSCAN
   // rather than ZRANGE by rank, because ranks shift as members are removed.
-  async function pruneOrphanedIndexEntries(): Promise<void> {
+  async function pruneOrphansIn(sortedSetKey: string): Promise<void> {
     let cursor = "0";
     do {
       const [nextCursor, entries] = await redis.zscan(
-        roomIndexKey,
+        sortedSetKey,
         cursor,
         "COUNT",
         INDEX_REPAIR_CHUNK_SIZE,
@@ -285,12 +290,22 @@ export async function createRedisRoomStore(
       // is safe: live rooms are left alone.
       await redis.eval(
         PRUNE_STALE_INDEX_ENTRIES_LUA,
-        1,
+        2,
         roomIndexKey,
+        roomExpiryKey,
         roomKeyPrefix,
         ...codes,
       );
     } while (cursor !== "0");
+  }
+
+  // Both sets need sweeping, and neither can stand in for the other: an
+  // expiry member whose code was already dropped from the index would never
+  // be visited by a sweep driven from the index, yet ZCOUNT would keep
+  // subtracting it from unrelated live rooms.
+  async function pruneOrphanedIndexEntries(): Promise<void> {
+    await pruneOrphansIn(roomIndexKey);
+    await pruneOrphansIn(roomExpiryKey);
   }
 
   let backfillCompleted = false;
@@ -411,8 +426,9 @@ export async function createRedisRoomStore(
         try {
           await redis.eval(
             PRUNE_STALE_INDEX_ENTRIES_LUA,
-            1,
+            2,
             roomIndexKey,
+            roomExpiryKey,
             roomKeyPrefix,
             ...staleCodes,
           );
@@ -441,11 +457,17 @@ export async function createRedisRoomStore(
   return {
     async createRoom(input) {
       const room = createPersistedRoom(input);
-      const transaction = redis.multi();
-      transaction.set(roomKey(room.code), serializeRoom(room), "NX");
-      transaction.zadd(roomIndexKey, String(room.lastActiveAt), room.code);
-      const [created] = (await transaction.exec()) ?? [];
-      if (!created || created[1] !== "OK") {
+      const created = await redis.eval(
+        CREATE_ROOM_LUA,
+        3,
+        roomKey(room.code),
+        roomIndexKey,
+        roomExpiryKey,
+        serializeRoom(room),
+        String(room.lastActiveAt),
+        room.code,
+      );
+      if (created !== "ok") {
         throw new Error(`Room ${room.code} already exists.`);
       }
       return room;
@@ -454,11 +476,18 @@ export async function createRedisRoomStore(
       return parseRoom(await redis.get(roomKey(code)));
     },
     async saveRoom(room) {
+      // The expiry write belongs in the same transaction: as a follow-up call
+      // it could be lost to a crash or a connection drop, leaving the two
+      // sorted sets disagreeing about whether the room expires.
       const transaction = redis.multi();
       transaction.set(roomKey(room.code), serializeRoom(room));
       transaction.zadd(roomIndexKey, String(room.lastActiveAt), room.code);
+      if (room.expiresAt === null) {
+        transaction.zrem(roomExpiryKey, room.code);
+      } else {
+        transaction.zadd(roomExpiryKey, String(room.expiresAt), room.code);
+      }
       await transaction.exec();
-      await updateExpiryIndex(redis, roomExpiryKey, room);
       return room;
     },
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
@@ -547,14 +576,11 @@ export async function createRedisRoomStore(
         if (query.includeExpired) {
           return await redis.zcard(roomIndexKey);
         }
-        const nonExpired = await redis.eval(
-          COUNT_NON_EXPIRED_ROOMS_LUA,
-          2,
-          roomIndexKey,
-          roomExpiryKey,
-          String(currentTime),
-        );
-        return Math.max(Number(nonExpired), 0);
+        const [total, expired] = await Promise.all([
+          redis.zcard(roomIndexKey),
+          redis.zcount(roomExpiryKey, "-inf", currentTime),
+        ]);
+        return Math.max(total - expired, 0);
       }
 
       // Keyword search still has to look at every code, but codes come
