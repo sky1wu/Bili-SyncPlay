@@ -8,8 +8,13 @@ import {
 } from "./room-store.js";
 import type { PersistedRoom } from "./types.js";
 
+// Every branch that stops a code from having a room body must also drop it
+// from the room index, or the index grows without bound: it is the only
+// enumeration source for listRooms/countRooms, so leftovers turn every room
+// listing into a scan over every room the deployment has ever created.
 const DELETE_EXPIRED_ROOMS_LUA = `
 local expiryKey = KEYS[1]
+local indexKey = KEYS[2]
 local roomKeyPrefix = ARGV[1]
 local now = tonumber(ARGV[2])
 local expiredCodes = redis.call("ZRANGEBYSCORE", expiryKey, 0, now)
@@ -24,17 +29,24 @@ for _, code in ipairs(expiredCodes) do
     if ok and room and room["expiresAt"] ~= cjson.null and room["expiresAt"] ~= nil and tonumber(room["expiresAt"]) ~= nil and tonumber(room["expiresAt"]) <= now then
       redis.call("DEL", key)
       redis.call("ZREM", expiryKey, code)
+      redis.call("ZREM", indexKey, code)
       deletedCount = deletedCount + 1
     elseif ok and room and (room["expiresAt"] == cjson.null or room["expiresAt"] == nil) then
+      -- The room outlived its expiry candidacy; it keeps its index entry.
       redis.call("ZREM", expiryKey, code)
     end
   else
     redis.call("ZREM", expiryKey, code)
+    redis.call("ZREM", indexKey, code)
   end
 end
 
 return deletedCount
 `;
+
+// ZREM takes variadic members; chunk so a first-run cleanup of a long-leaking
+// index cannot build one multi-megabyte command.
+const STALE_INDEX_PRUNE_CHUNK_SIZE = 500;
 
 function serializeRoom(room: PersistedRoom): string {
   return JSON.stringify(room);
@@ -110,25 +122,46 @@ export async function createRedisRoomStore(
       | "sortOrder"
     >,
   ) {
-    const ascending = query.sortOrder === "asc";
-    const codes =
-      query.sortBy === "lastActiveAt"
-        ? ascending
-          ? await redis.zrange(roomIndexKey, 0, -1)
-          : await redis.zrevrange(roomIndexKey, 0, -1)
-        : await redis.keys(`${roomKeyPrefix}*`);
+    // Both sort orders enumerate through the room index. Its members are the
+    // room codes themselves, so sorting by createdAt needs nothing more than
+    // the room bodies this function already loads — the previous KEYS scan
+    // walked the entire Redis keyspace while blocking every other client.
+    // Order here is irrelevant: rooms are re-sorted below by query.sortBy.
+    const codes = await redis.zrange(roomIndexKey, 0, -1);
 
-    const normalizedCodes =
-      query.sortBy === "createdAt"
-        ? codes.map((key) => key.replace(roomKeyPrefix, ""))
-        : codes;
-    const rooms = (
-      await Promise.all(
-        normalizedCodes.map(async (code) =>
-          parseRoom(await redis.get(roomKey(code))),
-        ),
-      )
-    ).filter((room): room is PersistedRoom => room !== null);
+    const loaded = await Promise.all(
+      codes.map(async (code) => ({
+        code,
+        room: parseRoom(await redis.get(roomKey(code))),
+      })),
+    );
+
+    // A code with no room body is a leftover index entry. The reaper above
+    // now cleans up after itself, but indexes written by earlier builds still
+    // carry one entry per room they ever expired, so drop them on sight.
+    const staleCodes = loaded
+      .filter(({ room }) => room === null)
+      .map(({ code }) => code);
+    if (staleCodes.length > 0) {
+      try {
+        for (
+          let offset = 0;
+          offset < staleCodes.length;
+          offset += STALE_INDEX_PRUNE_CHUNK_SIZE
+        ) {
+          await redis.zrem(
+            roomIndexKey,
+            ...staleCodes.slice(offset, offset + STALE_INDEX_PRUNE_CHUNK_SIZE),
+          );
+        }
+      } catch {
+        // Best effort: a failed prune only means the next call retries it.
+      }
+    }
+
+    const rooms = loaded
+      .map(({ room }) => room)
+      .filter((room): room is PersistedRoom => room !== null);
 
     rooms.sort((left, right) => {
       const factor = query.sortOrder === "asc" ? 1 : -1;
@@ -208,8 +241,9 @@ export async function createRedisRoomStore(
     async deleteExpiredRooms(now) {
       const deletedCount = await redis.eval(
         DELETE_EXPIRED_ROOMS_LUA,
-        1,
+        2,
         roomExpiryKey,
+        roomIndexKey,
         roomKeyPrefix,
         String(now),
       );
