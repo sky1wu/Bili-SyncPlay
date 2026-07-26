@@ -44,9 +44,29 @@ end
 return deletedCount
 `;
 
-// ZREM takes variadic members; chunk so a first-run cleanup of a long-leaking
-// index cannot build one multi-megabyte command.
-const STALE_INDEX_PRUNE_CHUNK_SIZE = 500;
+// Re-checks each candidate inside the script so a code cannot be dropped from
+// the index between the caller's read and the removal: createRoom may reuse a
+// just-reaped code, and its SET+ZADD transaction would otherwise be undone by
+// a ZREM decided against the previous occupant of that code.
+const PRUNE_STALE_INDEX_ENTRIES_LUA = `
+local indexKey = KEYS[1]
+local roomKeyPrefix = ARGV[1]
+local removed = 0
+
+for index = 2, #ARGV do
+  local code = ARGV[index]
+  if redis.call("EXISTS", roomKeyPrefix .. code) == 0 then
+    removed = removed + redis.call("ZREM", indexKey, code)
+  end
+end
+
+return removed
+`;
+
+// Chunk both the prune and the backfill: a first run against an index that
+// leaked for months must not build one multi-megabyte command or hold Redis
+// inside a single long-running script.
+const INDEX_REPAIR_CHUNK_SIZE = 500;
 
 function serializeRoom(room: PersistedRoom): string {
   return JSON.stringify(room);
@@ -111,6 +131,49 @@ export async function createRedisRoomStore(
 
   await redis.connect();
 
+  // The room index landed after Redis persistence shipped and never got a
+  // backfill, so a database upgraded from those builds can hold room bodies
+  // with no index member. Enumeration used to reach them through the KEYS
+  // scan in the createdAt sort; now that the index is the only enumeration
+  // source, they would disappear from every admin listing and count instead.
+  // SCAN — not KEYS — so a large keyspace never blocks Redis for other
+  // clients, and this runs once per process rather than once per listing.
+  async function backfillRoomIndex(): Promise<void> {
+    let cursor = "0";
+    do {
+      const [nextCursor, keys] = await redis.scan(
+        cursor,
+        "MATCH",
+        `${roomKeyPrefix}*`,
+        "COUNT",
+        INDEX_REPAIR_CHUNK_SIZE,
+      );
+      cursor = nextCursor;
+      if (keys.length === 0) {
+        continue;
+      }
+
+      const codes = keys.map((key) => key.slice(roomKeyPrefix.length));
+      const scores = await Promise.all(
+        codes.map(async (code) => redis.zscore(roomIndexKey, code)),
+      );
+      const unindexed = codes.filter((_, index) => scores[index] === null);
+      for (const code of unindexed) {
+        const room = parseRoom(await redis.get(roomKey(code)));
+        if (room) {
+          await redis.zadd(roomIndexKey, String(room.lastActiveAt), room.code);
+        }
+      }
+    } while (cursor !== "0");
+  }
+
+  try {
+    await backfillRoomIndex();
+  } catch {
+    // Best effort: startup must not hinge on repairing a legacy index, and
+    // the next process start retries it.
+  }
+
   async function fetchRooms(
     query: Pick<
       RoomListQuery,
@@ -147,11 +210,14 @@ export async function createRedisRoomStore(
         for (
           let offset = 0;
           offset < staleCodes.length;
-          offset += STALE_INDEX_PRUNE_CHUNK_SIZE
+          offset += INDEX_REPAIR_CHUNK_SIZE
         ) {
-          await redis.zrem(
+          await redis.eval(
+            PRUNE_STALE_INDEX_ENTRIES_LUA,
+            1,
             roomIndexKey,
-            ...staleCodes.slice(offset, offset + STALE_INDEX_PRUNE_CHUNK_SIZE),
+            roomKeyPrefix,
+            ...staleCodes.slice(offset, offset + INDEX_REPAIR_CHUNK_SIZE),
           );
         }
       } catch {

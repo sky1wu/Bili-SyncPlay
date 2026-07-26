@@ -156,6 +156,67 @@ test("redis room listing prunes index entries left by older builds", async (t) =
   }
 });
 
+test("redis room store backfills index entries missing from legacy databases", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = `bsp-test-backfill-${Date.now().toString(36)}`;
+  const indexKey = `${namespace}:room-index`;
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
+  try {
+    // A room body with no index member: exactly the shape left by databases
+    // created before the room index existed, which shipped without a backfill.
+    await redis.set(
+      `${namespace}:room:LEGACY`,
+      JSON.stringify({
+        code: "LEGACY",
+        joinToken: "join-token-123456",
+        createdAt: 50,
+        ownerMemberId: null,
+        ownerDisplayName: null,
+        sharedVideo: null,
+        playback: null,
+        version: 0,
+        lastActiveAt: 60,
+        expiresAt: null,
+      }),
+    );
+    assert.equal(await redis.zcard(indexKey), 0);
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+
+    assert.equal(await redis.zscore(indexKey, "LEGACY"), "60");
+    const rooms = await store.listRooms({
+      keyword: undefined,
+      includeExpired: true,
+      page: 1,
+      pageSize: 50,
+      sortBy: "createdAt",
+      sortOrder: "desc",
+    });
+    assert.deepEqual(
+      rooms.map((listed) => listed.code),
+      ["LEGACY"],
+    );
+  } finally {
+    await redis.del(
+      `${namespace}:room:LEGACY`,
+      indexKey,
+      `${namespace}:room-expiry`,
+    );
+    await redis.quit();
+    await store?.close();
+  }
+});
+
 test("redis room listing sorts by createdAt without a keyspace scan", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
