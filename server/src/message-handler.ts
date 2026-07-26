@@ -746,14 +746,16 @@ export function createMessageHandler(options: {
             return;
           }
 
-          const state = await roomService.getRoomStateForSession(
-            session,
-            message.payload.memberToken,
-            message.type,
-          );
-          send(socket, {
-            type: "room:state",
-            payload: state,
+          await measureMessageHandling("sync:request", async () => {
+            const state = await roomService.getRoomStateForSession(
+              session,
+              message.payload.memberToken,
+              message.type,
+            );
+            send(socket, {
+              type: "room:state",
+              payload: state,
+            });
           });
           return;
         }

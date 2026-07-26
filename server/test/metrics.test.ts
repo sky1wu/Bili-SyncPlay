@@ -164,6 +164,29 @@ test("metrics collector renders event counters, histograms, and redis failure co
     assert.notEqual(match, null, gauge);
     assert.equal(Number(match![1]) > 0, true, gauge);
   }
+  // CPU time is the headroom signal for a single-process server: rate() over
+  // this counter is cores consumed, and the JS main thread tops out at 1.0.
+  for (const mode of ["user", "system"]) {
+    const match = rendered.match(
+      new RegExp(
+        `^bili_syncplay_process_cpu_seconds_total\\{mode="${mode}"\\} (\\d+(?:\\.\\d+)?)$`,
+        "m",
+      ),
+    );
+    assert.notEqual(match, null, mode);
+    // Only user time is reliably non-zero this early in a process; asserting
+    // system > 0 here would be flaky.
+    assert.equal(Number(match![1]) >= 0, true, mode);
+  }
+  assert.match(
+    rendered,
+    /^bili_syncplay_process_cpu_seconds_total\{mode="user"\} (?!0$)\d+(?:\.\d+)?$/m,
+  );
+  const coresMatch = rendered.match(
+    /^bili_syncplay_process_cpu_cores_available (\d+)$/m,
+  );
+  assert.notEqual(coresMatch, null);
+  assert.equal(Number(coresMatch![1]) >= 1, true);
   // GC kinds are pre-seeded so "no major GC" is an explicit zero series.
   for (const kind of ["major", "minor", "incremental", "weakcb"]) {
     assert.match(

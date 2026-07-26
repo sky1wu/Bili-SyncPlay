@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import {
   constants as perfHooksConstants,
   monitorEventLoopDelay,
@@ -13,6 +14,7 @@ const DEFAULT_HISTOGRAM_BUCKETS_SECONDS = [
 ] as const;
 
 const NANOSECONDS_PER_SECOND = 1e9;
+const MICROSECONDS_PER_SECOND = 1e6;
 
 const GC_KIND_NAMES: Readonly<Record<number, string>> = Object.freeze({
   [perfHooksConstants.NODE_PERFORMANCE_GC_MAJOR]: "major",
@@ -49,7 +51,11 @@ const RATE_LIMITED_MESSAGE_TYPES = [
 ] as const;
 
 export type MonitoredMessageType =
-  "video:share" | "playback:update" | "room:join" | "room:leave";
+  | "video:share"
+  | "playback:update"
+  | "room:join"
+  | "room:leave"
+  | "sync:request";
 
 type LabelValues = Record<string, string>;
 
@@ -181,6 +187,7 @@ export function createMetricsCollector(options: {
   let runtimeStore = options.runtimeStore;
   const serviceVersion = options.serviceVersion ?? "unknown";
   const processStartTimeSeconds = (Date.now() - process.uptime() * 1000) / 1000;
+  const availableCores = availableParallelism();
   const eventCounter: CounterMetric = {
     help: "Total structured log events grouped by event name",
     samples: new Map(),
@@ -294,6 +301,7 @@ export function createMetricsCollector(options: {
       includeExpired: false,
     });
     const memory = process.memoryUsage();
+    const cpu = process.cpuUsage();
     const eventSamples = Array.from(eventCounter.samples.values()).sort(
       (a, b) => (a.labels.event ?? "").localeCompare(b.labels.event ?? ""),
     );
@@ -390,6 +398,29 @@ export function createMetricsCollector(options: {
       "# HELP bili_syncplay_nodejs_process_rss_bytes Resident set size of the server process, in bytes",
       "# TYPE bili_syncplay_nodejs_process_rss_bytes gauge",
       formatMetricLine("bili_syncplay_nodejs_process_rss_bytes", memory.rss),
+      // rate() over this counter yields CPU cores consumed. The server runs a
+      // single Node process without cluster workers, so the JS main thread
+      // saturates at 1.0 regardless of how many cores the host reports —
+      // compare against bili_syncplay_process_cpu_cores_available to tell
+      // "one core is full" apart from "the box is idle".
+      "# HELP bili_syncplay_process_cpu_seconds_total Cumulative process CPU time in seconds, grouped by mode",
+      "# TYPE bili_syncplay_process_cpu_seconds_total counter",
+      formatMetricLine(
+        "bili_syncplay_process_cpu_seconds_total",
+        cpu.user / MICROSECONDS_PER_SECOND,
+        { mode: "user" },
+      ),
+      formatMetricLine(
+        "bili_syncplay_process_cpu_seconds_total",
+        cpu.system / MICROSECONDS_PER_SECOND,
+        { mode: "system" },
+      ),
+      "# HELP bili_syncplay_process_cpu_cores_available Logical cores available to the process",
+      "# TYPE bili_syncplay_process_cpu_cores_available gauge",
+      formatMetricLine(
+        "bili_syncplay_process_cpu_cores_available",
+        availableCores,
+      ),
       "# HELP bili_syncplay_connections Current websocket connection count",
       "# TYPE bili_syncplay_connections gauge",
       formatMetricLine(
