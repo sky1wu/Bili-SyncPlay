@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 // Rebuilds the pre-`rooms-by-expiry` room-expiry sorted set from room bodies.
 //
+// ORDER MATTERS: stop every node running this build first, then run this,
+// then start the old build. The scan is a plain batched read, not a snapshot,
+// so a node still serving requests can change a room's expiry after this
+// script has already read it — and the old build has no repair path for
+// room-expiry, so that room would never be reaped again.
+//
 // Run this once BEFORE rolling back to a build that still reads
 // `<namespace>:room-index` / `<namespace>:room-expiry`. That build rebuilds
 // room-index from room bodies on startup, but has no equivalent repair for

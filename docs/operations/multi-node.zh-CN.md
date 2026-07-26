@@ -193,7 +193,7 @@ node server/dist/global-admin-index.js
 - `bsp:room:*`、`bsp:rooms-by-expiry`：房间基础持久化。`bsp:rooms-by-expiry` 收录全部房间、分值为其过期时间(不过期的房间为 `+inf`),是列举、计数与回收的唯一来源。
 - `bsp:room-index`、`bsp:room-expiry`：已不再写入也不再读取,原样保留。
 
-  **回滚**到仍读取它们的版本前需要先做一步:旧版本会在启动时从房间体重建 `bsp:room-index`,却没有针对 `bsp:room-expiry` 的等价修复,因此在本版本期间被设为过期的房间将永远不会被回收。启动旧版本之前先执行 `REDIS_URL=... node server/scripts/rebuild-legacy-room-expiry.mjs`(加 `DRY_RUN=1` 可先预览)。该脚本幂等,既不改动房间体,也不触碰 `bsp:rooms-by-expiry`。
+  **回滚**到仍读取它们的版本前需要先做一步:旧版本会在启动时从房间体重建 `bsp:room-index`,却没有针对 `bsp:room-expiry` 的等价修复,因此在本版本期间被设为过期的房间将永远不会被回收。顺序是:**先停掉本版本的全部节点**,再执行 `REDIS_URL=... node server/scripts/rebuild-legacy-room-expiry.mjs`(加 `DRY_RUN=1` 可先预览),最后启动旧版本。该扫描是分批读取而非一致快照,仍在处理请求的节点可能在脚本读过之后修改房间的过期时间。脚本已随运行镜像发布,因此也可以 `docker exec <container> node server/scripts/rebuild-legacy-room-expiry.mjs`。脚本幂等,既不改动房间体,也不触碰 `bsp:rooms-by-expiry`。
 
   Redis ACL、备份与监控请覆盖 `bsp:rooms-by-expiry`;仅放行旧两个键的部署会导致房间写入失败。
 

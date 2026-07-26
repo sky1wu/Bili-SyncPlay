@@ -112,6 +112,18 @@ end
 return "ok"
 `;
 
+// Membership goes first: a Lua error does not roll back, and a body left
+// without membership is repaired by the next reconcile, whereas a membership
+// left without a body would keep the room in every count until the orphan
+// sweep runs. Doing both here also keeps deleteRoom from throwing after the
+// body is already gone, which would abort the caller's downstream cleanup and
+// leave other nodes serving a room that no longer exists.
+const DELETE_ROOM_LUA = `
+redis.call("ZREM", KEYS[2], ARGV[1])
+redis.call("DEL", KEYS[1])
+return "ok"
+`;
+
 // Candidates come from the score range itself, so rooms that never expire are
 // never even looked at. A candidate whose body disagrees with its score is
 // repaired rather than deleted: only a body that really is past its expiry is
@@ -539,10 +551,13 @@ export async function createRedisRoomStore(
       return { ok: true, room: nextRoom };
     },
     async deleteRoom(code) {
-      const transaction = redis.multi();
-      transaction.del(roomKey(code));
-      transaction.zrem(roomsByExpiryKey, code);
-      unwrapTransaction(await transaction.exec());
+      await redis.eval(
+        DELETE_ROOM_LUA,
+        2,
+        roomKey(code),
+        roomsByExpiryKey,
+        code,
+      );
     },
     async deleteExpiredRooms(currentTime) {
       // The reaper is the only caller that runs on its own timer, so it is
