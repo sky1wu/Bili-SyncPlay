@@ -1,4 +1,10 @@
 {
   "version": 1,
-  "entries": []
+  "entries": [
+    {
+      "id": "npm:react-router:1124282",
+      "reason": "GHSA-qwww-vcr4-c8h2 只影响 react-router 的 RSC (React Server Components) framework mode。admin-ui 是 Vite 构建的纯客户端 SPA,packages/admin-ui/src/app.tsx 用声明式 BrowserRouter,不存在服务端 action 执行路径,该 CSRF 绕过在本仓库不可达。修复版 8.3.0 为大版本,单独排期迁移而非顺带升级。",
+      "expires": "2026-10-31"
+    }
+  ]
 }

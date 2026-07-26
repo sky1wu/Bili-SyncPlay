@@ -59,8 +59,14 @@ npm run release:version        # Bump version numbers
 **Before every commit**, run in order:
 
 ```bash
-npm run format:check && npm run lint && npm run typecheck && npm run build && npm test
+npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
 ```
+
+`npm run audit` is the same dependency gate CI runs in the `verify` job. It is
+not covered by `npm test`, and it can start failing without any local change
+when a new advisory is published — so run it before pushing, not only after CI
+turns red. Findings that do not apply to this repository go in
+`audit-allowlist.json` with a reason and a mandatory expiry date.
 
 ## Architecture
 
@@ -116,7 +122,7 @@ Single source of truth for `ClientMessage`, `ServerMessage`, domain types (`Room
 - ALWAYS create a feature branch before making changes; NEVER push directly to `main`.
 - Do not rewrite published history unless explicitly requested by the repository maintainer.
 - Before every `git push`, run `npm run format:check` and the full pre-commit check sequence to avoid CI failures.
-- Before committing changes, run `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm run build`, and `npm test`.
+- Before committing changes, run `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm run build`, `npm test`, and `npm run audit`.
 - Keep formatting-only changes separate from behavior changes whenever practical.
 - Do not mix unrelated refactors, docs updates, and feature or bug-fix changes in a single commit when they can be reviewed independently.
 - Prefer small, reviewable commits that preserve behavior at each step of a refactor.
