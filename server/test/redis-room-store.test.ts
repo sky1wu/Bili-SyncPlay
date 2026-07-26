@@ -571,3 +571,88 @@ test("redis room index repair sweeps orphaned members so counts stay honest", as
     await store?.close();
   }
 });
+
+test("redis room count ignores expiry members that are no longer indexed", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = `bsp-test-orphanexp-${Date.now().toString(36)}`;
+  const expiryKey = `${namespace}:room-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  try {
+    await store.createRoom({
+      code: "ALIVEA",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    await store.createRoom({
+      code: "ALIVEB",
+      joinToken: "join-token-123456",
+      createdAt: 2,
+    });
+
+    // Expiry members whose rooms are long gone — left by a pre-fix delete or
+    // simply not swept yet. Subtracting them blindly from ZCARD would charge
+    // them against unrelated live rooms and could report 0.
+    await redis.zadd(expiryKey, "1", "DEADAA", "2", "DEADBB", "3", "DEADCC");
+
+    assert.equal(await store.countRooms({ includeExpired: false }), 2);
+    assert.equal(await store.countRooms({ includeExpired: true }), 2);
+  } finally {
+    await store.deleteRoom("ALIVEA");
+    await store.deleteRoom("ALIVEB");
+    await redis.del(`${namespace}:room-index`, expiryKey);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room index repair sweeps again once the reconcile cooldown lapses", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = `bsp-test-resweep-${Date.now().toString(36)}`;
+  const indexKey = `${namespace}:room-index`;
+  let clock = 1_000_000;
+  const store = await createRedisRoomStore(REDIS_URL, {
+    namespace,
+    now: () => clock,
+  });
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  try {
+    assert.equal(await store.countRooms({ includeExpired: true }), 0);
+
+    // Stands in for a node still on the old build reaping a room without
+    // removing its index member, after this process already swept.
+    await redis.zadd(indexKey, "10", "LATEGH");
+    assert.equal(await store.countRooms({ includeExpired: true }), 1);
+
+    // Inside the cooldown nothing re-sweeps, so the orphan still counts.
+    clock += 60_000;
+    assert.equal(await store.countRooms({ includeExpired: true }), 1);
+
+    // Past the cooldown the sweep runs again and the orphan is gone.
+    clock += 300_000;
+    assert.equal(await store.countRooms({ includeExpired: true }), 0);
+    assert.equal(await redis.zcard(indexKey), 0);
+  } finally {
+    await redis.del(indexKey, `${namespace}:room-expiry`);
+    await redis.quit();
+    await store.close();
+  }
+});

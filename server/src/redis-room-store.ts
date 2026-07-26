@@ -77,10 +77,35 @@ end
 return redis.call("ZADD", indexKey, ARGV[1], ARGV[2])
 `;
 
+// Counts non-expired rooms in one round trip. It deliberately does not just
+// subtract ZCOUNT(expiry) from ZCARD(index): an expiry member whose room body
+// and index entry are already gone — left by a pre-fix delete, or by a reaper
+// sweep that has not run yet — would be subtracted from live rooms it has
+// nothing to do with, and a large enough backlog would drive the count to 0.
+// Only expiry codes that are still present in the index may be subtracted.
+const COUNT_NON_EXPIRED_ROOMS_LUA = `
+local indexKey = KEYS[1]
+local expiryKey = KEYS[2]
+local total = redis.call("ZCARD", indexKey)
+local expired = redis.call("ZRANGEBYSCORE", expiryKey, "-inf", ARGV[1])
+local expiredInIndex = 0
+
+for _, code in ipairs(expired) do
+  if redis.call("ZSCORE", indexKey, code) then
+    expiredInIndex = expiredInIndex + 1
+  end
+end
+
+return total - expiredInIndex
+`;
+
 // Chunk both the prune and the backfill: a first run against an index that
 // leaked for months must not build one multi-megabyte command or hold Redis
 // inside a single long-running script.
 const INDEX_REPAIR_CHUNK_SIZE = 500;
+
+// How long a completed reconcile is trusted before enumeration sweeps again.
+const INDEX_RECONCILE_INTERVAL_MS = 300_000;
 
 // SCAN MATCH takes a glob, so a namespace carrying glob metacharacters — a
 // plain string as far as the config layer is concerned, e.g. "tenant[1]" —
@@ -171,6 +196,9 @@ export async function createRedisRoomStore(
   redisUrl: string,
   options: {
     namespace?: string;
+    // Injectable only so the reconcile cooldown below is testable without
+    // waiting it out; every other timestamp in this module stays on Date.now.
+    now?: () => number;
   } = {},
 ): Promise<RoomStore & { close: () => Promise<void> }> {
   const redis = new Redis(redisUrl, {
@@ -180,6 +208,7 @@ export async function createRedisRoomStore(
   const { roomKeyPrefix, roomExpiryKey, roomIndexKey } = getRedisRoomStoreKeys(
     options.namespace,
   );
+  const now = options.now ?? Date.now;
 
   function roomKey(code: string): string {
     return `${roomKeyPrefix}${code}`;
@@ -264,9 +293,18 @@ export async function createRedisRoomStore(
     } while (cursor !== "0");
   }
 
+  let backfillCompleted = false;
+  let lastReconciledAt = 0;
+
   async function reconcileRoomIndex(): Promise<void> {
-    await backfillRoomIndex();
+    // The keyspace walk only matters for a database written before the index
+    // existed, so it runs once; orphan sweeping repeats.
+    if (!backfillCompleted) {
+      await backfillRoomIndex();
+      backfillCompleted = true;
+    }
     await pruneOrphanedIndexEntries();
+    lastReconciledAt = now();
   }
 
   // Started here but deliberately not awaited: createSyncServer resolves
@@ -274,26 +312,46 @@ export async function createRedisRoomStore(
   // readiness and can trip deployment health-check timeouts on a Redis shared
   // with other services. Enumeration is the only thing that depends on the
   // repair, so enumeration awaits it instead — the cost lands on the first
-  // listing or count rather than on startup, and only once per process.
+  // listing or count rather than on startup.
   let indexRepair: Promise<void> | null = null;
 
   function repairRoomIndex(): Promise<void> {
+    // An in-flight reconcile is shared rather than duplicated.
     if (indexRepair) {
       return indexRepair;
     }
+    // Sweeping repeats on a cooldown rather than running once per process:
+    // during a rolling upgrade on a shared Redis, nodes still on the old
+    // build keep reaping rooms without removing their index members, and
+    // those orphans appear after this process already swept. countRooms no
+    // longer loads room bodies, so nothing else would ever notice them and
+    // both the overview and rooms_non_expired would stay inflated until a
+    // room listing happened to run or the process restarted.
+    if (
+      lastReconciledAt !== 0 &&
+      now() - lastReconciledAt < INDEX_RECONCILE_INTERVAL_MS
+    ) {
+      return Promise.resolve();
+    }
 
-    // Clear the cached promise on failure so one transient Redis error does
-    // not disable the repair for the life of the process, and rethrow so
-    // enumeration fails loudly rather than quietly reporting a room list and
-    // count built on an index that is known to be incomplete. The identity
-    // check keeps a late failure from discarding a newer attempt that already
-    // replaced this one.
-    const pending = reconcileRoomIndex().catch((error: unknown) => {
-      if (indexRepair === pending) {
-        indexRepair = null;
-      }
-      throw error;
-    });
+    // Clear the cached promise once settled so the cooldown governs the next
+    // run, and rethrow on failure so enumeration fails loudly rather than
+    // quietly reporting a list and count built on an index known to be
+    // incomplete. The identity checks keep a late settlement from discarding
+    // a newer attempt that already replaced this one.
+    const pending = reconcileRoomIndex().then(
+      () => {
+        if (indexRepair === pending) {
+          indexRepair = null;
+        }
+      },
+      (error: unknown) => {
+        if (indexRepair === pending) {
+          indexRepair = null;
+        }
+        throw error;
+      },
+    );
     indexRepair = pending;
     return pending;
   }
@@ -489,11 +547,14 @@ export async function createRedisRoomStore(
         if (query.includeExpired) {
           return await redis.zcard(roomIndexKey);
         }
-        const [total, expired] = await Promise.all([
-          redis.zcard(roomIndexKey),
-          redis.zcount(roomExpiryKey, "-inf", currentTime),
-        ]);
-        return Math.max(total - expired, 0);
+        const nonExpired = await redis.eval(
+          COUNT_NON_EXPIRED_ROOMS_LUA,
+          2,
+          roomIndexKey,
+          roomExpiryKey,
+          String(currentTime),
+        );
+        return Math.max(Number(nonExpired), 0);
       }
 
       // Keyword search still has to look at every code, but codes come
