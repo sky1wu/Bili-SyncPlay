@@ -18,6 +18,7 @@ COPY packages/admin-ui/tsconfig.json packages/admin-ui/vite.config.ts packages/a
 COPY packages/admin-ui/src packages/admin-ui/src
 COPY server/tsconfig.json server/
 COPY server/src server/src
+COPY server/scripts server/scripts
 RUN npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server && npm run build -w @bili-syncplay/admin-ui
 
 # 重装仅生产依赖（ws、ioredis 及 workspace 链接），供运行阶段拷贝。
@@ -35,6 +36,9 @@ COPY --from=builder /app/packages/protocol/package.json packages/protocol/
 COPY --from=builder /app/packages/protocol/dist packages/protocol/dist
 COPY --from=builder /app/server/package.json server/
 COPY --from=builder /app/server/dist server/dist
+# 运维脚本必须进运行镜像:回滚流程文档要求在容器内执行
+# rebuild-legacy-room-expiry.mjs,镜像里没有它这条指引就是空的。
+COPY --from=builder /app/server/scripts server/scripts
 # 服务端按 dist/../../packages/admin-ui/dist 解析管理面板构建产物。
 COPY --from=builder /app/packages/admin-ui/dist packages/admin-ui/dist
 

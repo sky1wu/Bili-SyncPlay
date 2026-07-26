@@ -15,8 +15,11 @@ export function getRedisRoomStoreKeys(namespace?: string) {
   const base = normalizeNamespaceBase(namespace);
   return {
     roomKeyPrefix: `${base}room:`,
-    roomExpiryKey: `${base}room-expiry`,
-    roomIndexKey: `${base}room-index`,
+    // One sorted set holds every room, scored by its expiry (+inf when the
+    // room does not expire), so enumeration, counting and reaping all read
+    // the same source instead of reconciling separate indexes against each
+    // other. It supersedes the room-index and room-expiry pair.
+    roomsByExpiryKey: `${base}rooms-by-expiry`,
   };
 }
 
