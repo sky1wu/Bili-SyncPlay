@@ -112,6 +112,34 @@ end
 return "ok"
 `;
 
+// Unconditional write, so the previous body is read inside the script rather
+// than by the caller: there is nothing to compare against, and taking it here
+// means no extra round trip and no window between the read and the write.
+//
+// The membership write is guarded and the body restored if it fails. Without
+// that the caller is told the save failed while the body has in fact already
+// changed, leaving the index carrying a score for a room state that no longer
+// exists — the same partial commit create and update already guard against.
+const SAVE_ROOM_LUA = `
+local previous = redis.call("GET", KEYS[1])
+redis.call("SET", KEYS[1], ARGV[1])
+
+local indexed = pcall(function()
+  redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
+end)
+
+if not indexed then
+  if previous then
+    redis.call("SET", KEYS[1], previous)
+  else
+    redis.call("DEL", KEYS[1])
+  end
+  return "index_failed"
+end
+
+return "ok"
+`;
+
 // Membership goes first: a Lua error does not roll back, and a body left
 // without membership is repaired by the next reconcile, whereas a membership
 // left without a body would keep the room in every count until the orphan
@@ -180,23 +208,6 @@ const RECONCILE_INTERVAL_MS = 900_000;
 // would silently match nothing and leave that deployment's rooms unmigrated.
 function escapeGlobPattern(value: string): string {
   return value.replaceAll(/[\\*?[\]]/g, (character) => `\\${character}`);
-}
-
-// ioredis resolves exec() with a per-command [error, value] tuple array and
-// does not reject when an individual command fails, so discarding the result
-// silently accepts partial transactions.
-function unwrapTransaction(
-  results: [Error | null, unknown][] | null,
-): unknown[] {
-  if (results === null) {
-    throw new Error("Redis transaction was aborted.");
-  }
-  return results.map(([error, value]) => {
-    if (error) {
-      throw error;
-    }
-    return value;
-  });
 }
 
 function serializeRoom(room: PersistedRoom): string {
@@ -524,10 +535,20 @@ export async function createRedisRoomStore(
       return parseRoom(await redis.get(roomKey(code)));
     },
     async saveRoom(room) {
-      const transaction = redis.multi();
-      transaction.set(roomKey(room.code), serializeRoom(room));
-      transaction.zadd(roomsByExpiryKey, expiryScore(room), room.code);
-      unwrapTransaction(await transaction.exec());
+      const saved = await redis.eval(
+        SAVE_ROOM_LUA,
+        2,
+        roomKey(room.code),
+        roomsByExpiryKey,
+        serializeRoom(room),
+        expiryScore(room),
+        room.code,
+      );
+      if (saved !== "ok") {
+        throw new Error(
+          `Room ${room.code} could not be indexed; the save was rolled back.`,
+        );
+      }
       return room;
     },
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {

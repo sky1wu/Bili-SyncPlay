@@ -612,36 +612,49 @@ test("redis room count answers every filter from the sorted set alone", async (t
   }
 });
 
-test("redis room save surfaces per-command transaction failures", async (t) => {
+test("redis room save rolls the room body back when indexing fails", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  const namespace = uniqueNamespace("txerr");
+  const namespace = uniqueNamespace("saveroll");
   const roomsKey = `${namespace}:rooms-by-expiry`;
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
   const redis = await connect();
 
   try {
     const room = await store.createRoom({
-      code: "TXFAIL",
+      code: "SAVERB",
       joinToken: "join-token-123456",
       createdAt: 1,
     });
+    const before = await store.getRoom(room.code);
+    assert.ok(before);
 
-    // Wrong type for the set key: the ZADD inside the transaction fails, but
-    // ioredis reports it per command rather than rejecting exec(). Discarding
-    // the result would let saveRoom claim success while the body moved on
-    // without its membership — miscounted, and never reaped.
+    // Wrong type for the set key: the body is written first and the ZADD then
+    // fails. Reporting the failure is not enough — the caller believes nothing
+    // was saved, so the body must still hold its previous state, or the index
+    // would carry a score for a room state that never took effect.
     await redis.del(roomsKey);
     await redis.set(roomsKey, "not-a-sorted-set");
 
     await assert.rejects(() =>
-      store.saveRoom({ ...room, expiresAt: 500, lastActiveAt: 400 }),
+      store.saveRoom({ ...before, expiresAt: 500, lastActiveAt: 400 }),
     );
+    assert.deepEqual(await store.getRoom(room.code), before);
+
+    // A save that would have created the body must leave none behind.
+    await assert.rejects(() =>
+      store.saveRoom({ ...before, code: "SAVENW", expiresAt: 600 }),
+    );
+    assert.equal(await redis.exists(`${namespace}:room:SAVENW`), 0);
   } finally {
-    await redis.del(`${namespace}:room:TXFAIL`, roomsKey);
+    await redis.del(
+      `${namespace}:room:SAVERB`,
+      `${namespace}:room:SAVENW`,
+      roomsKey,
+    );
     await redis.quit();
     await store.close();
   }
