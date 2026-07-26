@@ -126,6 +126,8 @@ const roomSessionController = createRoomSessionController({
   notifyContentScripts,
   compensateRoomState: (state, receivedAtMs) =>
     clockController.compensateRoomState(state, receivedAtMs),
+  markPlaybackArrival: (playback, atMs) =>
+    clockController.markPlaybackArrival(playback, atMs),
   clearPendingLocalShare: (reason) =>
     shareController.clearPendingLocalShare(reason),
   expirePendingLocalShareIfNeeded: () =>

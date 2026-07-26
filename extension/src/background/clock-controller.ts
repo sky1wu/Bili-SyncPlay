@@ -20,6 +20,20 @@ export interface ClockController {
     serverSendTime: number,
   ): void;
   compensateRoomState(state: RoomState, receivedAtMs?: number): RoomState;
+  /**
+   * Record when a playback snapshot arrived, before anything else can observe it.
+   *
+   * Anchoring at ingress rather than at the first `compensateRoomState` call takes
+   * the question of which caller has to supply an arrival time out of the picture:
+   * a snapshot becomes readable (`content:get-room-state`) and gets rewrapped
+   * (member joins/leaves) while its own handler is still persisting state or
+   * opening a tab, and any of those paths compensating first would otherwise anchor
+   * it at their own, later moment — losing everything the room played in between.
+   */
+  markPlaybackArrival(
+    playback: PlaybackState | null | undefined,
+    atMs: number,
+  ): void;
 }
 
 /**
@@ -140,42 +154,50 @@ export function createClockController(args: {
    * the server to report the snapshot's age as a *duration*, which is safe to
    * send across disagreeing clocks; `serverTime` is not.
    */
+  function markPlaybackArrival(
+    playback: PlaybackState | null | undefined,
+    atMs: number,
+  ): void {
+    if (!playback || playback.playState !== "playing") {
+      // An anchor only ever describes the snapshot the room is currently playing
+      // out. Dropping it keeps a stale one from outliving a pause, so no future
+      // snapshot can be extrapolated across the paused interval.
+      playbackAnchor = null;
+      return;
+    }
+
+    const key = playbackSnapshotKey(playback);
+    if (!playbackAnchor || playbackAnchor.key !== key) {
+      playbackAnchor = { key, atMs };
+      return;
+    }
+    // Only ever earlier. The same snapshot can be presented more than once (a
+    // re-broadcast, a replay), and the room has been at that position since the
+    // first time it reached us, so the earliest evidence is the best evidence.
+    if (atMs < playbackAnchor.atMs) {
+      playbackAnchor = { key, atMs };
+    }
+  }
+
   function compensateRoomState(
     state: RoomState,
     receivedAtMs?: number,
   ): RoomState {
     if (!state.playback || state.playback.playState !== "playing") {
-      // An anchor only ever describes the snapshot the room is currently playing
-      // out. Dropping it here keeps a stale one from outliving a pause, so no
-      // future snapshot can be extrapolated across the paused interval.
       playbackAnchor = null;
       return state;
     }
 
-    const key = playbackSnapshotKey(state.playback);
     const now = monotonicNow();
-    if (!playbackAnchor || playbackAnchor.key !== key) {
-      playbackAnchor = { key, atMs: receivedAtMs ?? now };
-    } else if (
-      receivedAtMs !== undefined &&
-      receivedAtMs < playbackAnchor.atMs
-    ) {
-      // A snapshot becomes readable before its own handler finishes: it is written
-      // to the room state, then persisted and the shared video's tab opened. A
-      // content script rehydrating in that window (`content:get-room-state`) asks
-      // for it with no arrival time, which anchors it at *request* time — later
-      // than it really arrived. When the handler then supplies the real arrival,
-      // correct the anchor backwards, or the interval between the two is lost for
-      // as long as the snapshot lasts.
-      //
-      // Only ever earlier: an arrival cannot postdate a reading of the same
-      // snapshot, so the earliest evidence is the best evidence.
-      playbackAnchor = { key, atMs: receivedAtMs };
-    }
-    return extrapolatePlayingRoomState(state, now - playbackAnchor.atMs);
+    // Anchors the snapshot if ingress did not already (a replay of a snapshot from
+    // a previous service-worker session has no anchor), and corrects one that a
+    // reader established late.
+    markPlaybackArrival(state.playback, receivedAtMs ?? now);
+    return extrapolatePlayingRoomState(state, now - playbackAnchor!.atMs);
   }
 
   return {
+    markPlaybackArrival,
     syncClock,
     startClockSyncTimer,
     stopClockSyncTimer,

@@ -67,6 +67,7 @@ export function createRoomSessionController(args: {
   ensureSharedVideoOpen: (state: RoomState) => Promise<void>;
   notifyContentScripts: (message: BackgroundToContentMessage) => Promise<void>;
   compensateRoomState: (state: RoomState, receivedAtMs?: number) => RoomState;
+  markPlaybackArrival: (playback: RoomState["playback"], atMs: number) => void;
   clearPendingLocalShare: (reason: string) => void;
   expirePendingLocalShareIfNeeded: () => void;
   normalizeUrl: (url: string | undefined | null) => string | null;
@@ -457,10 +458,24 @@ export function createRoomSessionController(args: {
     args.connectionState.lastError = null;
 
     await args.persistState();
+
+    // Same hazard as `handleRoomStateMessage`: handlers do not serialize, so a
+    // newer state can take over while this one awaits. This one carries the *older*
+    // playback snapshot, and the content script's staleness check is per actor, so
+    // pushing it would move playback backwards for real rather than being ignored.
+    // The newer state carries the server's own member list, so nothing is lost by
+    // dropping this delta — its join/leave toast comes from the content script
+    // diffing that state.
+    if (args.roomSessionState.roomState !== nextState) {
+      args.log(
+        "background",
+        `Dropped superseded member state for ${nextState.roomCode}`,
+      );
+      return;
+    }
+
     // No arrival stamp: a member delta carries the playback snapshot we already
-    // have, so it keeps the anchor established when that snapshot arrived. Passing
-    // "now" here would restart the anchor and silently drop however long the room
-    // has been playing since.
+    // have, and its anchor was established when that snapshot arrived at ingress.
     const compensatedRoomState = args.compensateRoomState(nextState);
     await args.notifyContentScripts({
       type: "background:apply-room-state",
@@ -547,6 +562,11 @@ export function createRoomSessionController(args: {
 
     const resolvedState = consumePendingMemberDeltas(nextState);
     stopWaitingForBootstrapRoomState();
+    // Anchored before the state becomes observable and before anything awaits:
+    // from here a rehydrating content script can read it and a member delta can
+    // rewrap it, and whichever of those compensates first must find the arrival
+    // already recorded rather than anchoring the snapshot at its own moment.
+    args.markPlaybackArrival(resolvedState.playback, receivedAtMs);
     args.roomSessionState.roomState = resolvedState;
     args.roomSessionState.roomCode = resolvedState.roomCode;
     args.connectionState.lastError = null;

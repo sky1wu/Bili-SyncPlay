@@ -277,3 +277,54 @@ test("a later arrival stamp never pushes an anchor forward", () => {
       0.001,
   );
 });
+
+test("an arrival marked at ingress survives a reader compensating first", () => {
+  // The member-delta and hydration paths compensate without an arrival time; with
+  // the anchor already recorded at ingress they no longer restart it.
+  const { controller, setMonotonicNow } = createHarness();
+  const state = roomState({ seq: 1, currentTime: 42, serverTime: 1_000 });
+
+  controller.markPlaybackArrival(state.playback, 1_000);
+  setMonotonicNow(3_000);
+
+  assert.ok(
+    Math.abs(controller.compensateRoomState(state).playback!.currentTime - 44) <
+      0.001,
+  );
+});
+
+test("marking a non-playing arrival drops the anchor", () => {
+  const { controller, setMonotonicNow } = createHarness();
+  const playing = roomState({ seq: 1, currentTime: 42, serverTime: 1_000 });
+  controller.markPlaybackArrival(playing.playback, 1_000);
+
+  controller.markPlaybackArrival(
+    roomState({
+      seq: 2,
+      currentTime: 42,
+      serverTime: 2_000,
+      playState: "paused",
+    }).playback,
+    2_000,
+  );
+  setMonotonicNow(120_000);
+
+  assert.equal(
+    controller.compensateRoomState(playing).playback!.currentTime,
+    42,
+  );
+});
+
+test("a repeated arrival of one snapshot keeps the earliest", () => {
+  const { controller, setMonotonicNow } = createHarness();
+  const state = roomState({ seq: 1, currentTime: 42, serverTime: 1_000 });
+
+  controller.markPlaybackArrival(state.playback, 1_000);
+  controller.markPlaybackArrival(state.playback, 2_500);
+  setMonotonicNow(3_000);
+
+  assert.ok(
+    Math.abs(controller.compensateRoomState(state).playback!.currentTime - 44) <
+      0.001,
+  );
+});

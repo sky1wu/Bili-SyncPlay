@@ -26,6 +26,11 @@ function createControllerHarness(options?: {
     state: RoomState;
     receivedAtMs: number | undefined;
   }> = [];
+  const arrivalMarks: Array<{
+    currentTime: number | undefined;
+    atMs: number;
+    persistCallsSoFar: number;
+  }> = [];
   const roomLifecycleResets: Array<{ action: string; reason: string }> = [];
   let connectCalls = 0;
   let disconnectCalls = 0;
@@ -76,6 +81,13 @@ function createControllerHarness(options?: {
       compensateCalls.push({ state, receivedAtMs });
       return state;
     },
+    markPlaybackArrival: (playback, atMs) => {
+      arrivalMarks.push({
+        currentTime: playback?.currentTime,
+        atMs,
+        persistCallsSoFar: persistReasons.length,
+      });
+    },
     clearPendingLocalShare: (reason) => {
       clearPendingLocalShareReasons.push(reason);
       runtimeState.share.pendingLocalShareUrl = null;
@@ -101,6 +113,7 @@ function createControllerHarness(options?: {
     ensureSharedVideoOpenCalls,
     clearPendingLocalShareReasons,
     compensateCalls,
+    arrivalMarks,
     roomLifecycleResets,
     get connectCalls() {
       return connectCalls;
@@ -871,5 +884,100 @@ test("drops a room state that a later one superseded while it awaited", async ()
   assert.deepEqual(harness.notifyContentMessages, []);
   assert.ok(
     harness.logs.some((line) => line.includes("Dropped superseded room state")),
+  );
+});
+
+test("marks the arrival before the state is observable or anything awaits", async () => {
+  // From the moment the state is stored, a rehydrating content script can read it
+  // and a member delta can rewrap it. Whichever compensates first must find the
+  // arrival already recorded. Reported by Codex review on #210.
+  let monotonicNow = 1_000;
+  const harness = createControllerHarness({
+    getMonotonicNow: () => monotonicNow,
+    persistState: () => {
+      monotonicNow += 300;
+    },
+  });
+
+  await harness.controller.handleServerMessage({
+    type: "room:state",
+    payload: {
+      roomCode: "ROOM09",
+      sharedVideo: null,
+      playback: {
+        actorId: "peer",
+        seq: 1,
+        url: "https://www.bilibili.com/video/BV1",
+        playState: "playing",
+        currentTime: 42,
+        playbackRate: 1,
+        serverTime: 1_000,
+      },
+      members: [{ id: "member-1", name: "Alice" }],
+    },
+  } satisfies ServerMessage);
+
+  assert.equal(harness.arrivalMarks.length, 1);
+  assert.equal(harness.arrivalMarks[0]?.atMs, 1_000);
+  assert.equal(harness.arrivalMarks[0]?.currentTime, 42);
+  // Before the first await, so before anything could observe the snapshot.
+  assert.equal(harness.arrivalMarks[0]?.persistCallsSoFar, 0);
+});
+
+test("drops a member delta that a later room state superseded", async () => {
+  // Mirror of the room-state path: this delta carries the *older* playback
+  // snapshot, and a per-actor staleness check will not save the receiver from it.
+  const laterSnapshot = {
+    roomCode: "ROOM10",
+    sharedVideo: null,
+    playback: {
+      actorId: "peer-b",
+      seq: 5,
+      url: "https://www.bilibili.com/video/BV1",
+      playState: "playing" as const,
+      currentTime: 99,
+      playbackRate: 1,
+      serverTime: 9_000,
+    },
+    members: [{ id: "member-1", name: "Alice" }],
+  } as unknown as RoomState;
+
+  const harness = createControllerHarness({
+    persistState: (callCount) => {
+      if (callCount === 1) {
+        harness.runtimeState.room.roomState = laterSnapshot;
+      }
+    },
+  });
+  harness.runtimeState.room.roomCode = "ROOM10";
+  harness.runtimeState.room.roomState = {
+    roomCode: "ROOM10",
+    sharedVideo: null,
+    playback: {
+      actorId: "peer-a",
+      seq: 1,
+      url: "https://www.bilibili.com/video/BV1",
+      playState: "playing",
+      currentTime: 42,
+      playbackRate: 1,
+      serverTime: 1_000,
+    },
+    members: [{ id: "member-1", name: "Alice" }],
+  } as unknown as RoomState;
+
+  await harness.controller.handleServerMessage({
+    type: "room:member-joined",
+    payload: {
+      roomCode: "ROOM10",
+      member: { id: "member-2", name: "Bob" },
+    },
+  } satisfies ServerMessage);
+
+  assert.deepEqual(harness.compensateCalls, []);
+  assert.deepEqual(harness.notifyContentMessages, []);
+  assert.ok(
+    harness.logs.some((line) =>
+      line.includes("Dropped superseded member state"),
+    ),
   );
 });
