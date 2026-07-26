@@ -67,26 +67,27 @@ end
 return removed
 `;
 
-// Same check-then-act hazard as the prune, mirrored: the room may be deleted
-// between the caller reading its body and this write, and an unconditional
-// ZADD would resurrect an index entry for a room that no longer exists.
-// Restores the expiry entry alongside the index one, so a legacy room that
-// already carries an expiresAt becomes reapable and countable in one step.
-const BACKFILL_INDEX_ENTRY_LUA = `
+// Re-points both sorted sets at what the room body currently says. Guarded by
+// the exact bytes the caller read rather than mere key existence: a concurrent
+// updateRoom on another node may already have written a newer body and correct
+// entries, and replaying a stale snapshot over them would resurrect an index
+// score that is too old or, worse, delete a freshly written expiry member and
+// leave the room permanently unreapable.
+const RECONCILE_INDEX_ENTRY_LUA = `
 local indexKey = KEYS[1]
 local expiryKey = KEYS[2]
 local roomKey = KEYS[3]
 
-if redis.call("EXISTS", roomKey) == 0 then
+if redis.call("GET", roomKey) ~= ARGV[1] then
   return 0
 end
 
-redis.call("ZADD", indexKey, ARGV[1], ARGV[2])
+redis.call("ZADD", indexKey, ARGV[2], ARGV[3])
 
-if ARGV[3] == "" then
-  redis.call("ZREM", expiryKey, ARGV[2])
+if ARGV[4] == "" then
+  redis.call("ZREM", expiryKey, ARGV[3])
 else
-  redis.call("ZADD", expiryKey, ARGV[3], ARGV[2])
+  redis.call("ZADD", expiryKey, ARGV[4], ARGV[3])
 end
 
 return 1
@@ -224,6 +225,13 @@ export async function createRedisRoomStore(
   // with no index member. Enumeration used to reach them through the KEYS
   // scan in the createdAt sort; now that the index is the only enumeration
   // source, they would disappear from every admin listing and count instead.
+  //
+  // It reconciles the expiry set too, and for every room body rather than
+  // only unindexed ones: the pre-fix saveRoom wrote the body and the index in
+  // one MULTI but updated expiry in a separate call, so a crash between them
+  // left indexed rooms carrying an expiresAt that no expiry member records —
+  // counted as alive forever, and never found by the reaper.
+  //
   // SCAN — not KEYS — so a large keyspace never blocks Redis for other
   // clients, and this runs once per process rather than once per listing.
   async function backfillRoomIndex(): Promise<void> {
@@ -242,24 +250,28 @@ export async function createRedisRoomStore(
       }
 
       const codes = keys.map((key) => key.slice(roomKeyPrefix.length));
-      const scores = await Promise.all(
-        codes.map(async (code) => redis.zscore(roomIndexKey, code)),
+      const loaded = await Promise.all(
+        codes.map(async (code) => {
+          const raw = await redis.get(roomKey(code));
+          return { code, raw, room: parseRoom(raw) };
+        }),
       );
-      const unindexed = codes.filter((_, index) => scores[index] === null);
-      for (const code of unindexed) {
-        const room = parseRoom(await redis.get(roomKey(code)));
-        if (room) {
-          await redis.eval(
-            BACKFILL_INDEX_ENTRY_LUA,
-            3,
-            roomIndexKey,
-            roomExpiryKey,
-            roomKey(code),
-            String(room.lastActiveAt),
-            room.code,
-            room.expiresAt === null ? "" : String(room.expiresAt),
-          );
+
+      for (const { code, raw, room } of loaded) {
+        if (!room || raw === null) {
+          continue;
         }
+        await redis.eval(
+          RECONCILE_INDEX_ENTRY_LUA,
+          3,
+          roomIndexKey,
+          roomExpiryKey,
+          roomKey(code),
+          raw,
+          String(room.lastActiveAt),
+          room.code,
+          room.expiresAt === null ? "" : String(room.expiresAt),
+        );
       }
     } while (cursor !== "0");
   }
@@ -576,10 +588,17 @@ export async function createRedisRoomStore(
         if (query.includeExpired) {
           return await redis.zcard(roomIndexKey);
         }
-        const [total, expired] = await Promise.all([
-          redis.zcard(roomIndexKey),
-          redis.zcount(roomExpiryKey, "-inf", currentTime),
-        ]);
+        // MULTI, not Promise.all: the two commands must observe one snapshot,
+        // or a reaper deleting a room between them yields a count that never
+        // existed. Both are O(log N) with no per-member work, so holding the
+        // server for the transaction costs nothing measurable.
+        const snapshot = await redis
+          .multi()
+          .zcard(roomIndexKey)
+          .zcount(roomExpiryKey, "-inf", currentTime)
+          .exec();
+        const total = Number(snapshot?.[0]?.[1] ?? 0);
+        const expired = Number(snapshot?.[1]?.[1] ?? 0);
         return Math.max(total - expired, 0);
       }
 

@@ -710,3 +710,57 @@ test("redis room index repair sweeps again once the reconcile cooldown lapses", 
     await store.close();
   }
 });
+
+test("redis room store reconciles indexed legacy rooms whose expiry entry was lost", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = `bsp-test-lostexp-${Date.now().toString(36)}`;
+  const indexKey = `${namespace}:room-index`;
+  const expiryKey = `${namespace}:room-expiry`;
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
+  try {
+    // The pre-fix saveRoom wrote body + index in one MULTI but updated expiry
+    // in a separate call, so a crash in between left exactly this: an indexed
+    // room carrying an expiresAt that no expiry member records. It would be
+    // counted as alive forever and the reaper would never find it.
+    await redis.set(
+      `${namespace}:room:LOSTEX`,
+      JSON.stringify({
+        code: "LOSTEX",
+        joinToken: "join-token-123456",
+        createdAt: 50,
+        ownerMemberId: null,
+        ownerDisplayName: null,
+        sharedVideo: null,
+        playback: null,
+        version: 3,
+        lastActiveAt: 60,
+        expiresAt: 70,
+      }),
+    );
+    await redis.zadd(indexKey, "60", "LOSTEX");
+    assert.equal(await redis.zcard(expiryKey), 0);
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+
+    assert.equal(await store.countRooms({ includeExpired: true }), 1);
+    // Its expiresAt is in the past, so once reconciled it must not count as
+    // live, and the reaper must be able to find it.
+    assert.equal(await store.countRooms({ includeExpired: false }), 0);
+    assert.equal(await redis.zscore(expiryKey, "LOSTEX"), "70");
+    assert.equal(await store.deleteExpiredRooms(100), 1);
+  } finally {
+    await redis.del(`${namespace}:room:LOSTEX`, indexKey, expiryKey);
+    await redis.quit();
+    await store?.close();
+  }
+});
