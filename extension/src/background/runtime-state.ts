@@ -7,6 +7,7 @@ import type {
   DebugLogEntry,
   SharedVideoToastPayload,
 } from "../shared/messages";
+import type { ClockSample } from "./clock-sync";
 
 declare const __BILI_SYNCPLAY_DEFAULT_SERVER_URL__: string | undefined;
 
@@ -107,6 +108,8 @@ export interface ShareState {
 export interface ClockState {
   clockOffsetMs: number | null;
   rttMs: number | null;
+  /** Recent ping samples backing the robust offset estimate, oldest first. */
+  clockSamples: ClockSample[];
   clockSyncTimer: number | null;
 }
 
@@ -171,6 +174,7 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
     clock: {
       clockOffsetMs: null,
       rttMs: null,
+      clockSamples: [],
       clockSyncTimer: null,
     },
     diagnostics: {

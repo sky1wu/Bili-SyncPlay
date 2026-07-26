@@ -8,6 +8,8 @@ const SEEK_START_TOAST_SUPPRESSION_MS = 1600;
 
 export interface ToastCoordinatorState {
   lastRoomState: RoomState | null;
+  /** Monotonic timestamp of when `lastRoomState` reached us. */
+  lastRoomStateAtMs: number | null;
   lastSeekToastByActor: Map<string, number>;
   lastSharedVideoToastKey: string | null;
 }
@@ -15,6 +17,7 @@ export interface ToastCoordinatorState {
 export function createToastCoordinatorState(): ToastCoordinatorState {
   return {
     lastRoomState: null,
+    lastRoomStateAtMs: null,
     lastSeekToastByActor: new Map(),
     lastSharedVideoToastKey: null,
   };
@@ -139,32 +142,56 @@ function formatPlaybackRate(rate: number): string {
   return `${rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}x`;
 }
 
+/**
+ * Whether the room's position moved by more than playing it out can explain —
+ * i.e. somebody seeked.
+ *
+ * The content advance is checked against *two independent* references for how
+ * much time really passed, and only counts as a seek when both agree, because
+ * each has its own way of lying:
+ *
+ * - `serverTime` deltas are immune to anything happening on this machine, but
+ *   they are stamped with the server's wall clock. A server whose clock is
+ *   stepped (a container or VM being resynced — a WSL dev server was seen moving
+ *   ~1.9s between pings) reports an interval that never happened, and the
+ *   difference lands here as a phantom jump.
+ * - The locally measured interval between the two states arriving is immune to
+ *   any clock being adjusted, but not to this page being starved: two states
+ *   processed back to back after the main thread stalls look like no time passed
+ *   at all, which reads as the room having jumped forward.
+ *
+ * A real seek moves the position against *both* references, so requiring both to
+ * exceed the threshold removes both families of false positive. The cost is a
+ * missed toast when a genuine seek coincides with a clock step or a stall —
+ * cosmetic, and the next update tells the story anyway. A false toast is worse:
+ * it says a peer did something they did not do.
+ */
 function shouldShowSeekToast(
   previousPlayback: PlaybackState,
   nextPlayback: PlaybackState,
+  localElapsedMs: number,
 ): boolean {
   const actualDelta = nextPlayback.currentTime - previousPlayback.currentTime;
-  const elapsedSeconds =
+  const serverElapsedSeconds =
     Math.max(0, nextPlayback.serverTime - previousPlayback.serverTime) / 1000;
-  const expectedDelta = elapsedSeconds * previousPlayback.playbackRate;
+  const localElapsedSeconds = Math.max(0, localElapsedMs) / 1000;
+  const unexplainedBy = (elapsedSeconds: number): number =>
+    Math.abs(actualDelta - elapsedSeconds * previousPlayback.playbackRate);
 
-  if (
-    previousPlayback.playState === "playing" &&
-    nextPlayback.playState !== "playing"
-  ) {
-    return (
-      Math.abs(actualDelta - expectedDelta) >= SEEK_TOAST_THRESHOLD_SECONDS
-    );
-  }
-
-  if (
-    previousPlayback.playState !== "playing" ||
-    nextPlayback.playState !== "playing"
-  ) {
+  if (previousPlayback.playState !== "playing") {
+    // The room was not advancing, so no amount of elapsed time explains a move:
+    // any change of position since then was somebody seeking. This also covers
+    // resuming from a pause, where crediting the elapsed time would report the
+    // paused interval as a backwards jump.
     return Math.abs(actualDelta) >= SEEK_TOAST_THRESHOLD_SECONDS;
   }
 
-  return Math.abs(actualDelta - expectedDelta) >= SEEK_TOAST_THRESHOLD_SECONDS;
+  return (
+    Math.min(
+      unexplainedBy(serverElapsedSeconds),
+      unexplainedBy(localElapsedSeconds),
+    ) >= SEEK_TOAST_THRESHOLD_SECONDS
+  );
 }
 
 export function getRoomStateToastMessages(args: {
@@ -173,7 +200,17 @@ export function getRoomStateToastMessages(args: {
   localMemberId: string | null;
   pendingRoomStateHydration: boolean;
   isCurrentPageShowingSharedVideo: boolean;
+  /**
+   * Monotonic "now", also the clock `lastSeekToastByActor` timestamps are on.
+   * Monotonic so that a clock adjustment cannot widen or collapse either the
+   * seek check or the suppression window.
+   */
   now: number;
+  /**
+   * Locally measured interval between `previousState` and `nextState` arriving,
+   * on the same monotonic clock as `now`. See {@link shouldShowSeekToast}.
+   */
+  elapsedSincePreviousStateMs: number;
   lastSeekToastByActor: Map<string, number>;
 }): {
   messages: string[];
@@ -229,7 +266,11 @@ export function getRoomStateToastMessages(args: {
     args.nextState.playback &&
     args.previousState.sharedVideo?.url === args.nextState.sharedVideo?.url &&
     args.nextState.playback.actorId !== args.localMemberId &&
-    shouldShowSeekToast(args.previousState.playback, args.nextState.playback),
+    shouldShowSeekToast(
+      args.previousState.playback,
+      args.nextState.playback,
+      args.elapsedSincePreviousStateMs,
+    ),
   );
 
   if (

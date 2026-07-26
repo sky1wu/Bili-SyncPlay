@@ -48,16 +48,24 @@ export function createRoomStateController(args: {
   }
 
   function notifyRoomStateToasts(state: RoomState): void {
+    // Monotonic: every timing decision downstream is an interval measured on
+    // this machine, and none of them may move when a clock is adjusted.
+    const now = performance.now();
     const plan = getRoomStateToastMessages({
       previousState: args.toastState.lastRoomState,
       nextState: state,
       localMemberId: args.runtimeState.localMemberId,
       pendingRoomStateHydration: args.runtimeState.pendingRoomStateHydration,
       isCurrentPageShowingSharedVideo: isCurrentPageShowingSharedVideo(state),
-      now: Date.now(),
+      now,
+      elapsedSincePreviousStateMs:
+        args.toastState.lastRoomStateAtMs === null
+          ? 0
+          : now - args.toastState.lastRoomStateAtMs,
       lastSeekToastByActor: args.toastState.lastSeekToastByActor,
     });
     args.toastState.lastRoomState = state;
+    args.toastState.lastRoomStateAtMs = now;
     args.toastState.lastSeekToastByActor = plan.nextSeekToastByActor;
     for (const message of plan.messages) {
       args.toastPresenter.show(message);

@@ -66,12 +66,19 @@ export function createRoomSessionController(args: {
   flushPendingShare: () => void;
   ensureSharedVideoOpen: (state: RoomState) => Promise<void>;
   notifyContentScripts: (message: BackgroundToContentMessage) => Promise<void>;
-  compensateRoomState: (state: RoomState) => RoomState;
+  compensateRoomState: (state: RoomState, receivedAtMs?: number) => RoomState;
+  markPlaybackArrival: (playback: RoomState["playback"], atMs: number) => void;
   clearPendingLocalShare: (reason: string) => void;
   expirePendingLocalShareIfNeeded: () => void;
   normalizeUrl: (url: string | undefined | null) => string | null;
   logServerError: (code: string, message: string) => void;
   shareToastTtlMs: number;
+  /**
+   * Monotonic time source, shared with the clock controller: it stamps when a
+   * `room:state` arrived so that the work before applying it is not credited to
+   * nobody. See `ClockController.compensateRoomState`.
+   */
+  getMonotonicNow?: () => number;
   bootstrapRoomStateTimeoutMs?: number;
 }): RoomSessionController {
   let pendingJoinAttemptResolvers: Array<(result: JoinAttemptResult) => void> =
@@ -83,6 +90,7 @@ export function createRoomSessionController(args: {
     null;
   const bootstrapRoomStateTimeoutMs =
     args.bootstrapRoomStateTimeoutMs ?? DEFAULT_BOOTSTRAP_ROOM_STATE_TIMEOUT_MS;
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
 
   function clearPendingMemberDeltas(): void {
     pendingMemberDeltas = [];
@@ -241,6 +249,8 @@ export function createRoomSessionController(args: {
       await args.persistState();
       return;
     }
+    // As in `applyRoomMemberState`: the queued deltas only change membership, so
+    // the playback snapshot — and its anchor — is the one that already arrived.
     const compensatedRoomState = args.compensateRoomState(resolvedState);
     await args.notifyContentScripts({
       type: "background:apply-room-state",
@@ -335,6 +345,9 @@ export function createRoomSessionController(args: {
   }
 
   async function handleServerMessage(message: ServerMessage): Promise<void> {
+    // Stamped before anything can await: everything between the socket event and
+    // here is synchronous, so this is when the message reached us.
+    const receivedAtMs = monotonicNow();
     switch (message.type) {
       case "room:created":
         clearPendingMemberDeltas();
@@ -371,7 +384,7 @@ export function createRoomSessionController(args: {
         args.notifyAll();
         return;
       case "room:state":
-        await handleRoomStateMessage(message.payload);
+        await handleRoomStateMessage(message.payload, receivedAtMs);
         return;
       case "room:member-joined":
         await handleRoomMemberJoined(
@@ -445,6 +458,24 @@ export function createRoomSessionController(args: {
     args.connectionState.lastError = null;
 
     await args.persistState();
+
+    // Same hazard as `handleRoomStateMessage`: handlers do not serialize, so a
+    // newer state can take over while this one awaits. This one carries the *older*
+    // playback snapshot, and the content script's staleness check is per actor, so
+    // pushing it would move playback backwards for real rather than being ignored.
+    // The newer state carries the server's own member list, so nothing is lost by
+    // dropping this delta — its join/leave toast comes from the content script
+    // diffing that state.
+    if (args.roomSessionState.roomState !== nextState) {
+      args.log(
+        "background",
+        `Dropped superseded member state for ${nextState.roomCode}`,
+      );
+      return;
+    }
+
+    // No arrival stamp: a member delta carries the playback snapshot we already
+    // have, and its anchor was established when that snapshot arrived at ingress.
     const compensatedRoomState = args.compensateRoomState(nextState);
     await args.notifyContentScripts({
       type: "background:apply-room-state",
@@ -490,7 +521,10 @@ export function createRoomSessionController(args: {
     );
   }
 
-  async function handleRoomStateMessage(nextState: RoomState): Promise<void> {
+  async function handleRoomStateMessage(
+    nextState: RoomState,
+    receivedAtMs: number,
+  ): Promise<void> {
     args.expirePendingLocalShareIfNeeded();
     const decision = decideIncomingRoomState({
       currentRoomState: args.roomSessionState.roomState,
@@ -528,6 +562,11 @@ export function createRoomSessionController(args: {
 
     const resolvedState = consumePendingMemberDeltas(nextState);
     stopWaitingForBootstrapRoomState();
+    // Anchored before the state becomes observable and before anything awaits:
+    // from here a rehydrating content script can read it and a member delta can
+    // rewrap it, and whichever of those compensates first must find the arrival
+    // already recorded rather than anchoring the snapshot at its own moment.
+    args.markPlaybackArrival(resolvedState.playback, receivedAtMs);
     args.roomSessionState.roomState = resolvedState;
     args.roomSessionState.roomCode = resolvedState.roomCode;
     args.connectionState.lastError = null;
@@ -542,8 +581,35 @@ export function createRoomSessionController(args: {
 
     await args.persistState();
     await args.ensureSharedVideoOpen(args.roomSessionState.roomState);
+
+    // Handlers are started with `void handleServerMessage(...)` per socket message
+    // and do not serialize, so a later state can take over while this one is
+    // awaiting (`ensureSharedVideoOpen` may open a tab). Once that has happened
+    // this handler has nothing left to deliver: the newer state is what the room
+    // is, and its own handler applies and announces it.
+    //
+    // Pushing our snapshot anyway would move playback backwards. The content
+    // script's staleness check is per actor
+    // (`room-state-apply-controller` looks up `lastAppliedVersionByActor`), so an
+    // older snapshot from a *different* member is not recognised as stale and gets
+    // applied — the position is a real regression, not a dropped message. Even for
+    // the same actor, compensating here would already have re-pointed the single
+    // anchor at the older snapshot before the content script rejects it.
+    if (args.roomSessionState.roomState !== resolvedState) {
+      args.log(
+        "background",
+        `Dropped superseded room state for ${resolvedState.roomCode}`,
+      );
+      return;
+    }
+
+    // Anchored on arrival, not on reaching this line: the awaits above can take a
+    // while and the room played on through them. `resolvedState` and its own
+    // arrival time, never a re-read of shared state — a snapshot must only ever be
+    // paired with the arrival that belongs to it.
     const compensatedRoomState = args.compensateRoomState(
-      args.roomSessionState.roomState,
+      resolvedState,
+      receivedAtMs,
     );
     await args.notifyContentScripts({
       type: "background:apply-room-state",
