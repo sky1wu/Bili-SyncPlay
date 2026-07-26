@@ -699,6 +699,10 @@ test("message handler records monitored duration metrics for critical room paths
     },
   });
   await handler.handleClientMessage(session, {
+    type: "sync:request",
+    payload: { memberToken: "member-token-1" },
+  });
+  await handler.handleClientMessage(session, {
     type: "room:leave",
     payload: { memberToken: "member-token-1" },
   });
@@ -707,6 +711,7 @@ test("message handler records monitored duration metrics for critical room paths
     "room:join",
     "video:share",
     "playback:update",
+    "sync:request",
     "room:leave",
   ]);
 });
