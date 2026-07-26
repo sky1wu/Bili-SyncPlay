@@ -197,11 +197,22 @@ export async function createRedisRoomStore(
   let indexBackfill: Promise<void> | null = null;
 
   function repairRoomIndex(): Promise<void> {
-    indexBackfill ??= backfillRoomIndex().catch(() => {
-      // Best effort: a failed repair leaves legacy rooms unlisted exactly as
-      // before this change, and the next process start retries it.
+    if (indexBackfill) {
+      return indexBackfill;
+    }
+
+    // Clear the cached promise on failure so one transient Redis error does
+    // not disable the repair for the life of the process — otherwise every
+    // later listing would keep dropping unindexed legacy rooms until a
+    // restart. The identity check keeps a late failure from discarding a
+    // newer attempt that already replaced this one.
+    const pending = backfillRoomIndex().catch(() => {
+      if (indexBackfill === pending) {
+        indexBackfill = null;
+      }
     });
-    return indexBackfill;
+    indexBackfill = pending;
+    return pending;
   }
 
   void repairRoomIndex();
