@@ -19,7 +19,7 @@ export interface ClockController {
     serverReceiveTime: number,
     serverSendTime: number,
   ): void;
-  compensateRoomState(state: RoomState): RoomState;
+  compensateRoomState(state: RoomState, receivedAtMs?: number): RoomState;
 }
 
 /**
@@ -116,13 +116,24 @@ export function createClockController(args: {
    * it, and a replay (a tab binding late, a popup asking for current state) is
    * advanced by the time that genuinely passed since it arrived.
    *
+   * `receivedAtMs` (monotonic, same source as this controller's) is when the
+   * snapshot actually arrived, and callers handling a fresh `room:state` must
+   * pass it: work between arrival and here — persisting state, opening the shared
+   * video's tab — is not instant, and anchoring at this call instead would credit
+   * that time to nobody. The room kept playing through it, so the receiver would
+   * apply a position already that stale as though it were current and then have to
+   * seek. Omit it only when replaying a snapshot that was anchored on arrival.
+   *
    * The cost is that we no longer know how stale a snapshot already was when it
    * reached us — on joining a room mid-playback that can be up to one broadcast
    * interval, which the receiver closes with a single seek. Recovering it needs
    * the server to report the snapshot's age as a *duration*, which is safe to
    * send across disagreeing clocks; `serverTime` is not.
    */
-  function compensateRoomState(state: RoomState): RoomState {
+  function compensateRoomState(
+    state: RoomState,
+    receivedAtMs?: number,
+  ): RoomState {
     if (!state.playback || state.playback.playState !== "playing") {
       return state;
     }
@@ -130,7 +141,7 @@ export function createClockController(args: {
     const key = playbackSnapshotKey(state.playback);
     const now = monotonicNow();
     if (!playbackAnchor || playbackAnchor.key !== key) {
-      playbackAnchor = { key, atMs: now };
+      playbackAnchor = { key, atMs: receivedAtMs ?? now };
     }
     return extrapolatePlayingRoomState(state, now - playbackAnchor.atMs);
   }

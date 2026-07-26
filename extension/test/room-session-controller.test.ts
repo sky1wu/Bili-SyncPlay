@@ -12,6 +12,8 @@ import { setLocaleForTests } from "../src/shared/i18n";
 function createControllerHarness(options?: {
   bootstrapRoomStateTimeoutMs?: number;
   persistState?: (callCount: number) => Promise<void> | void;
+  getMonotonicNow?: () => number;
+  onEnsureSharedVideoOpen?: () => void;
 }) {
   const runtimeState = createBackgroundRuntimeState();
   const sendToServerCalls: Array<unknown> = [];
@@ -20,6 +22,10 @@ function createControllerHarness(options?: {
   const logs: string[] = [];
   const ensureSharedVideoOpenCalls: RoomState[] = [];
   const clearPendingLocalShareReasons: string[] = [];
+  const compensateCalls: Array<{
+    state: RoomState;
+    receivedAtMs: number | undefined;
+  }> = [];
   const roomLifecycleResets: Array<{ action: string; reason: string }> = [];
   let connectCalls = 0;
   let disconnectCalls = 0;
@@ -61,11 +67,15 @@ function createControllerHarness(options?: {
     },
     ensureSharedVideoOpen: async (state) => {
       ensureSharedVideoOpenCalls.push(state);
+      options?.onEnsureSharedVideoOpen?.();
     },
     notifyContentScripts: async (message) => {
       notifyContentMessages.push(message);
     },
-    compensateRoomState: (state) => state,
+    compensateRoomState: (state, receivedAtMs) => {
+      compensateCalls.push({ state, receivedAtMs });
+      return state;
+    },
     clearPendingLocalShare: (reason) => {
       clearPendingLocalShareReasons.push(reason);
       runtimeState.share.pendingLocalShareUrl = null;
@@ -77,6 +87,7 @@ function createControllerHarness(options?: {
       logs.push(`server-error:${code}:${message}`);
     },
     shareToastTtlMs: 8_000,
+    getMonotonicNow: options?.getMonotonicNow,
     bootstrapRoomStateTimeoutMs: options?.bootstrapRoomStateTimeoutMs,
   });
 
@@ -89,6 +100,7 @@ function createControllerHarness(options?: {
     logs,
     ensureSharedVideoOpenCalls,
     clearPendingLocalShareReasons,
+    compensateCalls,
     roomLifecycleResets,
     get connectCalls() {
       return connectCalls;
@@ -731,4 +743,80 @@ test("room session controller syncs display name after room join completes", asy
       },
     },
   ]);
+});
+
+test("anchors an incoming room state on arrival, not after the work it triggers", async () => {
+  // `handleRoomStateMessage` persists state and may open the shared video's tab
+  // before the state is applied. The room keeps playing through that, so the
+  // anchor has to be the arrival, or the receiver treats an already-stale
+  // position as current and has to seek. Reported by Codex review on #210.
+  let monotonicNow = 1_000;
+  const harness = createControllerHarness({
+    getMonotonicNow: () => monotonicNow,
+    persistState: () => {
+      monotonicNow += 300;
+    },
+    onEnsureSharedVideoOpen: () => {
+      monotonicNow += 500;
+    },
+  });
+
+  await harness.controller.handleServerMessage({
+    type: "room:state",
+    payload: {
+      roomCode: "ROOM05",
+      sharedVideo: null,
+      playback: {
+        actorId: "peer",
+        seq: 1,
+        url: "https://www.bilibili.com/video/BV1",
+        playState: "playing",
+        currentTime: 42,
+        playbackRate: 1,
+        serverTime: 1,
+      },
+      members: [{ id: "member-1", name: "Alice" }],
+    },
+  } satisfies ServerMessage);
+
+  assert.equal(harness.compensateCalls.length, 1);
+  assert.equal(harness.compensateCalls[0]?.receivedAtMs, 1_000);
+  // Proof the stamp is not simply "now": the awaited work moved the clock on.
+  assert.equal(monotonicNow, 1_800);
+});
+
+test("member deltas keep the anchor of the snapshot that arrived", async () => {
+  // A membership change carries the playback snapshot we already hold, so it must
+  // not restamp the anchor — that would drop however long the room has played.
+  let monotonicNow = 5_000;
+  const harness = createControllerHarness({
+    getMonotonicNow: () => monotonicNow,
+  });
+  harness.runtimeState.room.roomCode = "ROOM06";
+  harness.runtimeState.room.roomState = {
+    roomCode: "ROOM06",
+    sharedVideo: null,
+    playback: {
+      actorId: "peer",
+      seq: 1,
+      url: "https://www.bilibili.com/video/BV1",
+      playState: "playing",
+      currentTime: 42,
+      playbackRate: 1,
+      serverTime: 1,
+    },
+    members: [{ id: "member-1", name: "Alice" }],
+  } as unknown as RoomState;
+
+  monotonicNow = 9_000;
+  await harness.controller.handleServerMessage({
+    type: "room:member-joined",
+    payload: {
+      roomCode: "ROOM06",
+      member: { id: "member-2", name: "Bob" },
+    },
+  } satisfies ServerMessage);
+
+  assert.equal(harness.compensateCalls.length, 1);
+  assert.equal(harness.compensateCalls[0]?.receivedAtMs, undefined);
 });

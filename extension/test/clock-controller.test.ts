@@ -85,6 +85,34 @@ test("replaying the same snapshot advances it by the time since it arrived", () 
   );
 });
 
+test("anchors on the supplied arrival stamp, not on the call", () => {
+  // Work between arrival and applying a snapshot (persisting state, opening the
+  // shared video's tab) is not instant, and the room plays on through it.
+  const { controller, setMonotonicNow } = createHarness();
+  setMonotonicNow(1_800);
+
+  const compensated = controller.compensateRoomState(
+    roomState({ seq: 1, currentTime: 42 }),
+    1_000,
+  );
+
+  assert.ok(Math.abs(compensated.playback!.currentTime - 42.8) < 0.001);
+});
+
+test("keeps extrapolating from the arrival stamp on later replays", () => {
+  const { controller, setMonotonicNow } = createHarness();
+  const state = roomState({ seq: 1, currentTime: 42 });
+  setMonotonicNow(1_500);
+  controller.compensateRoomState(state, 1_000);
+
+  setMonotonicNow(3_000);
+
+  assert.ok(
+    Math.abs(controller.compensateRoomState(state).playback!.currentTime - 44) <
+      0.001,
+  );
+});
+
 test("each new snapshot re-anchors instead of accumulating", () => {
   const { controller, setMonotonicNow } = createHarness();
 

@@ -66,12 +66,18 @@ export function createRoomSessionController(args: {
   flushPendingShare: () => void;
   ensureSharedVideoOpen: (state: RoomState) => Promise<void>;
   notifyContentScripts: (message: BackgroundToContentMessage) => Promise<void>;
-  compensateRoomState: (state: RoomState) => RoomState;
+  compensateRoomState: (state: RoomState, receivedAtMs?: number) => RoomState;
   clearPendingLocalShare: (reason: string) => void;
   expirePendingLocalShareIfNeeded: () => void;
   normalizeUrl: (url: string | undefined | null) => string | null;
   logServerError: (code: string, message: string) => void;
   shareToastTtlMs: number;
+  /**
+   * Monotonic time source, shared with the clock controller: it stamps when a
+   * `room:state` arrived so that the work before applying it is not credited to
+   * nobody. See `ClockController.compensateRoomState`.
+   */
+  getMonotonicNow?: () => number;
   bootstrapRoomStateTimeoutMs?: number;
 }): RoomSessionController {
   let pendingJoinAttemptResolvers: Array<(result: JoinAttemptResult) => void> =
@@ -83,6 +89,7 @@ export function createRoomSessionController(args: {
     null;
   const bootstrapRoomStateTimeoutMs =
     args.bootstrapRoomStateTimeoutMs ?? DEFAULT_BOOTSTRAP_ROOM_STATE_TIMEOUT_MS;
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
 
   function clearPendingMemberDeltas(): void {
     pendingMemberDeltas = [];
@@ -241,6 +248,8 @@ export function createRoomSessionController(args: {
       await args.persistState();
       return;
     }
+    // As in `applyRoomMemberState`: the queued deltas only change membership, so
+    // the playback snapshot — and its anchor — is the one that already arrived.
     const compensatedRoomState = args.compensateRoomState(resolvedState);
     await args.notifyContentScripts({
       type: "background:apply-room-state",
@@ -335,6 +344,9 @@ export function createRoomSessionController(args: {
   }
 
   async function handleServerMessage(message: ServerMessage): Promise<void> {
+    // Stamped before anything can await: everything between the socket event and
+    // here is synchronous, so this is when the message reached us.
+    const receivedAtMs = monotonicNow();
     switch (message.type) {
       case "room:created":
         clearPendingMemberDeltas();
@@ -371,7 +383,7 @@ export function createRoomSessionController(args: {
         args.notifyAll();
         return;
       case "room:state":
-        await handleRoomStateMessage(message.payload);
+        await handleRoomStateMessage(message.payload, receivedAtMs);
         return;
       case "room:member-joined":
         await handleRoomMemberJoined(
@@ -445,6 +457,10 @@ export function createRoomSessionController(args: {
     args.connectionState.lastError = null;
 
     await args.persistState();
+    // No arrival stamp: a member delta carries the playback snapshot we already
+    // have, so it keeps the anchor established when that snapshot arrived. Passing
+    // "now" here would restart the anchor and silently drop however long the room
+    // has been playing since.
     const compensatedRoomState = args.compensateRoomState(nextState);
     await args.notifyContentScripts({
       type: "background:apply-room-state",
@@ -490,7 +506,10 @@ export function createRoomSessionController(args: {
     );
   }
 
-  async function handleRoomStateMessage(nextState: RoomState): Promise<void> {
+  async function handleRoomStateMessage(
+    nextState: RoomState,
+    receivedAtMs: number,
+  ): Promise<void> {
     args.expirePendingLocalShareIfNeeded();
     const decision = decideIncomingRoomState({
       currentRoomState: args.roomSessionState.roomState,
@@ -542,8 +561,12 @@ export function createRoomSessionController(args: {
 
     await args.persistState();
     await args.ensureSharedVideoOpen(args.roomSessionState.roomState);
+    // Anchored on arrival, not on reaching this line: the two awaits above can
+    // take a while (`ensureSharedVideoOpen` may open a tab) and the room played on
+    // through them.
     const compensatedRoomState = args.compensateRoomState(
       args.roomSessionState.roomState,
+      receivedAtMs,
     );
     await args.notifyContentScripts({
       type: "background:apply-room-state",
