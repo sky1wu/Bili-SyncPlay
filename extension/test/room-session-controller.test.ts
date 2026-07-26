@@ -781,6 +781,8 @@ test("anchors an incoming room state on arrival, not after the work it triggers"
 
   assert.equal(harness.compensateCalls.length, 1);
   assert.equal(harness.compensateCalls[0]?.receivedAtMs, 1_000);
+  // Paired with the snapshot this handler is responsible for.
+  assert.equal(harness.compensateCalls[0]?.state.playback?.currentTime, 42);
   // Proof the stamp is not simply "now": the awaited work moved the clock on.
   assert.equal(monotonicNow, 1_800);
 });
@@ -821,18 +823,16 @@ test("member deltas keep the anchor of the snapshot that arrived", async () => {
   assert.equal(harness.compensateCalls[0]?.receivedAtMs, undefined);
 });
 
-test("pairs each room state with its own arrival time when handlers interleave", async () => {
-  // Handlers are started per socket message with `void handleServerMessage(...)`,
-  // so a later state can land in shared state while this one is awaiting. Applying
-  // that newer snapshot with *this* message's arrival time would anchor it too
-  // early — by however long the tab took to open. Reported by Codex review on #210.
-  let monotonicNow = 1_000;
+test("drops a room state that a later one superseded while it awaited", async () => {
+  // The content script's staleness check is per actor, so pushing an overtaken
+  // snapshot from another member moves playback backwards rather than being
+  // ignored. Reported by Codex review on #210.
   const laterSnapshot = {
-    roomCode: "ROOM07",
+    roomCode: "ROOM08",
     sharedVideo: null,
     playback: {
-      actorId: "peer",
-      seq: 9,
+      actorId: "peer-b",
+      seq: 3,
       url: "https://www.bilibili.com/video/BV1",
       playState: "playing" as const,
       currentTime: 99,
@@ -843,10 +843,7 @@ test("pairs each room state with its own arrival time when handlers interleave",
   } as unknown as RoomState;
 
   const harness = createControllerHarness({
-    getMonotonicNow: () => monotonicNow,
     onEnsureSharedVideoOpen: () => {
-      // Opening the tab took 4s, and a newer state arrived meanwhile.
-      monotonicNow += 4_000;
       harness.runtimeState.room.roomState = laterSnapshot;
     },
   });
@@ -854,10 +851,10 @@ test("pairs each room state with its own arrival time when handlers interleave",
   await harness.controller.handleServerMessage({
     type: "room:state",
     payload: {
-      roomCode: "ROOM07",
+      roomCode: "ROOM08",
       sharedVideo: null,
       playback: {
-        actorId: "peer",
+        actorId: "peer-a",
         seq: 1,
         url: "https://www.bilibili.com/video/BV1",
         playState: "playing",
@@ -869,9 +866,10 @@ test("pairs each room state with its own arrival time when handlers interleave",
     },
   } satisfies ServerMessage);
 
-  assert.equal(harness.compensateCalls.length, 1);
-  const call = harness.compensateCalls[0];
-  assert.equal(call?.receivedAtMs, 1_000);
-  // The snapshot this handler is responsible for — not the one that overtook it.
-  assert.equal(call?.state.playback?.currentTime, 42);
+  // Neither compensated (which would repoint the anchor) nor delivered.
+  assert.deepEqual(harness.compensateCalls, []);
+  assert.deepEqual(harness.notifyContentMessages, []);
+  assert.ok(
+    harness.logs.some((line) => line.includes("Dropped superseded room state")),
+  );
 });

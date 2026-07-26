@@ -242,3 +242,38 @@ test("a pause drops the anchor so nothing extrapolates across it", () => {
     42,
   );
 });
+
+test("an explicit arrival corrects an anchor a reader established late", () => {
+  // A snapshot is readable before its own handler finishes, so a rehydrating
+  // content script can ask for it — with no arrival time — first, anchoring it at
+  // request time. Reported by Codex review on #210.
+  const { controller, setMonotonicNow } = createHarness();
+  const state = roomState({ seq: 1, currentTime: 42, serverTime: 1_000 });
+
+  setMonotonicNow(2_500);
+  controller.compensateRoomState(state); // hydration read, anchors at 2500
+  setMonotonicNow(3_000);
+  controller.compensateRoomState(state, 1_000); // handler: it arrived at 1000
+
+  setMonotonicNow(4_000);
+
+  // 3s since the real arrival, not 1.5s since it was first read.
+  assert.ok(
+    Math.abs(controller.compensateRoomState(state).playback!.currentTime - 45) <
+      0.001,
+  );
+});
+
+test("a later arrival stamp never pushes an anchor forward", () => {
+  const { controller, setMonotonicNow } = createHarness();
+  const state = roomState({ seq: 1, currentTime: 42, serverTime: 1_000 });
+  controller.compensateRoomState(state, 1_000);
+
+  setMonotonicNow(3_000);
+  controller.compensateRoomState(state, 2_500);
+
+  assert.ok(
+    Math.abs(controller.compensateRoomState(state).playback!.currentTime - 44) <
+      0.001,
+  );
+});

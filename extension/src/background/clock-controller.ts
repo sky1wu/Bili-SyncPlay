@@ -156,6 +156,21 @@ export function createClockController(args: {
     const now = monotonicNow();
     if (!playbackAnchor || playbackAnchor.key !== key) {
       playbackAnchor = { key, atMs: receivedAtMs ?? now };
+    } else if (
+      receivedAtMs !== undefined &&
+      receivedAtMs < playbackAnchor.atMs
+    ) {
+      // A snapshot becomes readable before its own handler finishes: it is written
+      // to the room state, then persisted and the shared video's tab opened. A
+      // content script rehydrating in that window (`content:get-room-state`) asks
+      // for it with no arrival time, which anchors it at *request* time — later
+      // than it really arrived. When the handler then supplies the real arrival,
+      // correct the anchor backwards, or the interval between the two is lost for
+      // as long as the snapshot lasts.
+      //
+      // Only ever earlier: an arrival cannot postdate a reading of the same
+      // snapshot, so the earliest evidence is the best evidence.
+      playbackAnchor = { key, atMs: receivedAtMs };
     }
     return extrapolatePlayingRoomState(state, now - playbackAnchor.atMs);
   }

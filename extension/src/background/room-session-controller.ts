@@ -561,19 +561,32 @@ export function createRoomSessionController(args: {
 
     await args.persistState();
     await args.ensureSharedVideoOpen(args.roomSessionState.roomState);
-    // Anchored on arrival, not on reaching this line: the two awaits above can
-    // take a while (`ensureSharedVideoOpen` may open a tab) and the room played on
-    // through them.
+
+    // Handlers are started with `void handleServerMessage(...)` per socket message
+    // and do not serialize, so a later state can take over while this one is
+    // awaiting (`ensureSharedVideoOpen` may open a tab). Once that has happened
+    // this handler has nothing left to deliver: the newer state is what the room
+    // is, and its own handler applies and announces it.
     //
-    // Deliberately `resolvedState` and not `roomSessionState.roomState`: handlers
-    // are started with `void handleServerMessage(...)` per socket message and do
-    // not serialize, so a later state can land in shared state while this one is
-    // awaiting. Re-reading it here would pair that newer snapshot with *this*
-    // message's arrival time and anchor it too early — and the correctly paired
-    // call that follows could not repair it, because the content script drops the
-    // second apply of a snapshot it has already versioned. Each handler applies
-    // the snapshot it is responsible for, with the arrival time that belongs to
-    // it; an out-of-order apply is rejected by that same version guard.
+    // Pushing our snapshot anyway would move playback backwards. The content
+    // script's staleness check is per actor
+    // (`room-state-apply-controller` looks up `lastAppliedVersionByActor`), so an
+    // older snapshot from a *different* member is not recognised as stale and gets
+    // applied — the position is a real regression, not a dropped message. Even for
+    // the same actor, compensating here would already have re-pointed the single
+    // anchor at the older snapshot before the content script rejects it.
+    if (args.roomSessionState.roomState !== resolvedState) {
+      args.log(
+        "background",
+        `Dropped superseded room state for ${resolvedState.roomCode}`,
+      );
+      return;
+    }
+
+    // Anchored on arrival, not on reaching this line: the awaits above can take a
+    // while and the room played on through them. `resolvedState` and its own
+    // arrival time, never a re-read of shared state — a snapshot must only ever be
+    // paired with the arrival that belongs to it.
     const compensatedRoomState = args.compensateRoomState(
       resolvedState,
       receivedAtMs,
