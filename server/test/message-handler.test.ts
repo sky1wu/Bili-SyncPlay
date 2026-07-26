@@ -1841,3 +1841,82 @@ test("publish wrapper times out so a hung publish frees its slot", async () => {
   // Underlying publish never rejected, so the failed-event log must stay quiet.
   assert.equal(failedEvents.length, 0);
 });
+
+test("room:state is aged at the send, not at the room-store read", async () => {
+  // The age must cover the store read too: `getRoomStateForSession` awaits, and
+  // the room keeps playing through it. Anchoring at the read would hand the
+  // receiver a position already staler than the age admits.
+  const sentPayloads: Array<Record<string, unknown>> = [];
+  let clock = 10_000;
+  const session = createSession("member-age", {
+    roomCode: "ROOM-AGE",
+    memberId: "member-age",
+    memberToken: "member-token-age",
+    joinedAt: 0,
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    now: () => clock,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession() {
+        return { room: null };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        // The store read costs 400ms of room time before the send happens.
+        clock += 400;
+        return {
+          roomCode: "ROOM-AGE",
+          sharedVideo: null,
+          playback: {
+            url: "https://www.bilibili.com/video/BV1xx411c7mD",
+            currentTime: 42,
+            playState: "playing",
+            playbackRate: 1,
+            updatedAt: 8_000,
+            serverTime: 8_000,
+            actorId: "member-age",
+            seq: 7,
+          },
+          members: [{ id: "member-age", name: "Alice" }],
+        };
+      },
+    },
+    logEvent() {},
+    send(_socket, message) {
+      if (message.type === "room:state") {
+        sentPayloads.push(
+          message.payload as unknown as Record<string, unknown>,
+        );
+      }
+    },
+    sendError() {
+      throw new Error("sendError should not be called");
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "sync:request",
+    payload: { memberToken: "member-token-age" },
+  });
+
+  assert.equal(sentPayloads.length, 1);
+  assert.equal(sentPayloads[0].playbackAgeMs, 2_400);
+});

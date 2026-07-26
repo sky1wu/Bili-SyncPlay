@@ -22,6 +22,7 @@ import {
   getPendingShareToastFor as getRoomPendingShareToastFor,
 } from "./room-manager";
 import { localizeServerError } from "../shared/i18n";
+import { resolvePlaybackAnchorAtMs } from "./clock-sync";
 
 type JoinAttemptResult = "joined" | "failed" | "timeout";
 type PendingMemberDelta = {
@@ -66,7 +67,7 @@ export function createRoomSessionController(args: {
   flushPendingShare: () => void;
   ensureSharedVideoOpen: (state: RoomState) => Promise<void>;
   notifyContentScripts: (message: BackgroundToContentMessage) => Promise<void>;
-  compensateRoomState: (state: RoomState, receivedAtMs?: number) => RoomState;
+  compensateRoomState: (state: RoomState, anchorAtMs?: number) => RoomState;
   markPlaybackArrival: (playback: RoomState["playback"], atMs: number) => void;
   clearPendingLocalShare: (reason: string) => void;
   expirePendingLocalShareIfNeeded: () => void;
@@ -75,8 +76,9 @@ export function createRoomSessionController(args: {
   shareToastTtlMs: number;
   /**
    * Monotonic time source, shared with the clock controller: it stamps when a
-   * `room:state` arrived so that the work before applying it is not credited to
-   * nobody. See `ClockController.compensateRoomState`.
+   * `room:state` arrived so that neither the work before applying it nor the age
+   * it already had on arrival is credited to nobody. See
+   * `ClockController.compensateRoomState`.
    */
   getMonotonicNow?: () => number;
   bootstrapRoomStateTimeoutMs?: number;
@@ -383,9 +385,18 @@ export function createRoomSessionController(args: {
         args.flushPendingShare();
         args.notifyAll();
         return;
-      case "room:state":
-        await handleRoomStateMessage(message.payload, receivedAtMs);
+      case "room:state": {
+        // `playbackAgeMs` is stripped here rather than carried inside: it is only
+        // true at the instant the server sent it, and the room state travels on
+        // into storage and into member-delta rewraps where a stale age would read
+        // as a fresh one.
+        const { playbackAgeMs, ...state } = message.payload;
+        await handleRoomStateMessage(
+          state,
+          resolvePlaybackAnchorAtMs(receivedAtMs, playbackAgeMs),
+        );
         return;
+      }
       case "room:member-joined":
         await handleRoomMemberJoined(
           message.payload.roomCode,
@@ -523,7 +534,7 @@ export function createRoomSessionController(args: {
 
   async function handleRoomStateMessage(
     nextState: RoomState,
-    receivedAtMs: number,
+    playbackAnchorAtMs: number,
   ): Promise<void> {
     args.expirePendingLocalShareIfNeeded();
     const decision = decideIncomingRoomState({
@@ -566,7 +577,7 @@ export function createRoomSessionController(args: {
     // from here a rehydrating content script can read it and a member delta can
     // rewrap it, and whichever of those compensates first must find the arrival
     // already recorded rather than anchoring the snapshot at its own moment.
-    args.markPlaybackArrival(resolvedState.playback, receivedAtMs);
+    args.markPlaybackArrival(resolvedState.playback, playbackAnchorAtMs);
     args.roomSessionState.roomState = resolvedState;
     args.roomSessionState.roomCode = resolvedState.roomCode;
     args.connectionState.lastError = null;
@@ -603,13 +614,13 @@ export function createRoomSessionController(args: {
       return;
     }
 
-    // Anchored on arrival, not on reaching this line: the awaits above can take a
-    // while and the room played on through them. `resolvedState` and its own
-    // arrival time, never a re-read of shared state — a snapshot must only ever be
-    // paired with the arrival that belongs to it.
+    // Anchored where the snapshot was actually current, not on reaching this
+    // line: the awaits above can take a while and the room played on through
+    // them. `resolvedState` and its own anchor, never a re-read of shared state —
+    // a snapshot must only ever be paired with the anchor that belongs to it.
     const compensatedRoomState = args.compensateRoomState(
       resolvedState,
-      receivedAtMs,
+      playbackAnchorAtMs,
     );
     await args.notifyContentScripts({
       type: "background:apply-room-state",

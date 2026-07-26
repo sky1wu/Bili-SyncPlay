@@ -627,3 +627,101 @@ test("room event consumer still reads room state when a local session is present
   assert.equal(roomStateReads, 1);
   assert.equal(delivered, 1);
 });
+
+const PLAYING_SNAPSHOT = {
+  url: "https://www.bilibili.com/video/BV1xx411c7mD",
+  currentTime: 42,
+  playState: "playing" as const,
+  playbackRate: 1,
+  updatedAt: 8_000,
+  serverTime: 8_000,
+  actorId: "member-a",
+  seq: 7,
+};
+
+test("broadcast room state reports how stale its playback snapshot is", async () => {
+  const bus = createInMemoryRoomEventBus();
+  const session = createSession("member-a", "ROOM01");
+  const ages: Array<number | undefined> = [];
+
+  const consumer = await createRoomEventConsumer({
+    roomEventBus: bus,
+    now: () => 10_100,
+    async getRoomStateByCode(roomCode) {
+      return {
+        roomCode,
+        sharedVideo: null,
+        playback: PLAYING_SNAPSHOT,
+        members: [{ id: "member-a", name: "Alice" }],
+      };
+    },
+    listLocalSessionsByRoom() {
+      return [session];
+    },
+    send(_socket, message) {
+      if (message.type === "room:state") {
+        ages.push(message.payload.playbackAgeMs);
+      }
+    },
+  });
+
+  try {
+    await bus.publish({
+      type: "room_state_updated",
+      roomCode: "ROOM01",
+      sourceInstanceId: "instance-b",
+      emittedAt: 1_100,
+    });
+  } finally {
+    await consumer.close();
+  }
+
+  assert.deepEqual(ages, [2_100]);
+});
+
+test("legacy member-delta room state reports how stale its playback snapshot is", async () => {
+  // The snapshot a legacy client receives here is the one the room has held
+  // since well before this join — the case the age exists for.
+  const bus = createInMemoryRoomEventBus();
+  const legacySession = createSession("member-b", "ROOM01", 1);
+  const ages: Array<number | undefined> = [];
+
+  const consumer = await createRoomEventConsumer({
+    roomEventBus: bus,
+    now: () => 10_100,
+    async getRoomStateByCode(roomCode) {
+      return {
+        roomCode,
+        sharedVideo: null,
+        playback: PLAYING_SNAPSHOT,
+        members: [
+          { id: "member-a", name: "Alice" },
+          { id: "member-b", name: "Bob" },
+        ],
+      };
+    },
+    listLocalSessionsByRoom() {
+      return [legacySession];
+    },
+    send(_socket, message) {
+      if (message.type === "room:state") {
+        ages.push(message.payload.playbackAgeMs);
+      }
+    },
+  });
+
+  try {
+    await bus.publish({
+      type: "room_member_joined",
+      roomCode: "ROOM01",
+      sourceInstanceId: "instance-b",
+      emittedAt: 1_100,
+      memberId: "member-a",
+      displayName: "Alice",
+    });
+  } finally {
+    await consumer.close();
+  }
+
+  assert.deepEqual(ages, [2_100]);
+});

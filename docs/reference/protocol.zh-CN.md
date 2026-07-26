@@ -66,7 +66,7 @@
 | -------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
 | `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | 房间已创建，携带邀请与会话 token                                                      |
 | `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | 加入成功，返回本次会话的 `memberToken`（重连携带仍有效的旧 token 时复用，否则新签发） |
-| `room:state`         | `RoomState`                                                              | 房间完整快照（加入后、按请求、共享视频/播放状态变化时）                               |
+| `room:state`         | `RoomState & { playbackAgeMs? }`                                         | 房间完整快照（加入后、按请求、共享视频/播放状态变化时）                               |
 | `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | 成员加入（增量消息，发给 `protocolVersion >= 2` 客户端）                              |
 | `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | 成员离开（增量消息，发给 `protocolVersion >= 2` 客户端）                              |
 | `error`              | `{ code: ErrorCode, message }`                                           | 请求失败                                                                              |
@@ -76,9 +76,20 @@
 
 成员变更按协议版本分流（`server/src/room-event-consumer.ts` 中 `MEMBER_DELTA_PROTOCOL_VERSION = 2`）：`protocolVersion >= 2` 的客户端收到 `room:member-joined` / `room:member-left` 增量，必须据此维护成员列表——成员变更不会重新广播 `room:state`；旧客户端（v1 或未携带版本号）则收到完整 `room:state`。
 
+### 播放快照年龄
+
+`room:state` 在房间状态之外附带可选的 `playbackAgeMs`：服务端在**发送那一刻**用自己的两个时刻相减，得出 `playback.serverTime` 至今过了多久。它让中途加入正在播放房间的客户端从房间的实际位置起播，而不是从最后一次广播的位置起播——后者最坏已旧了一个广播周期（约 2.1s）。
+
+两条规则保证它成立，且都不受类型系统约束：
+
+- **每次下发都重新计算，绝不存储。** 年龄只在发送那一刻为真，存下来的年龄就是伪装成时长的时刻。因此它挂在 `room:state` payload（`RoomStatePayload`）上，而不是放进 `PlaybackState`——后者会被服务端持久化，也会由客户端在 `playback:update` 中回传。
+- **只传时长，不传时刻。** 时长跨两个不一致的钟是安全的：接收端只是把它加到自己的锚上。时刻则不然，接收端必须拿服务端时刻减本地时刻，量到的是钟差而非流逝时间（见 [AGENTS.md](../../AGENTS.md) 的播放计时不变量）。
+
+接收端把它从该消息的本地到达时刻里减去，得到位置外推所用的锚（`extension/src/background/clock-sync.ts`）；缺失（旧服务端）、为负或大得不合理的值一律忽略。缺失即"视为最新"，也就是 #212 之前的行为。
+
 ### 时钟同步
 
-`sync:ping` / `sync:pong` 实现 NTP 式往返：客户端比较 `clientSendTime`、`serverReceiveTime`、`serverSendTime` 与自身接收时间，估算应用 `PlaybackState.serverTime` 时使用的时钟偏移。扩展端由 `clock-controller.ts` 维护该偏移。
+`sync:ping` / `sync:pong` 实现 NTP 式往返：客户端比较 `clientSendTime`、`serverReceiveTime`、`serverSendTime` 与自身接收时间估算时钟偏移，扩展端由 `clock-controller.ts` 维护该偏移。自 #210 起该偏移只是弹窗里展示的诊断值，不再参与播放：位置改由本地单调锚点外推，`PlaybackState.serverTime` 仅作为快照的服务端版本标签使用。
 
 ## 错误码（`ErrorCode`）
 

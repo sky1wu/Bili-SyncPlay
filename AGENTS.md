@@ -126,6 +126,16 @@ background path touches room state or playback timing.
   an age across machines send a _duration_, never a timestamp. Comparing two
   server timestamps to each other is fine (version ordering); comparing two local
   ones is fine (elapsed).
+- **A snapshot age is computed at every send and never stored.** `room:state`
+  carries `playbackAgeMs` so a client joining mid-playback knows how stale the
+  snapshot it was handed already is (`withPlaybackAge` on the server,
+  `resolvePlaybackAnchorAtMs` on the receiver). An age is only true at the instant
+  it is sent, so storing one turns it back into a timestamp — which is why it
+  lives on the `room:state` payload and not on `PlaybackState`, the shape the
+  server persists and clients send back. Every `room:state` send site must stamp
+  it (there are four: bootstrap, `sync:request`, and two in
+  `room-event-consumer`), and the extension strips it before the state reaches
+  storage or a member-delta rewrap.
 - **Record a playback snapshot's arrival before the snapshot is observable.** Once
   it is in `roomSessionState.roomState`, a rehydrating content script
   (`content:get-room-state`) can read it and a member join/leave can rewrap it,

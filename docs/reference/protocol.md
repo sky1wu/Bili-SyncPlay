@@ -66,7 +66,7 @@ Clients send `protocolVersion` inside the `room:create` / `room:join` payload; t
 | -------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | Room created; carries the invite and session tokens                                                                                     |
 | `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | Join succeeded; returns the session `memberToken` (a rejoin with a still-valid previous token reuses it, otherwise a new one is issued) |
-| `room:state`         | `RoomState`                                                              | Full room snapshot (after join, on request, on shared-video / playback changes)                                                         |
+| `room:state`         | `RoomState & { playbackAgeMs? }`                                         | Full room snapshot (after join, on request, on shared-video / playback changes)                                                         |
 | `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | Member joined (delta, sent to `protocolVersion >= 2` clients)                                                                           |
 | `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | Member left (delta, sent to `protocolVersion >= 2` clients)                                                                             |
 | `error`              | `{ code: ErrorCode, message }`                                           | Request failed                                                                                                                          |
@@ -76,9 +76,20 @@ Clients send `protocolVersion` inside the `room:create` / `room:join` payload; t
 
 Membership changes are version-gated (`MEMBER_DELTA_PROTOCOL_VERSION = 2` in `server/src/room-event-consumer.ts`): clients with `protocolVersion >= 2` receive `room:member-joined` / `room:member-left` deltas and must apply them to their member list — `room:state` is not re-broadcast for membership changes. Legacy clients (v1 or no version) receive a full `room:state` instead.
 
+### Playback snapshot age
+
+`room:state` carries an optional `playbackAgeMs` alongside the room state: how long ago the server stamped `playback.serverTime`, computed from the server's own two timestamps at the moment of sending. It lets a client joining a room mid-playback start from where the room actually is instead of from the last broadcast's position, which can be up to one broadcast interval (~2.1s) old.
+
+Two rules keep it sound, neither of which the type system enforces:
+
+- **Computed at every send, never stored.** An age is only true at the instant it is sent; a stored one is a timestamp in disguise. That is why it lives on the `room:state` payload (`RoomStatePayload`) rather than inside `PlaybackState`, which the server persists and clients send back in `playback:update`.
+- **A duration, never a timestamp.** A duration is safe across two disagreeing clocks — the receiver only adds it to an anchor of its own. A timestamp would force the receiver to subtract a server time from a local one, which measures the clock disagreement rather than elapsed time (see the playback timing invariants in [AGENTS.md](../../AGENTS.md)).
+
+Receivers subtract it from the message's local arrival time to get the anchor the position is extrapolated from (`extension/src/background/clock-sync.ts`), ignoring values that are absent (legacy server), negative, or implausibly large. Absent means "assume current", the pre-#212 behaviour.
+
 ### Clock synchronization
 
-`sync:ping` / `sync:pong` implement an NTP-style exchange: the client compares `clientSendTime`, `serverReceiveTime`, `serverSendTime`, and its own receive time to estimate the clock offset used when applying `PlaybackState.serverTime`. The extension's `clock-controller.ts` maintains this offset.
+`sync:ping` / `sync:pong` implement an NTP-style exchange: the client compares `clientSendTime`, `serverReceiveTime`, `serverSendTime`, and its own receive time to estimate the clock offset, which the extension's `clock-controller.ts` maintains. As of #210 that offset is a diagnostic shown in the popup, not an input to playback: positions are extrapolated from a local monotonic anchor instead, and `PlaybackState.serverTime` is used only as the server's version tag for a snapshot.
 
 ## Error Codes (`ErrorCode`)
 

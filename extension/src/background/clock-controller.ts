@@ -19,12 +19,13 @@ export interface ClockController {
     serverReceiveTime: number,
     serverSendTime: number,
   ): void;
-  compensateRoomState(state: RoomState, receivedAtMs?: number): RoomState;
+  compensateRoomState(state: RoomState, anchorAtMs?: number): RoomState;
   /**
-   * Record when a playback snapshot arrived, before anything else can observe it.
+   * Record when a playback snapshot was current, in local monotonic time, before
+   * anything else can observe it.
    *
    * Anchoring at ingress rather than at the first `compensateRoomState` call takes
-   * the question of which caller has to supply an arrival time out of the picture:
+   * the question of which caller has to supply an anchor out of the picture:
    * a snapshot becomes readable (`content:get-room-state`) and gets rewrapped
    * (member joins/leaves) while its own handler is still persisting state or
    * opening a tab, and any of those paths compensating first would otherwise anchor
@@ -140,19 +141,19 @@ export function createClockController(args: {
    * it, and a replay (a tab binding late, a popup asking for current state) is
    * advanced by the time that genuinely passed since it arrived.
    *
-   * `receivedAtMs` (monotonic, same source as this controller's) is when the
-   * snapshot actually arrived, and callers handling a fresh `room:state` must
-   * pass it: work between arrival and here — persisting state, opening the shared
-   * video's tab — is not instant, and anchoring at this call instead would credit
-   * that time to nobody. The room kept playing through it, so the receiver would
-   * apply a position already that stale as though it were current and then have to
-   * seek. Omit it only when replaying a snapshot that was anchored on arrival.
+   * `anchorAtMs` (monotonic, same source as this controller's) is when the
+   * snapshot's position was true on this machine's clock, and callers handling a
+   * fresh `room:state` must pass it: work between arrival and here — persisting
+   * state, opening the shared video's tab — is not instant, and anchoring at this
+   * call instead would credit that time to nobody. The room kept playing through
+   * it, so the receiver would apply a position already that stale as though it
+   * were current and then have to seek. Omit it only when replaying a snapshot
+   * that was already anchored.
    *
-   * The cost is that we no longer know how stale a snapshot already was when it
-   * reached us — on joining a room mid-playback that can be up to one broadcast
-   * interval, which the receiver closes with a single seek. Recovering it needs
-   * the server to report the snapshot's age as a *duration*, which is safe to
-   * send across disagreeing clocks; `serverTime` is not.
+   * It is arrival time minus the snapshot's age at arrival — see
+   * `resolvePlaybackAnchorAtMs`, which is what recovers the staleness a snapshot
+   * already had when it reached us (up to one broadcast interval, when joining a
+   * room mid-playback).
    */
   function markPlaybackArrival(
     playback: PlaybackState | null | undefined,
@@ -174,6 +175,9 @@ export function createClockController(args: {
     // Only ever earlier. The same snapshot can be presented more than once (a
     // re-broadcast, a replay), and the room has been at that position since the
     // first time it reached us, so the earliest evidence is the best evidence.
+    // With `playbackAgeMs` accounted for, two arrivals of one snapshot resolve to
+    // the same anchor no matter how far apart they land, so this only ever has to
+    // discard a reader's late, unaged guess.
     if (atMs < playbackAnchor.atMs) {
       playbackAnchor = { key, atMs };
     }
@@ -181,7 +185,7 @@ export function createClockController(args: {
 
   function compensateRoomState(
     state: RoomState,
-    receivedAtMs?: number,
+    anchorAtMs?: number,
   ): RoomState {
     if (!state.playback || state.playback.playState !== "playing") {
       playbackAnchor = null;
@@ -192,7 +196,7 @@ export function createClockController(args: {
     // Anchors the snapshot if ingress did not already (a replay of a snapshot from
     // a previous service-worker session has no anchor), and corrects one that a
     // reader established late.
-    markPlaybackArrival(state.playback, receivedAtMs ?? now);
+    markPlaybackArrival(state.playback, anchorAtMs ?? now);
     return extrapolatePlayingRoomState(state, now - playbackAnchor!.atMs);
   }
 
