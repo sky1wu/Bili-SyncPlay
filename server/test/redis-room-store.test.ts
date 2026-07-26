@@ -732,3 +732,139 @@ test("redis room store mirrors expiry into the legacy key for rollback safety", 
     await store.close();
   }
 });
+
+async function evalCallCount(redis: Redis): Promise<number> {
+  const info = await redis.info("commandstats");
+  const line = info
+    .split("\n")
+    .find((entry) => entry.startsWith("cmdstat_eval:"));
+  if (!line) {
+    return 0;
+  }
+  const calls = /calls=(\d+)/.exec(line);
+  return calls ? Number(calls[1]) : 0;
+}
+
+test("redis room reconcile writes nothing when no member has drifted", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("steady");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  let clock = 1_000_000;
+  const store = await createRedisRoomStore(REDIS_URL, {
+    namespace,
+    now: () => clock,
+  });
+  const redis = await connect();
+
+  try {
+    for (const code of ["STDYAA", "STDYBB", "STDYCC"]) {
+      await store.createRoom({
+        code,
+        joinToken: "join-token-123456",
+        createdAt: 1,
+      });
+    }
+    // Settle the first reconcile before measuring.
+    await store.countRooms({ includeExpired: true });
+
+    // Non-expiring rooms score "inf", which is also what ZSCORE reads back.
+    // Comparing against "+inf" instead made every one of them look drifted,
+    // so the pass below re-ran a script per room forever.
+    const before = await evalCallCount(redis);
+    clock += 900_000;
+    await store.countRooms({ includeExpired: true });
+    const after = await evalCallCount(redis);
+
+    // The orphan sweep still runs one script per ZSCAN cursor; what must not
+    // scale with the room count is the repair pass.
+    assert.equal(after - before <= 1, true, `evals: ${after - before}`);
+    assert.equal(await redis.zcard(roomsKey), 3);
+  } finally {
+    for (const code of ["STDYAA", "STDYBB", "STDYCC"]) {
+      await store.deleteRoom(code);
+    }
+    await redis.del(roomsKey, `${namespace}:room-expiry`);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room store keeps working when one room body is corrupt", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("corrupt");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const redis = await connect();
+
+  let store: Store | null = null;
+  try {
+    await redis.set(`${namespace}:room:BROKEN`, "{not valid json");
+    await redis.set(
+      `${namespace}:room:GOODEX`,
+      legacyRoomBody("GOODEX", { expiresAt: 70, lastActiveAt: 65 }),
+    );
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+
+    // A single unparseable value must not stop the reconcile, the listing, or
+    // — most importantly — the reaper that now waits on that reconcile.
+    const rooms = await store.listRooms(LIST_ALL);
+    assert.deepEqual(
+      rooms.map((listed) => listed.code),
+      ["GOODEX"],
+    );
+    assert.equal(await store.deleteExpiredRooms(100), 1);
+    assert.equal(await redis.exists(`${namespace}:room:GOODEX`), 0);
+
+    // The corrupt body is left alone rather than silently dropped.
+    assert.equal(await redis.exists(`${namespace}:room:BROKEN`), 1);
+  } finally {
+    await redis.del(
+      `${namespace}:room:BROKEN`,
+      `${namespace}:room:GOODEX`,
+      roomsKey,
+    );
+    await redis.quit();
+    await store?.close();
+  }
+});
+
+test("redis room create leaves no room body behind when indexing fails", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("createfail");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    // Wrong type for the set: SET NX succeeds, the ZADD then fails, and Lua
+    // does not roll back on its own. room-service reads any create error as a
+    // code collision and retries five times, so without the rollback one
+    // request would strand five unreachable rooms.
+    await redis.set(roomsKey, "not-a-sorted-set");
+
+    await assert.rejects(() =>
+      store.createRoom({
+        code: "ORPHAN",
+        joinToken: "join-token-123456",
+        createdAt: 1,
+      }),
+    );
+    assert.equal(await redis.exists(`${namespace}:room:ORPHAN`), 0);
+  } finally {
+    await redis.del(`${namespace}:room:ORPHAN`, roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});

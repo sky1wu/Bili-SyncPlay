@@ -62,13 +62,27 @@ return 1
 
 // SET NX and the membership write must succeed or fail together, or a losing
 // create would still stamp its score over the winner's membership.
+//
+// A Lua runtime error does not roll back what the script already wrote, so the
+// membership write is guarded and the body deleted if it fails — otherwise a
+// Redis ACL that does not yet grant the new key would leave an unreachable
+// room behind, five of them per request once room-service retries what it
+// reads as a code collision.
 const CREATE_ROOM_LUA = `
 if not redis.call("SET", KEYS[1], ARGV[1], "NX") then
   return "exists"
 end
 
-redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
-redis.call("ZREM", KEYS[3], ARGV[3])
+local indexed = pcall(function()
+  redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
+  redis.call("ZREM", KEYS[3], ARGV[3])
+end)
+
+if not indexed then
+  redis.call("DEL", KEYS[1])
+  return "index_failed"
+end
+
 return "ok"
 `;
 
@@ -95,12 +109,19 @@ if raw ~= ARGV[1] then
 end
 
 redis.call("SET", KEYS[1], ARGV[2])
-redis.call("ZADD", KEYS[2], ARGV[3], ARGV[4])
 
-if ARGV[5] == "" then
-  redis.call("ZREM", KEYS[3], ARGV[4])
-else
-  redis.call("ZADD", KEYS[3], ARGV[5], ARGV[4])
+local indexed = pcall(function()
+  redis.call("ZADD", KEYS[2], ARGV[3], ARGV[4])
+  if ARGV[5] == "" then
+    redis.call("ZREM", KEYS[3], ARGV[4])
+  else
+    redis.call("ZADD", KEYS[3], ARGV[5], ARGV[4])
+  end
+end)
+
+if not indexed then
+  redis.call("SET", KEYS[1], ARGV[1])
+  return "index_failed"
 end
 
 return "ok"
@@ -193,11 +214,29 @@ function parseRoom(value: string | null): PersistedRoom | null {
   return JSON.parse(value) as PersistedRoom;
 }
 
+// One unparseable value must not take down a whole batch. The reaper's script
+// already skips such a body via pcall, and the orphan prune keys off EXISTS,
+// so a corrupt room keeps its membership and is simply not enumerated —
+// rather than rejecting the reconcile that the reaper now waits on, which
+// would stop every other room from ever being collected.
+function parseRoomOrNull(value: string | null): PersistedRoom | null {
+  try {
+    return parseRoom(value);
+  } catch {
+    return null;
+  }
+}
+
 // JS formats the score, never Lua: String() renders a millisecond timestamp
 // exactly, while Lua's default number formatting can reach for exponent
 // notation.
+//
+// "inf" rather than "+inf" because that is what ZSCORE reads back, and the
+// reconcile compares the two as strings. Emitting "+inf" here made every
+// non-expiring room — the common case — compare as drifted forever, so the
+// pass rewrote every room on every run instead of writing nothing.
 function expiryScore(room: PersistedRoom): string {
-  return room.expiresAt === null ? "+inf" : String(room.expiresAt);
+  return room.expiresAt === null ? "inf" : String(room.expiresAt);
 }
 
 function matchesQuery(
@@ -270,7 +309,7 @@ export async function createRedisRoomStore(
             redis.get(roomKey(code)),
             redis.zscore(roomsByExpiryKey, code),
           ]);
-          return { code, raw, score, room: parseRoom(raw) };
+          return { code, raw, score, room: parseRoomOrNull(raw) };
         }),
       );
 
@@ -405,10 +444,13 @@ export async function createRedisRoomStore(
       const loaded = await Promise.all(
         batch.map(async (code) => ({
           code,
-          room: parseRoom(await redis.get(roomKey(code))),
+          room: parseRoomOrNull(await redis.get(roomKey(code))),
         })),
       );
 
+      // Only codes with no body at all are prune candidates; the script
+      // re-checks EXISTS anyway, so a corrupt-but-present body keeps its
+      // membership instead of being silently dropped from the set.
       const orphanedCodes = loaded
         .filter(({ room }) => room === null)
         .map(({ code }) => code);
@@ -457,6 +499,11 @@ export async function createRedisRoomStore(
         expiryScore(room),
         room.code,
       );
+      if (created === "index_failed") {
+        throw new Error(
+          `Room ${room.code} could not be indexed; the room was not created.`,
+        );
+      }
       if (created !== "ok") {
         throw new Error(`Room ${room.code} already exists.`);
       }
@@ -516,6 +563,11 @@ export async function createRedisRoomStore(
 
       if (result === "not_found") {
         return { ok: false, reason: "not_found" };
+      }
+      if (result === "index_failed") {
+        throw new Error(
+          `Room ${code} could not be indexed; the update was rolled back.`,
+        );
       }
       if (result !== "ok") {
         return { ok: false, reason: "version_conflict" };
