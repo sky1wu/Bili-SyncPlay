@@ -15,6 +15,17 @@ if (typeof (globalThis as { WebSocket?: unknown }).WebSocket === "undefined") {
   };
 }
 
+/**
+ * chrome.tabs.Tab 有十余个必填字段,但消息路由只读取 id / url;
+ * 用一个集中的构造器承担这层收窄,避免每个用例各自强转。
+ */
+function createSender(tab: {
+  id: number;
+  url?: string;
+}): chrome.runtime.MessageSender {
+  return { tab: tab as chrome.tabs.Tab };
+}
+
 function createControllerHarness(
   overrides: {
     connectionState?: {
@@ -197,6 +208,7 @@ function createControllerHarness(
               actorId: "member-1",
               seq: 1,
               serverTime: 1_000,
+              updatedAt: 1_000,
             },
           },
           tabId: tab?.id ?? null,
@@ -240,7 +252,7 @@ function createControllerHarness(
         return {
           ...state,
           playback: state.playback
-            ? { ...state.playback, position: state.playback.position + 1 }
+            ? { ...state.playback, currentTime: state.playback.currentTime + 1 }
             : null,
         };
       },
@@ -426,7 +438,7 @@ test("message controller returns share context for content page actions", async 
 
   await harness.controller.handleRuntimeMessage(
     { type: "content:get-share-context" },
-    { tab: { id: 456 } },
+    createSender({ id: 456 }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -456,7 +468,7 @@ test("message controller shares content page video by reading the sender tab", a
     {
       type: "content:share-current-video",
     },
-    { tab: senderTab },
+    createSender(senderTab),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -479,6 +491,7 @@ test("message controller shares content page video by reading the sender tab", a
           actorId: "member-1",
           seq: 1,
           serverTime: 1_000,
+          updatedAt: 1_000,
         },
       },
       tabId: 456,
@@ -504,12 +517,10 @@ test("message controller reports content page share read failures", async () => 
     {
       type: "content:share-current-video",
     },
-    {
-      tab: {
-        id: 456,
-        url: "https://www.bilibili.com/video/BV199W9zEEcH",
-      },
-    },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -538,12 +549,10 @@ test("message controller reports content page share send failures", async () => 
     {
       type: "content:share-current-video",
     },
-    {
-      tab: {
-        id: 456,
-        url: "https://www.bilibili.com/video/BV199W9zEEcH",
-      },
-    },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -598,7 +607,7 @@ test("message controller auto-shares the next video from the original sharer's s
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: senderTab },
+    createSender(senderTab),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -621,6 +630,7 @@ test("message controller auto-shares the next video from the original sharer's s
           actorId: "member-1",
           seq: 1,
           serverTime: 1_000,
+          updatedAt: 1_000,
         },
       },
       tabId: 456,
@@ -671,7 +681,10 @@ test("message controller defers a chained auto-share until the previous share is
         targetNormalizedUrl: "https://www.bilibili.com/video/BV1aa411c7zz",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV1aa411c7zz" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV1aa411c7zz",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -719,7 +732,10 @@ test("message controller skips a chained auto-share when the room genuinely move
         targetNormalizedUrl: "https://www.bilibili.com/video/BV1aa411c7zz",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV1aa411c7zz" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV1aa411c7zz",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -771,7 +787,7 @@ test("message controller re-claims the shared source tab after a worker restart 
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: senderTab },
+    createSender(senderTab),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -834,7 +850,10 @@ test("message controller does not claim the source tab when the auto-share paylo
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -885,7 +904,10 @@ test("message controller skips auto-share when the source tab binding was claime
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -947,7 +969,10 @@ test("message controller treats a next video with no readable playback as retrya
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -995,7 +1020,10 @@ test("message controller skips auto-share when a manual share is awaiting confir
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1042,7 +1070,10 @@ test("message controller advances chained autoplay past its own in-flight auto-s
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1092,7 +1123,10 @@ test("message controller defers auto-share when the socket drops while validatin
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1143,7 +1177,10 @@ test("message controller defers auto-share during the socket CLOSING micro-windo
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1202,7 +1239,10 @@ test("message controller skips auto-share when another member re-shared the same
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: { id: 456, url: "https://www.bilibili.com/video/BV199W9zEEcH" } },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1249,12 +1289,10 @@ test("message controller skips auto-share next video from non-sharers", async ()
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    {
-      tab: {
-        id: 456,
-        url: "https://www.bilibili.com/video/BV199W9zEEcH",
-      },
-    },
+    createSender({
+      id: 456,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1297,12 +1335,10 @@ test("message controller skips auto-share next video from other tabs", async () 
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    {
-      tab: {
-        id: 789,
-        url: "https://www.bilibili.com/video/BV199W9zEEcH",
-      },
-    },
+    createSender({
+      id: 789,
+      url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    }),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1361,7 +1397,7 @@ test("message controller reports a retryable failure when the page bridge still 
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: senderTab },
+    createSender(senderTab),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1413,7 +1449,7 @@ test("message controller defers auto-share next video with a retryable failure w
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: senderTab },
+    createSender(senderTab),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1470,7 +1506,7 @@ test("message controller defers auto-share next video while awaiting fresh room 
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: senderTab },
+    createSender(senderTab),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1520,7 +1556,7 @@ test("message controller skips auto-share next video when the room moved past th
         targetNormalizedUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
       },
     },
-    { tab: senderTab },
+    createSender(senderTab),
     (nextResponse) => {
       response = nextResponse;
     },
@@ -1570,13 +1606,15 @@ test("message controller forwards content playback updates only for the active s
       payload: {
         url: "https://www.bilibili.com/video/BV1xx411c7mD",
         currentTime: 12,
-        paused: false,
+        playState: "playing",
         playbackRate: 1,
-        timestamp: 123,
+        updatedAt: 123,
+        serverTime: 0,
         actorId: "remote-actor",
+        seq: 1,
       },
     },
-    { tab: { id: 123 } },
+    createSender({ id: 123 }),
     () => undefined,
   );
 
@@ -1588,11 +1626,12 @@ test("message controller forwards content playback updates only for the active s
         playback: {
           url: "https://www.bilibili.com/video/BV1xx411c7mD",
           currentTime: 12,
-          paused: false,
+          playState: "playing",
           playbackRate: 1,
-          timestamp: 123,
-          actorId: "member-1",
+          updatedAt: 123,
           serverTime: 0,
+          actorId: "member-1",
+          seq: 1,
         },
       },
     },
@@ -1607,13 +1646,15 @@ test("message controller forwards content playback updates only for the active s
       payload: {
         url: "https://www.bilibili.com/video/BV1xx411c7mD",
         currentTime: 12,
-        paused: false,
+        playState: "playing",
         playbackRate: 1,
-        timestamp: 123,
+        updatedAt: 123,
+        serverTime: 0,
         actorId: "remote-actor",
+        seq: 1,
       },
     },
-    { tab: { id: 123 } },
+    createSender({ id: 123 }),
     () => undefined,
   );
 

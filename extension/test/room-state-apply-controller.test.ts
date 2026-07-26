@@ -67,8 +67,6 @@ function createController(overrides: {
     debugLog: (msg) => logs.push(msg),
     shouldLogHeartbeat: () => true,
     runtimeSendMessage: overrides.runtimeSendMessage ?? (async () => null),
-    getHydrateRetryTimer: () => null,
-    setHydrateRetryTimer: () => {},
     getVideoElement: () => video,
     getSharedVideo: () =>
       overrides.currentVideo === undefined
@@ -291,6 +289,7 @@ test("syncs the cached shared url and sharer when the page bridge has no current
       actorId: "member-2",
       seq: 1,
       serverTime: 1_000,
+      updatedAt: 1_000,
     },
     members: [
       { id: "member-1", name: "Alice" },
@@ -338,6 +337,7 @@ test("clears the pending auto-share target once the room confirms it", async () 
       actorId: "member-1",
       seq: 1,
       serverTime: 1_000,
+      updatedAt: 1_000,
     },
     members: [{ id: "member-1", name: "Alice" }],
   });
@@ -374,6 +374,7 @@ test("keeps the pending auto-share target while the room is still catching up th
       actorId: "member-1",
       seq: 1,
       serverTime: 1_000,
+      updatedAt: 1_000,
     },
     members: [{ id: "member-1", name: "Alice" }],
   });
@@ -414,6 +415,7 @@ test("clears the pending auto-share target when another member takes over the sh
       actorId: "member-2",
       seq: 1,
       serverTime: 1_000,
+      updatedAt: 1_000,
     },
     members: [
       { id: "member-1", name: "Alice" },
@@ -454,6 +456,7 @@ test("clears the resolved bare-route anchor when another member re-shares the sa
       actorId: "member-2",
       seq: 1,
       serverTime: 1_000,
+      updatedAt: 1_000,
     },
     members: [
       { id: "member-1", name: "Alice" },
@@ -493,6 +496,7 @@ test("keeps the resolved bare-route anchor when the same member re-applies the s
       actorId: "member-1",
       seq: 1,
       serverTime: 1_000,
+      updatedAt: 1_000,
     },
     members: [{ id: "member-1", name: "Alice" }],
   });
@@ -559,7 +563,7 @@ function createRoomStateWithPlayback(playback: {
   actorId: string;
   seq?: number;
   userInitiated?: boolean;
-}) {
+}): RoomState {
   return {
     roomCode: "ROOM01",
     sharedVideo: {
@@ -581,7 +585,7 @@ function createRoomStateWithPlayback(playback: {
       seq: playback.seq ?? 1,
     },
     members: [],
-  } as const;
+  };
 }
 
 test("ignores non-shared paused room state without debouncing or pausing", async () => {
@@ -634,7 +638,7 @@ test("does not pre-pause non-shared video during paused room hydration", async (
       playState: "paused",
       actorId: "remote-member",
       seq: 5,
-    }) as RoomState;
+    });
     const harness = createController({
       video,
       now: 30_000,
@@ -674,7 +678,7 @@ test("pauses during hydration when unstable shared url mismatch follows a recent
       playState: "paused",
       actorId: "remote-member",
       seq: 5,
-    }) as RoomState;
+    });
     const harness = createController({
       video,
       now: 30_000,
@@ -721,7 +725,7 @@ test("hydrates paused room state while page bridge is not ready", async () => {
       playState: "paused",
       actorId: "remote-member",
       seq: 5,
-    }) as RoomState;
+    });
     const harness = createController({
       video,
       now: 30_000,
@@ -767,7 +771,7 @@ test("clears stale sync state when hydration switches shared video before page b
       playState: "paused",
       actorId: "remote-member",
       seq: 5,
-    }) as RoomState;
+    });
     const resetReasons: string[] = [];
     const harness = createController({
       video,

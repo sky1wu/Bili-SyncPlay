@@ -321,7 +321,7 @@ test("renderPopup only logs once for repeated identical pending renders", async 
     sendPopupLog: async (message: string) => {
       popupLogs.push(message);
     },
-  } as const;
+  };
 
   try {
     renderPopup(renderArgs);

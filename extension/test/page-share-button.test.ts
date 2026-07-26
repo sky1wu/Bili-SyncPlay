@@ -42,13 +42,13 @@ function createHarness(args: {
       shareCurrentPageVideoFromContent({
         resolveCurrentSharePayload: async () =>
           args.payload === undefined ? currentPayload : args.payload,
-        runtimeSendMessage: async (message) => {
+        runtimeSendMessage: async <T>(message: ContentToBackgroundMessage) => {
           sentMessages.push(message);
           if (message.type === "content:get-share-context") {
-            return args.contextResponse;
+            return args.contextResponse as T;
           }
           if (message.type === "content:share-current-video") {
-            return args.shareResponse ?? { ok: true };
+            return (args.shareResponse ?? { ok: true }) as T;
           }
           return null;
         },

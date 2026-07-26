@@ -32,7 +32,6 @@ test("ignores stale room state while waiting for local share confirmation", () =
     currentRoomState: createRoomState(
       "https://www.bilibili.com/video/BV1A?p=1",
     ),
-    nextState: createRoomState("https://www.bilibili.com/video/BV1A?p=1"),
     normalizedPendingLocalShareUrl: "https://www.bilibili.com/video/BV1B?p=1",
     normalizedIncomingSharedUrl: "https://www.bilibili.com/video/BV1A?p=1",
   });
@@ -45,7 +44,6 @@ test("applies matching room state and confirms pending local share", () => {
     currentRoomState: createRoomState(
       "https://www.bilibili.com/video/BV1A?p=1",
     ),
-    nextState: createRoomState("https://www.bilibili.com/video/BV1B?p=1"),
     normalizedPendingLocalShareUrl: "https://www.bilibili.com/video/BV1B?p=1",
     normalizedIncomingSharedUrl: "https://www.bilibili.com/video/BV1B?p=1",
   });

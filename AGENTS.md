@@ -184,6 +184,21 @@ Refactors touching these areas require regression coverage:
 - Protocol validation (type guards)
 - Server room lifecycle and admin routing
 
+### Test directories are inside typecheck
+
+Every package's `typecheck` script runs **two** projects: `tsconfig.json` (src)
+and `tsconfig.test.json` (src + `test/**`, plus `node` types). New test
+directories or packages must be wired into both, otherwise a signature change
+that misses a test call site passes the gate silently — and can hide the
+behaviour regression the missed argument causes (`#210` / `#211`).
+
+Keep fixtures honest rather than casting past the checker: a fixture that no
+longer matches its type usually means the type moved (a field was renamed,
+removed, or became required), and the fix belongs in the fixture. Reach for
+`as unknown as T` only for genuinely unfakeable platform/library objects
+(`ws.WebSocket`, `chrome.tabs.Tab`, `HTMLVideoElement`), and prefer one shared
+constructor over per-call-site casts.
+
 ## Agent Execution Rules
 
 - Do not perform destructive git operations such as `git reset --hard`, force-pushes, or overwriting unrelated uncommitted user changes unless explicitly requested.

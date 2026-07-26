@@ -39,7 +39,6 @@ function createControllerHarness() {
   >();
   const debugLogs: string[] = [];
   const runtimeMessages: Array<unknown> = [];
-  let hydrateRetryTimer: number | null = null;
   let now = 10_000;
   let currentPlaybackVideo: SharedVideo | null = null;
   let sharedVideo: SharedVideo | null = null;
@@ -68,13 +67,9 @@ function createControllerHarness() {
       debugLogs.push(message);
     },
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
+    runtimeSendMessage: async <T>(message: unknown) => {
       runtimeMessages.push(message);
-      return null;
-    },
-    getHydrateRetryTimer: () => hydrateRetryTimer,
-    setHydrateRetryTimer: (timer) => {
-      hydrateRetryTimer = timer;
+      return null as T | null;
     },
     getVideoElement: () => videoElement,
     getCurrentPlaybackVideo: async () => currentPlaybackVideo,
@@ -100,9 +95,6 @@ function createControllerHarness() {
     },
     setVideoElement(video: HTMLVideoElement | null) {
       videoElement = video;
-    },
-    get hydrateRetryTimer() {
-      return hydrateRetryTimer;
     },
   };
 }
@@ -139,9 +131,18 @@ function createRoomState(
   };
 }
 
+/**
+ * `paused` / `readyState` 在 lib.dom 里是只读的,但这些用例要直接改写它们来模拟
+ * 播放器状态变化,所以桩类型把这两项放开为可写。
+ */
+type StubVideoElement = Omit<HTMLVideoElement, "paused" | "readyState"> & {
+  paused: boolean;
+  readyState: number;
+};
+
 function createVideo(
   overrides: Partial<HTMLVideoElement> = {},
-): HTMLVideoElement {
+): StubVideoElement {
   return {
     paused: false,
     readyState: 4,
@@ -151,7 +152,7 @@ function createVideo(
     pause() {},
     play: async () => undefined,
     ...overrides,
-  } as HTMLVideoElement;
+  } as unknown as StubVideoElement;
 }
 
 test("sync controller skips playback broadcast before hydration becomes ready", async () => {
@@ -208,6 +209,9 @@ test("sync controller schedules hydration retry when room exists but initial roo
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
     userGestureGraceMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
     getNow: () => 10_000,
@@ -215,12 +219,11 @@ test("sync controller schedules hydration retry when room exists but initial roo
       harness.debugLogs.push(message);
     },
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async () => ({
-      memberId: "member-2",
-      roomCode: "ROOM02",
-    }),
-    getHydrateRetryTimer: () => harness.hydrateRetryTimer,
-    setHydrateRetryTimer: (_timer) => {},
+    runtimeSendMessage: async <T>() =>
+      ({
+        memberId: "member-2",
+        roomCode: "ROOM02",
+      }) as T,
     getVideoElement: () => null,
     getCurrentPlaybackVideo: async () => null,
     getSharedVideo: () => null,
@@ -2208,12 +2211,10 @@ test("programmatic apply signature stores the normalized url for mismatched (fes
     getNow: () => 20_000,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async (message) => {
+    runtimeSendMessage: async <T>(message: unknown) => {
       harness.runtimeMessages.push(message);
-      return null;
+      return null as T | null;
     },
-    getHydrateRetryTimer: () => null,
-    setHydrateRetryTimer: () => {},
     getVideoElement: () => video,
     getCurrentPlaybackVideo: async () => sharedVideo,
     getSharedVideo: () => sharedVideo,

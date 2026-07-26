@@ -150,7 +150,9 @@ test("suppresses programmatic play, pause, and seek events inside the apply wind
   };
   assert.equal(
     shouldSuppressProgrammaticEvent({
+      programmaticApplyAt: 10_000,
       programmaticApplyUntil: 10_500,
+      programmaticApplyScope: "all",
       programmaticApplySignature: playSignature,
       normalizedCurrentUrl: playSignature.url,
       playState: "playing",
@@ -171,7 +173,9 @@ test("suppresses programmatic play, pause, and seek events inside the apply wind
   };
   assert.equal(
     shouldSuppressProgrammaticEvent({
+      programmaticApplyAt: 10_000,
       programmaticApplyUntil: 10_500,
+      programmaticApplyScope: "all",
       programmaticApplySignature: pauseSignature,
       normalizedCurrentUrl: pauseSignature.url,
       playState: "paused",
@@ -187,7 +191,9 @@ test("suppresses programmatic play, pause, and seek events inside the apply wind
 
   assert.equal(
     shouldSuppressProgrammaticEvent({
+      programmaticApplyAt: 10_000,
       programmaticApplyUntil: 10_500,
+      programmaticApplyScope: "all",
       programmaticApplySignature: pauseSignature,
       normalizedCurrentUrl: pauseSignature.url,
       playState: "paused",
@@ -212,7 +218,9 @@ test("treats buffering after a programmatic playing apply as the same suppressio
 
   assert.equal(
     shouldSuppressProgrammaticEvent({
+      programmaticApplyAt: 10_000,
       programmaticApplyUntil: 10_500,
+      programmaticApplyScope: "all",
       programmaticApplySignature: playSignature,
       normalizedCurrentUrl: playSignature.url,
       playState: "buffering",
@@ -234,6 +242,7 @@ test("allows explicit user actions to bypass programmatic suppression", () => {
       // the apply — a genuine user seek that must not be suppressed.
       programmaticApplyAt: 9_800,
       programmaticApplyUntil: 10_500,
+      programmaticApplyScope: "all",
       programmaticApplySignature: {
         url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
         playState: "paused",
@@ -501,6 +510,7 @@ test("does not let an explicit action from before the apply window bypass suppre
     // state we just applied straight back to the room.
     programmaticApplyAt: 9_800,
     programmaticApplyUntil: 10_500,
+    programmaticApplyScope: "all",
     programmaticApplySignature: {
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
       playState: "paused",
