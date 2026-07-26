@@ -55,19 +55,26 @@ export function createClockController(args: {
     serverReceiveTime: number,
     serverSendTime: number,
   ): void {
-    const sample = updateClockSample({
+    const result = updateClockSample({
       clientSendTime,
       serverReceiveTime,
       serverSendTime,
       now: Date.now(),
       previousRttMs: args.clockState.rttMs,
       previousClockOffsetMs: args.clockState.clockOffsetMs,
+      previousSamples: args.clockState.clockSamples,
     });
-    args.clockState.rttMs = sample.rttMs;
-    args.clockState.clockOffsetMs = sample.clockOffsetMs;
+    args.clockState.rttMs = result.rttMs;
+    args.clockState.clockOffsetMs = result.clockOffsetMs;
+    args.clockState.clockSamples = result.samples;
+    // The raw sample is logged alongside the published estimate: a sample that
+    // swings while `rtt` stays flat is the signature of a late-written
+    // timestamp, and `out`/`in` say which direction it came from.
     args.log(
       "background",
-      `Clock sync offset=${args.clockState.clockOffsetMs}ms rtt=${args.clockState.rttMs}ms`,
+      `Clock sync offset=${args.clockState.clockOffsetMs}ms rtt=${args.clockState.rttMs}ms ` +
+        `sample=${Math.round(result.sample.offsetMs)}ms sampleRtt=${result.sample.rttMs}ms ` +
+        `out=${result.sample.outboundMs}ms in=${result.sample.inboundMs}ms window=${result.samples.length}`,
     );
   }
 

@@ -61,6 +61,7 @@ export function createRuntimeSyncController(args: {
       clock: {
         clockOffsetMs: args.clockState.clockOffsetMs,
         rttMs: args.clockState.rttMs,
+        clockSamples: args.clockState.clockSamples,
         clockSyncTimer: args.clockState.clockSyncTimer,
       },
       diagnostics: {
