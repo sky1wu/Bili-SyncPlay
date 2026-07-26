@@ -30,7 +30,7 @@ Useful command matrix:
 - `npm run lint:fix`: apply safe ESLint fixes
 - `npm run format`: rewrite files with Prettier
 - `npm run format:check`: verify formatting without rewriting
-- `npm run typecheck`: run TypeScript semantic checks across protocol, server, and extension source code
+- `npm run typecheck`: run TypeScript semantic checks across protocol, server, extension, and admin-ui — **both source and `test/**`**. The first three packages check tests through a second project (`tsconfig.test.json`); admin-ui covers them in its single `tsconfig.json`. A signature change that misses a test call site fails this command.
 - `npm run build`: build `protocol`, `server`, and `extension` in dependency order
 - `npm test`: run audit gate tests plus repository-wide protocol, server, and extension tests
 - `npm run audit`: run the dependency audit gate, failing on unallowlisted `high` or `critical` vulnerabilities

@@ -186,18 +186,36 @@ Refactors touching these areas require regression coverage:
 
 ### Test directories are inside typecheck
 
-Every package's `typecheck` script runs **two** projects: `tsconfig.json` (src)
-and `tsconfig.test.json` (src + `test/**`, plus `node` types). New test
-directories or packages must be wired into both, otherwise a signature change
-that misses a test call site passes the gate silently — and can hide the
-behaviour regression the missed argument causes (`#210` / `#211`).
+The rule is: **every package's `test/**` must be inside `npm run typecheck`.**
+Otherwise a signature change that misses a test call site passes the gate
+silently — and can hide the behaviour regression the missed argument causes
+(`#210` / `#211`). How a package satisfies it depends on whether src and tests
+can share one compiler configuration:
+
+- `protocol`, `server`, `extension` need a second project, because their tests
+  need `node` types (and `server`'s reach into `bench/`) that the src build must
+  not carry. Their `typecheck` runs `tsconfig.json` then `tsconfig.test.json`.
+- `admin-ui` needs no second project: its `tsconfig.json` already includes
+  `test` (its src is browser code compiled by Vite, so no split is required).
+
+A new package picks whichever applies — do not add an unnecessary
+`tsconfig.test.json` just to match the majority.
 
 Keep fixtures honest rather than casting past the checker: a fixture that no
 longer matches its type usually means the type moved (a field was renamed,
-removed, or became required), and the fix belongs in the fixture. Reach for
-`as unknown as T` only for genuinely unfakeable platform/library objects
-(`ws.WebSocket`, `chrome.tabs.Tab`, `HTMLVideoElement`), and prefer one shared
-constructor over per-call-site casts.
+removed, or became required), and the fix belongs in the fixture. Two casts to
+avoid specifically, because both re-open the gap this gate exists to close:
+
+- `as unknown as <DomainType>` on a fixture (`RoomState`, `PlaybackState`,
+  `Session`) — it silences exactly the missing-required-field error you want.
+- A stub satisfying an unconstrained `<T>(…) => Promise<T>` via `as T`. No value
+  inhabits every `T`, so the cast is unconditional. If a contract has one real
+  response type, declare it; if the response must be runtime-guarded anyway,
+  declare `Promise<unknown>` and let the guard narrow it.
+
+`as unknown as T` is fine for genuinely unfakeable platform/library objects
+(`ws.WebSocket`, `chrome.tabs.Tab`, `HTMLVideoElement`, `IncomingMessage`);
+prefer one shared constructor over per-call-site casts.
 
 ## Agent Execution Rules
 

@@ -3,6 +3,8 @@ import test from "node:test";
 import type {
   ActiveVideoResponsePayload,
   ContentToBackgroundMessage,
+  ShareContextResponse,
+  ShareCurrentVideoResponse,
 } from "../src/shared/messages";
 import {
   clampPageShareButtonPosition,
@@ -26,8 +28,8 @@ const currentPayload: ActiveVideoResponsePayload = {
 
 function createHarness(args: {
   payload?: ActiveVideoResponsePayload | null;
-  contextResponse?: unknown;
-  shareResponse?: unknown;
+  contextResponse?: ShareContextResponse;
+  shareResponse?: ShareCurrentVideoResponse;
   confirmResult?: boolean;
 }) {
   const sentMessages: ContentToBackgroundMessage[] = [];
@@ -42,13 +44,13 @@ function createHarness(args: {
       shareCurrentPageVideoFromContent({
         resolveCurrentSharePayload: async () =>
           args.payload === undefined ? currentPayload : args.payload,
-        runtimeSendMessage: async <T>(message: ContentToBackgroundMessage) => {
+        runtimeSendMessage: async (message) => {
           sentMessages.push(message);
           if (message.type === "content:get-share-context") {
-            return args.contextResponse as T;
+            return args.contextResponse ?? null;
           }
           if (message.type === "content:share-current-video") {
-            return (args.shareResponse ?? { ok: true }) as T;
+            return args.shareResponse ?? { ok: true };
           }
           return null;
         },

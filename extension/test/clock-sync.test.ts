@@ -314,8 +314,9 @@ function playingRoomState(args: {
       currentTime: args.currentTime,
       playbackRate: args.playbackRate ?? 1,
       serverTime: args.serverTime,
+      updatedAt: args.serverTime,
     },
-  } as unknown as RoomState;
+  };
 }
 
 test("extrapolates a playing snapshot by the elapsed time", () => {

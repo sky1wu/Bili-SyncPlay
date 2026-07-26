@@ -49,9 +49,9 @@ test("auto-share next controller sends a request after the navigation settles", 
     settleDelayMs: 900,
     getCurrentPageUrl: () => currentUrl,
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: (message) => {
       debugLogs.push(message);
@@ -105,9 +105,9 @@ test("auto-share next controller re-anchors to its own confirmed previous step b
     getCurrentPageUrl: () => currentUrl,
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
     getActiveSharedUrl: () => activeSharedUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -172,9 +172,9 @@ test("auto-share next controller does not re-anchor to an unrelated video the ro
     getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1BVideo",
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
     getActiveSharedUrl: () => activeSharedUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -221,9 +221,9 @@ test("auto-share next controller re-anchors to an earlier sent step that confirm
     getCurrentPageUrl: () => currentUrl,
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
     getActiveSharedUrl: () => activeSharedUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -289,9 +289,9 @@ test("auto-share next controller skips a settled request when the page moved aga
     settleDelayMs: 900,
     getCurrentPageUrl: () => currentUrl,
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: (message) => {
       debugLogs.push(message);
@@ -342,9 +342,9 @@ test("auto-share next controller still sends when a festival snapshot is cleared
     settleDelayMs: 900,
     getCurrentPageUrl: () => "https://www.bilibili.com/festival/MyMuji",
     normalizeVideoPageUrl: normalizeFestivalAwareUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -386,9 +386,9 @@ test("auto-share next controller skips when a non-festival page leaves to an uns
     settleDelayMs: 900,
     getCurrentPageUrl: () => "https://www.bilibili.com/account/history",
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: (message) => {
       debugLogs.push(message);
@@ -438,9 +438,9 @@ test("auto-share next controller skips when a festival snapshot resolves a diffe
     getCurrentPageUrl: () => resolvedUrl,
     getResolvedVideoUrl: () => resolvedUrl,
     normalizeVideoPageUrl: normalizeFestivalAwareUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: (message) => {
       debugLogs.push(message);
@@ -487,9 +487,9 @@ test("auto-share next controller still sends when a festival address bar keeps a
     getCurrentPageUrl: () =>
       "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1",
     normalizeVideoPageUrl: normalizeFestivalAwareUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -529,9 +529,9 @@ test("auto-share next controller retries when the background reports the page is
     maxAttempts: 4,
     getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return (responses.shift() ?? { ok: true }) as T;
+      return responses.shift() ?? { ok: true };
     },
     debugLog: () => {},
   });
@@ -581,9 +581,9 @@ test("auto-share next controller keeps retrying offline deferrals without consum
     maxAttempts: 2,
     getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return (responses.shift() ?? { ok: true }) as T;
+      return responses.shift() ?? { ok: true };
     },
     debugLog: () => {},
   });
@@ -619,9 +619,9 @@ test("auto-share next controller stops retrying after the maximum attempts", asy
     maxAttempts: 3,
     getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: false } as T;
+      return { ok: false };
     },
     debugLog: () => {},
   });
@@ -657,14 +657,14 @@ test("auto-share next controller retry does not cancel a newer navigation's pend
     maxAttempts: 4,
     getCurrentPageUrl: () => currentUrl,
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
       if (sentMessages.length === 1) {
-        return (await new Promise<{ ok: boolean }>((resolve) => {
+        return await new Promise<{ ok: boolean }>((resolve) => {
           resolveFirst = resolve;
-        })) as T;
+        });
       }
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -725,14 +725,14 @@ test("auto-share next controller supersedes an in-flight request when a new navi
     maxAttempts: 4,
     getCurrentPageUrl: () => currentUrl,
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
       if (sentMessages.length === 1) {
-        return (await new Promise<{ ok: boolean }>((resolve) => {
+        return await new Promise<{ ok: boolean }>((resolve) => {
           resolveFirst = resolve;
-        })) as T;
+        });
       }
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -797,14 +797,14 @@ test("auto-share next controller re-sends the same target after a superseded req
     maxAttempts: 4,
     getCurrentPageUrl: () => currentUrl,
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
       if (sentMessages.length === 1) {
-        return (await new Promise<{ ok: boolean }>((resolve) => {
+        return await new Promise<{ ok: boolean }>((resolve) => {
           resolveFirst = resolve;
-        })) as T;
+        });
       }
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -878,14 +878,14 @@ test("auto-share next controller supersedes a pending request when the same targ
     settleDelayMs: 900,
     getCurrentPageUrl: () => currentUrl,
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(
         message as {
           type: string;
           payload: { previousSharedUrl: string; targetNormalizedUrl: string };
         },
       );
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -930,9 +930,9 @@ test("auto-share next controller re-shares the same target after the previous re
     settleDelayMs: 900,
     getCurrentPageUrl: () => currentUrl,
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -972,7 +972,7 @@ test("auto-share next controller deduplicates repeated requests for the same tar
     settleDelayMs: 900,
     getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>() => ({ ok: true }) as T,
+    runtimeSendMessage: async () => ({ ok: true }),
     debugLog: () => {},
   });
 
@@ -1000,9 +1000,9 @@ test("auto-share next controller cancels a pending request when navigation is no
     settleDelayMs: 900,
     getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
-      return { ok: true } as T;
+      return { ok: true };
     },
     debugLog: () => {},
   });
@@ -1034,11 +1034,11 @@ test("auto-share next controller invalidates an in-flight request after cancelPe
     settleDelayMs: 900,
     getCurrentPageUrl: () => "https://www.bilibili.com/video/BV1NextVideo",
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       sentMessages.push(message);
       // The page bridge is not ready: without cancellation this would schedule a
       // retry. cancelPending (a manual navigation) must abandon it instead.
-      return { ok: false } as T;
+      return { ok: false };
     },
     debugLog: () => {},
   });

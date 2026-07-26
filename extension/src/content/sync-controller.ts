@@ -3,7 +3,11 @@ import type {
   RoomState,
   SharedVideo,
 } from "@bili-syncplay/protocol";
-import type { SharedVideoToastPayload } from "../shared/messages";
+import type {
+  ContentToBackgroundMessage,
+  RoomStateHydrationResponse,
+  SharedVideoToastPayload,
+} from "../shared/messages";
 import {
   createPlaybackBroadcastPayload,
   derivePlaybackSyncIntent,
@@ -102,7 +106,9 @@ export function createSyncController(args: {
     key: string,
     now?: number,
   ) => boolean;
-  runtimeSendMessage: <T>(message: unknown) => Promise<T | null>;
+  runtimeSendMessage: (
+    message: ContentToBackgroundMessage,
+  ) => Promise<RoomStateHydrationResponse | null>;
   getVideoElement: () => HTMLVideoElement | null;
   getCurrentPlaybackVideo: () => Promise<SharedVideo | null>;
   getSharedVideo: () => SharedVideo | null;

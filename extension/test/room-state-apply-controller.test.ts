@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RoomState, SharedVideo } from "@bili-syncplay/protocol";
+import type {
+  ContentToBackgroundMessage,
+  RoomStateHydrationResponse,
+} from "../src/shared/messages";
 import { createContentRuntimeState } from "../src/content/runtime-state";
 import { createRoomStateApplyController } from "../src/content/room-state-apply-controller";
 
@@ -32,7 +36,9 @@ function createController(overrides: {
   remotePauseDebounceMs?: number;
   normalizeUrl?: (url: string | undefined | null) => string | null;
   currentVideo?: SharedVideo | null;
-  runtimeSendMessage?: <T>(message: unknown) => Promise<T | null>;
+  runtimeSendMessage?: (
+    message: ContentToBackgroundMessage,
+  ) => Promise<RoomStateHydrationResponse | null>;
   rememberRemotePlaybackForSuppression?: (
     playback: import("@bili-syncplay/protocol").PlaybackState,
   ) => void;

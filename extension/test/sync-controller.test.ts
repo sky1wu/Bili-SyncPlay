@@ -67,9 +67,9 @@ function createControllerHarness() {
       debugLogs.push(message);
     },
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       runtimeMessages.push(message);
-      return null as T | null;
+      return null;
     },
     getVideoElement: () => videoElement,
     getCurrentPlaybackVideo: async () => currentPlaybackVideo,
@@ -219,11 +219,10 @@ test("sync controller schedules hydration retry when room exists but initial roo
       harness.debugLogs.push(message);
     },
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async <T>() =>
-      ({
-        memberId: "member-2",
-        roomCode: "ROOM02",
-      }) as T,
+    runtimeSendMessage: async () => ({
+      memberId: "member-2",
+      roomCode: "ROOM02",
+    }),
     getVideoElement: () => null,
     getCurrentPlaybackVideo: async () => null,
     getSharedVideo: () => null,
@@ -2211,9 +2210,9 @@ test("programmatic apply signature stores the normalized url for mismatched (fes
     getNow: () => 20_000,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
-    runtimeSendMessage: async <T>(message: unknown) => {
+    runtimeSendMessage: async (message) => {
       harness.runtimeMessages.push(message);
-      return null as T | null;
+      return null;
     },
     getVideoElement: () => video,
     getCurrentPlaybackVideo: async () => sharedVideo,

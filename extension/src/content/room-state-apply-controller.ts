@@ -3,7 +3,11 @@ import type {
   RoomState,
   SharedVideo,
 } from "@bili-syncplay/protocol";
-import type { SharedVideoToastPayload } from "../shared/messages";
+import type {
+  ContentToBackgroundMessage,
+  RoomStateHydrationResponse,
+  SharedVideoToastPayload,
+} from "../shared/messages";
 import { decidePlaybackApplication } from "./playback-apply";
 import {
   canApplyPlaybackImmediately,
@@ -44,7 +48,9 @@ export function createRoomStateApplyController(args: {
     key: string,
     now?: number,
   ) => boolean;
-  runtimeSendMessage: <T>(message: unknown) => Promise<T | null>;
+  runtimeSendMessage: (
+    message: ContentToBackgroundMessage,
+  ) => Promise<RoomStateHydrationResponse | null>;
   getVideoElement: () => HTMLVideoElement | null;
   getSharedVideo: () => SharedVideo | null;
   normalizeUrl: (url: string | undefined | null) => string | null;
@@ -792,12 +798,7 @@ export function createRoomStateApplyController(args: {
       hydrateRetryTimer = null;
     }
 
-    const response = await args.runtimeSendMessage<{
-      ok?: boolean;
-      roomState?: RoomState;
-      memberId?: string | null;
-      roomCode?: string | null;
-    }>({
+    const response = await args.runtimeSendMessage({
       type: "content:get-room-state",
     });
     if (destroyed || response === null) {

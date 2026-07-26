@@ -55,8 +55,9 @@ function roomState(args: {
       currentTime: args.currentTime,
       playbackRate: args.playbackRate ?? 1,
       serverTime: args.serverTime ?? 0,
+      updatedAt: args.serverTime ?? 0,
     },
-  } as unknown as RoomState;
+  };
 }
 
 test("a freshly arrived snapshot is passed through as reported", () => {
