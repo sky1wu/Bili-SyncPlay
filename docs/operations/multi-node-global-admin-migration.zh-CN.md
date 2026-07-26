@@ -35,7 +35,7 @@
 
 当前会使用这些键族：
 
-- `bsp:room:*`、`bsp:room-index`、`bsp:room-expiry`
+- `bsp:room:*`、`bsp:rooms-by-expiry`(以及仅作回滚镜像写入的 `bsp:room-expiry`;`bsp:room-index` 已不再写入)
 - `bsp:runtime:*`
 - `bsp:admin:session:*`
 - `bsp:events`

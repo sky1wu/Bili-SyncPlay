@@ -32,7 +32,7 @@ Recommended role split:
 
 Key families used by the rollout:
 
-- `bsp:room:*`, `bsp:room-index`, `bsp:room-expiry`
+- `bsp:room:*`, `bsp:rooms-by-expiry` (plus `bsp:room-expiry`, written only as a rollback mirror; `bsp:room-index` is no longer written)
 - `bsp:runtime:*`
 - `bsp:admin:session:*`
 - `bsp:events`

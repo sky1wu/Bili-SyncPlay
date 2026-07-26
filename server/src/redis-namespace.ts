@@ -18,10 +18,14 @@ export function getRedisRoomStoreKeys(namespace?: string) {
     // One sorted set holds every room, scored by its expiry (+inf when the
     // room does not expire), so enumeration, counting and reaping all read
     // the same source instead of reconciling separate indexes against each
-    // other. It replaces the former room-index and room-expiry pair; those
-    // keys are deliberately left untouched in existing databases so a
-    // rollback still finds the data it expects.
+    // other. It supersedes the room-index and room-expiry pair.
     roomsByExpiryKey: `${base}rooms-by-expiry`,
+    // Kept as a write-only mirror for one release so a rollback stays safe.
+    // The previous build rebuilds room-index from room bodies on startup but
+    // has no equivalent repair for room-expiry, so without this mirror any
+    // room whose expiry was set while the new build was live would become
+    // invisible to the old reaper and linger forever. Nothing reads it here.
+    legacyRoomExpiryKey: `${base}room-expiry`,
   };
 }
 

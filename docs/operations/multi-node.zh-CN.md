@@ -190,7 +190,11 @@ node server/dist/global-admin-index.js
 
 多节点控制面当前使用的 Redis 键族：
 
-- `bsp:room:*`、`bsp:room-index`、`bsp:room-expiry`：房间基础持久化
+- `bsp:room:*`、`bsp:rooms-by-expiry`：房间基础持久化。`bsp:rooms-by-expiry` 收录全部房间、分值为其过期时间(不过期的房间为 `+inf`),是列举、计数与回收的唯一来源。
+- `bsp:room-expiry`：只写不读。作为回滚镜像保留一个版本 —— 旧版本会在启动时从房间体重建 `bsp:room-index`,却没有针对 `bsp:room-expiry` 的等价修复。`bsp:room-index` 本身已不再写入。
+
+  Redis ACL、备份与监控请覆盖 `bsp:rooms-by-expiry`;仅放行旧两个键的部署会导致房间写入失败。
+
 - `bsp:runtime:*`：共享 session、房间成员、被踢 token 与节点心跳
 - `bsp:admin:session:*`：共享管理员 Bearer 会话
 - `bsp:events`：运行事件流

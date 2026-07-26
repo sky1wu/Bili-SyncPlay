@@ -646,3 +646,89 @@ test("redis room save surfaces per-command transaction failures", async (t) => {
     await store.close();
   }
 });
+
+test("redis room reaper triggers the reconcile itself", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("reapreconcile");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const redis = await connect();
+
+  let store: Store | null = null;
+  try {
+    // A room body written by a node on an older build: no membership here, so
+    // the reaper's own range query cannot see it. Nothing lists or counts in
+    // this test — a deployment with no admin traffic and no metrics scrape
+    // must still converge, or such a room lingers forever.
+    await redis.set(
+      `${namespace}:room:NOREAD`,
+      legacyRoomBody("NOREAD", { expiresAt: 70, lastActiveAt: 65 }),
+    );
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+    assert.equal(await store.deleteExpiredRooms(100), 1);
+    assert.equal(await redis.exists(`${namespace}:room:NOREAD`), 0);
+    assert.equal(await redis.zscore(roomsKey, "NOREAD"), null);
+  } finally {
+    await redis.del(`${namespace}:room:NOREAD`, roomsKey);
+    await redis.quit();
+    await store?.close();
+  }
+});
+
+test("redis room store mirrors expiry into the legacy key for rollback safety", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("mirror");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const legacyKey = `${namespace}:room-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const room = await store.createRoom({
+      code: "MIRROR",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    // A room that does not expire has no legacy entry, matching what the
+    // previous build would have written.
+    assert.equal(await redis.zscore(legacyKey, room.code), null);
+
+    const expiring = await store.updateRoom(room.code, room.version, {
+      expiresAt: 900,
+      lastActiveAt: 800,
+    });
+    assert.equal(expiring.ok, true);
+    if (!expiring.ok) {
+      throw new Error("Expected update to succeed.");
+    }
+    // Without this the old reaper could never find the room after a rollback,
+    // because the old build rebuilds room-index from bodies but never
+    // room-expiry.
+    assert.equal(await redis.zscore(legacyKey, room.code), "900");
+
+    const revived = await store.updateRoom(room.code, expiring.room.version, {
+      expiresAt: null,
+      lastActiveAt: 850,
+    });
+    assert.equal(revived.ok, true);
+    assert.equal(await redis.zscore(legacyKey, room.code), null);
+
+    await store.saveRoom({ ...room, expiresAt: 1_200, lastActiveAt: 900 });
+    assert.equal(await redis.zscore(legacyKey, room.code), "1200");
+
+    await store.deleteRoom(room.code);
+    assert.equal(await redis.zscore(legacyKey, room.code), null);
+  } finally {
+    await redis.del(roomsKey, legacyKey);
+    await redis.quit();
+    await store.close();
+  }
+});

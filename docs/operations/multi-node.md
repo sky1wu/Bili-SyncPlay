@@ -190,7 +190,11 @@ If the edge machine also carries `room-node-a`, `global-admin`, and `redis`, it 
 
 Redis key families used by the multi-node control plane:
 
-- `bsp:room:*`, `bsp:room-index`, `bsp:room-expiry`: persisted room base state
+- `bsp:room:*`, `bsp:rooms-by-expiry`: persisted room base state. `bsp:rooms-by-expiry` holds every room scored by its expiry (`+inf` when the room does not expire) and is the single source for listing, counting and reaping.
+- `bsp:room-expiry`: written but never read. Kept as a rollback mirror for one release, because the previous build rebuilds `bsp:room-index` from room bodies on startup but has no equivalent repair for `bsp:room-expiry`. `bsp:room-index` itself is no longer written.
+
+  Grant ACLs, backups and monitoring on `bsp:rooms-by-expiry`; a deployment that only allows the old two keys will fail room writes.
+
 - `bsp:runtime:*`: shared sessions, room members, blocked member tokens, and node heartbeats
 - `bsp:admin:session:*`: shared admin bearer sessions
 - `bsp:events`: runtime event stream
