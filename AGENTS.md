@@ -112,6 +112,38 @@ Single source of truth for `ClientMessage`, `ServerMessage`, domain types (`Room
 - Protocol types/guards must stay in `@bili-syncplay/protocol`.
 - Server env parsing must stay in the server config layer.
 
+### Playback timing invariants
+
+These three cost four review rounds on #210 between them. Nothing in the type
+system enforces any of them, so they have to be checked by hand whenever a
+background path touches room state or playback timing.
+
+- **Never subtract a local timestamp from a server one.** `serverTime` belongs to
+  the server's clock; a local timestamp belongs to this machine's. Their
+  difference is the clock disagreement, which is not a duration and drifts on its
+  own — a receiver aiming at it wobbles the playback rate forever. Extrapolate
+  playback from a local monotonic anchor instead (`clock-controller`), and to send
+  an age across machines send a _duration_, never a timestamp. Comparing two
+  server timestamps to each other is fine (version ordering); comparing two local
+  ones is fine (elapsed).
+- **Record a playback snapshot's arrival before the snapshot is observable.** Once
+  it is in `roomSessionState.roomState`, a rehydrating content script
+  (`content:get-room-state`) can read it and a member join/leave can rewrap it,
+  and whichever path compensates first would otherwise anchor it at _its_ moment
+  and lose everything the room played before that. `markPlaybackArrival` must run
+  before the write and before any `await`. Serializing socket messages would not
+  cover this: those readers arrive on the `chrome.runtime` channel, not the socket.
+- **After any `await`, confirm the room state you hold is still the current one
+  before compensating or delivering it.** Handlers are started per socket message
+  with `void handleServerMessage(...)` and do not serialize, so a newer state can
+  take over while one awaits (`ensureSharedVideoOpen` may open a tab). A
+  superseded snapshot must be dropped, not delivered: the content script's
+  staleness check is per actor (`lastAppliedVersionByActor`), so an overtaken
+  snapshot from a _different_ member is accepted and moves playback backwards.
+  `handleRoomStateMessage`, `applyRoomMemberState` and
+  `expireBootstrapRoomStateWait` each carry this check; a new delivery path needs
+  its own.
+
 ## Engineering Constraints
 
 - Repository-wide contribution and refactoring constraints are defined in [CONTRIBUTING.md](./CONTRIBUTING.md).
