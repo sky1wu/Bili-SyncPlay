@@ -128,27 +128,41 @@ export async function createRoomEventConsumer(options: {
         return;
       }
 
-      const state =
-        message.type === "room_deleted"
-          ? {
-              roomCode: message.roomCode,
-              sharedVideo: null,
-              playback: null,
-              members: [],
-            }
-          : await options.getRoomStateByCode(message.roomCode);
-      if (!state) {
-        return;
-      }
+      // The room event bus uses a single global channel, so every node
+      // receives every room's events. Resolving room state before checking
+      // whether any local session actually wants it turned one broadcast into
+      // one room-store read per node — O(nodes x message rate) of pure waste,
+      // and a full network round trip each once a node is not co-located with
+      // Redis. The member-delta branch above already defers its read lazily.
+      const recipients = localSessions.filter((session) =>
+        isRoomEventRecipient(session, message.roomCode),
+      );
 
-      for (const session of localSessions) {
-        if (!isRoomEventRecipient(session, message.roomCode)) {
-          continue;
+      if (recipients.length > 0) {
+        const state =
+          message.type === "room_deleted"
+            ? {
+                roomCode: message.roomCode,
+                sharedVideo: null,
+                playback: null,
+                members: [],
+              }
+            : await options.getRoomStateByCode(message.roomCode);
+        if (!state) {
+          return;
         }
-        options.send(session.socket, {
-          type: "room:state",
-          payload: state,
-        });
+
+        for (const session of recipients) {
+          // Re-check after the await: a session can leave the room while the
+          // state loads, and it must not receive another room's state.
+          if (!isRoomEventRecipient(session, message.roomCode)) {
+            continue;
+          }
+          options.send(session.socket, {
+            type: "room:state",
+            payload: state,
+          });
+        }
       }
 
       options.logEvent?.("room_event_consumed", {

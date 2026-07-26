@@ -498,8 +498,10 @@ test("room event consumer logs failures without throwing to the bus", async () =
     async getRoomStateByCode() {
       throw new Error("boom");
     },
+    // A local recipient is required for the consumer to reach the room state
+    // read at all; without one the read is skipped by design.
     listLocalSessionsByRoom() {
-      return [];
+      return [createSession("member-a", "ROOM99")];
     },
     send() {},
     instanceId: "instance-a",
@@ -530,4 +532,92 @@ test("room event consumer logs failures without throwing to the bus", async () =
       roomCode: "ROOM99",
     },
   ]);
+});
+
+test("room event consumer skips the room state read when no local session wants it", async () => {
+  const bus = createInMemoryRoomEventBus();
+  let roomStateReads = 0;
+  const logs: string[] = [];
+
+  const consumer = await createRoomEventConsumer({
+    roomEventBus: bus,
+    async getRoomStateByCode(roomCode) {
+      roomStateReads += 1;
+      return {
+        roomCode,
+        sharedVideo: null,
+        playback: null,
+        members: [],
+      };
+    },
+    // Every node receives every room's events off the single global channel,
+    // so this is the common case on any node that does not host the room.
+    listLocalSessionsByRoom() {
+      return [];
+    },
+    send() {
+      throw new Error("send should not be called without recipients");
+    },
+    instanceId: "instance-a",
+    logEvent(event) {
+      logs.push(event);
+    },
+  });
+
+  try {
+    await bus.publish({
+      type: "room_state_updated",
+      roomCode: "ROOM01",
+      sourceInstanceId: "instance-b",
+      emittedAt: 3_000,
+    });
+  } finally {
+    await consumer.close();
+  }
+
+  assert.equal(roomStateReads, 0);
+  // Delivery accounting is unchanged: the event is still recorded as consumed.
+  assert.deepEqual(logs, ["room_event_consumed"]);
+});
+
+test("room event consumer still reads room state when a local session is present", async () => {
+  const bus = createInMemoryRoomEventBus();
+  const session = createSession("member-a", "ROOM01");
+  let roomStateReads = 0;
+  let delivered = 0;
+
+  const consumer = await createRoomEventConsumer({
+    roomEventBus: bus,
+    async getRoomStateByCode(roomCode) {
+      roomStateReads += 1;
+      return {
+        roomCode,
+        sharedVideo: null,
+        playback: null,
+        members: [{ id: "member-a", name: "Alice" }],
+      };
+    },
+    listLocalSessionsByRoom() {
+      return [session];
+    },
+    send() {
+      delivered += 1;
+    },
+    instanceId: "instance-a",
+    logEvent() {},
+  });
+
+  try {
+    await bus.publish({
+      type: "room_state_updated",
+      roomCode: "ROOM01",
+      sourceInstanceId: "instance-b",
+      emittedAt: 3_100,
+    });
+  } finally {
+    await consumer.close();
+  }
+
+  assert.equal(roomStateReads, 1);
+  assert.equal(delivered, 1);
 });

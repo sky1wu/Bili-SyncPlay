@@ -90,6 +90,40 @@ function escapeGlobPattern(value: string): string {
   return value.replaceAll(/[\\*?[\]]/g, (character) => `\\${character}`);
 }
 
+// Compare-and-set in one round trip, replacing WATCH + GET + MULTI/EXEC +
+// UNWATCH. The caller merges the patch in JS and hands over both the exact
+// bytes it read and the fully serialized next room, so the script never
+// decodes or re-encodes room JSON — Redis's cjson formats numbers with
+// %.14g, which turns a seq of 9007199254740991 into 9.007199254741e+15 and
+// clips playback positions.
+//
+// The guard compares the whole previous body rather than just its version,
+// because that is what WATCH actually guaranteed: a room can be deleted and
+// a later room created under the same code, and the new room starts at
+// version 0 again. Comparing versions alone would let an update prepared
+// against the old room overwrite the new one — joinToken and owner included.
+const UPDATE_ROOM_CAS_LUA = `
+local raw = redis.call("GET", KEYS[1])
+if not raw then
+  return "not_found"
+end
+
+if raw ~= ARGV[1] then
+  return "version_conflict"
+end
+
+redis.call("SET", KEYS[1], ARGV[2])
+redis.call("ZADD", KEYS[2], ARGV[3], ARGV[4])
+
+if ARGV[5] == "" then
+  redis.call("ZREM", KEYS[3], ARGV[4])
+else
+  redis.call("ZADD", KEYS[3], ARGV[5], ARGV[4])
+end
+
+return "ok"
+`;
+
 function serializeRoom(room: PersistedRoom): string {
   return JSON.stringify(room);
 }
@@ -332,38 +366,44 @@ export async function createRedisRoomStore(
     },
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
       const key = roomKey(code);
-      await redis.watch(key);
-      try {
-        const currentRoom = parseRoom(await redis.get(key));
-        if (!currentRoom) {
-          return { ok: false, reason: "not_found" };
-        }
-        if (currentRoom.version !== expectedVersion) {
-          return { ok: false, reason: "version_conflict" };
-        }
-
-        const nextRoom: PersistedRoom = {
-          ...currentRoom,
-          ...patch,
-          version: currentRoom.version + 1,
-        };
-
-        const transaction = redis.multi();
-        transaction.set(key, serializeRoom(nextRoom));
-        transaction.zadd(roomIndexKey, String(nextRoom.lastActiveAt), code);
-        if (nextRoom.expiresAt === null) {
-          transaction.zrem(roomExpiryKey, code);
-        } else {
-          transaction.zadd(roomExpiryKey, String(nextRoom.expiresAt), code);
-        }
-        const result = await transaction.exec();
-        if (result === null) {
-          return { ok: false, reason: "version_conflict" };
-        }
-        return { ok: true, room: nextRoom };
-      } finally {
-        await redis.unwatch();
+      const rawRoom = await redis.get(key);
+      if (rawRoom === null) {
+        return { ok: false, reason: "not_found" };
       }
+      const currentRoom = parseRoom(rawRoom);
+      if (!currentRoom) {
+        return { ok: false, reason: "not_found" };
+      }
+      if (currentRoom.version !== expectedVersion) {
+        return { ok: false, reason: "version_conflict" };
+      }
+
+      const nextRoom: PersistedRoom = {
+        ...currentRoom,
+        ...patch,
+        version: currentRoom.version + 1,
+      };
+
+      const result = await redis.eval(
+        UPDATE_ROOM_CAS_LUA,
+        3,
+        key,
+        roomIndexKey,
+        roomExpiryKey,
+        rawRoom,
+        serializeRoom(nextRoom),
+        String(nextRoom.lastActiveAt),
+        code,
+        nextRoom.expiresAt === null ? "" : String(nextRoom.expiresAt),
+      );
+
+      if (result === "not_found") {
+        return { ok: false, reason: "not_found" };
+      }
+      if (result !== "ok") {
+        return { ok: false, reason: "version_conflict" };
+      }
+      return { ok: true, room: nextRoom };
     },
     async deleteRoom(code) {
       const transaction = redis.multi();
