@@ -58,6 +58,7 @@ const redis = new Redis(redisUrl, { maxRetriesPerRequest: 1 });
 
 let scanned = 0;
 let expiring = 0;
+let skipped = 0;
 let cursor = "0";
 
 try {
@@ -90,14 +91,27 @@ try {
         continue;
       }
       if (typeof room?.code !== "string") {
+        console.warn(`skipping body without a usable code: ${keys[index]}`);
+        skipped += 1;
         continue;
       }
       if (room.expiresAt === null || room.expiresAt === undefined) {
         pending.push(["zrem", room.code]);
-      } else {
-        pending.push(["zadd", room.code, String(room.expiresAt)]);
-        expiring += 1;
+        continue;
       }
+      // Anything else would go straight into ZADD as a score and abort the
+      // rebuild mid-rollback. DRY_RUN never issues the command, so without
+      // this check a dry run would report a clean preflight for a database
+      // that cannot actually be rebuilt.
+      if (!Number.isFinite(room.expiresAt)) {
+        console.warn(
+          `skipping body with a non-numeric expiresAt: ${keys[index]}`,
+        );
+        skipped += 1;
+        continue;
+      }
+      pending.push(["zadd", room.code, String(room.expiresAt)]);
+      expiring += 1;
     }
 
     if (!dryRun && pending.length > 0) {
@@ -120,7 +134,8 @@ try {
 
   console.log(
     `${dryRun ? "[dry run] " : ""}scanned ${scanned} room bodies; ` +
-      `${expiring} carry an expiresAt and were written to ${legacyExpiryKey}.`,
+      `${expiring} carry an expiresAt and were written to ${legacyExpiryKey}` +
+      `; ${skipped} unusable bodies were skipped.`,
   );
 } finally {
   await redis.quit();

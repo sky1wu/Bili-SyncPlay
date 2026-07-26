@@ -145,7 +145,10 @@ for _, code in ipairs(candidates) do
     redis.call("ZREM", roomsKey, code)
   else
     local ok, room = pcall(cjson.decode, rawRoom)
-    if ok and room then
+    -- cjson.decode("1") yields a truthy scalar; indexing it raises a Lua
+    -- error that aborts the whole reaper run, so the member stays a candidate
+    -- and every expired room ordered after it stops being collected too.
+    if ok and type(room) == "table" then
       local expiresAt = room["expiresAt"]
       if expiresAt == cjson.null or expiresAt == nil then
         redis.call("ZADD", roomsKey, "+inf", code)

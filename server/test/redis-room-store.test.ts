@@ -854,3 +854,53 @@ test("redis room store skips bodies whose fields are the wrong shape", async (t)
     await store?.close();
   }
 });
+
+test("redis room reaper survives a body corrupted into a JSON scalar", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("scalar");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const doomed = await store.createRoom({
+      code: "SCALAR",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    const expiring = await store.updateRoom(doomed.code, doomed.version, {
+      expiresAt: 10,
+      lastActiveAt: 2,
+    });
+    assert.equal(expiring.ok, true);
+
+    // Valid JSON, but a scalar. cjson.decode returns a truthy number, and
+    // indexing it raises a Lua error that aborts the reaper before it reaches
+    // any other candidate — the member stays a candidate forever, so every
+    // expired room ordered after it stops being collected too.
+    await redis.set(`${namespace}:room:SCALAR`, "1");
+    // A genuinely expired room that must still be collected.
+    await redis.set(
+      `${namespace}:room:VICTIM`,
+      legacyRoomBody("VICTIM", { expiresAt: 20, lastActiveAt: 5 }),
+    );
+    await redis.zadd(roomsKey, "20", "VICTIM");
+
+    assert.equal(await store.deleteExpiredRooms(100), 1);
+    assert.equal(await redis.exists(`${namespace}:room:VICTIM`), 0);
+    // The scalar body is left alone rather than deleted on a guess.
+    assert.equal(await redis.exists(`${namespace}:room:SCALAR`), 1);
+  } finally {
+    await redis.del(
+      `${namespace}:room:SCALAR`,
+      `${namespace}:room:VICTIM`,
+      roomsKey,
+    );
+    await redis.quit();
+    await store.close();
+  }
+});

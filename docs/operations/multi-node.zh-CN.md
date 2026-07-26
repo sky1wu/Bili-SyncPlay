@@ -201,7 +201,9 @@ node server/dist/global-admin-index.js
     -e REDIS_NAMESPACE=<你的命名空间> \
     <与线上相同的镜像标签> \
     node server/scripts/rebuild-legacy-room-expiry.mjs
-  ```脚本幂等,既不改动房间体,也不触碰 `bsp:rooms-by-expiry`。
+  ```
+
+  脚本幂等,既不改动房间体,也不触碰 `bsp:rooms-by-expiry`。
 
   Redis ACL、备份与监控请覆盖 `bsp:rooms-by-expiry`;仅放行旧两个键的部署会导致房间写入失败。
 

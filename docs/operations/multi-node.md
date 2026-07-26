@@ -201,7 +201,9 @@ Redis key families used by the multi-node control plane:
     -e REDIS_NAMESPACE=<your-namespace> \
     <the-same-image-tag> \
     node server/scripts/rebuild-legacy-room-expiry.mjs
-  ``` It is idempotent and touches neither room bodies nor `bsp:rooms-by-expiry`.
+  ```
+
+  It is idempotent and touches neither room bodies nor `bsp:rooms-by-expiry`.
 
   Grant ACLs, backups and monitoring on `bsp:rooms-by-expiry`; a deployment that only allows the old two keys will fail room writes.
 
