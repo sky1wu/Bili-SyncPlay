@@ -30,8 +30,19 @@ if (!redisUrl) {
   process.exit(1);
 }
 
-const rawNamespace = (process.env.REDIS_NAMESPACE ?? "bsp").trim();
-const base = rawNamespace.endsWith(":") ? rawNamespace : `${rawNamespace}:`;
+// Mirrors normalizeNamespaceBase in server/src/redis-namespace.ts, which is
+// the source of truth. Notably an explicitly blank REDIS_NAMESPACE is treated
+// as unset there; trimming to "" here instead would rebuild ":room-expiry"
+// and leave the deployment's real index untouched while reporting success.
+function normalizeNamespaceBase(namespace) {
+  if (!namespace || namespace.trim().length === 0) {
+    return "bsp:";
+  }
+  const trimmed = namespace.trim();
+  return trimmed.endsWith(":") ? trimmed : `${trimmed}:`;
+}
+
+const base = normalizeNamespaceBase(process.env.REDIS_NAMESPACE);
 const roomKeyPrefix = `${base}room:`;
 const legacyExpiryKey = `${base}room-expiry`;
 const dryRun = process.env.DRY_RUN === "1";

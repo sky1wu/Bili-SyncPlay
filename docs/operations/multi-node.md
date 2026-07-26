@@ -193,9 +193,19 @@ Redis key families used by the multi-node control plane:
 - `bsp:room:*`, `bsp:rooms-by-expiry`: persisted room base state. `bsp:rooms-by-expiry` holds every room scored by its expiry (`+inf` when the room does not expire) and is the single source for listing, counting and reaping.
 - `bsp:room-index`, `bsp:room-expiry`: no longer written or read. They are left in place untouched.
 
-  **Rolling back** to a build that still reads them needs one step first: that build rebuilds `bsp:room-index` from room bodies on startup, but has no equivalent repair for `bsp:room-expiry`, so rooms whose expiry was set while this build was live would never be reaped. The order is: **stop every node on this build**, run `REDIS_URL=... node server/scripts/rebuild-legacy-room-expiry.mjs` (`DRY_RUN=1` to preview), then start the old build. The scan is a batched read rather than a snapshot, so a node still serving requests could change a room's expiry after the script read it. The script ships in the runtime image, so `docker exec <container> node server/scripts/rebuild-legacy-room-expiry.mjs` works too. It is idempotent and touches neither room bodies nor `bsp:rooms-by-expiry`.
+  **Rolling back** to a build that still reads them needs one step first: that build rebuilds `bsp:room-index` from room bodies on startup, but has no equivalent repair for `bsp:room-expiry`, so rooms whose expiry was set while this build was live would never be reaped. The order is: **stop every node on this build**, run `REDIS_URL=... node server/scripts/rebuild-legacy-room-expiry.mjs` (`DRY_RUN=1` to preview), then start the old build. The scan is a batched read rather than a snapshot, so a node still serving requests could change a room's expiry after the script read it. The script ships in the runtime image. Because every node must already be stopped, run it as a one-off container rather than `docker exec` — there is no running container left to exec into:
+
+  ````bash
+  docker run --rm --network <your-network> \
+    -e REDIS_URL=redis://<redis-host>:6379 \
+    -e REDIS_NAMESPACE=<your-namespace> \
+    <the-same-image-tag> \
+    node server/scripts/rebuild-legacy-room-expiry.mjs
+  ``` It is idempotent and touches neither room bodies nor `bsp:rooms-by-expiry`.
 
   Grant ACLs, backups and monitoring on `bsp:rooms-by-expiry`; a deployment that only allows the old two keys will fail room writes.
+
+  ````
 
 - `bsp:runtime:*`: shared sessions, room members, blocked member tokens, and node heartbeats
 - `bsp:admin:session:*`: shared admin bearer sessions

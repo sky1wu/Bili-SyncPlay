@@ -800,3 +800,57 @@ test("redis room create leaves no room body behind when indexing fails", async (
     await store.close();
   }
 });
+
+test("redis room store skips bodies whose fields are the wrong shape", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("badshape");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const redis = await connect();
+
+  let store: Store | null = null;
+  try {
+    // Valid JSON, unusable fields. expiryScore() would hand Redis "bad" as a
+    // score, the reconcile's ZADD would fail, and because the reaper waits on
+    // that reconcile and a failure skips the cooldown, every other expired
+    // room would stop being collected.
+    await redis.set(
+      `${namespace}:room:BADEXP`,
+      legacyRoomBody("BADEXP", { expiresAt: "bad" }),
+    );
+    await redis.set(
+      `${namespace}:room:BADVER`,
+      legacyRoomBody("BADVER", { version: "one" }),
+    );
+    await redis.set(
+      `${namespace}:room:GOODEX`,
+      legacyRoomBody("GOODEX", { expiresAt: 70, lastActiveAt: 65 }),
+    );
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+
+    const rooms = await store.listRooms(LIST_ALL);
+    assert.deepEqual(
+      rooms.map((listed) => listed.code),
+      ["GOODEX"],
+    );
+    assert.equal(await store.deleteExpiredRooms(100), 1);
+    assert.equal(await redis.exists(`${namespace}:room:GOODEX`), 0);
+
+    // The unusable bodies are left alone, not silently destroyed.
+    assert.equal(await redis.exists(`${namespace}:room:BADEXP`), 1);
+    assert.equal(await redis.exists(`${namespace}:room:BADVER`), 1);
+  } finally {
+    await redis.del(
+      `${namespace}:room:BADEXP`,
+      `${namespace}:room:BADVER`,
+      `${namespace}:room:GOODEX`,
+      roomsKey,
+    );
+    await redis.quit();
+    await store?.close();
+  }
+});

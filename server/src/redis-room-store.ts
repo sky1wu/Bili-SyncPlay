@@ -207,17 +207,38 @@ function parseRoom(value: string | null): PersistedRoom | null {
   return JSON.parse(value) as PersistedRoom;
 }
 
-// One unparseable value must not take down a whole batch. The reaper's script
+// One unusable value must not take down a whole batch. The reaper's script
 // already skips such a body via pcall, and the orphan prune keys off EXISTS,
-// so a corrupt room keeps its membership and is simply not enumerated —
-// rather than rejecting the reconcile that the reaper now waits on, which
-// would stop every other room from ever being collected.
+// so a bad room keeps its membership and is simply not enumerated — rather
+// than rejecting the reconcile that the reaper now waits on, which would stop
+// every other room from ever being collected.
+//
+// Valid JSON is not enough: a body carrying `expiresAt: "bad"` parses fine,
+// and expiryScore() would then hand Redis "bad" as a score, failing the ZADD
+// and blocking the reaper just the same. Every field this store actually
+// reads is checked before the body is trusted.
+function isUsableRoom(value: unknown): value is PersistedRoom {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const room = value as Partial<PersistedRoom>;
+  return (
+    typeof room.code === "string" &&
+    typeof room.version === "number" &&
+    typeof room.createdAt === "number" &&
+    typeof room.lastActiveAt === "number" &&
+    (room.expiresAt === null || typeof room.expiresAt === "number")
+  );
+}
+
 function parseRoomOrNull(value: string | null): PersistedRoom | null {
+  let parsed: unknown;
   try {
-    return parseRoom(value);
+    parsed = value === null || value === "" ? null : JSON.parse(value);
   } catch {
     return null;
   }
+  return isUsableRoom(parsed) ? parsed : null;
 }
 
 // JS formats the score, never Lua: String() renders a millisecond timestamp
