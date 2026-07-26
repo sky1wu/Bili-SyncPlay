@@ -202,3 +202,43 @@ test("updateClockOffset still publishes the diagnostic offset and rtt", () => {
   );
   assert.equal(clockState.clockSamples.length, 1);
 });
+
+test("a reused seq at a repeated position is still a new snapshot", () => {
+  // `seq` restarts at 0 on every content-script load, so identity cannot rest on
+  // it: a member who reloads and resumes where an early-seq snapshot already was
+  // would otherwise match a key the controller has seen, and inherit its anchor.
+  const { controller, setMonotonicNow } = createHarness();
+  controller.compensateRoomState(
+    roomState({ seq: 1, currentTime: 42, serverTime: 1_000 }),
+  );
+
+  setMonotonicNow(120_000);
+  const afterReload = controller.compensateRoomState(
+    roomState({ seq: 1, currentTime: 42, serverTime: 500_000 }),
+  );
+
+  assert.equal(afterReload.playback!.currentTime, 42);
+});
+
+test("a pause drops the anchor so nothing extrapolates across it", () => {
+  const { controller, setMonotonicNow } = createHarness();
+  const playing = roomState({ seq: 1, currentTime: 42, serverTime: 1_000 });
+  controller.compensateRoomState(playing);
+
+  controller.compensateRoomState(
+    roomState({
+      seq: 2,
+      currentTime: 42,
+      serverTime: 2_000,
+      playState: "paused",
+    }),
+  );
+  setMonotonicNow(120_000);
+
+  // Same snapshot as before the pause: without dropping the anchor this would be
+  // advanced by the whole paused interval.
+  assert.equal(
+    controller.compensateRoomState(playing).playback!.currentTime,
+    42,
+  );
+});

@@ -369,3 +369,69 @@ test("leaves non-playing states untouched", () => {
     100,
   );
 });
+
+test("negative round trips cannot carry the estimate even in the majority", () => {
+  // Flooring the competitiveness bar at zero is not enough: a negative round trip
+  // always clears `0 + tolerance`, so once such samples are the majority they win
+  // the median outright and publish an offset built from contradictory timestamps.
+  let clockOffsetMs: number | null = null;
+  let window: ClockSample[] = [];
+  const feed = (offsetMs: number, rttMs: number, atMs: number) => {
+    const result = updateClockSample({
+      clientSendTime: atMs,
+      // Construct the pair directly so the round trip can be made negative:
+      // reported server processing exceeding the client-measured round trip.
+      serverReceiveTime: atMs + offsetMs + rttMs / 2,
+      serverSendTime: atMs + offsetMs + rttMs / 2 + (rttMs < 0 ? -rttMs : 0),
+      now: atMs + (rttMs < 0 ? 0 : rttMs),
+      previousRttMs: null,
+      previousClockOffsetMs: clockOffsetMs,
+      previousSamples: window,
+    });
+    clockOffsetMs = result.clockOffsetMs;
+    window = result.samples;
+    return result;
+  };
+
+  feed(100, 10, 1_000);
+  feed(100, 10, 16_000);
+  feed(100, 10, 31_000);
+  assert.equal(clockOffsetMs, 100);
+
+  // Four contradictory samples agreeing on a wild offset: a majority of the
+  // window, and each one "faster" than every honest sample.
+  const contradictory = [46_000, 61_000, 76_000, 91_000];
+  for (const atMs of contradictory) {
+    const result = feed(5_000, -800, atMs);
+    assert.ok(result.sample.rttMs < 0, "expected an impossible round trip");
+  }
+
+  assert.equal(clockOffsetMs, 100);
+});
+
+test("keeps the published offset when nothing in the window is believable", () => {
+  const first = updateClockSample({
+    clientSendTime: 1_000,
+    serverReceiveTime: 1_205,
+    serverSendTime: 1_205,
+    now: 1_010,
+    previousRttMs: null,
+    previousClockOffsetMs: null,
+  });
+  assert.equal(first.clockOffsetMs, 200);
+
+  // Only an impossible sample in the window: publishing anything from it would be
+  // inventing a number.
+  const second = updateClockSample({
+    clientSendTime: 2_000,
+    serverReceiveTime: 2_100,
+    serverSendTime: 2_900,
+    now: 2_000,
+    previousRttMs: first.rttMs,
+    previousClockOffsetMs: first.clockOffsetMs,
+    previousSamples: [],
+  });
+
+  assert.ok(second.sample.rttMs < 0);
+  assert.equal(second.clockOffsetMs, 200);
+});

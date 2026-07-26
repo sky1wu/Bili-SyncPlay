@@ -86,7 +86,8 @@ export function toConnectionCheckUrl(url: string): string | null {
 
 export interface ClockSampleResult {
   rttMs: number;
-  clockOffsetMs: number;
+  /** `null` while no sample has ever been believable. */
+  clockOffsetMs: number | null;
   /** Retained window, oldest first. Feed back in as `previousSamples`. */
   samples: ClockSample[];
   /** The raw sample this call produced, for diagnostics. */
@@ -114,21 +115,34 @@ function median(values: number[]): number {
 }
 
 /**
- * The offset the window agrees on: the median of the samples whose round trip
- * was competitive, which drops both a slow (and therefore likely asymmetric)
- * round trip and an isolated wild reading.
+ * The offset the window agrees on: the median of the samples whose round trip was
+ * competitive, which drops both a slow (and therefore likely asymmetric) round
+ * trip and an isolated wild reading.
+ *
+ * Returns `null` when the window holds nothing worth believing.
  */
-function estimateOffsetMs(samples: ClockSample[]): number {
-  // Floored at zero: a negative round trip is impossible, so an inconsistent
-  // sample must not be allowed to set a bar that excludes every honest one.
-  const fastestRtt = Math.max(
-    0,
-    Math.min(...samples.map((sample) => sample.rttMs)),
-  );
-  const competing = samples.filter(
+function estimateOffsetMs(
+  samples: ClockSample[],
+): { offsetMs: number; usableCount: number } | null {
+  // A negative round trip means the four timestamps contradict each other, so the
+  // offset that sample carries is not evidence of anything and is dropped outright
+  // — flooring the *bar* at zero is not enough, because a negative round trip
+  // always clears `0 + tolerance` and would keep competing for the median (and win
+  // it outright once such samples are the majority). They stay in the raw log,
+  // where an impossible round trip is itself the diagnostic.
+  const usable = samples.filter((sample) => sample.rttMs >= 0);
+  if (usable.length === 0) {
+    return null;
+  }
+
+  const fastestRtt = Math.min(...usable.map((sample) => sample.rttMs));
+  const competing = usable.filter(
     (sample) => sample.rttMs <= fastestRtt + CLOCK_SAMPLE_RTT_TOLERANCE_MS,
   );
-  return median(competing.map((sample) => sample.offsetMs));
+  return {
+    offsetMs: median(competing.map((sample) => sample.offsetMs)),
+    usableCount: usable.length,
+  };
 }
 
 export function updateClockSample(args: {
@@ -152,17 +166,19 @@ export function updateClockSample(args: {
     { offsetMs: sampleOffset, rttMs: sampleRtt, at: args.now },
   ].slice(-CLOCK_SAMPLE_WINDOW_SIZE);
 
-  const estimatedOffset = estimateOffsetMs(samples);
+  const estimate = estimateOffsetMs(samples);
   // Only follow the estimate once it has moved beyond the deadband, so routine
-  // sample noise leaves the published offset — and every target extrapolated
-  // from it — untouched.
+  // sample noise leaves the published offset untouched. With nothing believable in
+  // the window, keep whatever was published rather than inventing a number.
   const clockOffsetMs =
-    args.previousClockOffsetMs === null ||
-    samples.length < CLOCK_SAMPLE_MIN_TRUSTED_SIZE ||
-    Math.abs(estimatedOffset - args.previousClockOffsetMs) >
-      CLOCK_OFFSET_DEADBAND_MS
-      ? Math.round(estimatedOffset)
-      : args.previousClockOffsetMs;
+    estimate === null
+      ? args.previousClockOffsetMs
+      : args.previousClockOffsetMs === null ||
+          estimate.usableCount < CLOCK_SAMPLE_MIN_TRUSTED_SIZE ||
+          Math.abs(estimate.offsetMs - args.previousClockOffsetMs) >
+            CLOCK_OFFSET_DEADBAND_MS
+        ? Math.round(estimate.offsetMs)
+        : args.previousClockOffsetMs;
 
   return {
     rttMs:

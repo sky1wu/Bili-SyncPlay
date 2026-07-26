@@ -820,3 +820,58 @@ test("member deltas keep the anchor of the snapshot that arrived", async () => {
   assert.equal(harness.compensateCalls.length, 1);
   assert.equal(harness.compensateCalls[0]?.receivedAtMs, undefined);
 });
+
+test("pairs each room state with its own arrival time when handlers interleave", async () => {
+  // Handlers are started per socket message with `void handleServerMessage(...)`,
+  // so a later state can land in shared state while this one is awaiting. Applying
+  // that newer snapshot with *this* message's arrival time would anchor it too
+  // early — by however long the tab took to open. Reported by Codex review on #210.
+  let monotonicNow = 1_000;
+  const laterSnapshot = {
+    roomCode: "ROOM07",
+    sharedVideo: null,
+    playback: {
+      actorId: "peer",
+      seq: 9,
+      url: "https://www.bilibili.com/video/BV1",
+      playState: "playing" as const,
+      currentTime: 99,
+      playbackRate: 1,
+      serverTime: 9_000,
+    },
+    members: [{ id: "member-1", name: "Alice" }],
+  } as unknown as RoomState;
+
+  const harness = createControllerHarness({
+    getMonotonicNow: () => monotonicNow,
+    onEnsureSharedVideoOpen: () => {
+      // Opening the tab took 4s, and a newer state arrived meanwhile.
+      monotonicNow += 4_000;
+      harness.runtimeState.room.roomState = laterSnapshot;
+    },
+  });
+
+  await harness.controller.handleServerMessage({
+    type: "room:state",
+    payload: {
+      roomCode: "ROOM07",
+      sharedVideo: null,
+      playback: {
+        actorId: "peer",
+        seq: 1,
+        url: "https://www.bilibili.com/video/BV1",
+        playState: "playing",
+        currentTime: 42,
+        playbackRate: 1,
+        serverTime: 1_000,
+      },
+      members: [{ id: "member-1", name: "Alice" }],
+    },
+  } satisfies ServerMessage);
+
+  assert.equal(harness.compensateCalls.length, 1);
+  const call = harness.compensateCalls[0];
+  assert.equal(call?.receivedAtMs, 1_000);
+  // The snapshot this handler is responsible for — not the one that overtook it.
+  assert.equal(call?.state.playback?.currentTime, 42);
+});

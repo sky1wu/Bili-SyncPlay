@@ -24,12 +24,22 @@ export interface ClockController {
 
 /**
  * Identity of a playback snapshot. Two broadcasts of the same snapshot share it;
- * a playing room always advances `currentTime`, so consecutive snapshots differ.
+ * two different snapshots must not.
+ *
+ * `serverTime` is in here as the server's version tag for the snapshot — compared
+ * only for equality, never subtracted from a local timestamp, which is the thing
+ * this module exists to avoid. Without it the identity is forgeable: `seq` is a
+ * per-content-script counter that restarts at 0 on every page load (see
+ * `content/index.ts`), so a member who reloads the page and resumes at a position
+ * an early-`seq` snapshot already reported would produce a key that has been seen
+ * before, and the anchor from that older snapshot would still be standing — adding
+ * everything that happened in between to the playback position.
  */
 function playbackSnapshotKey(playback: PlaybackState): string {
   return [
     playback.actorId,
     playback.seq,
+    playback.serverTime,
     playback.playState,
     playback.url,
     playback.currentTime,
@@ -135,6 +145,10 @@ export function createClockController(args: {
     receivedAtMs?: number,
   ): RoomState {
     if (!state.playback || state.playback.playState !== "playing") {
+      // An anchor only ever describes the snapshot the room is currently playing
+      // out. Dropping it here keeps a stale one from outliving a pause, so no
+      // future snapshot can be extrapolated across the paused interval.
+      playbackAnchor = null;
       return state;
     }
 

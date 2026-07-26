@@ -564,8 +564,18 @@ export function createRoomSessionController(args: {
     // Anchored on arrival, not on reaching this line: the two awaits above can
     // take a while (`ensureSharedVideoOpen` may open a tab) and the room played on
     // through them.
+    //
+    // Deliberately `resolvedState` and not `roomSessionState.roomState`: handlers
+    // are started with `void handleServerMessage(...)` per socket message and do
+    // not serialize, so a later state can land in shared state while this one is
+    // awaiting. Re-reading it here would pair that newer snapshot with *this*
+    // message's arrival time and anchor it too early — and the correctly paired
+    // call that follows could not repair it, because the content script drops the
+    // second apply of a snapshot it has already versioned. Each handler applies
+    // the snapshot it is responsible for, with the arrival time that belongs to
+    // it; an out-of-order apply is rejected by that same version guard.
     const compensatedRoomState = args.compensateRoomState(
-      args.roomSessionState.roomState,
+      resolvedState,
       receivedAtMs,
     );
     await args.notifyContentScripts({
