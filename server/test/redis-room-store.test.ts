@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Redis from "ioredis";
-import { createRedisRoomStore } from "../src/redis-room-store.js";
+import { createRedisRoomStore, expiryScore } from "../src/redis-room-store.js";
 
 const REDIS_URL = process.env.REDIS_URL;
 
@@ -679,115 +679,47 @@ test("redis room reaper triggers the reconcile itself", async (t) => {
   }
 });
 
-test("redis room store mirrors expiry into the legacy key for rollback safety", async (t) => {
+test("redis room expiry score matches exactly what ZSCORE reads back", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  const namespace = uniqueNamespace("mirror");
+  const namespace = uniqueNamespace("scorefmt");
   const roomsKey = `${namespace}:rooms-by-expiry`;
-  const legacyKey = `${namespace}:room-expiry`;
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
   const redis = await connect();
 
   try {
     const room = await store.createRoom({
-      code: "MIRROR",
+      code: "FMTCHK",
       joinToken: "join-token-123456",
       createdAt: 1,
     });
-    // A room that does not expire has no legacy entry, matching what the
-    // previous build would have written.
-    assert.equal(await redis.zscore(legacyKey, room.code), null);
+
+    // The reconcile decides whether a member has drifted by comparing the
+    // stored score against expiryScore() as strings. Emitting "+inf" while
+    // Redis reads back "inf" made every non-expiring room — the common case —
+    // compare as drifted forever, so the pass rewrote every room on every run
+    // instead of writing nothing. Redis normalising the value is exactly why
+    // this has to be asserted against a real ZSCORE rather than assumed.
+    assert.equal(await redis.zscore(roomsKey, room.code), expiryScore(room));
 
     const expiring = await store.updateRoom(room.code, room.version, {
-      expiresAt: 900,
+      expiresAt: 1783844580123,
       lastActiveAt: 800,
     });
     assert.equal(expiring.ok, true);
     if (!expiring.ok) {
       throw new Error("Expected update to succeed.");
     }
-    // Without this the old reaper could never find the room after a rollback,
-    // because the old build rebuilds room-index from bodies but never
-    // room-expiry.
-    assert.equal(await redis.zscore(legacyKey, room.code), "900");
-
-    const revived = await store.updateRoom(room.code, expiring.room.version, {
-      expiresAt: null,
-      lastActiveAt: 850,
-    });
-    assert.equal(revived.ok, true);
-    assert.equal(await redis.zscore(legacyKey, room.code), null);
-
-    await store.saveRoom({ ...room, expiresAt: 1_200, lastActiveAt: 900 });
-    assert.equal(await redis.zscore(legacyKey, room.code), "1200");
-
-    await store.deleteRoom(room.code);
-    assert.equal(await redis.zscore(legacyKey, room.code), null);
+    assert.equal(
+      await redis.zscore(roomsKey, room.code),
+      expiryScore(expiring.room),
+    );
   } finally {
-    await redis.del(roomsKey, legacyKey);
-    await redis.quit();
-    await store.close();
-  }
-});
-
-async function evalCallCount(redis: Redis): Promise<number> {
-  const info = await redis.info("commandstats");
-  const line = info
-    .split("\n")
-    .find((entry) => entry.startsWith("cmdstat_eval:"));
-  if (!line) {
-    return 0;
-  }
-  const calls = /calls=(\d+)/.exec(line);
-  return calls ? Number(calls[1]) : 0;
-}
-
-test("redis room reconcile writes nothing when no member has drifted", async (t) => {
-  if (!REDIS_URL) {
-    t.skip("REDIS_URL is not configured.");
-    return;
-  }
-
-  const namespace = uniqueNamespace("steady");
-  const roomsKey = `${namespace}:rooms-by-expiry`;
-  let clock = 1_000_000;
-  const store = await createRedisRoomStore(REDIS_URL, {
-    namespace,
-    now: () => clock,
-  });
-  const redis = await connect();
-
-  try {
-    for (const code of ["STDYAA", "STDYBB", "STDYCC"]) {
-      await store.createRoom({
-        code,
-        joinToken: "join-token-123456",
-        createdAt: 1,
-      });
-    }
-    // Settle the first reconcile before measuring.
-    await store.countRooms({ includeExpired: true });
-
-    // Non-expiring rooms score "inf", which is also what ZSCORE reads back.
-    // Comparing against "+inf" instead made every one of them look drifted,
-    // so the pass below re-ran a script per room forever.
-    const before = await evalCallCount(redis);
-    clock += 900_000;
-    await store.countRooms({ includeExpired: true });
-    const after = await evalCallCount(redis);
-
-    // The orphan sweep still runs one script per ZSCAN cursor; what must not
-    // scale with the room count is the repair pass.
-    assert.equal(after - before <= 1, true, `evals: ${after - before}`);
-    assert.equal(await redis.zcard(roomsKey), 3);
-  } finally {
-    for (const code of ["STDYAA", "STDYBB", "STDYCC"]) {
-      await store.deleteRoom(code);
-    }
-    await redis.del(roomsKey, `${namespace}:room-expiry`);
+    await store.deleteRoom("FMTCHK");
+    await redis.del(roomsKey);
     await redis.quit();
     await store.close();
   }

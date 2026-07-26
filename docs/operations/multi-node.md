@@ -191,7 +191,9 @@ If the edge machine also carries `room-node-a`, `global-admin`, and `redis`, it 
 Redis key families used by the multi-node control plane:
 
 - `bsp:room:*`, `bsp:rooms-by-expiry`: persisted room base state. `bsp:rooms-by-expiry` holds every room scored by its expiry (`+inf` when the room does not expire) and is the single source for listing, counting and reaping.
-- `bsp:room-expiry`: written but never read. Kept as a rollback mirror for one release, because the previous build rebuilds `bsp:room-index` from room bodies on startup but has no equivalent repair for `bsp:room-expiry`. `bsp:room-index` itself is no longer written.
+- `bsp:room-index`, `bsp:room-expiry`: no longer written or read. They are left in place untouched.
+
+  **Rolling back** to a build that still reads them needs one step first: that build rebuilds `bsp:room-index` from room bodies on startup, but has no equivalent repair for `bsp:room-expiry`, so rooms whose expiry was set while this build was live would never be reaped. Run `REDIS_URL=... node server/scripts/rebuild-legacy-room-expiry.mjs` before starting the old build (`DRY_RUN=1` to preview). It is idempotent and touches neither room bodies nor `bsp:rooms-by-expiry`.
 
   Grant ACLs, backups and monitoring on `bsp:rooms-by-expiry`; a deployment that only allows the old two keys will fail room writes.
 

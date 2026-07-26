@@ -21,7 +21,6 @@ import type { PersistedRoom } from "./types.js";
 // membership that create just wrote.
 const PRUNE_ORPHANED_MEMBERS_LUA = `
 local roomsKey = KEYS[1]
-local legacyExpiryKey = KEYS[2]
 local roomKeyPrefix = ARGV[1]
 local removed = 0
 
@@ -29,7 +28,6 @@ for index = 2, #ARGV do
   local code = ARGV[index]
   if redis.call("EXISTS", roomKeyPrefix .. code) == 0 then
     removed = removed + redis.call("ZREM", roomsKey, code)
-    redis.call("ZREM", legacyExpiryKey, code)
   end
 end
 
@@ -42,21 +40,13 @@ return removed
 // restore an expiry the room no longer has.
 const RECONCILE_MEMBER_LUA = `
 local roomsKey = KEYS[1]
-local legacyExpiryKey = KEYS[2]
-local roomKey = KEYS[3]
+local roomKey = KEYS[2]
 
 if redis.call("GET", roomKey) ~= ARGV[1] then
   return 0
 end
 
 redis.call("ZADD", roomsKey, ARGV[2], ARGV[3])
-
-if ARGV[4] == "" then
-  redis.call("ZREM", legacyExpiryKey, ARGV[3])
-else
-  redis.call("ZADD", legacyExpiryKey, ARGV[4], ARGV[3])
-end
-
 return 1
 `;
 
@@ -67,7 +57,8 @@ return 1
 // membership write is guarded and the body deleted if it fails — otherwise a
 // Redis ACL that does not yet grant the new key would leave an unreachable
 // room behind, five of them per request once room-service retries what it
-// reads as a code collision.
+// reads as a code collision. With one key to write there is nothing else to
+// undo on that path.
 const CREATE_ROOM_LUA = `
 if not redis.call("SET", KEYS[1], ARGV[1], "NX") then
   return "exists"
@@ -75,7 +66,6 @@ end
 
 local indexed = pcall(function()
   redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
-  redis.call("ZREM", KEYS[3], ARGV[3])
 end)
 
 if not indexed then
@@ -112,11 +102,6 @@ redis.call("SET", KEYS[1], ARGV[2])
 
 local indexed = pcall(function()
   redis.call("ZADD", KEYS[2], ARGV[3], ARGV[4])
-  if ARGV[5] == "" then
-    redis.call("ZREM", KEYS[3], ARGV[4])
-  else
-    redis.call("ZADD", KEYS[3], ARGV[5], ARGV[4])
-  end
 end)
 
 if not indexed then
@@ -135,7 +120,6 @@ return "ok"
 // a number in Lua and that is exactly how playback values got mangled before.
 const DELETE_EXPIRED_ROOMS_LUA = `
 local roomsKey = KEYS[1]
-local legacyExpiryKey = KEYS[2]
 local roomKeyPrefix = ARGV[1]
 local now = tonumber(ARGV[2])
 local candidates = redis.call("ZRANGEBYSCORE", roomsKey, "-inf", now)
@@ -147,18 +131,15 @@ for _, code in ipairs(candidates) do
 
   if not rawRoom then
     redis.call("ZREM", roomsKey, code)
-    redis.call("ZREM", legacyExpiryKey, code)
   else
     local ok, room = pcall(cjson.decode, rawRoom)
     if ok and room then
       local expiresAt = room["expiresAt"]
       if expiresAt == cjson.null or expiresAt == nil then
         redis.call("ZADD", roomsKey, "+inf", code)
-        redis.call("ZREM", legacyExpiryKey, code)
       elseif tonumber(expiresAt) ~= nil and tonumber(expiresAt) <= now then
         redis.call("DEL", key)
         redis.call("ZREM", roomsKey, code)
-        redis.call("ZREM", legacyExpiryKey, code)
         deletedCount = deletedCount + 1
       end
     end
@@ -235,7 +216,7 @@ function parseRoomOrNull(value: string | null): PersistedRoom | null {
 // reconcile compares the two as strings. Emitting "+inf" here made every
 // non-expiring room — the common case — compare as drifted forever, so the
 // pass rewrote every room on every run instead of writing nothing.
-function expiryScore(room: PersistedRoom): string {
+export function expiryScore(room: PersistedRoom): string {
   return room.expiresAt === null ? "inf" : String(room.expiresAt);
 }
 
@@ -272,8 +253,9 @@ export async function createRedisRoomStore(
     lazyConnect: true,
     maxRetriesPerRequest: 1,
   });
-  const { roomKeyPrefix, roomsByExpiryKey, legacyRoomExpiryKey } =
-    getRedisRoomStoreKeys(options.namespace);
+  const { roomKeyPrefix, roomsByExpiryKey } = getRedisRoomStoreKeys(
+    options.namespace,
+  );
   const now = options.now ?? Date.now;
 
   function roomKey(code: string): string {
@@ -325,16 +307,12 @@ export async function createRedisRoomStore(
         drifted.map(async ({ code, raw, room }) =>
           redis.eval(
             RECONCILE_MEMBER_LUA,
-            3,
+            2,
             roomsByExpiryKey,
-            legacyRoomExpiryKey,
             roomKey(code),
             raw as string,
             expiryScore(room as PersistedRoom),
             code,
-            (room as PersistedRoom).expiresAt === null
-              ? ""
-              : String((room as PersistedRoom).expiresAt),
           ),
         ),
       );
@@ -361,9 +339,8 @@ export async function createRedisRoomStore(
 
       await redis.eval(
         PRUNE_ORPHANED_MEMBERS_LUA,
-        2,
+        1,
         roomsByExpiryKey,
-        legacyRoomExpiryKey,
         roomKeyPrefix,
         ...codes,
       );
@@ -458,9 +435,8 @@ export async function createRedisRoomStore(
         try {
           await redis.eval(
             PRUNE_ORPHANED_MEMBERS_LUA,
-            2,
+            1,
             roomsByExpiryKey,
-            legacyRoomExpiryKey,
             roomKeyPrefix,
             ...orphanedCodes,
           );
@@ -491,10 +467,9 @@ export async function createRedisRoomStore(
       const room = createPersistedRoom(input);
       const created = await redis.eval(
         CREATE_ROOM_LUA,
-        3,
+        2,
         roomKey(room.code),
         roomsByExpiryKey,
-        legacyRoomExpiryKey,
         serializeRoom(room),
         expiryScore(room),
         room.code,
@@ -516,15 +491,6 @@ export async function createRedisRoomStore(
       const transaction = redis.multi();
       transaction.set(roomKey(room.code), serializeRoom(room));
       transaction.zadd(roomsByExpiryKey, expiryScore(room), room.code);
-      if (room.expiresAt === null) {
-        transaction.zrem(legacyRoomExpiryKey, room.code);
-      } else {
-        transaction.zadd(
-          legacyRoomExpiryKey,
-          String(room.expiresAt),
-          room.code,
-        );
-      }
       unwrapTransaction(await transaction.exec());
       return room;
     },
@@ -550,15 +516,13 @@ export async function createRedisRoomStore(
 
       const result = await redis.eval(
         UPDATE_ROOM_CAS_LUA,
-        3,
+        2,
         key,
         roomsByExpiryKey,
-        legacyRoomExpiryKey,
         rawRoom,
         serializeRoom(nextRoom),
         expiryScore(nextRoom),
         code,
-        nextRoom.expiresAt === null ? "" : String(nextRoom.expiresAt),
       );
 
       if (result === "not_found") {
@@ -578,7 +542,6 @@ export async function createRedisRoomStore(
       const transaction = redis.multi();
       transaction.del(roomKey(code));
       transaction.zrem(roomsByExpiryKey, code);
-      transaction.zrem(legacyRoomExpiryKey, code);
       unwrapTransaction(await transaction.exec());
     },
     async deleteExpiredRooms(currentTime) {
@@ -590,9 +553,8 @@ export async function createRedisRoomStore(
       await ensureReconciled();
       const deletedCount = await redis.eval(
         DELETE_EXPIRED_ROOMS_LUA,
-        2,
+        1,
         roomsByExpiryKey,
-        legacyRoomExpiryKey,
         roomKeyPrefix,
         String(currentTime),
       );
