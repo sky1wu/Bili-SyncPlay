@@ -230,17 +230,56 @@ export async function createRedisRoomStore(
     } while (cursor !== "0");
   }
 
+  // The mirror image of the backfill: index members whose room body is gone.
+  // fetchRooms prunes these as it encounters them, but countRooms no longer
+  // loads bodies at all, so without a sweep here a leaked index would keep
+  // inflating every count and metric for the life of the deployment. ZSCAN
+  // rather than ZRANGE by rank, because ranks shift as members are removed.
+  async function pruneOrphanedIndexEntries(): Promise<void> {
+    let cursor = "0";
+    do {
+      const [nextCursor, entries] = await redis.zscan(
+        roomIndexKey,
+        cursor,
+        "COUNT",
+        INDEX_REPAIR_CHUNK_SIZE,
+      );
+      cursor = nextCursor;
+
+      // ZSCAN returns a flat [member, score, member, score, ...] reply.
+      const codes = entries.filter((_, index) => index % 2 === 0);
+      if (codes.length === 0) {
+        continue;
+      }
+
+      // The script re-checks each body inside Redis, so passing every member
+      // is safe: live rooms are left alone.
+      await redis.eval(
+        PRUNE_STALE_INDEX_ENTRIES_LUA,
+        1,
+        roomIndexKey,
+        roomKeyPrefix,
+        ...codes,
+      );
+    } while (cursor !== "0");
+  }
+
+  async function reconcileRoomIndex(): Promise<void> {
+    await backfillRoomIndex();
+    await pruneOrphanedIndexEntries();
+  }
+
   // Started here but deliberately not awaited: createSyncServer resolves
   // before httpServer.listen, so awaiting a full keyspace walk would delay
   // readiness and can trip deployment health-check timeouts on a Redis shared
   // with other services. Enumeration is the only thing that depends on the
-  // repair, so fetchRooms awaits it instead — the cost lands on the first
-  // listing rather than on startup, and only once per process.
-  let indexBackfill: Promise<void> | null = null;
+  // repair, so enumeration awaits it instead — the cost lands on the first
+  // listing or count rather than on startup, and only once per process.
+  let indexRepair: Promise<void> | null = null;
 
   function repairRoomIndex(): Promise<void> {
-    if (indexBackfill) {
-      return indexBackfill;
+    if (indexRepair) {
+      return indexRepair;
     }
 
     // Clear the cached promise on failure so one transient Redis error does
@@ -249,13 +288,13 @@ export async function createRedisRoomStore(
     // count built on an index that is known to be incomplete. The identity
     // check keeps a late failure from discarding a newer attempt that already
     // replaced this one.
-    const pending = backfillRoomIndex().catch((error: unknown) => {
-      if (indexBackfill === pending) {
-        indexBackfill = null;
+    const pending = reconcileRoomIndex().catch((error: unknown) => {
+      if (indexRepair === pending) {
+        indexRepair = null;
       }
       throw error;
     });
-    indexBackfill = pending;
+    indexRepair = pending;
     return pending;
   }
 
@@ -436,15 +475,41 @@ export async function createRedisRoomStore(
     ) {
       return await fetchRooms(query);
     },
+    // Counting never needs a room body. The index members are the room codes,
+    // and every room with a non-null expiresAt is in the expiry zset with that
+    // timestamp as its score, so both filters this query supports are answered
+    // from the two sorted sets alone. This matters because the metrics
+    // collector calls countRooms on every scrape: the old implementation went
+    // through fetchRooms and loaded every room in the deployment each time.
     async countRooms(query: Pick<RoomListQuery, "keyword" | "includeExpired">) {
-      const rooms = await fetchRooms({
-        ...query,
-        page: 1,
-        pageSize: Number.MAX_SAFE_INTEGER,
-        sortBy: "lastActiveAt",
-        sortOrder: "desc",
-      });
-      return rooms.length;
+      await repairRoomIndex();
+      const currentTime = Date.now();
+
+      if (!query.keyword) {
+        if (query.includeExpired) {
+          return await redis.zcard(roomIndexKey);
+        }
+        const [total, expired] = await Promise.all([
+          redis.zcard(roomIndexKey),
+          redis.zcount(roomExpiryKey, "-inf", currentTime),
+        ]);
+        return Math.max(total - expired, 0);
+      }
+
+      // Keyword search still has to look at every code, but codes come
+      // straight out of the index — no room bodies are fetched.
+      const keyword = query.keyword.toLowerCase();
+      const matching = (await redis.zrange(roomIndexKey, 0, -1)).filter(
+        (code) => code.toLowerCase().includes(keyword),
+      );
+      if (query.includeExpired) {
+        return matching.length;
+      }
+
+      const expiredCodes = new Set(
+        await redis.zrangebyscore(roomExpiryKey, "-inf", currentTime),
+      );
+      return matching.filter((code) => !expiredCodes.has(code)).length;
     },
     async isReady() {
       try {
