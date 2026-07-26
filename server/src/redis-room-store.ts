@@ -63,6 +63,20 @@ end
 return removed
 `;
 
+// Same check-then-act hazard as the prune, mirrored: the room may be deleted
+// between the caller reading its body and this write, and an unconditional
+// ZADD would resurrect an index entry for a room that no longer exists.
+const BACKFILL_INDEX_ENTRY_LUA = `
+local indexKey = KEYS[1]
+local roomKey = KEYS[2]
+
+if redis.call("EXISTS", roomKey) == 0 then
+  return 0
+end
+
+return redis.call("ZADD", indexKey, ARGV[1], ARGV[2])
+`;
+
 // Chunk both the prune and the backfill: a first run against an index that
 // leaked for months must not build one multi-megabyte command or hold Redis
 // inside a single long-running script.
@@ -161,7 +175,14 @@ export async function createRedisRoomStore(
       for (const code of unindexed) {
         const room = parseRoom(await redis.get(roomKey(code)));
         if (room) {
-          await redis.zadd(roomIndexKey, String(room.lastActiveAt), room.code);
+          await redis.eval(
+            BACKFILL_INDEX_ENTRY_LUA,
+            2,
+            roomIndexKey,
+            roomKey(code),
+            String(room.lastActiveAt),
+            room.code,
+          );
         }
       }
     } while (cursor !== "0");
