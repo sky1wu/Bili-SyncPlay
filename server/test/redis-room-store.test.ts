@@ -219,6 +219,62 @@ test("redis room store backfills index entries missing from legacy databases", a
   }
 });
 
+test("redis room index backfill escapes glob metacharacters in the namespace", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // Square brackets are a Redis glob character class, so an unescaped
+  // SCAN MATCH would match nothing here and silently skip the repair.
+  const namespace = `bsp-test[glob]-${Date.now().toString(36)}`;
+  const indexKey = `${namespace}:room-index`;
+  const roomBodyKey = `${namespace}:room:BRACKT`;
+  const redis = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+
+  let store: Awaited<ReturnType<typeof createRedisRoomStore>> | null = null;
+  try {
+    await redis.set(
+      roomBodyKey,
+      JSON.stringify({
+        code: "BRACKT",
+        joinToken: "join-token-123456",
+        createdAt: 50,
+        ownerMemberId: null,
+        ownerDisplayName: null,
+        sharedVideo: null,
+        playback: null,
+        version: 0,
+        lastActiveAt: 60,
+        expiresAt: null,
+      }),
+    );
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+    const rooms = await store.listRooms({
+      keyword: undefined,
+      includeExpired: true,
+      page: 1,
+      pageSize: 50,
+      sortBy: "lastActiveAt",
+      sortOrder: "desc",
+    });
+
+    assert.deepEqual(
+      rooms.map((listed) => listed.code),
+      ["BRACKT"],
+    );
+  } finally {
+    await redis.del(roomBodyKey, indexKey, `${namespace}:room-expiry`);
+    await redis.quit();
+    await store?.close();
+  }
+});
+
 test("redis room listing sorts by createdAt without a keyspace scan", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");

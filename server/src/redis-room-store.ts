@@ -82,6 +82,14 @@ return redis.call("ZADD", indexKey, ARGV[1], ARGV[2])
 // inside a single long-running script.
 const INDEX_REPAIR_CHUNK_SIZE = 500;
 
+// SCAN MATCH takes a glob, so a namespace carrying glob metacharacters — a
+// plain string as far as the config layer is concerned, e.g. "tenant[1]" —
+// would silently match nothing and leave that deployment's legacy rooms
+// unindexed forever.
+function escapeGlobPattern(value: string): string {
+  return value.replaceAll(/[\\*?[\]]/g, (character) => `\\${character}`);
+}
+
 function serializeRoom(room: PersistedRoom): string {
   return JSON.stringify(room);
 }
@@ -158,7 +166,7 @@ export async function createRedisRoomStore(
       const [nextCursor, keys] = await redis.scan(
         cursor,
         "MATCH",
-        `${roomKeyPrefix}*`,
+        `${escapeGlobPattern(roomKeyPrefix)}*`,
         "COUNT",
         INDEX_REPAIR_CHUNK_SIZE,
       );
@@ -202,20 +210,24 @@ export async function createRedisRoomStore(
     }
 
     // Clear the cached promise on failure so one transient Redis error does
-    // not disable the repair for the life of the process — otherwise every
-    // later listing would keep dropping unindexed legacy rooms until a
-    // restart. The identity check keeps a late failure from discarding a
-    // newer attempt that already replaced this one.
-    const pending = backfillRoomIndex().catch(() => {
+    // not disable the repair for the life of the process, and rethrow so
+    // enumeration fails loudly rather than quietly reporting a room list and
+    // count built on an index that is known to be incomplete. The identity
+    // check keeps a late failure from discarding a newer attempt that already
+    // replaced this one.
+    const pending = backfillRoomIndex().catch((error: unknown) => {
       if (indexBackfill === pending) {
         indexBackfill = null;
       }
+      throw error;
     });
     indexBackfill = pending;
     return pending;
   }
 
-  void repairRoomIndex();
+  // Startup only kicks the repair off; the rejection is surfaced to whoever
+  // enumerates, so swallow it here to avoid an unhandled rejection.
+  void repairRoomIndex().catch(() => undefined);
 
   async function fetchRooms(
     query: Pick<
@@ -239,42 +251,51 @@ export async function createRedisRoomStore(
     // Order here is irrelevant: rooms are re-sorted below by query.sortBy.
     const codes = await redis.zrange(roomIndexKey, 0, -1);
 
-    const loaded = await Promise.all(
-      codes.map(async (code) => ({
-        code,
-        room: parseRoom(await redis.get(roomKey(code))),
-      })),
-    );
+    // Load in batches rather than one Promise.all over every code. The first
+    // listing after this fix ships still faces an index that leaked for as
+    // long as the deployment has existed, and queueing that many GETs at once
+    // would spike heap and stall the connection before a single stale entry
+    // got pruned. Batching bounds both the in-flight commands and the pruning.
+    const rooms: PersistedRoom[] = [];
+    for (
+      let offset = 0;
+      offset < codes.length;
+      offset += INDEX_REPAIR_CHUNK_SIZE
+    ) {
+      const batch = codes.slice(offset, offset + INDEX_REPAIR_CHUNK_SIZE);
+      const loaded = await Promise.all(
+        batch.map(async (code) => ({
+          code,
+          room: parseRoom(await redis.get(roomKey(code))),
+        })),
+      );
 
-    // A code with no room body is a leftover index entry. The reaper above
-    // now cleans up after itself, but indexes written by earlier builds still
-    // carry one entry per room they ever expired, so drop them on sight.
-    const staleCodes = loaded
-      .filter(({ room }) => room === null)
-      .map(({ code }) => code);
-    if (staleCodes.length > 0) {
-      try {
-        for (
-          let offset = 0;
-          offset < staleCodes.length;
-          offset += INDEX_REPAIR_CHUNK_SIZE
-        ) {
+      // A code with no room body is a leftover index entry. The reaper now
+      // cleans up after itself, but indexes written by earlier builds still
+      // carry one entry per room they ever expired, so drop them on sight.
+      const staleCodes = loaded
+        .filter(({ room }) => room === null)
+        .map(({ code }) => code);
+      if (staleCodes.length > 0) {
+        try {
           await redis.eval(
             PRUNE_STALE_INDEX_ENTRIES_LUA,
             1,
             roomIndexKey,
             roomKeyPrefix,
-            ...staleCodes.slice(offset, offset + INDEX_REPAIR_CHUNK_SIZE),
+            ...staleCodes,
           );
+        } catch {
+          // Best effort: a failed prune only means the next call retries it.
         }
-      } catch {
-        // Best effort: a failed prune only means the next call retries it.
+      }
+
+      for (const { room } of loaded) {
+        if (room) {
+          rooms.push(room);
+        }
       }
     }
-
-    const rooms = loaded
-      .map(({ room }) => room)
-      .filter((room): room is PersistedRoom => room !== null);
 
     rooms.sort((left, right) => {
       const factor = query.sortOrder === "asc" ? 1 : -1;
