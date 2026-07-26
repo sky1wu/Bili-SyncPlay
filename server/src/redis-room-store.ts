@@ -91,28 +91,24 @@ function escapeGlobPattern(value: string): string {
 }
 
 // Compare-and-set in one round trip, replacing WATCH + GET + MULTI/EXEC +
-// UNWATCH. The caller still merges the patch in JS and hands over the fully
-// serialized next room: the script only reads "version" out of the current
-// body and never re-encodes it, so room JSON never round-trips through
-// cjson, whose %.14g number formatting would quietly reshape playback
-// timestamps and positions.
+// UNWATCH. The caller merges the patch in JS and hands over both the exact
+// bytes it read and the fully serialized next room, so the script never
+// decodes or re-encodes room JSON — Redis's cjson formats numbers with
+// %.14g, which turns a seq of 9007199254740991 into 9.007199254741e+15 and
+// clips playback positions.
 //
-// The version re-check inside the script gives the same guarantee WATCH did —
-// any writer that slipped in after the caller's read loses here — while
-// cutting the window in which a concurrent playback update can collide from
-// three round trips to one.
+// The guard compares the whole previous body rather than just its version,
+// because that is what WATCH actually guaranteed: a room can be deleted and
+// a later room created under the same code, and the new room starts at
+// version 0 again. Comparing versions alone would let an update prepared
+// against the old room overwrite the new one — joinToken and owner included.
 const UPDATE_ROOM_CAS_LUA = `
 local raw = redis.call("GET", KEYS[1])
 if not raw then
   return "not_found"
 end
 
-local ok, room = pcall(cjson.decode, raw)
-if not ok or room["version"] == nil then
-  return "not_found"
-end
-
-if tonumber(room["version"]) ~= tonumber(ARGV[1]) then
+if raw ~= ARGV[1] then
   return "version_conflict"
 end
 
@@ -370,7 +366,11 @@ export async function createRedisRoomStore(
     },
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
       const key = roomKey(code);
-      const currentRoom = parseRoom(await redis.get(key));
+      const rawRoom = await redis.get(key);
+      if (rawRoom === null) {
+        return { ok: false, reason: "not_found" };
+      }
+      const currentRoom = parseRoom(rawRoom);
       if (!currentRoom) {
         return { ok: false, reason: "not_found" };
       }
@@ -390,7 +390,7 @@ export async function createRedisRoomStore(
         key,
         roomIndexKey,
         roomExpiryKey,
-        String(expectedVersion),
+        rawRoom,
         serializeRoom(nextRoom),
         String(nextRoom.lastActiveAt),
         code,
