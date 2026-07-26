@@ -52,6 +52,7 @@ test("builds member join and leave toast messages", () => {
     pendingRoomStateHydration: false,
     isCurrentPageShowingSharedVideo: false,
     now: 1000,
+    elapsedSincePreviousStateMs: 1000,
     lastSeekToastByActor: new Map(),
   });
 
@@ -79,6 +80,7 @@ test("keeps member join toasts during initial hydration", () => {
     pendingRoomStateHydration: true,
     isCurrentPageShowingSharedVideo: true,
     now: 1000,
+    elapsedSincePreviousStateMs: 1000,
     lastSeekToastByActor: new Map(),
   });
 
@@ -129,6 +131,7 @@ test("builds seek and rate toast messages for remote playback changes", () => {
     pendingRoomStateHydration: false,
     isCurrentPageShowingSharedVideo: true,
     now: 1000,
+    elapsedSincePreviousStateMs: 1,
     lastSeekToastByActor: new Map(),
   });
 
@@ -183,6 +186,7 @@ test("suppresses playback toasts for a natural-end paused state", () => {
     pendingRoomStateHydration: false,
     isCurrentPageShowingSharedVideo: true,
     now: 1000,
+    elapsedSincePreviousStateMs: 6000,
     lastSeekToastByActor: new Map(),
   });
 
@@ -276,6 +280,7 @@ test("builds English toast messages when the UI language is English", () => {
     pendingRoomStateHydration: false,
     isCurrentPageShowingSharedVideo: true,
     now: 1000,
+    elapsedSincePreviousStateMs: 1,
     lastSeekToastByActor: new Map(),
   });
 
@@ -384,4 +389,118 @@ test("does not auto-continue toast when the pending target is a different video"
 
   assert.equal(result.message, null);
   setLocaleForTests(null);
+});
+
+function playingPeerState(args: {
+  currentTime: number;
+  serverTime: number;
+  playState?: "playing" | "paused";
+  playbackRate?: number;
+}): RoomState {
+  return createRoomState({
+    members: [
+      { id: "self", name: "Me" },
+      { id: "remote", name: "Alice" },
+    ],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=1",
+    playback: {
+      url: "https://www.bilibili.com/video/BV1?p=1",
+      currentTime: args.currentTime,
+      playState: args.playState ?? "playing",
+      playbackRate: args.playbackRate ?? 1,
+      updatedAt: args.serverTime,
+      serverTime: args.serverTime,
+      actorId: "remote",
+      seq: args.serverTime,
+    },
+  });
+}
+
+function peerToastMessages(args: {
+  previousState: RoomState;
+  nextState: RoomState;
+  elapsedSincePreviousStateMs: number;
+}): string[] {
+  return getRoomStateToastMessages({
+    previousState: args.previousState,
+    nextState: args.nextState,
+    localMemberId: "self",
+    pendingRoomStateHydration: false,
+    isCurrentPageShowingSharedVideo: true,
+    now: 10_000,
+    elapsedSincePreviousStateMs: args.elapsedSincePreviousStateMs,
+    lastSeekToastByActor: new Map(),
+  }).messages;
+}
+
+test("reports a mid-playback seek when both time references agree", () => {
+  setLocaleForTests("zh-CN");
+
+  const messages = peerToastMessages({
+    previousState: playingPeerState({ currentTime: 10, serverTime: 1_000 }),
+    nextState: playingPeerState({ currentTime: 42, serverTime: 3_000 }),
+    elapsedSincePreviousStateMs: 2_000,
+  });
+
+  assert.deepEqual(messages, ["Alice 跳转到 0:42"]);
+});
+
+test("stays silent when only the server's clock moved", () => {
+  setLocaleForTests("zh-CN");
+  // The reported false positive: the peer played steadily for 2.1s, but the
+  // server's clock was stepped ~1.9s in between, so its timestamps claim 4s
+  // passed. Nobody seeked.
+  const messages = peerToastMessages({
+    previousState: playingPeerState({ currentTime: 10, serverTime: 1_000 }),
+    nextState: playingPeerState({ currentTime: 12.1, serverTime: 5_000 }),
+    elapsedSincePreviousStateMs: 2_100,
+  });
+
+  assert.deepEqual(messages, []);
+});
+
+test("stays silent when only this page stalled", () => {
+  setLocaleForTests("zh-CN");
+  // The mirror image: the two states were processed back to back after the main
+  // thread stalled, so locally no time appears to have passed.
+  const messages = peerToastMessages({
+    previousState: playingPeerState({ currentTime: 10, serverTime: 1_000 }),
+    nextState: playingPeerState({ currentTime: 12.1, serverTime: 3_100 }),
+    elapsedSincePreviousStateMs: 0,
+  });
+
+  assert.deepEqual(messages, []);
+});
+
+test("does not report a seek when a peer resumes after a long pause", () => {
+  setLocaleForTests("zh-CN");
+  // Position unchanged across a 30s pause: crediting the elapsed time here would
+  // report the pause itself as a 30s backwards jump.
+  const messages = peerToastMessages({
+    previousState: playingPeerState({
+      currentTime: 10,
+      serverTime: 1_000,
+      playState: "paused",
+    }),
+    nextState: playingPeerState({ currentTime: 10, serverTime: 31_000 }),
+    elapsedSincePreviousStateMs: 30_000,
+  });
+
+  assert.deepEqual(messages, ["Alice 开始播放"]);
+});
+
+test("reports a seek that lands together with a pause", () => {
+  setLocaleForTests("zh-CN");
+
+  const messages = peerToastMessages({
+    previousState: playingPeerState({ currentTime: 10, serverTime: 1_000 }),
+    nextState: playingPeerState({
+      currentTime: 100,
+      serverTime: 3_000,
+      playState: "paused",
+    }),
+    elapsedSincePreviousStateMs: 2_000,
+  });
+
+  assert.deepEqual(messages, ["Alice 暂停了视频", "Alice 跳转到 1:40"]);
 });
