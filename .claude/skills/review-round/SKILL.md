@@ -20,12 +20,12 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 | `round-signal.sh <PR>`    | 无未解决线程时区分「通过」与「没触发」              |
 | `selftest.sh [PR]`        | 对上述防护做判别力测试                              |
 
-改动这些脚本后必须跑 `./scripts/selftest.sh <PR编号>`。
+改动这些脚本后必须跑 `.claude/skills/review-round/scripts/selftest.sh <PR编号>`。
 
 ## 0. 切到该 PR 的 head 分支并校验
 
 ```bash
-./scripts/verify-branch.sh "$PR" --switch
+.claude/skills/review-round/scripts/verify-branch.sh "$PR" --switch
 ```
 
 技能可能从 `main` 或别的分支启动。只比分支名不够：同名本地分支可能落后于远端，那样
@@ -35,7 +35,7 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 ## 1. 读未解决的评审线程（权威信号）
 
 ```bash
-./scripts/list-unresolved.sh "$PR"
+.claude/skills/review-round/scripts/list-unresolved.sh "$PR"
 ```
 
 **不要用 reaction 判断有没有意见。** 本仓库实测：意见最多的 PR221（11 条）和 PR222
@@ -73,10 +73,10 @@ PR 上有多轮评审时列表里既有旧 SHA 也有当前 SHA，无从对应�
 **宁要单一根因修复，不要层叠补丁。** 若修复需要在已有的抑制标志 / 冷却期 / 特例分支
 之上再加一个，停下来重新推导根因——见 AGENTS.md 的 `## Debugging Sync Bugs`。
 
-编辑前先记一份工作树基线，后面要用：
+**编辑前必须先记一份工作树基线**，第 5 步要拿它判断本轮到底改了什么：
 
 ```bash
-git status --porcelain
+.claude/skills/review-round/scripts/has-changes.sh --baseline /tmp/rr-baseline
 ```
 
 ## 4. 审计同类路径（不要只修被标的那一行）
@@ -94,12 +94,16 @@ git status --porcelain
 ## 5. 验证
 
 ```bash
-./scripts/has-changes.sh || echo "本轮无改动，跳到第 7 步"
+.claude/skills/review-round/scripts/has-changes.sh /tmp/rr-baseline || echo "本轮无改动，跳到第 7 步"
 ```
 
-`has-changes.sh` 用 `git status --porcelain`，覆盖已修改、已暂存和**未跟踪**三类。
-只用 `git diff --quiet` 会漏掉新增的测试或文档文件，把有改动的一轮误判成无改动，
-跳过验证和提交却仍去 resolve，改动就此丢失。
+判断的是**相对第 3 步基线的新增**，两个方向都得防住：
+
+- 用 `git status --porcelain` 而非 `git diff --quiet`——后者看不到未跟踪文件，只新增
+  测试或文档的一轮会被误判成无改动，跳过验证和提交却仍去 resolve，改动就此丢失。
+- 但也不能直接看工作树是否非空——技能启动前就存在的无关未提交文件，会让「本轮只需
+  解释或拒绝意见」的轮次误判成有改动，卡在无内容可提交的 `git commit` 上，永远到不了
+  第 7 步。
 
 有改动时：
 
@@ -144,7 +148,9 @@ git status --porcelain
 git add <本轮实际改动的具体文件>   # 严禁 git add -A / git add .
 git diff --cached                  # 核对暂存内容
 git commit -m "fix: ..."
-./scripts/verify-branch.sh "$PR"   # 推送前复验，中途可能被切走
+# 推送前复验（中途可能被切走）。--allow-ahead 是必须的：刚 commit 完本地一定
+# 领先远端 headRefOid，严格相等会让每个有提交的轮次都在 push 前中止。
+.claude/skills/review-round/scripts/verify-branch.sh "$PR" --allow-ahead
 git push origin "HEAD:$(gh pr view "$PR" --json headRefName --jq .headRefName)"
 ```
 
@@ -154,19 +160,19 @@ git push origin "HEAD:$(gh pr view "$PR" --json headRefName --jq .headRefName)"
 ## 7. 回复并 resolve 线程
 
 ```bash
-./scripts/reply-resolve.sh <线程id> "已修。<改在哪、怎么验证的；不采纳则写明理由>" <第1步看到的评论数>
+.claude/skills/review-round/scripts/reply-resolve.sh <线程id> "已修。<改在哪、怎么验证的；不采纳则写明理由>" <第1步看到的评论数>
 ```
 
 脚本会先重读线程：若评论数与第 1 步不一致，说明扫描之后评审者又补了内容，此时**拒绝
 resolve** 并打出最新一条，让你先把它纳入根因分析。确认回复拿到 comment id 之后才
 resolve——只跑 `resolveReviewThread` 会把线程静默关掉，评审者看不到改在哪。
 
-收尾用 `./scripts/list-unresolved.sh "$PR" --count` 确认归零。
+收尾用 `.claude/skills/review-round/scripts/list-unresolved.sh "$PR" --count` 确认归零。
 
 ## 8. 本轮结束——**不要合并**
 
 ```bash
-./scripts/round-signal.sh "$PR"
+.claude/skills/review-round/scripts/round-signal.sh "$PR"
 ```
 
 输出 `PASSED` / `REVIEWING` / `NOT-TRIGGERED`。

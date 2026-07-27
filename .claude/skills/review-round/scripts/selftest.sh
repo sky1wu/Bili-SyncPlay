@@ -75,11 +75,20 @@ rm -rf "$TMP"
 echo "== 4. GraphQL 失败必须终止，不能被当成「没有线程」 =="
 grep -q 'j.errors' "$HERE/lib.sh" && ok "lib.sh 检查响应体里的 errors" || no "lib.sh 未检查 errors"
 grep -q 'set -euo pipefail' "$HERE/lib.sh" && ok "lib.sh 启用 set -euo pipefail" || no "缺少 set -euo pipefail"
-(source "$HERE/lib.sh" && gql 'query{ bogusField }' >/dev/null 2>&1) &&
-  no "非法查询竟然成功了" || ok "非法 GraphQL 查询以非零退出"
+
+# 先用一个合法查询确认依赖 / 认证 / 网络都可用。否则 gh 缺失或未登录时，
+# lib.sh 会在执行非法查询之前就 die，而 `|| ok` 仍把它记成「非法查询以非零退出」——
+# 关键防护根本没被测到，selftest 却报全绿。
+if (source "$HERE/lib.sh" && gql 'query{ viewer{ login } }' >/dev/null 2>&1); then
+  ok "前置条件可用（gh 已登录、网络可达）"
+  (source "$HERE/lib.sh" && gql 'query{ bogusField }' >/dev/null 2>&1) &&
+    no "非法查询竟然成功了" || ok "非法 GraphQL 查询以非零退出"
+else
+  no "前置条件不可用（gh 缺失/未登录/网络不可达）——GraphQL 防护未被测试，不能算通过"
+fi
 
 echo "== 5. resolve 前必须比对评论数 =="
-grep -q 'NOW" -ne "\$SEEN' "$HERE/reply-resolve.sh" &&
+grep -q 'TOTAL" -ne "\$SEEN' "$HERE/reply-resolve.sh" &&
   ok "reply-resolve.sh 比对扫描后是否有新评论" || no "缺少评论数比对"
 grep -q '不执行 resolve' "$HERE/reply-resolve.sh" &&
   ok "回复失败时不 resolve" || no "缺少回复失败保护"
@@ -88,7 +97,50 @@ echo "== 6. 分支校验必须比 SHA 而非只比分支名 =="
 grep -q 'headRefOid' "$HERE/verify-branch.sh" && ok "verify-branch.sh 读取 headRefOid" || no "未校验 SHA"
 grep -q 'isCrossRepository' "$HERE/verify-branch.sh" && ok "检测 fork PR" || no "未检测 fork"
 
-echo "== 7. 翻页一致性（需传入一个真实 PR 编号）=="
+echo "== 7. has-changes 必须按基线判断，而非工作树是否非空 =="
+TMP2=$(mktemp -d)
+(
+  cd "$TMP2" && git init -q
+  git config user.email t@t && git config user.name t && git config commit.gpgsign false
+  git commit -q --allow-empty -m init || exit 9
+  echo pre >preexisting.txt # 技能启动前就存在的无关脏文件
+  "$HERE/has-changes.sh" --baseline /tmp/rr-selftest-base >/dev/null
+  # 本轮什么都没改
+  "$HERE/has-changes.sh" /tmp/rr-selftest-base >/dev/null 2>&1
+  [ $? -eq 1 ] || exit 1 # 应判 NO-CHANGES
+  echo new >thisround.txt # 本轮新增
+  "$HERE/has-changes.sh" /tmp/rr-selftest-base >/dev/null 2>&1
+  [ $? -eq 0 ] || exit 2 # 应判 HAS-CHANGES
+)
+case $? in
+0) ok "脏工作树下：无本轮改动判 NO-CHANGES，有则判 HAS-CHANGES" ;;
+1) no "既有脏文件被误判成本轮改动（会卡在无内容可提交的 commit）" ;;
+2) no "本轮新增未被识别" ;;
+*) no "基线测试环境异常" ;;
+esac
+rm -rf "$TMP2" /tmp/rr-selftest-base
+
+echo "== 8. verify-branch 必须允许提交后本地领先 =="
+grep -q 'allow-ahead' "$HERE/verify-branch.sh" &&
+  ok "verify-branch.sh 支持 --allow-ahead（否则有提交的轮次都会在 push 前中止）" ||
+  no "缺少 --allow-ahead"
+grep -q 'git fetch origin "\$HEAD_REF"' "$HERE/verify-branch.sh" &&
+  [ "$(grep -n 'git fetch origin' "$HERE/verify-branch.sh" | cut -d: -f1)" -lt \
+    "$(grep -n 'git switch "\$HEAD_REF"' "$HERE/verify-branch.sh" | cut -d: -f1)" ] &&
+  ok "fetch 在 switch 之前（新建的 PR 分支本地没有 origin/ref，否则 switch 必失败）" ||
+  no "fetch 仍在 switch 之后"
+
+echo "== 9. round-signal 不得把 API 错误降级为未触发 =="
+grep -q '这不是「未触发」' "$HERE/round-signal.sh" &&
+  ok "Actions API 请求失败时 die 而非报 NOT-TRIGGERED" || no "仍在吞掉 API 错误"
+grep -q '2>/dev/null || true' "$HERE/round-signal.sh" &&
+  no "仍有 2>/dev/null || true 吞错误" || ok "已移除吞错误的写法"
+
+echo "== 10. reply-resolve 部分失败后可安全重试 =="
+grep -q 'MINE" = "true"' "$HERE/reply-resolve.sh" &&
+  ok "识别已存在的自身回复，重跑只补 resolve 不重复发" || no "缺少幂等重试路径"
+
+echo "== 11. 翻页一致性（需传入一个真实 PR 编号）=="
 if [ -n "${1:-}" ]; then
   BIG=$("$HERE/list-unresolved.sh" "$1" --count 2>/dev/null)
   ONE=$(RR_PAGE_SIZE=1 "$HERE/list-unresolved.sh" "$1" --count 2>/dev/null)
