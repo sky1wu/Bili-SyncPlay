@@ -75,6 +75,11 @@ jobs:
             type=ref,event=pr
 
       - name: Build and push
+        # QEMU 模拟下的 linux/arm64 `npm ci` 会偶发静默挂起（实测 36 分钟零输出，
+        # 取消重跑后同一层 4 分钟跑完）。历次 tag 发布该步骤耗时 2.9~8.6 分钟，
+        # 20 分钟给足余量，又能让挂起在 20 分钟内失败，而不是占满 job 默认的 6 小时。
+        # 命中时按失败处理即可：重跑本工作流，不需要改构建本身。
+        timeout-minutes: 20
         uses: docker/build-push-action@v6
         with:
           context: .
