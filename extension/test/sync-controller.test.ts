@@ -661,6 +661,7 @@ test("sync controller allows explicit user seek inside the silence window", asyn
   harness.runtimeState.lastExplicitUserAction = {
     kind: "seek",
     at: 21_950,
+    inPlayerGestureAt: 21_950,
   };
 
   harness.setNow(22_000);
@@ -704,7 +705,11 @@ function createSeekFromBufferingHarness() {
   harness.setSharedVideo(sharedVideo);
   harness.setCurrentPlaybackVideo(sharedVideo);
   harness.setNow(22_000);
-  harness.runtimeState.lastExplicitUserAction = { kind: "seek", at: 21_950 };
+  harness.runtimeState.lastExplicitUserAction = {
+    kind: "seek",
+    at: 21_950,
+    inPlayerGestureAt: 21_950,
+  };
 
   return { harness, sharedVideo };
 }
@@ -810,6 +815,7 @@ test("sync controller does not treat a seek as explicit after a forced pause inv
   harness.runtimeState.lastExplicitUserAction = {
     kind: "seek",
     at: 21_950,
+    inPlayerGestureAt: 21_950,
   };
   harness.runtimeState.lastForcedPauseAt = 21_975;
   harness.setSharedVideo(sharedVideo);
@@ -864,6 +870,7 @@ test("sync controller marks explicit user ratechange with explicit-ratechange in
   harness.runtimeState.lastExplicitUserAction = {
     kind: "ratechange",
     at: 21_950,
+    inPlayerGestureAt: 21_950,
   };
 
   harness.setNow(22_000);
@@ -1866,6 +1873,7 @@ test("sync controller tags broadcast with userInitiated:true on a fresh user pau
   harness.runtimeState.lastExplicitUserAction = {
     kind: "pause",
     at: 20_350,
+    inPlayerGestureAt: 20_350,
   };
   harness.runtimeState.pauseStartedAt = 20_350;
   harness.runtimeState.pauseClassifiedAsBuffer = false;
@@ -2022,6 +2030,7 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
   harness.runtimeState.lastExplicitUserAction = {
     kind: "pause",
     at: 19_900,
+    inPlayerGestureAt: 19_900,
   };
   harness.runtimeState.lastUserGestureAt = 19_900;
   harness.setSharedVideo(sharedVideo);
@@ -2614,7 +2623,11 @@ test("sync controller keeps userInitiated on a pause that cancelled a rate catch
   harness.runtimeState.intendedPlayState = "paused";
   harness.runtimeState.lastUserGestureAt = 20_350;
   harness.runtimeState.lastForcedPauseAt = 0;
-  harness.runtimeState.lastExplicitUserAction = { kind: "pause", at: 20_350 };
+  harness.runtimeState.lastExplicitUserAction = {
+    kind: "pause",
+    at: 20_350,
+    inPlayerGestureAt: 20_350,
+  };
   harness.runtimeState.pauseStartedAt = 20_350;
   harness.runtimeState.pauseClassifiedAsBuffer = false;
   // The user's own `pause` handler cancelled the active catch-up, and the rate
@@ -2793,7 +2806,11 @@ test("sync controller still broadcasts a pause the user made after the apply", a
   // live inside the player and say nothing about playback intent.
   harness.runtimeState.lastUserGestureAt = 13_900;
   harness.runtimeState.lastUserGestureInPlayerAt = 13_900;
-  harness.runtimeState.lastExplicitUserAction = { kind: "pause", at: 13_900 };
+  harness.runtimeState.lastExplicitUserAction = {
+    kind: "pause",
+    at: 13_900,
+    inPlayerGestureAt: 13_900,
+  };
   await harness.controller.broadcastPlayback(video, "pause");
 
   // Deliberately the only assertion: this test is the "does not over-suppress"

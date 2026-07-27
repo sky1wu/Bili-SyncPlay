@@ -105,6 +105,7 @@ test("playback binding controller forwards ratechange event source", async () =>
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "ratechange",
       at: 1_100,
+      inPlayerGestureAt: 0,
     });
   } finally {
     dom.restore();
@@ -229,6 +230,7 @@ test("playback binding controller preserves explicit seek intent across immediat
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 1_100,
+      inPlayerGestureAt: 0,
     });
   } finally {
     dom.restore();
@@ -833,6 +835,7 @@ test("playback binding controller allows manual play after a newer gesture follo
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "play",
       at: 1_200,
+      inPlayerGestureAt: 0,
     });
   } finally {
     dom.restore();
@@ -3106,7 +3109,11 @@ test("playback binding controller records the seek-to-end flag when a seek prece
   // The sharer seeked to the last seconds (the most recent gesture is that seek,
   // no newer gesture since), then the video played out to its natural end.
   runtimeState.lastUserGestureAt = 4_800;
-  runtimeState.lastExplicitUserAction = { kind: "seek", at: 4_850 };
+  runtimeState.lastExplicitUserAction = {
+    kind: "seek",
+    at: 4_850,
+    inPlayerGestureAt: 4_850,
+  };
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
@@ -3687,6 +3694,7 @@ test("playback binding controller still records a gesture made during a programm
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 5_100,
+      inPlayerGestureAt: 5_050,
     });
   } finally {
     dom.restore();
@@ -3711,6 +3719,7 @@ test("playback binding controller records user actions normally once the apply w
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 6_000,
+      inPlayerGestureAt: 5_900,
     });
   } finally {
     dom.restore();
@@ -3739,6 +3748,7 @@ test("playback binding controller gives a same-tick gesture to the user, not the
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 5_100,
+      inPlayerGestureAt: 5_000,
     });
   } finally {
     dom.restore();
@@ -3823,6 +3833,7 @@ test("a user seek that cancels an active rate catch-up is still recorded", async
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 1_100,
+      inPlayerGestureAt: 1_000,
     });
 
     await Promise.resolve();
@@ -3876,6 +3887,7 @@ test("a user pause that cancels an active rate catch-up is still recorded", () =
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "pause",
       at: 1_100,
+      inPlayerGestureAt: 1_000,
     });
     assert.deepEqual(runtimeState.lastExplicitPlaybackAction, {
       playState: "paused",
@@ -4117,6 +4129,93 @@ test("playback binding controller re-samples the seek origin after a forced paus
     // Inheriting "buffering" here would force this scrub to `playing` and start
     // playback for the whole room.
     assert.equal(runtimeState.explicitSeekOriginPlayState, "paused");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller records no in-player provenance for a document-level gesture", async () => {
+  // The gate that accepts an explicit action only asks for a recent gesture
+  // *anywhere on the page*, which is right for the broadcast paths but far too
+  // loose to release a protection. A click on blank page area while a remote
+  // paused hard-seek is still buffering must not let the late `seeked` pose as
+  // the user taking over, so the recorded action has to say that no in-player
+  // gesture backed it. Controller-level tests cannot see this: they set
+  // `lastExplicitUserAction` directly and never exercise this classification.
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 1_000; // click on blank page area
+  runtimeState.lastUserGestureInPlayerAt = 0; // nothing inside the player
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeked")!(new Event("seeked"));
+    await Promise.resolve();
+
+    // The action is still recorded — the broadcast paths depend on that.
+    assert.equal(runtimeState.lastExplicitUserAction?.kind, "seek");
+    // But it carries no in-player provenance, so it cannot release ownership.
+    assert.equal(runtimeState.lastExplicitUserAction?.inPlayerGestureAt, 0);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller carries in-player provenance when the gesture was in the player", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 1_000;
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("pause")!(new Event("pause"));
+    await Promise.resolve();
+
+    assert.equal(runtimeState.lastExplicitUserAction?.kind, "pause");
+    assert.equal(runtimeState.lastExplicitUserAction?.inPlayerGestureAt, 1_000);
   } finally {
     dom.restore();
   }

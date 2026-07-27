@@ -58,11 +58,23 @@ export interface RemoteAppliedPlayback {
   actorId: string;
   seq: number;
   /**
-   * Local monotonic instant of the apply. Compared only against other local
-   * instants (gesture timestamps, the backstop age) — never against
-   * `serverTime`, which belongs to a different clock.
+   * Wall-clock instant of the apply (`Date.now()` domain), kept solely so it can
+   * be compared against the gesture timestamps, which live in that same domain.
+   * Never compared against `serverTime`, which belongs to the server's clock.
+   *
+   * It is not safe for measuring elapsed time: a backwards NTP correction makes
+   * every later gesture look older than the apply, and a forwards one makes the
+   * apply look arbitrarily old. Durations use [[appliedAtMonotonic]].
    */
   appliedAtLocal: number;
+  /**
+   * The same instant on the monotonic clock (`performance.now()`), used for the
+   * backstop age. Keeping the two domains separate is what stops a clock
+   * adjustment from either freezing ownership forever (a backwards jump makes
+   * the wall-clock age negative, so a single-domain backstop would never fire)
+   * or releasing it instantly (a forwards jump).
+   */
+  appliedAtMonotonic: number;
 }
 
 export type LocalPlaybackEventSource =
@@ -84,6 +96,21 @@ export type ExplicitUserActionKind = "play" | "pause" | "seek" | "ratechange";
 export interface ExplicitUserAction {
   kind: ExplicitUserActionKind;
   at: number;
+  /**
+   * [[ContentRuntimeState.lastUserGestureInPlayerAt]] as it stood when this
+   * action was accepted.
+   *
+   * The acceptance gate itself only requires a recent *document-level* gesture,
+   * which is deliberately loose: a keypress or a click anywhere on the page is
+   * enough to treat the transport events that follow as user-driven. That is the
+   * right call for the broadcast paths, but far too loose for anything that
+   * *releases* a protection — a click on blank page area while a remote paused
+   * hard-seek is still buffering would otherwise let the late `seeked` count as
+   * the user taking over. Recording the in-player gesture alongside the action
+   * lets those consumers demand the stronger provenance without loosening the
+   * gate for everyone else.
+   */
+  inPlayerGestureAt: number;
 }
 
 export interface ProgrammaticPlaybackSignature {

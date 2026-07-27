@@ -274,6 +274,7 @@ export function createPlaybackBindingController(args: {
       args.runtimeState.lastExplicitUserAction = {
         kind,
         at: nowOf(),
+        inPlayerGestureAt: args.runtimeState.lastUserGestureInPlayerAt,
       };
       if (kind === "seek") {
         // One gesture produces `seeking` AND `seeked`, and the `seeking`

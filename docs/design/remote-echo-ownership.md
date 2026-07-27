@@ -51,8 +51,8 @@ interface RemoteAppliedPlayback {
   playbackRate: number;
   actorId: string;
   seq: number;
-  appliedAtLocal: number; // local monotonic instant; compared only against other
-  // local instants, never against serverTime
+  appliedAtLocal: number; // wall clock; only ever compared against gesture timestamps
+  appliedAtMonotonic: number; // monotonic; the only domain durations are measured in
 }
 ```
 
@@ -82,19 +82,30 @@ all of which are silent.
 
 The marker does not expire on time. It is cleared only by:
 
-| #   | Clearing condition                                                            | Rationale                                                        |
-| --- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| C1  | A genuine in-player gesture (`lastUserGestureInPlayerAt > appliedAtLocal`)    | The user took over; everything after is local intent             |
-| C2  | Local state diverges from the owned values in a way the remote cannot explain | The player moved on its own (start-up, jump) — no longer an echo |
-| C3  | A newer remote state arrives                                                  | Straight replacement                                             |
-| C4  | Shared video switch / room reset / `<video>` rebind                           | The context is gone                                              |
+| #   | Clearing condition                                                                               | Rationale                                                        |
+| --- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| C1  | A playback action whose authenticating gesture was **inside the player** and postdates the apply | The user took over; everything after is local intent             |
+| C2  | Local state diverges from the owned values in a way the remote cannot explain                    | The player moved on its own (start-up, jump) — no longer an echo |
+| C3  | A newer remote state arrives                                                                     | Straight replacement                                             |
+| C4  | Shared video switch / room reset / `<video>` rebind                                              | The context is gone                                              |
 
-**C1 must be evaluated first**, otherwise user actions get swallowed. It keys off
-`lastExplicitUserAction` — the playback action the binding layer confirmed — and not off a
-raw gesture. An in-player gesture is too broad: volume, settings and danmaku controls all
-live inside the player container and express no intent about playback, so releasing on one
-of those while a remote paused hard-seek is still buffering would let the late `seeked`
-rebroadcast the room's own pause. The document-level `lastUserGestureAt` is broader still.
+**C1 must be evaluated first**, otherwise user actions get swallowed — and it needs _both_
+halves of the evidence, because each alone is too weak:
+
+- The playback action alone is not enough. `rememberExplicitUserAction` accepts an action
+  whenever any recent **document-level** gesture exists, which is the right call for the
+  broadcast paths but far too loose to release a protection: a click on blank page area
+  while a remote paused hard-seek is still buffering would let the late `seeked` pose as
+  the user taking over.
+- An in-player gesture alone is not enough either: volume, settings and danmaku controls
+  all live inside the player container and express nothing about playback.
+
+So the action records the in-player gesture that authenticated it
+(`ExplicitUserAction.inPlayerGestureAt`), and C1 requires _that_ to postdate the apply. One
+residual case remains by choice: adjusting volume inside the player at the exact moment a
+late transport event lands still releases. The consequence is only that ownership ends
+early — degrading to the pre-existing 700ms window — rather than any new failure, and
+closing it would mean classifying individual player sub-controls.
 
 ### The critical split: paused/buffering versus playing
 
@@ -128,6 +139,15 @@ start-up. So a match suppresses and leaves the ownership in place; only C1–C4 
 A non-matching position or rate suppresses nothing but does **not** release either: the
 player may still be settling toward the target, and releasing on the first intermediate
 sample would put the leak back.
+
+### Two clock domains
+
+Gesture timestamps live on the wall clock (`Date.now()`), so ownership records that instant
+to compare against them. Durations must not use it: a backwards NTP correction makes the
+wall-clock age negative — a single-domain backstop would then never fire and a matching
+pause would stay suppressed indefinitely — while a forwards one makes the apply look
+arbitrarily old and drops the protection on the spot. The backstop measures on
+`performance.now()`, recorded alongside as `appliedAtMonotonic`.
 
 ### Backstop cap
 
@@ -184,8 +204,9 @@ a swallowed action just feels like "sometimes it doesn't respond".
 
 Mitigations:
 
-1. C1 (gesture clearing) sits first in the decision chain and keys off an in-player
-   gesture, so it neither over-clears nor misses a genuine action.
+1. C1 sits first in the decision chain and requires a playback action _plus_ the in-player
+   gesture that authenticated it, so it neither over-clears on a stray page click nor
+   misses a genuine interaction.
 2. Suppression logs the owning source (`actorId` / `seq` / age since `appliedAtLocal`), so
    a swallowed action is visible in the log.
 3. Phase 1's parallel-backstop mode keeps the new logic purely additive until real-world

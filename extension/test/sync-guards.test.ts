@@ -260,6 +260,7 @@ test("allows explicit user actions to bypass programmatic suppression", () => {
       lastExplicitUserAction: {
         kind: "seek",
         at: 10_000,
+        inPlayerGestureAt: 10_000,
       },
       now: 10_100,
       userGestureGraceMs: 1_200,
@@ -297,6 +298,7 @@ test("allows explicit user seek to bypass the remote playing window", () => {
     lastExplicitUserAction: {
       kind: "seek",
       at: 12_250,
+      inPlayerGestureAt: 12_250,
     },
     now: 12_300,
     userGestureGraceMs: 1_200,
@@ -315,6 +317,7 @@ test("allows canplay and playing to bypass the remote playing window after an ex
     lastExplicitUserAction: {
       kind: "seek",
       at: 12_250,
+      inPlayerGestureAt: 12_250,
     },
     now: 12_300,
     userGestureGraceMs: 1_200,
@@ -328,6 +331,7 @@ test("allows canplay and playing to bypass the remote playing window after an ex
     lastExplicitUserAction: {
       kind: "seek",
       at: 12_250,
+      inPlayerGestureAt: 12_250,
     },
     now: 12_300,
     userGestureGraceMs: 1_200,
@@ -528,6 +532,7 @@ test("does not let an explicit action from before the apply window bypass suppre
     lastExplicitUserAction: {
       kind: "seek",
       at: 9_700,
+      inPlayerGestureAt: 9_700,
     },
     now: 10_100,
     userGestureGraceMs: 1_200,
@@ -558,7 +563,11 @@ test("a ratechange-scoped window does not swallow the seek that opened it", () =
     eventSource: "seeking" as const,
     // Swallowed by `isProgrammaticEventEcho`, so the record is still the stale
     // ratechange from before the seek and cannot bypass the guard.
-    lastExplicitUserAction: { kind: "ratechange" as const, at: 9_000 },
+    lastExplicitUserAction: {
+      kind: "ratechange" as const,
+      at: 9_000,
+      inPlayerGestureAt: 9_000,
+    },
     now: 10_005,
     userGestureGraceMs: 1_200,
   };
@@ -615,6 +624,7 @@ function createOwnership(
     actorId: "remote-member",
     seq: 12,
     appliedAtLocal: 1_000,
+    appliedAtMonotonic: 1_000,
     ...overrides,
   };
 }
@@ -630,8 +640,9 @@ function ownershipInput(
     playState: "paused",
     currentTime: 49,
     playbackRate: 1,
-    lastExplicitPlaybackActionAt: 0,
+    lastExplicitActionInPlayerGestureAt: 0,
     now: 5_000,
+    monotonicNow: 5_000,
     maxAgeMs: 30_000,
     positionToleranceSeconds: 0.2,
     ...overrides,
@@ -662,7 +673,7 @@ test("ownership keeps suppressing the second report of the same applied state", 
 
 test("a confirmed playback action releases ownership so the user's own pause broadcasts", () => {
   const decision = shouldSuppressLeakedEchoByOwnership(
-    ownershipInput({ lastExplicitPlaybackActionAt: 4_000 }),
+    ownershipInput({ lastExplicitActionInPlayerGestureAt: 4_000 }),
   );
   assert.equal(decision.shouldSuppress, false);
   assert.equal(decision.releaseReason, "user-action");
@@ -671,7 +682,7 @@ test("a confirmed playback action releases ownership so the user's own pause bro
 
 test("an action predating the apply does not release ownership", () => {
   const decision = shouldSuppressLeakedEchoByOwnership(
-    ownershipInput({ lastExplicitPlaybackActionAt: 900 }),
+    ownershipInput({ lastExplicitActionInPlayerGestureAt: 900 }),
   );
   assert.equal(decision.shouldSuppress, true);
   assert.equal(decision.releaseReason, null);
@@ -729,8 +740,9 @@ test("a different video releases ownership", () => {
 });
 
 test("the backstop releases ownership that outlived every designed condition", () => {
+  // Ages are measured on the monotonic clock, so that is the one to advance.
   const decision = shouldSuppressLeakedEchoByOwnership(
-    ownershipInput({ now: 31_001 }),
+    ownershipInput({ now: 31_001, monotonicNow: 31_001 }),
   );
   assert.equal(decision.shouldSuppress, false);
   assert.equal(decision.releaseReason, "backstop-age");
@@ -744,6 +756,7 @@ test("ownership is only taken for stop-like states, never for playing", () => {
       playback: createPlayback({ playState: "paused" }),
       normalizedUrl: url,
       now: 1_000,
+      monotonicNow: 1_000,
     }),
     null,
   );
@@ -752,6 +765,7 @@ test("ownership is only taken for stop-like states, never for playing", () => {
       playback: createPlayback({ playState: "buffering" }),
       normalizedUrl: url,
       now: 1_000,
+      monotonicNow: 1_000,
     }),
     null,
   );
@@ -762,6 +776,7 @@ test("ownership is only taken for stop-like states, never for playing", () => {
       playback: createPlayback({ playState: "playing" }),
       normalizedUrl: url,
       now: 1_000,
+      monotonicNow: 1_000,
     }),
     null,
   );
@@ -770,7 +785,35 @@ test("ownership is only taken for stop-like states, never for playing", () => {
       playback: createPlayback({ playState: "paused" }),
       normalizedUrl: null,
       now: 1_000,
+      monotonicNow: 1_000,
     }),
     null,
   );
+});
+
+test("a backwards wall-clock jump does not freeze ownership forever", () => {
+  // NTP (or the user) moves the system clock back after the apply. Measured on
+  // the wall clock the age is negative, so a single-domain backstop would never
+  // fire and a matching pause would be suppressed silently for good.
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({
+      now: 500, // earlier than appliedAtLocal (1_000)
+      monotonicNow: 31_001,
+    }),
+  );
+  assert.equal(decision.shouldSuppress, false);
+  assert.equal(decision.releaseReason, "backstop-age");
+});
+
+test("a forwards wall-clock jump does not release ownership early", () => {
+  // The mirror case: the wall clock leaps ahead, which on a single-domain
+  // backstop would drop the protection immediately and let the late echo leak.
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({
+      now: 10_000_000,
+      monotonicNow: 1_200,
+    }),
+  );
+  assert.equal(decision.shouldSuppress, true);
+  assert.equal(decision.releaseReason, null);
 });

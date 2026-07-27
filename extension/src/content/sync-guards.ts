@@ -52,14 +52,21 @@ export interface RemoteOwnershipEchoGuardInput {
   currentTime: number;
   playbackRate: number;
   /**
-   * When the user last performed a *playback* action (play/pause/seek/ratechange)
-   * that `rememberExplicitUserAction` accepted as genuine — not merely when they
-   * last touched the player. Adjusting volume, opening settings or toggling
-   * danmaku all land inside the player container without expressing any intent
-   * about playback, and must not hand back a state the room still owns.
+   * The in-player gesture that authenticated the most recent playback action
+   * (`ExplicitUserAction.inPlayerGestureAt`), or 0 when there is none.
+   *
+   * Neither half is sufficient alone. The action's own timestamp is authenticated
+   * by a *document-level* gesture, so a click on blank page area during a long
+   * buffer would let the late `seeked` pose as the user taking over. A bare
+   * in-player gesture is no better: volume, settings and danmaku controls all
+   * live in the player container and produce no playback action at all. Requiring
+   * the action to carry an in-player gesture demands both.
    */
-  lastExplicitPlaybackActionAt: number;
+  lastExplicitActionInPlayerGestureAt: number;
+  /** Wall-clock now — same domain as the gesture timestamps above. */
   now: number;
+  /** Monotonic now — the only domain durations may be measured in. */
+  monotonicNow: number;
   maxAgeMs: number;
   positionToleranceSeconds: number;
 }
@@ -285,13 +292,13 @@ export function rememberRemotePlaybackForSuppression(
  * Ownership is released, rather than consulted, whenever something proves the
  * state is no longer the room's:
  *
- * - `user-action` — a confirmed playback action (play/pause/seek/ratechange)
- *   postdating the apply. Checked first, because failing to release here
- *   swallows a real interaction silently. It deliberately keys off the action
- *   rather than any in-player gesture: volume, settings and danmaku controls all
- *   live inside the player container and say nothing about playback intent, so
- *   using a raw gesture would hand the state back mid-buffering and let the very
- *   echo this guards against escape.
+ * - `user-action` — a playback action (play/pause/seek/ratechange) that was
+ *   itself authenticated by an in-player gesture postdating the apply. Checked
+ *   first, because failing to release here swallows a real interaction silently.
+ *   Both halves are required: the action alone is authenticated by any
+ *   document-level gesture (a click on blank page area during a long buffer would
+ *   qualify), and an in-player gesture alone covers volume, settings and danmaku
+ *   controls that express nothing about playback.
  * - `left-state` — the local player reached `playing`. It moved on its own, so
  *   nothing that follows is this apply's echo. (`paused` ⇄ `buffering` is not a
  *   departure: both are the same standstill mid-transition, which is also why a
@@ -331,7 +338,7 @@ export function shouldSuppressLeakedEchoByOwnership(
     releaseReason: reason,
   });
 
-  if (input.lastExplicitPlaybackActionAt > owned.appliedAtLocal) {
+  if (input.lastExplicitActionInPlayerGestureAt > owned.appliedAtLocal) {
     return release("user-action");
   }
 
@@ -343,7 +350,7 @@ export function shouldSuppressLeakedEchoByOwnership(
     return release("left-state");
   }
 
-  if (input.now - owned.appliedAtLocal >= input.maxAgeMs) {
+  if (input.monotonicNow - owned.appliedAtMonotonic >= input.maxAgeMs) {
     return release("backstop-age");
   }
 
@@ -374,6 +381,7 @@ export function rememberRemoteAppliedPlayback(input: {
   playback: PlaybackState;
   normalizedUrl: string | null;
   now: number;
+  monotonicNow: number;
 }): RemoteAppliedPlayback | null {
   if (!input.normalizedUrl) {
     return null;
@@ -392,6 +400,7 @@ export function rememberRemoteAppliedPlayback(input: {
     actorId: input.playback.actorId,
     seq: input.playback.seq,
     appliedAtLocal: input.now,
+    appliedAtMonotonic: input.monotonicNow,
   };
 }
 

@@ -85,6 +85,7 @@ export function createSyncController(args: {
   localIntentGuardMs: number;
   pauseHoldMs: number;
   initialRoomStatePauseHoldMs: number;
+  getMonotonicNow?: () => number;
   remoteEchoSuppressionMs: number;
   /**
    * Backstop age for remote playback ownership. Not the designed expiry — the
@@ -142,6 +143,11 @@ export function createSyncController(args: {
   ) => void;
 }): SyncController {
   const nowOf = () => args.getNow?.() ?? Date.now();
+  // Durations must not be measured on the wall clock: an NTP or manual
+  // correction would otherwise either freeze remote-playback ownership forever
+  // (backwards jump ⇒ negative age ⇒ the backstop never fires) or release it on
+  // the spot (forwards jump ⇒ the late echo leaks again).
+  const monotonicNowOf = () => args.getMonotonicNow?.() ?? performance.now();
   const ignoredRemotePlaybackLogState = { key: null as string | null, at: 0 };
   const duplicateBroadcastLogState = { key: null as string | null, at: 0 };
   /**
@@ -553,14 +559,6 @@ export function createSyncController(args: {
       remembered.suppressedRemotePlayback;
     args.runtimeState.recentRemotePlayingIntent =
       remembered.recentRemotePlayingIntent;
-    // A newer remote state always replaces the ownership, including replacing it
-    // with null when the room moved to `playing` — that is the C3 release.
-    args.runtimeState.remoteAppliedPlayback =
-      rememberRemoteAppliedPlaybackGuard({
-        playback,
-        normalizedUrl: url,
-        now,
-      });
     if (!url) {
       return;
     }
@@ -609,6 +607,7 @@ export function createSyncController(args: {
         playback,
         normalizedUrl: args.normalizeUrl(playback.url),
         now: nowOf(),
+        monotonicNow: monotonicNowOf(),
       });
   }
 
@@ -703,9 +702,10 @@ export function createSyncController(args: {
       playState,
       currentTime: video.currentTime,
       playbackRate: video.playbackRate,
-      lastExplicitPlaybackActionAt:
-        args.runtimeState.lastExplicitUserAction?.at ?? 0,
+      lastExplicitActionInPlayerGestureAt:
+        args.runtimeState.lastExplicitUserAction?.inPlayerGestureAt ?? 0,
       now: nowOf(),
+      monotonicNow: monotonicNowOf(),
       maxAgeMs: args.remoteOwnershipMaxAgeMs,
       positionToleranceSeconds: REMOTE_OWNERSHIP_POSITION_TOLERANCE_SECONDS,
     });
@@ -717,7 +717,7 @@ export function createSyncController(args: {
       // conditions should have fired and did not, so it is worth noticing in a
       // log the user can send back.
       args.debugLog(
-        `Released remote playback ownership ${owned.playState} ${owned.url} actor=${owned.actorId} seq=${owned.seq} ageMs=${nowOf() - owned.appliedAtLocal} reason=${decision.releaseReason}${
+        `Released remote playback ownership ${owned.playState} ${owned.url} actor=${owned.actorId} seq=${owned.seq} ageMs=${Math.round(monotonicNowOf() - owned.appliedAtMonotonic)} reason=${decision.releaseReason}${
           decision.releaseReason === "backstop-age" ? " (unexpected)" : ""
         }`,
       );
@@ -728,7 +728,7 @@ export function createSyncController(args: {
       logHeartbeatMessage(
         ownershipEchoLogState,
         `${playState}|${owned.url}`,
-        `Suppressed leaked echo by ownership ${playState} ${owned.url} actor=${owned.actorId} seq=${owned.seq} ageMs=${nowOf() - owned.appliedAtLocal} localT=${video.currentTime.toFixed(2)} ownedT=${owned.currentTime.toFixed(2)}`,
+        `Suppressed leaked echo by ownership ${playState} ${owned.url} actor=${owned.actorId} seq=${owned.seq} ageMs=${Math.round(monotonicNowOf() - owned.appliedAtMonotonic)} localT=${video.currentTime.toFixed(2)} ownedT=${owned.currentTime.toFixed(2)}`,
       );
     }
     return decision.shouldSuppress;
