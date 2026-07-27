@@ -513,6 +513,7 @@ Per deployment style:
 - Docker: the default grace period is only 10s, so the container is SIGKILLed mid-cleanup (exit code `137`). The repository's `docker-compose.yml` sets `stop_grace_period: 160s`; with `docker run`, stop the container using `docker stop -t 160 <container>`. Lower it if you prefer a faster hard stop, at the cost of leaving Redis runtime state for the reapers to expire.
 - A signal that arrives during startup (while still connecting to Redis, for example) is recorded, and the full shutdown runs once startup finishes; if startup has not finished within 5s the process exits with code `1` instead of hanging until the orchestrator sends SIGKILL.
 - If any shutdown step fails or times out, the process exits with code `1` and has logged a `server_shutdown_step_failed` event; exit code `0` means every step succeeded.
+- Clients receive a proper close frame — `1001 going away` with reason `server_shutting_down` — instead of the `1006` that a dropped TCP connection produces (which is indistinguishable from a crash or a network failure). Only connections that do not answer the close handshake within 2s are terminated. The extension reconnects either way.
 - A second signal during shutdown (for example pressing Ctrl+C twice) exits immediately and abandons the remaining cleanup steps.
 
 ## 8. Operational notes

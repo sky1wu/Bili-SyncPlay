@@ -513,6 +513,7 @@ sudo systemctl restart bili-syncplay-global-admin
 - Docker：默认宽限期只有 10s，会在清理中途 SIGKILL（表现为退出码 `137`）。仓库内的 `docker-compose.yml` 已设 `stop_grace_period: 160s`；用 `docker run` 启动时对应 `docker stop -t 160 <容器名>`。愿意牺牲尾部清理的话可以调小，代价是 Redis 上的运行时状态要等 reaper 过期回收。
 - 启动期间（例如仍在连接 Redis）收到信号：进程会记录并等启动完成后再走完整关闭；如果启动 5s 内仍未完成，直接以退出码 `1` 退出，不会挂着等编排器 SIGKILL。
 - 有关闭步骤失败或超时时，进程以退出码 `1` 退出，并已记录 `server_shutdown_step_failed` 事件；退出码 `0` 表示所有步骤都成功。
+- 客户端会收到正常的 close frame：`1001 going away`，reason 为 `server_shutting_down`；不再是断开 TCP 导致的 `1006`（与崩溃、断网无法区分）。2s 内没回应 close 握手的连接才会被强制断开。两种情况扩展都会自动重连。
 - 在清理过程中再次收到信号（例如连按两次 Ctrl+C）会立即退出，放弃剩余清理步骤。
 
 ## 8. 运维说明
