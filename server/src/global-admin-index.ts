@@ -6,6 +6,11 @@ import {
 import { logEffectiveOriginPolicy } from "./config/security-config.js";
 import { createGlobalAdminServer } from "./global-admin-app.js";
 
+// Installed before any awaited startup work — see the note in index.ts.
+const shutdown = installGracefulShutdown({
+  name: "Bili-SyncPlay global admin",
+});
+
 const {
   globalAdminPort: port,
   metricsPort,
@@ -32,23 +37,25 @@ const { httpServer, metricsHttpServer, close } = await createGlobalAdminServer(
     metricsPort,
   },
 );
-installGracefulShutdown({ close, name: "Bili-SyncPlay global admin" });
-httpServer.listen(port, () => {
-  console.log(
-    `Bili-SyncPlay global admin listening on http://localhost:${port}`,
-  );
-});
-if (metricsHttpServer && metricsPort !== undefined) {
-  metricsHttpServer.on("error", (error) => {
-    console.error(
-      `Bili-SyncPlay global admin metrics server failed to listen on ${metricsPort}:`,
-      error,
-    );
-    process.exit(1);
-  });
-  metricsHttpServer.listen(metricsPort, () => {
+
+if (shutdown.attachCloseTarget(close)) {
+  httpServer.listen(port, () => {
     console.log(
-      `Bili-SyncPlay global admin metrics listening on http://localhost:${metricsPort}/metrics`,
+      `Bili-SyncPlay global admin listening on http://localhost:${port}`,
     );
   });
+  if (metricsHttpServer && metricsPort !== undefined) {
+    metricsHttpServer.on("error", (error) => {
+      console.error(
+        `Bili-SyncPlay global admin metrics server failed to listen on ${metricsPort}:`,
+        error,
+      );
+      process.exit(1);
+    });
+    metricsHttpServer.listen(metricsPort, () => {
+      console.log(
+        `Bili-SyncPlay global admin metrics listening on http://localhost:${metricsPort}/metrics`,
+      );
+    });
+  }
 }

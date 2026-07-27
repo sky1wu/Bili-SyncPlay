@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
   installGracefulShutdown,
+  type GracefulShutdownHandle,
+  type ShutdownCloseTarget,
   type ShutdownSignalTarget,
 } from "../src/bootstrap/graceful-shutdown.js";
 
@@ -14,13 +16,14 @@ type Harness = {
   logs: string[];
   errors: string[];
   exitCodes: number[];
+  exits: EventEmitter;
+  /** Resolves on the next exit() call, without holding a timer of its own. */
+  nextExit: () => Promise<number>;
 };
 
 function createHarness(): Harness {
   const emitter = new EventEmitter();
-  const logs: string[] = [];
-  const errors: string[] = [];
-  const exitCodes: number[] = [];
+  const exits = new EventEmitter();
   return {
     signalTarget: {
       on: (signal, listener) => emitter.on(signal, listener),
@@ -28,30 +31,44 @@ function createHarness(): Harness {
       emit: (signal) => emitter.emit(signal),
       listenerCount: (signal) => emitter.listenerCount(signal),
     },
-    logs,
-    errors,
-    exitCodes,
+    logs: [],
+    errors: [],
+    exitCodes: [],
+    exits,
+    nextExit: () =>
+      new Promise<number>((resolve) => {
+        exits.once("exit", (code: number) => {
+          resolve(code);
+        });
+      }),
   };
 }
 
 function install(
   harness: Harness,
-  close: () => Promise<void>,
-  overrides: { forceExitTimeoutMs?: number } = {},
-): () => void {
+  close?: ShutdownCloseTarget,
+  overrides: {
+    forceExitTimeoutMs?: number;
+    startupAbortTimeoutMs?: number;
+  } = {},
+): GracefulShutdownHandle {
   return installGracefulShutdown({
-    close,
     name: "test server",
+    close,
     signalTarget: harness.signalTarget,
     log: (message) => harness.logs.push(message),
     logError: (message) => harness.errors.push(message),
-    exit: (code) => harness.exitCodes.push(code),
+    exit: (code) => {
+      harness.exitCodes.push(code);
+      harness.exits.emit("exit", code);
+    },
     ...overrides,
   });
 }
 
 async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 test("SIGTERM runs close and exits with code 0", async () => {
@@ -59,6 +76,7 @@ test("SIGTERM runs close and exits with code 0", async () => {
   let closeCalls = 0;
   install(harness, async () => {
     closeCalls += 1;
+    return [];
   });
 
   harness.signalTarget.emit("SIGTERM");
@@ -82,6 +100,23 @@ test("SIGINT is handled as well", async () => {
 
   assert.equal(closeCalls, 1);
   assert.deepEqual(harness.exitCodes, [0]);
+});
+
+test("a shutdown step failure exits with code 1", async () => {
+  const harness = createHarness();
+  install(harness, async () => [
+    { step: "close_room_store", result: "timeout", error: "…" },
+  ]);
+
+  harness.signalTarget.emit("SIGTERM");
+  await flush();
+
+  assert.deepEqual(harness.exitCodes, [1]);
+  assert.ok(
+    harness.errors.some((line) => line.includes("close_room_store (timeout)")),
+    `Missing failed-step log: ${harness.errors.join(" | ")}`,
+  );
+  assert.ok(!harness.logs.some((line) => line.includes("shutdown complete")));
 });
 
 test("close runs once even if more signals arrive during shutdown", async () => {
@@ -111,16 +146,17 @@ test("close runs once even if more signals arrive during shutdown", async () => 
   assert.deepEqual(harness.exitCodes, [1, 0]);
 });
 
-test("a hung close is force-exited after the watchdog timeout", async () => {
+test("a hung close is force-exited by the watchdog", async () => {
   const harness = createHarness();
-  install(harness, () => new Promise<void>(() => undefined), {
-    forceExitTimeoutMs: 10,
+  const exited = harness.nextExit();
+  install(harness, () => new Promise<never>(() => undefined), {
+    forceExitTimeoutMs: 20,
   });
 
   harness.signalTarget.emit("SIGTERM");
-  await new Promise((resolve) => setTimeout(resolve, 30));
-
-  assert.deepEqual(harness.exitCodes, [1]);
+  // Nothing but the watchdog keeps the event loop alive here: awaiting a timer
+  // of our own would mask an unref()'d watchdog, which is how this regressed.
+  assert.equal(await exited, 1);
   assert.ok(harness.errors.some((line) => line.includes("timed out")));
   assert.equal(harness.signalTarget.listenerCount("SIGTERM"), 0);
 });
@@ -138,18 +174,74 @@ test("a failing close exits with code 1", async () => {
   assert.ok(harness.errors.some((line) => line.includes("shutdown failed")));
 });
 
+test("a signal during startup shuts down once the close target is attached", async () => {
+  const harness = createHarness();
+  const handle = install(harness, undefined, { startupAbortTimeoutMs: 60_000 });
+  let closeCalls = 0;
+
+  harness.signalTarget.emit("SIGTERM");
+  await flush();
+
+  // Nothing to close yet: the process must stay alive until startup finishes.
+  assert.deepEqual(harness.exitCodes, []);
+  assert.equal(closeCalls, 0);
+  assert.ok(harness.logs.some((line) => line.includes("during startup")));
+
+  const keepListening = handle.attachCloseTarget(async () => {
+    closeCalls += 1;
+    return [];
+  });
+  await flush();
+
+  assert.equal(
+    keepListening,
+    false,
+    "the caller must be told not to start listening",
+  );
+  assert.equal(closeCalls, 1);
+  assert.deepEqual(harness.exitCodes, [0]);
+});
+
+test("a startup that never finishes is aborted after the startup timeout", async () => {
+  const harness = createHarness();
+  const exited = harness.nextExit();
+  install(harness, undefined, { startupAbortTimeoutMs: 20 });
+
+  harness.signalTarget.emit("SIGTERM");
+  assert.equal(await exited, 1);
+  assert.ok(
+    harness.errors.some((line) => line.includes("startup did not finish")),
+    `Missing startup abort log: ${harness.errors.join(" | ")}`,
+  );
+});
+
+test("attachCloseTarget keeps the caller running when no signal arrived", async () => {
+  const harness = createHarness();
+  const handle = install(harness);
+
+  assert.equal(
+    handle.attachCloseTarget(async () => []),
+    true,
+  );
+  assert.deepEqual(harness.exitCodes, []);
+
+  harness.signalTarget.emit("SIGTERM");
+  await flush();
+  assert.deepEqual(harness.exitCodes, [0]);
+});
+
 test("handlers are detached after shutdown and by the returned detach", async () => {
   const harness = createHarness();
-  const detach = install(harness, async () => undefined);
+  const handle = install(harness, async () => []);
 
   assert.equal(harness.signalTarget.listenerCount("SIGTERM"), 1);
   assert.equal(harness.signalTarget.listenerCount("SIGINT"), 1);
-  detach();
+  handle.detach();
   assert.equal(harness.signalTarget.listenerCount("SIGTERM"), 0);
   assert.equal(harness.signalTarget.listenerCount("SIGINT"), 0);
 
   const other = createHarness();
-  install(other, async () => undefined);
+  install(other, async () => []);
   other.signalTarget.emit("SIGTERM");
   await flush();
   assert.equal(other.signalTarget.listenerCount("SIGTERM"), 0);

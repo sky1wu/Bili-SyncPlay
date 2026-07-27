@@ -499,10 +499,20 @@ sudo systemctl restart bili-syncplay-global-admin
 
 ### 优雅退出
 
-两个入口（`server/dist/index.js` 与 `server/dist/global-admin-index.js`）都监听 `SIGTERM` 与 `SIGINT`：收到信号后先停止接受新连接，再依次关闭 WebSocket 连接、等待会话清理、冲刷未发出的房间事件，最后释放 Redis 上的运行时状态与连接。整个过程如果 15s 内没有走完，进程会自行以退出码 `1` 退出，不会一直挂着等编排系统 SIGKILL。
+两个入口（`server/dist/index.js` 与 `server/dist/global-admin-index.js`）都监听 `SIGTERM` 与 `SIGINT`：收到信号后先停止接受新连接，再依次关闭 WebSocket 连接、等待会话清理、冲刷未发出的房间事件，最后释放 Redis 上的运行时状态与连接。
 
-- systemd：`systemctl restart` / `stop` 会在秒级完成，无需调整 `TimeoutStopSec`。
-- Docker：默认宽限期只有 10s，短于上面的 15s 上限。仓库内的 `docker-compose.yml` 已设 `stop_grace_period: 20s`；用 `docker run` 启动时请用 `docker stop -t 20 <容器名>`。宽限期不足时容器仍会被 SIGKILL，表现为退出码 `137`。
+超时分三层，不要混淆：
+
+1. **每个关闭步骤各自的上限**：多数 5s，会话清理与房间事件冲刷各 30s，最坏累计约 135s。空闲节点通常 1s 内就走完。
+2. **进程看门狗 150s**：只兜底 `close()` 本身卡死的情况，取值高于上面的合法预算，不会裁剪正常关闭。触发时以退出码 `1` 退出。
+3. **编排器宽限期**：决定实际给多少时间。它是上限而非固定等待，正常关闭不会因为设得大而变慢。
+
+对应到部署方式：
+
+- systemd：默认 `TimeoutStopSec=90s`，`systemctl restart` / `stop` 通常秒级完成；如果希望忙节点也能走完全部清理，把该值调到 160s。
+- Docker：默认宽限期只有 10s，会在清理中途 SIGKILL（表现为退出码 `137`）。仓库内的 `docker-compose.yml` 已设 `stop_grace_period: 160s`；用 `docker run` 启动时对应 `docker stop -t 160 <容器名>`。愿意牺牲尾部清理的话可以调小，代价是 Redis 上的运行时状态要等 reaper 过期回收。
+- 启动期间（例如仍在连接 Redis）收到信号：进程会记录并等启动完成后再走完整关闭；如果启动 5s 内仍未完成，直接以退出码 `1` 退出，不会挂着等编排器 SIGKILL。
+- 有关闭步骤失败或超时时，进程以退出码 `1` 退出，并已记录 `server_shutdown_step_failed` 事件；退出码 `0` 表示所有步骤都成功。
 - 在清理过程中再次收到信号（例如连按两次 Ctrl+C）会立即退出，放弃剩余清理步骤。
 
 ## 8. 运维说明
