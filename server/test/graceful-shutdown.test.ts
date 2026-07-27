@@ -283,6 +283,21 @@ test("shutdown closes clients with a 1001 close frame", async () => {
   assert.equal(reason.toString(), "server_shutting_down");
 });
 
+/**
+ * Resolves when the peer is gone, by FIN or by RST.
+ *
+ * `events.once(socket, "close")` rejects if the socket emits `error` first, and
+ * a connection the server terminates surfaces as ECONNRESET on some Node
+ * patch releases and a plain FIN on others — which is not a difference any
+ * assertion here should depend on.
+ */
+function waitForSocketClose(socket: Socket): Promise<void> {
+  return new Promise<void>((resolve) => {
+    socket.on("error", () => undefined);
+    socket.once("close", () => resolve());
+  });
+}
+
 function writeUpgradeRequest(socket: Socket, port: number): void {
   socket.write(
     [
@@ -311,8 +326,8 @@ test("a client that never answers the close frame is terminated", async () => {
   assert.match(handshake.toString(), /^HTTP\/1\.1 101 /);
 
   // Subscribe before shutting down: the socket is torn down while `close()`
-  // runs, and `once()` on an already-closed socket would never resolve.
-  const rawClosed = once(raw, "close");
+  // runs, and subscribing to an already-closed socket would never resolve.
+  const rawClosed = waitForSocketClose(raw);
   const startedAt = Date.now();
   assert.deepEqual(await server.close(), []);
   await rawClosed;
@@ -330,24 +345,38 @@ test("a client that never answers the close frame is terminated", async () => {
 // upgrade request afterwards. Completing that handshake would hand out a
 // WebSocket the shutdown immediately drops — a 1006 on a connection that was
 // never usable — or leave `wss.close()` waiting on a client that appeared after
-// the close-frame pass. Two things prevent it: Node ≥19 answers a request that
-// arrives after `close()` with its own 503, and `isShuttingDown` refuses the
-// upgrade if it ever does reach the handler (covered by the unit test below).
-// This test pins the end-to-end guarantee regardless of which one fires.
-test("an upgrade arriving after shutdown started is refused", async () => {
+// the close-frame pass.
+//
+// The guarantee under test is only "no WebSocket is handed out, and the
+// shutdown still reports no failed steps". How the request is refused is not
+// ours to pin: node 22.23.1 answers it with an http 503 before the request
+// reaches our handler, node 22.22.2 resets the connection instead (ECONNRESET),
+// and `isShuttingDown` produces its own 503 on the paths where the handler does
+// run — see the unit test below, which is what actually covers that gate.
+test("an upgrade arriving after shutdown started never yields a WebSocket", async () => {
   const { server, port } = await startListeningSyncServer();
 
   // Connected before shutdown, but the upgrade request is still unsent.
   const late: Socket = connect(port, "127.0.0.1");
   await once(late, "connect");
 
-  const response = once(late, "data") as Promise<[Buffer]>;
+  const refusal = new Promise<string>((resolve) => {
+    late.once("data", (chunk: Buffer) => resolve(chunk.toString()));
+    // Torn down without a reply — a refusal all the same. A persistent error
+    // listener, so a later EPIPE/ECONNRESET cannot go unhandled either.
+    late.on("error", () => resolve(""));
+    late.once("close", () => resolve(""));
+  });
   const closing = server.close();
   writeUpgradeRequest(late, port);
 
-  const [refusal] = await response;
-  assert.match(refusal.toString(), /^HTTP\/1\.1 503 /);
+  const response = await refusal;
+  assert.ok(
+    !response.startsWith("HTTP/1.1 101"),
+    `The upgrade must not complete during shutdown, got: ${JSON.stringify(response.slice(0, 80))}`,
+  );
   assert.deepEqual(await closing, []);
+  late.destroy();
 });
 
 test("the upgrade handler refuses upgrades while shutting down", async () => {
