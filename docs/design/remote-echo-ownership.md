@@ -101,12 +101,26 @@ halves of the evidence, because each alone is too weak:
 - An in-player gesture alone is not enough either: volume, settings and danmaku controls
   all live inside the player container and express nothing about playback.
 
-So the action records the in-player gesture that authenticated it
-(`ExplicitUserAction.inPlayerGestureAt`), and C1 requires _that_ to postdate the apply. One
-residual case remains by choice: adjusting volume inside the player at the exact moment a
-late transport event lands still releases. The consequence is only that ownership ends
-early — degrading to the pre-existing 700ms window — rather than any new failure, and
-closing it would mean classifying individual player sub-controls.
+A first attempt at this — recording the most recent in-player gesture on the action
+(`inPlayerGestureAt`) and requiring it to postdate the apply — **is not sufficient, and must
+not be copied.** Two timestamps both being recent does not make them the same interaction:
+an in-player volume click from seconds ago gets copied onto an action that a _newer_
+document-level gesture authenticated, manufacturing provenance that never existed (trap 6
+in §7). C1 then releases and the late echo leaks — the exact failure this design exists to
+prevent.
+
+**C1 requires proof that the gesture and the action belong to one interaction, not merely
+that both are recent.** Comparing timestamps cannot establish that. A workable direction:
+give each recorded gesture a monotonically increasing id, have `rememberExplicitUserAction`
+record the id of the gesture it authenticated on, and let C1 require that this id belongs to
+an in-player gesture postdating the apply. Whatever the mechanism, the acceptance criterion
+is that the gesture which authenticated _this_ action was itself in-player.
+
+This is specified but unvalidated: no implementation has demonstrated it. One residual case
+is accepted by design even so — a genuine in-player volume adjustment that does authenticate
+a playback action still releases. That only ends ownership early, degrading to the
+pre-existing 700ms window rather than introducing a new failure, and closing it would mean
+classifying individual player sub-controls.
 
 ### The critical split: paused/buffering versus playing
 
@@ -137,9 +151,24 @@ _two_ frames — `seeked` and `canplay` each reporting the same paused@49 — an
 second one that extended the server's veto window far enough to swallow the sharer's
 start-up. So a match suppresses and leaves the ownership in place; only C1–C4 release it.
 
-A non-matching position or rate suppresses nothing but does **not** release either: the
-player may still be settling toward the target, and releasing on the first intermediate
-sample would put the leak back.
+A non-matching position or rate needs a decidable rule, because "still settling toward the
+target" and "the player jumped somewhere else" both present as a position mismatch, and C2
+says the second must release while the leak returns if the first does. Ordering by
+magnitude against the apply's target:
+
+| Position delta | Verdict                          | Why                                                                                            |
+| -------------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `≤ ε` (0.2s)   | match — suppress, keep ownership | The same standstill                                                                            |
+| `ε < Δ ≤ D`    | no suppression, keep ownership   | Plausibly still converging on the target; releasing on an intermediate sample reopens the leak |
+| `> D`          | **C2 — release**                 | Nothing the room asked for puts the playhead here; the player or a script moved it             |
+
+`D` bounds how far a seek in progress may legitimately read from its own target. It has to
+be small enough that a real jump falls outside it and large enough to cover intermediate
+samples; a starting value around 2s is a guess, not a measured one, and calibrating it
+against real player behaviour is part of implementing this.
+
+Without the `> D` arm, ownership survives an unexplained jump all the way to the backstop
+and can suppress a genuine state that happens to match the old position again.
 
 ### Two clock domains
 
@@ -217,8 +246,14 @@ Mitigations:
 ## 7. Why the first implementation was withdrawn
 
 An implementation of Phase 1 was written and withdrawn after four rounds of review turned
-up eleven findings (seven of them P1). The design above is unchanged and still believed
-sound; what failed was the implementation strategy.
+up eleven findings (seven of them P1).
+
+The _core_ of the design above — ownership by state identity rather than a wall-clock
+window — is still believed sound. But "the design was fine, only the implementation
+failed" would be too kind to it: reviewing this document afterwards found two places where
+the design itself was underspecified (the C1 same-interaction requirement and the C2
+position-delta rule, both now written out in §3). An underspecified design is how an
+implementation ends up approximating; the two failures are not independent.
 
 **The mistake:** ownership is fundamentally _"this state, written to this element, at this
 instant"_ — an object with an identity. The withdrawn attempt never modelled it that way.
