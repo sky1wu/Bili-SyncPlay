@@ -10,6 +10,27 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 > Bash 工具**不保留 shell 状态**，变量不跨代码块存活。下面每个代码块都自带
 > `PR=` / `REPO=` 两行，照抄时把 `PR=` 改成实际编号。
 
+## 0. 切到该 PR 的 head 分支并校验（动任何文件之前）
+
+技能可能从 `main` 或别的分支上被启动。后续步骤只读 `HEAD` 和你填的 PR 编号，**没有
+任何一步保证当前分支就是这个 PR 的 head**——第 6 步那个无目标的 `git push` 于是会
+把修复推到当前分支上，最坏情况直接推 `main`。
+
+```bash
+PR=<编号>; REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+HEAD_REF=$(gh pr view "$PR" --json headRefName --jq .headRefName)
+CUR=$(git rev-parse --abbrev-ref HEAD)
+echo "PR#$PR head=$HEAD_REF  当前分支=$CUR"
+
+case "$HEAD_REF" in
+  main | master) echo "拒绝：该 PR 的 head 是 $HEAD_REF"; exit 1 ;;
+esac
+[ "$CUR" = "$HEAD_REF" ] || git switch "$HEAD_REF"
+[ "$(git rev-parse --abbrev-ref HEAD)" = "$HEAD_REF" ] || { echo "切换失败"; exit 1; }
+```
+
+提交和推送前（第 6 步）再校验一次——中途可能因为别的操作切走了。
+
 ## 1. 读未解决的评审线程（权威信号）
 
 **不要用 reaction 判断有没有意见。** 本仓库实测：意见最多的 PR221（11 条）和
@@ -23,43 +44,67 @@ REST 的 `pulls/$PR/comments` 也不行：它不返回解决状态，第 2 轮�
 PR=<编号>; REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 read -r OWNER NAME <<<"${REPO%%/*} ${REPO##*/}"
 
-gh api graphql -f query='
-  query($owner:String!,$repo:String!,$pr:Int!){
-    repository(owner:$owner,name:$repo){
-      pullRequest(number:$pr){
-        reviewThreads(first:100){
-          nodes{ id isResolved path line originalLine
-                 comments(first:50){ totalCount
-                   nodes{author{login} body} } }
+CUR=null
+while :; do
+  RESP=$(gh api graphql -f query='
+    query($owner:String!,$repo:String!,$pr:Int!,$after:String){
+      repository(owner:$owner,name:$repo){
+        pullRequest(number:$pr){
+          reviewThreads(first:100, after:$after){
+            pageInfo{ hasNextPage endCursor }
+            nodes{ id isResolved path line originalLine
+                   comments(first:100){ totalCount
+                     nodes{ author{login} body
+                            pullRequestReview{ commit{oid} submittedAt } } } }
+          }
         }
       }
-    }
-  }' -F owner="$OWNER" -F repo="$NAME" -F pr="$PR" \
-  --jq '.data.repository.pullRequest.reviewThreads.nodes[]
-        | select(.isResolved==false)
-        | "\n=== \(.path):\(.line // .originalLine)  id=\(.id)  评论数=\(.comments.totalCount)",
-          (.comments.nodes[] | "  [\(.author.login)] \(.body
-            | gsub("!\\[[^]]*\\]\\([^)]*\\)";"") | gsub("\n";" ") | .[0:400])")'
+    }' -F owner="$OWNER" -F repo="$NAME" -F pr="$PR" -F after="$CUR")
+
+  echo "$RESP" | node -e '
+    let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+      const t=JSON.parse(s).data.repository.pullRequest.reviewThreads;
+      for(const n of t.nodes){
+        if(n.isResolved) continue;
+        console.log(`\n═══ ${n.path}:${n.line ?? n.originalLine}  id=${n.id}  评论数=${n.comments.totalCount}`);
+        for(const c of n.comments.nodes){
+          const sha=c.pullRequestReview?.commit?.oid?.slice(0,7) ?? "?";
+          // 完整正文，只剥徽章图片，不截断
+          console.log(`[${c.author.login} @${sha}] ${c.body.replace(/!\[[^\]]*\]\([^)]*\)/g,"")}`);
+        }
+        if(n.comments.totalCount > n.comments.nodes.length)
+          console.log(`  ⚠ 该线程还有 ${n.comments.totalCount-n.comments.nodes.length} 条评论未取出，需翻页`);
+      }
+    });'
+
+  NEXT=$(echo "$RESP" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s).data.repository.pullRequest.reviewThreads.pageInfo;process.stdout.write(p.hasNextPage?p.endCursor:"")})')
+  [ -z "$NEXT" ] && break
+  CUR="$NEXT"
+done
 ```
 
-`line` 常为 `null`（意见挂在已变动的行上），必须回退到 `originalLine`；Codex 的
-正文以徽章图片开头，不剥掉会吃掉大半个截断窗口。
+这个查询里有四处都不能省：
 
-**必须读完线程里的每一条评论，不能只取第一条。** 评审者会在同一线程里追加条件、
-纠正原意见或回答你的提问；只看首条会照着已被推翻的说法改，然后 resolve 掉。你自己
-在第 7 步的回复也会进入该线程，所以第 2 轮起线程普遍是多条。若 `totalCount > 50`
-需翻页取全。
+- **`line` 常为 `null`**（意见挂在已变动的行上），必须回退到 `originalLine`。
+- **正文不截断。** 只剥掉开头的徽章图片。评审者常把适用条件、反例、纠正写在后半段，
+  按固定字数切片会静默丢掉它们，然后你照着半条意见改完就 resolve 了。
+- **读完线程里的每一条评论。** 评审者会在同一线程追加条件或推翻原意见；你自己在第 7
+  步的回复也会进该线程，所以第 2 轮起线程普遍是多条。单线程评论超过 100 条时上面会
+  打出告警，此时需要对 `comments` 再翻页。
+- **必须翻页。** 线程超过 100 条时 `first:100` 只返回第一页，剩下的未解决意见完全不
+  可见——命令会输出「零条未解决」，于是你把还有反馈的一轮当成通过或没触发。
 
-**有未解决线程 → 进第 2 步。一条都没有 → 进第 8 步判断是通过还是没触发。**
-
-## 2. 核对评审针对的是当前 HEAD
+## 2. 核对每条线程对应的是当前 HEAD
 
 评审可能是上一次 push 的产物。对着旧提交的意见照改会白改甚至改错。
 
+**判定要按线程逐条做，不能只看全局 review 列表。** PR 上同时存在多轮评审时，全局列表
+里既有旧 SHA 也有当前 SHA，而线程本身若不带 commit 信息就无从对应——本仓库 PR225 实测
+就同时挂着 `2ab3b09` 和 `938c337` 两轮的线程。第 1 步的输出已经把每条评论标成
+`[作者 @sha]`，直接拿它和当前 HEAD 比：
+
 ```bash
-PR=<编号>; REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-git rev-parse HEAD
-gh api "repos/$REPO/pulls/$PR/reviews" --jq '.[] | "\(.user.login) \(.state) commit=\(.commit_id)"'
+git rev-parse --short HEAD
 ```
 
 `commit_id` 与当前 HEAD 不一致 → 这轮意见是旧的，先确认哪些仍然成立。
@@ -141,24 +186,66 @@ gh api "repos/$REPO/pulls/$PR/reviews" --jq '.[] | "\(.user.login) \(.state) com
 
 - **严禁 `npm run typecheck | tail`** 这类写法：管道让退出码变成 `tail` 的，失败被吞成绿。
 
-## 6. 提交、推送
+## 6. 提交、推送（可能整步跳过）
+
+**这一步不是无条件的。** 若本轮所有意见都已过时、不成立、或只需解释而无需改文件，
+此时 `git commit` 会以 "nothing to commit" 失败——而技能开头要求任一步失败就停，
+于是永远走不到第 7 步去回复和 resolve，线程就那么挂着。先判断有没有改动：
 
 ```bash
-git add <具体文件>          # 严禁 git add -A / git add .
-git commit -m "fix: ..."
-git push
+if git diff --quiet && git diff --cached --quiet; then
+  echo "本轮无代码改动，跳过第 5-6 步，直接进第 7 步回复线程"
+else
+  # …第 5 步验证…然后提交
+  git add <本轮实际改动的具体文件>   # 严禁 git add -A / git add .
+  git commit -m "fix: ..."
+  HEAD_REF=$(gh pr view "$PR" --json headRefName --jq .headRefName)
+  [ "$(git rev-parse --abbrev-ref HEAD)" = "$HEAD_REF" ] || { echo "分支不对，拒绝推送"; exit 1; }
+  git push origin "HEAD:$HEAD_REF"
+fi
 ```
+
+**推送前必须复验分支**（第 0 步之后可能被切走），且显式写出 `origin "HEAD:$HEAD_REF"`
+而不是裸 `git push`。
+
+**动手前先审计工作树。** 显式列出文件名并不足以隔离改动：如果用户在技能启动前就对同
+一个文件有未提交的修改，`git add <文件>` 会把那些改动和本轮修复一起提交。所以在第 3
+步开始编辑之前先记录：
+
+```bash
+git status --short          # 记下哪些文件本来就是脏的
+git stash list
+```
+
+对本来就脏的文件，提交前用 `git add -p` 按 hunk 只暂存本轮的补丁，并用
+`git diff --cached` 逐项确认暂存内容里没有别人的改动。
 
 ## 7. 回复并 resolve 线程
 
-逐条回复说明如何处理的，再用第 1 步取到的线程 `id` 标记已解决：
+**先回复，确认回复成功，再 resolve。** 只跑 `resolveReviewThread` 会把线程静默关掉，
+评审者看不到改在哪、验证结果如何、或哪条为什么不采纳。回复用
+`addPullRequestReviewThreadReply`：
 
 ```bash
 THREAD_ID=<第 1 步输出的 id>
+BODY="已修。<改在哪、怎么验证的；不采纳则写明理由>"
+
+# 1) 先发回复，并确认拿到了 id（失败就不要往下走）
+REPLY=$(gh api graphql -f query='
+  mutation($id:ID!,$body:String!){
+    addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id, body:$body}){
+      comment{ id }
+    }
+  }' -F id="$THREAD_ID" -F body="$BODY" --jq '.data.addPullRequestReviewThreadReply.comment.id')
+[ -n "$REPLY" ] || { echo "回复失败，不 resolve"; exit 1; }
+
+# 2) 回复成功后才 resolve
 gh api graphql -f query='
   mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){thread{isResolved}} }
-' -F id="$THREAD_ID"
+' -F id="$THREAD_ID" --jq '.data.resolveReviewThread.thread.isResolved'
 ```
+
+收尾再查一次未解决线程数应为 0，确认回复确实进了线程（该线程 `totalCount` 应 +1）。
 
 ## 8. 本轮结束——**不要合并**
 
