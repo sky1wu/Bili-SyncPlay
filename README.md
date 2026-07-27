@@ -207,6 +207,7 @@ Notes:
 
 - The container listens on `8787` (override with `PORT`), exposes `/healthz` and `/readyz`, and ships a built-in Docker `HEALTHCHECK`.
 - Configuration is entirely environment-variable based, identical to a bare-metal deployment: `ALLOWED_ORIGINS` (required for extensions to connect), Redis persistence (`ROOM_STORE_PROVIDER=redis` plus `REDIS_URL`; `REDIS_URL` alone keeps the in-memory store), admin panel variables (`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET`), and so on — see the [security environment variable reference](./docs/reference/security-env.md) and the [multi-node runbook](./docs/runbook/multi-node-operations.md).
+- The container runs `node` directly as PID 1 and handles `SIGTERM`, so `docker stop` triggers a graceful shutdown (15s cap). Docker's default grace period is only 10s — use `docker stop -t 20`; `docker-compose.yml` already sets `stop_grace_period: 20s`.
 - In production, terminate TLS at a reverse proxy so the extension connects over `wss://` (see the version matrix).
 - Build locally from the repository root: `docker build -t bili-syncplay-server .` (the image contains only the server; the extension is distributed separately).
 

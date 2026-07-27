@@ -497,6 +497,14 @@ If you run multiple room nodes, prefer a rolling restart instead of restarting e
 3. continue with the next room node
 4. restart `global-admin` last
 
+### Graceful shutdown
+
+Both entry points (`server/dist/index.js` and `server/dist/global-admin-index.js`) handle `SIGTERM` and `SIGINT`: the server stops accepting new connections, then closes WebSocket connections, drains session cleanup, flushes pending room event publishes, and finally releases Redis-backed runtime state and connections. If that does not finish within 15s the process exits on its own with code `1` rather than hanging until the orchestrator sends SIGKILL.
+
+- systemd: `systemctl restart` / `stop` completes in seconds; no `TimeoutStopSec` tuning needed.
+- Docker: the default grace period is only 10s, shorter than the 15s cap above. The repository's `docker-compose.yml` sets `stop_grace_period: 20s`; with `docker run`, stop the container using `docker stop -t 20 <container>`. With too short a grace period the container is still SIGKILLed, which shows up as exit code `137`.
+- A second signal during shutdown (for example pressing Ctrl+C twice) exits immediately and abandons the remaining cleanup steps.
+
 ## 8. Operational notes
 
 - With `ROOM_STORE_PROVIDER=memory`, restarting the process still clears all rooms.

@@ -1,3 +1,4 @@
+import { installGracefulShutdown } from "./bootstrap/graceful-shutdown.js";
 import {
   assertMetricsPortDoesNotCollide,
   loadRuntimeConfig,
@@ -18,7 +19,7 @@ const {
 assertMetricsPortDoesNotCollide(metricsPort, port, "GLOBAL_ADMIN_PORT");
 logEffectiveOriginPolicy(securityConfig);
 
-const { httpServer, metricsHttpServer } = await createGlobalAdminServer(
+const { httpServer, metricsHttpServer, close } = await createGlobalAdminServer(
   securityConfig,
   persistenceConfig,
   {
@@ -31,6 +32,7 @@ const { httpServer, metricsHttpServer } = await createGlobalAdminServer(
     metricsPort,
   },
 );
+installGracefulShutdown({ close, name: "Bili-SyncPlay global admin" });
 httpServer.listen(port, () => {
   console.log(
     `Bili-SyncPlay global admin listening on http://localhost:${port}`,

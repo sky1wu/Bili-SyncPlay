@@ -1,4 +1,5 @@
 import { createSyncServer } from "./app.js";
+import { installGracefulShutdown } from "./bootstrap/graceful-shutdown.js";
 import {
   assertMetricsPortDoesNotCollide,
   loadRuntimeConfig,
@@ -18,7 +19,7 @@ const {
 assertMetricsPortDoesNotCollide(metricsPort, port, "PORT");
 logEffectiveOriginPolicy(securityConfig);
 
-const { httpServer, metricsHttpServer } = await createSyncServer(
+const { httpServer, metricsHttpServer, close } = await createSyncServer(
   securityConfig,
   persistenceConfig,
   {
@@ -28,6 +29,7 @@ const { httpServer, metricsHttpServer } = await createSyncServer(
     metricsPort,
   },
 );
+installGracefulShutdown({ close, name: "Bili-SyncPlay server" });
 httpServer.listen(port, () => {
   console.log(`Bili-SyncPlay server listening on http://localhost:${port}`);
 });

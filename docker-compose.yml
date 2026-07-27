@@ -5,6 +5,9 @@ services:
     image: ghcr.io/sky1wu/bili-syncplay-server:latest
     build: .
     restart: unless-stopped
+    # 服务端收到 SIGTERM 后会依次断开 WebSocket 连接并释放 Redis 上的运行时状态，
+    # 最多等 15s 就自行退出；给 Docker 默认的 10s 宽限期留出余量，避免被 SIGKILL。
+    stop_grace_period: 20s
     ports:
       - "8787:8787"
     environment:
