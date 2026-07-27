@@ -47,10 +47,14 @@ git switch -c "fix/issue-$ISSUE_NUM"
 ## 4. 提交前的预提交检查（强制）
 
 ```bash
-npm run format:check && npm run lint && npm run typecheck && npm run build && npm test
+npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
 ```
 
 任一项失败就先修复，**不要跳过**。CLAUDE.md 的 Git 工作流已明确要求这一步。
+
+`npm run audit` 不被 `npm test` 覆盖，是 CI `verify` job 的同一道依赖闸门，且会在
+本地毫无改动的情况下因新公告而变红——所以要在推送前跑，而不是等 CI 红了再补。不
+适用于本仓库的条目写进 `audit-allowlist.json`，附理由和**必填的过期日期**。
 
 ## 5. 提交、推送、开 PR
 
@@ -86,7 +90,7 @@ git switch main && git pull --ff-only
 ## 硬性规则
 
 - **严禁直接推 main/master**。
-- **严禁跳过** `format:check` / `lint` / `typecheck` / `test`。
+- **严禁跳过** `format:check` / `lint` / `typecheck` / `build` / `test` / `audit`。
 - **严禁** `--no-verify` 或 `--no-gpg-sign` 绕过钩子。
 - **严禁** `git add -A` / `git add .`。
 - 除非用户明确授权，否则 `gh pr merge` 前先向用户确认。
