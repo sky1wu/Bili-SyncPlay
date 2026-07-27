@@ -61,6 +61,11 @@ export type { ShutdownStepFailure } from "./bootstrap/server-bootstrap.js";
 // Re-exported for backward compatibility with existing tests
 export { cleanupSessionAfterClose } from "./ws-session-handler.js";
 
+/** RFC 6455 "going away": the endpoint is shutting down, not failing. */
+const CLOSE_CODE_GOING_AWAY = 1001;
+const SHUTDOWN_CLOSE_REASON = "server_shutting_down";
+const WS_CLOSE_HANDSHAKE_GRACE_MS = 2_000;
+
 export type SyncServer = {
   httpServer: HttpServer;
   metricsHttpServer: HttpServer | undefined;
@@ -338,7 +343,7 @@ export async function createSyncServer(
       // Stop accepting new connections immediately, before any shutdown step runs.
       // httpServer.close() returns synchronously after detaching the listener;
       // its callback only fires once existing sockets disconnect. Capture the
-      // promises now so terminate_ws_clients can run with a stable client snapshot.
+      // promises now so close_ws_clients can run with a stable client snapshot.
       const httpServerClosed = closeHttpServer(httpServer);
       httpServerClosed.catch(() => undefined);
       const metricsHttpServerClosed = metricsHttpServer
@@ -369,8 +374,14 @@ export async function createSyncServer(
             },
           },
           {
-            name: "terminate_ws_clients",
+            name: "close_ws_clients",
             run: async () => {
+              // Send a real close frame first: terminate() drops the TCP
+              // connection with no close handshake, which every client reports
+              // as 1006 (abnormal closure) — indistinguishable from a crash or a
+              // network drop, and the extension surfaces it as an error state.
+              // 1001 "going away" says the disconnect was intentional. Clients
+              // still reconnect either way; only the reported reason changes.
               const closures = Array.from(wss.clients).map(
                 (client) =>
                   new Promise<void>((resolve) => {
@@ -381,9 +392,35 @@ export async function createSyncServer(
                     client.once("close", () => {
                       resolve();
                     });
-                    client.terminate();
+                    if (client.readyState === client.OPEN) {
+                      client.close(
+                        CLOSE_CODE_GOING_AWAY,
+                        SHUTDOWN_CLOSE_REASON,
+                      );
+                    }
                   }),
               );
+              // A peer that never answers the close frame would otherwise keep
+              // the socket in CLOSING until its own TCP timeout, so give the
+              // handshake a bounded window and terminate whoever is left. The
+              // window stays well inside this step's 5s cap: overrunning it
+              // would be recorded as a failed step and exit the process non-zero.
+              let graceTimer: ReturnType<typeof setTimeout> | undefined;
+              const grace = new Promise<void>((resolve) => {
+                graceTimer = setTimeout(resolve, WS_CLOSE_HANDSHAKE_GRACE_MS);
+              });
+              await Promise.race([
+                Promise.allSettled(closures).then(() => undefined),
+                grace,
+              ]);
+              if (graceTimer) {
+                clearTimeout(graceTimer);
+              }
+              for (const client of wss.clients) {
+                if (client.readyState !== client.CLOSED) {
+                  client.terminate();
+                }
+              }
               await Promise.allSettled(closures);
             },
           },
