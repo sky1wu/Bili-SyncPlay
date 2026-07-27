@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
+import type { IncomingMessage } from "node:http";
 import { connect, type Socket } from "node:net";
+import { PassThrough } from "node:stream";
 import test from "node:test";
-import { WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
+import { createWsUpgradeHandler } from "../src/ws-session-handler.js";
 import {
   createSyncServer,
   getDefaultPersistenceConfig,
@@ -280,14 +283,8 @@ test("shutdown closes clients with a 1001 close frame", async () => {
   assert.equal(reason.toString(), "server_shutting_down");
 });
 
-test("a client that never answers the close frame is terminated", async () => {
-  const { server, port } = await startListeningSyncServer();
-
-  // A raw socket completes the upgrade and then ignores everything, including
-  // the close frame — the handshake the ws client would answer automatically.
-  const raw: Socket = connect(port, "127.0.0.1");
-  await once(raw, "connect");
-  raw.write(
+function writeUpgradeRequest(socket: Socket, port: number): void {
+  socket.write(
     [
       "GET / HTTP/1.1",
       `Host: 127.0.0.1:${port}`,
@@ -300,6 +297,16 @@ test("a client that never answers the close frame is terminated", async () => {
       "",
     ].join("\r\n"),
   );
+}
+
+test("a client that never answers the close frame is terminated", async () => {
+  const { server, port } = await startListeningSyncServer();
+
+  // A raw socket completes the upgrade and then ignores everything, including
+  // the close frame — the handshake the ws client would answer automatically.
+  const raw: Socket = connect(port, "127.0.0.1");
+  await once(raw, "connect");
+  writeUpgradeRequest(raw, port);
   const [handshake] = (await once(raw, "data")) as [Buffer];
   assert.match(handshake.toString(), /^HTTP\/1\.1 101 /);
 
@@ -317,6 +324,63 @@ test("a client that never answers the close frame is terminated", async () => {
     elapsedMs < 5_000,
     `Expected the unresponsive client to be terminated within the grace, took ${elapsedMs}ms`,
   );
+});
+
+// A socket accepted just before `httpServer.close()` can still deliver its
+// upgrade request afterwards. Completing that handshake would hand out a
+// WebSocket the shutdown immediately drops — a 1006 on a connection that was
+// never usable — or leave `wss.close()` waiting on a client that appeared after
+// the close-frame pass. Two things prevent it: Node ≥19 answers a request that
+// arrives after `close()` with its own 503, and `isShuttingDown` refuses the
+// upgrade if it ever does reach the handler (covered by the unit test below).
+// This test pins the end-to-end guarantee regardless of which one fires.
+test("an upgrade arriving after shutdown started is refused", async () => {
+  const { server, port } = await startListeningSyncServer();
+
+  // Connected before shutdown, but the upgrade request is still unsent.
+  const late: Socket = connect(port, "127.0.0.1");
+  await once(late, "connect");
+
+  const response = once(late, "data") as Promise<[Buffer]>;
+  const closing = server.close();
+  writeUpgradeRequest(late, port);
+
+  const [refusal] = await response;
+  assert.match(refusal.toString(), /^HTTP\/1\.1 503 /);
+  assert.deepEqual(await closing, []);
+});
+
+test("the upgrade handler refuses upgrades while shutting down", async () => {
+  const wss = new WebSocketServer({ noServer: true });
+  let connections = 0;
+  wss.on("connection", () => {
+    connections += 1;
+  });
+  const handler = createWsUpgradeHandler({
+    securityPolicy: {
+      evaluateUpgrade: () => ({
+        ok: true,
+        context: { remoteAddress: "127.0.0.1", origin: CLIENT_ORIGIN },
+      }),
+    },
+    wss,
+    logEvent: () => {},
+    isShuttingDown: () => true,
+  });
+
+  const socket = new PassThrough();
+  const written: Buffer[] = [];
+  socket.on("data", (chunk: Buffer) => written.push(chunk));
+  handler(
+    { headers: {} } as unknown as IncomingMessage,
+    socket,
+    Buffer.alloc(0),
+  );
+  await once(socket, "close");
+
+  assert.match(Buffer.concat(written).toString(), /^HTTP\/1\.1 503 /);
+  assert.equal(connections, 0);
+  wss.close();
 });
 
 // A stop signal during startup tears the server down before the entry point

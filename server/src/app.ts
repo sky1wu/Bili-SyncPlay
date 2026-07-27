@@ -314,9 +314,15 @@ export async function createSyncServer(
   });
   wsHeartbeat.start();
 
+  let shuttingDown = false;
   httpServer.on(
     "upgrade",
-    createWsUpgradeHandler({ securityPolicy, wss, logEvent }),
+    createWsUpgradeHandler({
+      securityPolicy,
+      wss,
+      logEvent,
+      isShuttingDown: () => shuttingDown,
+    }),
   );
 
   wss.on(
@@ -337,6 +343,12 @@ export async function createSyncServer(
     httpServer,
     metricsHttpServer,
     close: async () => {
+      // Refuse upgrades from here on: a TCP connection accepted just before
+      // httpServer.close() can still deliver its upgrade request during the
+      // close-frame grace below, and a client that appears after the snapshot
+      // would only ever be terminated (1006) or, later still, keep wss.close()
+      // waiting until that step times out.
+      shuttingDown = true;
       const maybeClosableRuntimeStore =
         sharedRuntimeStore === localRuntimeStore ? null : sharedRuntimeStore;
 

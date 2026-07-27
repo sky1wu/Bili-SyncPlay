@@ -142,8 +142,32 @@ export function createWsUpgradeHandler(args: {
   };
   wss: WebSocketServer;
   logEvent: LogEvent;
+  /**
+   * Gate for upgrades that arrive once shutdown started. A socket accepted just
+   * before `httpServer.close()` can still deliver its upgrade request
+   * afterwards, and completing that handshake would hand the client a WebSocket
+   * the shutdown is about to drop (a 1006 on a connection that was never
+   * usable), or leave `wss.close()` waiting on a client that appeared after the
+   * close-frame pass.
+   *
+   * Node ≥19 already answers such a request with its own 503 before this
+   * handler runs, so on the supported runtime this gate is a second line of
+   * defence — it keeps the guarantee ours instead of borrowing it from an http
+   * server behaviour nothing in this repo pins.
+   */
+  isShuttingDown?: () => boolean;
 }): (request: IncomingMessage, socket: Duplex, head: Buffer) => void {
   return (request, socket, head) => {
+    if (args.isShuttingDown?.()) {
+      rejectUpgrade(
+        socket,
+        503,
+        "Service Unavailable",
+        { result: "rejected", reason: "server_shutting_down" },
+        args.logEvent,
+      );
+      return;
+    }
     const decision = args.securityPolicy.evaluateUpgrade(request);
     if (!decision.ok) {
       rejectUpgrade(
