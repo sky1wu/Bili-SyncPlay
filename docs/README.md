@@ -8,6 +8,11 @@ This directory keeps project documentation that is useful after the first README
 - [Architecture overview](./architecture.md) / [架构概览](./architecture.zh-CN.md)
 - [Development guide](./development.md) / [开发指南](./development.zh-CN.md)
 
+## Design / 设计
+
+- [Remote playback ownership replaces the fixed echo window](./design/remote-echo-ownership.md)
+- [远端播放态归属标记取代固定回声窗](./design/remote-echo-ownership.zh-CN.md)
+
 ## Operations / 运维
 
 - [Server deployment guide](./operations/deployment.md) / [服务器部署指南](./operations/deployment.zh-CN.md)
