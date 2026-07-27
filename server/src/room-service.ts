@@ -1388,16 +1388,6 @@ export function createRoomService(options: {
         );
       }
 
-      if (authorityKind) {
-        recordPlaybackAuthority({
-          roomCode: access.persistedRoom.code,
-          actorId: nextPlayback.actorId,
-          kind: authorityKind,
-          source: "playback:update",
-        });
-      }
-
-      const nextAuthority = getPlaybackAuthority(access.persistedRoom.code);
       // Skip steady timeupdate ticks so the admin event store keeps user
       // operations visible without being flooded by ~every-2s broadcasts:
       // log when playState, playbackRate, or syncIntent changes, or when
@@ -1431,6 +1421,36 @@ export function createRoomService(options: {
           0.01 &&
         !nextPlayback.syncIntent &&
         Math.abs(actualTimeDelta - expectedTimeDelta) < 1;
+
+      // A steady tick must not refresh the authority window. It carries no new
+      // intent by definition — same playState, same rate, no syncIntent, and a
+      // currentTime that only advanced as far as the previous rate predicts —
+      // yet recording it used to push the 1.2s veto window forward in full,
+      // which is what `decidePlaybackAcceptance` reads to drop other members'
+      // updates as `authority-window-follow`.
+      //
+      // That turned a repeated `paused` frame into a rolling veto: a peer that
+      // hard-seeks across a shared-video switch leaks its just-applied pause
+      // back as two identical frames, and the second one extends the window
+      // far enough to swallow every `playing` the sharer emits while its own
+      // autoplay-next starts up — the room sticks at paused with nobody having
+      // paused anything. Only the frame that actually changes something may
+      // claim the veto.
+      //
+      // The gate is deliberately the same predicate as the applied-event log
+      // below: a frame that is not worth an audit entry is not worth a veto,
+      // and keeping one predicate means the log stays an accurate record of
+      // which frames can move the authority.
+      if (authorityKind && !isSteadyTick) {
+        recordPlaybackAuthority({
+          roomCode: access.persistedRoom.code,
+          actorId: nextPlayback.actorId,
+          kind: authorityKind,
+          source: "playback:update",
+        });
+      }
+
+      const nextAuthority = getPlaybackAuthority(access.persistedRoom.code);
       if (!isSteadyTick) {
         logEvent("playback_update_applied", {
           roomCode: access.persistedRoom.code,
