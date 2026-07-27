@@ -1,7 +1,11 @@
 # Design: remote playback ownership replaces the fixed echo window
 
-**Status: design only. Not implemented — an implementation attempt was withdrawn.**
-See §7 for why, and for the timing traps any future attempt has to handle.
+**Status: problem analysis and constraints. Not an implementable design, not implemented.**
+
+What is solid here: the problem (§1–2), the contamination sources (§4), and the timing traps
+and process lessons an implementation attempt paid for (§7). What is not: the direction
+sketched in §3, which still carries six unresolved questions (§3.1) — including one where
+its own safety net contradicts the document's central claim.
 
 This note records the design trade-offs behind moving the extension's echo suppression
 from a _fixed time window_ to an _ownership marker_. It is the follow-up to
@@ -40,7 +44,13 @@ millisecond in which a genuine user action can be swallowed, and a swallowed use
 fails silently — harder to diagnose than a leaked echo. 700ms is a compromise wedged
 between two failure modes; moving it either way trades one for the other.
 
-## 3. Design: an ownership marker
+## 3. Explored direction: an ownership marker
+
+> **This section is not an implementable design.** It is the direction that was explored,
+> recorded because the reasoning behind it is worth keeping — not because it is ready to
+> build. Every decision procedure below has at least one unresolved question, listed in
+> §3.1. Two reviews of this document found the section still contradicting itself in
+> places; treat it as a starting point for a design, not as one.
 
 When a remote playback state is applied, record that the state **belongs to the remote**:
 
@@ -121,6 +131,42 @@ is accepted by design even so — a genuine in-player volume adjustment that doe
 a playback action still releases. That only ends ownership early, degrading to the
 pre-existing 700ms window rather than introducing a new failure, and closing it would mean
 classifying individual player sub-controls.
+
+### 3.1 Unresolved questions
+
+Each of these has to be answered before any of this can be built. They are listed here
+rather than buried because the previous implementation attempt failed by treating open
+questions as settled.
+
+1. **The backstop contradicts the premise.** `REMOTE_OWNERSHIP_MAX_AGE_MS` is itself a fixed
+   wall-clock window — precisely the construct §2 argues can never be correct. If
+   `canplay`/`seeked` arrive later than the cap (a hard seek on a weak network, or a
+   throttled background tab), the cap releases ownership and the late echo leaks exactly as
+   before. Either the design accepts that a contaminated ownership may persist indefinitely,
+   or it needs a release condition that is not a duration. **This is the deepest open
+   question: as written, the design's own safety net violates its central claim.**
+2. **C1 still has no causal link between gesture and action.** Recording a gesture id does
+   not fix it: `onSeeked` calls `rememberExplicitUserAction("seek")` whenever _any_ recent
+   document-level gesture exists, so the id it records is "the most recent gesture", not
+   "the gesture that caused this action". A volume click followed by a late `seeked` still
+   manufactures provenance. Establishing this needs the action's identity to originate from
+   the player control interaction itself, which no current code path provides.
+3. **The structure has no element identity.** §7 concludes that ownership must at minimum
+   hold a reference to the element the state was written to; the shape above does not. Until
+   it does, the binding path cannot tell "first bind of this already-applied element" from
+   "a different element", and C4 must either clear valid ownership or carry an old element's
+   ownership onto a new one. Echo events should additionally be required to originate from
+   that element.
+4. **No decidable rule for playback-rate divergence.** §3 claims position _and rate_ need
+   one; only position got a table. If the room asks for 1.5x while the player transiently
+   reports 1.0x mid-write, nothing says whether to keep ownership or apply C2.
+5. **`D` is a guess.** The position-delta bound has not been measured against real player
+   behaviour.
+6. **A user takeover during a pending apply is not cancelled.** While a state waits for
+   metadata, the user can act. C1 releases the ownership taken at receipt, but the pending
+   write still happens on `canplay` and unconditionally re-takes ownership — overwriting the
+   takeover that just occurred. Either the second write must re-check for newer local
+   intent, or C1 must cancel the corresponding `pendingPlaybackApplication`.
 
 ### The critical split: paused/buffering versus playing
 
@@ -248,12 +294,15 @@ Mitigations:
 An implementation of Phase 1 was written and withdrawn after four rounds of review turned
 up eleven findings (seven of them P1).
 
-The _core_ of the design above — ownership by state identity rather than a wall-clock
-window — is still believed sound. But "the design was fine, only the implementation
-failed" would be too kind to it: reviewing this document afterwards found two places where
-the design itself was underspecified (the C1 same-interaction requirement and the C2
-position-delta rule, both now written out in §3). An underspecified design is how an
-implementation ends up approximating; the two failures are not independent.
+The _premise_ — that echo suppression must key off state identity rather than a wall-clock
+window — still holds. §2 makes that case on evidence and nothing has challenged it.
+
+The direction built on that premise did not survive review. "The design was fine, only the
+implementation failed" was the first explanation offered here, and it was wrong: two
+reviews of this document alone then found six unresolved questions in §3, including a
+backstop that is itself the fixed window the document argues against. An underspecified
+design is how an implementation ends up approximating — the two failures were never
+independent, and the implementation was withdrawn before the design was ready to be one.
 
 **The mistake:** ownership is fundamentally _"this state, written to this element, at this
 instant"_ — an object with an identity. The withdrawn attempt never modelled it that way.
@@ -262,8 +311,10 @@ inference — and every review round found another interleaving where some appro
 broke. The clearing path in the binding layer was flagged three separate times, each fix
 covering only the interleaving that had just been named.
 
-**Any future attempt should start by giving ownership a real identity** — at minimum a
-reference to the element the state was written to — rather than inferring it.
+**Any future attempt should start from §3.1, not from §3.** Giving ownership a real
+identity — at minimum a reference to the element the state was written to — is a necessary
+first step but not a sufficient one; question 1 in particular has to be answered before the
+rest is worth building.
 
 ### Timing traps a future attempt must handle
 
