@@ -5,6 +5,22 @@
 - This file is for AI agents, coding assistants, and repository automations working in this codebase.
 - Human contribution rules live in [CONTRIBUTING.md](./CONTRIBUTING.md). This file only adds agent-specific execution constraints and decision rules.
 
+## Verification Before Claiming Done
+
+- Never report an edit as complete without re-reading the changed region. After
+  every Edit/Write, re-read the file (or grep the exact new string) to confirm
+  the change actually landed — silent no-op string replacements have happened
+  repeatedly.
+- After any fix, run the full test suite AND typecheck before saying it works.
+  Report the actual command output, not a summary. Never pipe a check into
+  `tail`/`head` to judge it: the pipe reports the tail's exit code, so a failure
+  reads as green.
+- Never use `git checkout <file>` or `git restore <file>` to revert a probe — it
+  destroys uncommitted work in that same file. Copy the file aside first (`cp`)
+  and restore from the copy, or use `git stash`.
+- Never use `git add -A`; stage explicit paths so build artifacts and patch
+  files don't get committed.
+
 ## Language Rules
 
 - Agents must respond in Chinese throughout the entire interaction unless the user explicitly requests another language.
@@ -38,6 +54,28 @@ turns red. Findings that do not apply to this repository go in
 ### Protocol Package (`packages/protocol/`)
 
 Always export through the package root to preserve import stability.
+
+## Protocol Changes
+
+Checklist to run before opening any PR that touches the sync protocol:
+
+1. Did the wire format change? If yes, bump the version — and note there are
+   **two** constants that must move together, with nothing enforcing that they
+   agree: `PROTOCOL_VERSION` in `packages/protocol/src/types/common.ts` (what
+   the extension sends) and `CURRENT_PROTOCOL_VERSION` in
+   `server/src/messages.ts` (what the server implements and reports back).
+2. Grep for ALL call sites of any changed function signature, including
+   `server/src/app.ts` and the `index.ts` adapters. TypeScript accepts a
+   function that declares _fewer_ parameters than the target type expects, so an
+   adapter that quietly stops forwarding a trailing argument still typechecks —
+   the compiler will not flag it for you.
+3. New enum values or new fields: the server accepts clients all the way down to
+   `MIN_PROTOCOL_VERSION` (currently `1`), so confirm an older client's guards
+   tolerate them, or gate the behaviour behind a version check.
+   `MEMBER_DELTA_PROTOCOL_VERSION` in `server/src/room-event-consumer.ts` is the
+   pattern to copy.
+4. Update `docs/reference/protocol.md` and `docs/reference/protocol.zh-CN.md` in
+   the same PR.
 
 ## Structural Constraints
 
@@ -173,13 +211,23 @@ of a large interface, its parameter should say so (`Pick<RoomStore,
 (`ws.WebSocket`, `chrome.tabs.Tab`, `HTMLVideoElement`, `IncomingMessage`);
 prefer one shared constructor over per-call-site casts.
 
+## Debugging Sync Bugs
+
+- Prefer a single root-cause fix over layered patches. If a fix requires adding
+  a new suppression flag, cooldown, or special case on top of an existing one,
+  stop and re-derive the root cause instead.
+- State the hypothesis, name the exact log lines / code path that prove it, and
+  confirm before writing code.
+- Every sync fix needs a regression test that FAILS on the pre-fix code — verify
+  this by reverting the fix (stash it, or restore from a copy taken beforehand)
+  and running the test. A test that stays green either way guards nothing.
+
 ## Agent Execution Rules
 
 - Do not perform destructive git operations such as `git reset --hard`, force-pushes, or overwriting unrelated uncommitted user changes unless explicitly requested.
 - Do not change secrets, `.env` files, release credentials, or production deployment settings unless explicitly requested.
 - Do not update versions, lockfiles, or release artifacts unless the task clearly requires it.
-- Prefer the smallest relevant verification command first; if validation was not run, say so explicitly.
-- Do not claim a change was verified if the relevant checks were not actually run.
+- While iterating, prefer the smallest relevant verification command first; if validation was not run, say so explicitly. Claiming a change works is a different bar — see [Verification Before Claiming Done](#verification-before-claiming-done).
 - Keep changes scoped to the task. Avoid opportunistic edits in unrelated files.
 - When code changes affect developer workflow, architecture, or shared rules, update the relevant documentation files in the same change.
 - When reviewing code, report findings first, with concrete file references and impact, before giving summary commentary.
