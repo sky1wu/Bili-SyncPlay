@@ -12,6 +12,7 @@ import {
   getDefaultPersistenceConfig,
   getDefaultSecurityConfig,
   runShutdownSteps,
+  type ShutdownStepFailure,
 } from "./bootstrap/server-bootstrap.js";
 import { type RoomStore } from "./room-store.js";
 import { createRoomService } from "./room-service.js";
@@ -28,7 +29,8 @@ import type {
 export type GlobalAdminServer = {
   httpServer: HttpServer;
   metricsHttpServer: HttpServer | undefined;
-  close: () => Promise<void>;
+  /** Resolves with the steps that failed; an empty array means a clean teardown. */
+  close: () => Promise<ShutdownStepFailure[]>;
 };
 
 export type GlobalAdminServerDependencies = {

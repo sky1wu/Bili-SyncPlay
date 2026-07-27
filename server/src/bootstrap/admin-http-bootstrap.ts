@@ -131,20 +131,34 @@ export async function createSharedAdminHttpBootstrap(args: {
   };
 }
 
+/**
+ * Resolves once the server is no longer accepting connections.
+ *
+ * A server that never called `listen()` reports `ERR_SERVER_NOT_RUNNING`, which
+ * is not a failure here: a stop signal that arrives during startup tears the
+ * server down before the entry point ever starts listening, and treating that
+ * as a failed step would make an otherwise clean shutdown exit non-zero.
+ */
+export function closeHttpServer(httpServer: HttpServer): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    httpServer.close((error) => {
+      if (
+        error &&
+        (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
+      ) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
 export function createCloseHttpServerStep(
   httpServer: HttpServer,
 ): ShutdownStep {
   return {
     name: "close_http_server",
-    run: () =>
-      new Promise<void>((resolve, reject) => {
-        httpServer.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      }),
+    run: () => closeHttpServer(httpServer),
   };
 }

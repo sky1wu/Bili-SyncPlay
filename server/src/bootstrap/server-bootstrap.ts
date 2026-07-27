@@ -66,6 +66,12 @@ export type ShutdownStep = {
   timeoutMs?: number;
 };
 
+export type ShutdownStepFailure = {
+  step: string;
+  result: "timeout" | "error";
+  error: string;
+};
+
 export type ServerBootstrapDependencies = {
   roomStore?: RoomStore;
   logEvent?: LogEvent;
@@ -114,11 +120,18 @@ export type ServerBootstrapContext = {
   metricsCollector: MetricsCollector;
 };
 
+/**
+ * Runs every step even when earlier ones fail, and reports which ones did:
+ * a caller that exits the process needs to know whether the teardown actually
+ * released everything, otherwise a shutdown that skipped Redis cleanup still
+ * looks successful to the orchestrator.
+ */
 export async function runShutdownSteps(
   steps: ShutdownStep[],
   logEvent: LogEvent,
   defaultTimeoutMs = DEFAULT_CLOSE_STEP_TIMEOUT_MS,
-): Promise<void> {
+): Promise<ShutdownStepFailure[]> {
+  const failures: ShutdownStepFailure[] = [];
   for (const step of steps) {
     const timeoutMs = step.timeoutMs ?? defaultTimeoutMs;
     const pendingStep = Promise.resolve().then(step.run);
@@ -138,11 +151,15 @@ export async function runShutdownSteps(
       const timedOut =
         error instanceof Error &&
         error.message === `Shutdown step timed out: ${step.name}.`;
-      logEvent("server_shutdown_step_failed", {
+      const failure: ShutdownStepFailure = {
         step: step.name,
-        timeoutMs,
         result: timedOut ? "timeout" : "error",
         error: error instanceof Error ? error.message : String(error),
+      };
+      failures.push(failure);
+      logEvent("server_shutdown_step_failed", {
+        ...failure,
+        timeoutMs,
       });
     } finally {
       if (timeoutHandle) {
@@ -150,6 +167,8 @@ export async function runShutdownSteps(
       }
     }
   }
+
+  return failures;
 }
 
 export function hasClose(value: object | null | undefined): value is Closeable {

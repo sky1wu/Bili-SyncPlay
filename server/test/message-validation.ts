@@ -56,7 +56,9 @@ async function startTestServer(
   }
   return {
     url: `ws://127.0.0.1:${address.port}`,
-    close: server.close,
+    close: async () => {
+      await server.close();
+    },
   };
 }
 

@@ -275,7 +275,9 @@ async function listenSingleNode(
 
   return {
     wsUrl: `ws://127.0.0.1:${address.port}`,
-    cleanup: () => server.close(),
+    cleanup: async () => {
+      await server.close();
+    },
   };
 }
 

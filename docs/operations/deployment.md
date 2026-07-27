@@ -497,6 +497,24 @@ If you run multiple room nodes, prefer a rolling restart instead of restarting e
 3. continue with the next room node
 4. restart `global-admin` last
 
+### Graceful shutdown
+
+Both entry points (`server/dist/index.js` and `server/dist/global-admin-index.js`) handle `SIGTERM` and `SIGINT`: the server stops accepting new connections, then closes WebSocket connections, drains session cleanup, flushes pending room event publishes, and finally releases Redis-backed runtime state and connections.
+
+Three separate timeouts are involved — do not confuse them:
+
+1. **Per-step caps**: 5s for most steps, 30s each for session cleanup and room-event flushing, adding up to ~135s in the worst case. An idle node typically finishes within a second.
+2. **A 150s process watchdog**: a last resort for a `close()` that wedges. It sits above the legitimate budget above so it never truncates a normal shutdown, and exits with code `1` when it fires.
+3. **The orchestrator's grace period**: this is what decides how much of that budget you actually grant. It is an upper bound, not a fixed wait — a large value does not slow down a normal stop.
+
+Per deployment style:
+
+- systemd: the default `TimeoutStopSec=90s` is fine and `systemctl restart` / `stop` normally completes in seconds; raise it to 160s if you want busy nodes to always finish their cleanup.
+- Docker: the default grace period is only 10s, so the container is SIGKILLed mid-cleanup (exit code `137`). The repository's `docker-compose.yml` sets `stop_grace_period: 160s`; with `docker run`, stop the container using `docker stop -t 160 <container>`. Lower it if you prefer a faster hard stop, at the cost of leaving Redis runtime state for the reapers to expire.
+- A signal that arrives during startup (while still connecting to Redis, for example) is recorded, and the full shutdown runs once startup finishes; if startup has not finished within 5s the process exits with code `1` instead of hanging until the orchestrator sends SIGKILL.
+- If any shutdown step fails or times out, the process exits with code `1` and has logged a `server_shutdown_step_failed` event; exit code `0` means every step succeeded.
+- A second signal during shutdown (for example pressing Ctrl+C twice) exits immediately and abandons the remaining cleanup steps.
+
 ## 8. Operational notes
 
 - With `ROOM_STORE_PROVIDER=memory`, restarting the process still clears all rooms.
