@@ -1736,6 +1736,174 @@ test("room service accepts a legal cross-actor playback update after authority e
   assert.equal(finalState.playback?.actorId, guest.memberId);
 });
 
+test("room service does not let a steady paused tick claim the authority window", async () => {
+  // Reproduces the autoplay-next stall seen in production: the sharer switches
+  // to the next video, which starts out paused at the remembered position, and
+  // a peer that hard-seeks to that position leaks the pause it just applied
+  // back into the room as repeated frames. Those frames change nothing, so
+  // they must not hand the peer a veto over the sharer's own start-up.
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM31",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const guest = createSession("guest");
+  const joined = await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  await service.shareVideoForSession(
+    owner,
+    created.memberToken,
+    createSharedVideo(),
+    createPlayback(owner.memberId ?? owner.id, {
+      playState: "paused",
+      currentTime: 49,
+    }),
+  );
+
+  // Past the share's own authority window, so nothing but the guest's frames
+  // can decide the outcome below.
+  currentTime = 2_500;
+  const echo = await service.updatePlaybackForSession(
+    guest,
+    joined.memberToken,
+    createPlayback(guest.memberId ?? guest.id, {
+      playState: "paused",
+      currentTime: 49,
+      seq: 1,
+    }),
+  );
+  assert.equal(echo.ignored, false);
+
+  currentTime = 2_600;
+  const repeatedEcho = await service.updatePlaybackForSession(
+    guest,
+    joined.memberToken,
+    createPlayback(guest.memberId ?? guest.id, {
+      playState: "paused",
+      currentTime: 49,
+      seq: 2,
+    }),
+  );
+  assert.equal(repeatedEcho.ignored, false);
+  assert.equal(service.getPlaybackAuthority(created.room.code), null);
+
+  currentTime = 2_700;
+  const sharerStartsPlaying = await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(owner.memberId ?? owner.id, {
+      playState: "playing",
+      currentTime: 49,
+      seq: 2,
+    }),
+  );
+
+  assert.equal(sharerStartsPlaying.ignored, false);
+  const finalState = await service.getRoomStateForSession(
+    owner,
+    created.memberToken,
+    "sync:request",
+  );
+  assert.equal(finalState.playback?.playState, "playing");
+  assert.equal(finalState.playback?.actorId, owner.memberId);
+});
+
+test("room service still lets a real pause claim the authority window", async () => {
+  // Counterpart to the steady-tick test above: a frame that actually changes
+  // playState is a genuine intent and must keep vetoing a competing play, or
+  // the steady-tick gate would have simply disabled pause dominance.
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM32",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const guest = createSession("guest");
+  const joined = await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  await service.shareVideoForSession(
+    owner,
+    created.memberToken,
+    createSharedVideo(),
+    createPlayback(owner.memberId ?? owner.id, {
+      playState: "playing",
+      currentTime: 40,
+    }),
+  );
+
+  currentTime = 2_500;
+  const realPause = await service.updatePlaybackForSession(
+    guest,
+    joined.memberToken,
+    createPlayback(guest.memberId ?? guest.id, {
+      playState: "paused",
+      currentTime: 40,
+      seq: 1,
+    }),
+  );
+  assert.equal(realPause.ignored, false);
+  assert.equal(
+    service.getPlaybackAuthority(created.room.code)?.actorId,
+    guest.memberId,
+  );
+  assert.equal(service.getPlaybackAuthority(created.room.code)?.kind, "pause");
+
+  currentTime = 2_600;
+  const competingPlay = await service.updatePlaybackForSession(
+    owner,
+    created.memberToken,
+    createPlayback(owner.memberId ?? owner.id, {
+      playState: "playing",
+      currentTime: 40,
+      seq: 2,
+    }),
+  );
+
+  assert.equal(competingPlay.ignored, true);
+  const finalState = await service.getRoomStateForSession(
+    owner,
+    created.memberToken,
+    "sync:request",
+  );
+  assert.equal(finalState.playback?.playState, "paused");
+  assert.equal(finalState.playback?.actorId, guest.memberId);
+});
+
 test("room service consults shared kick blocks when rejoining through another node", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const service = createRoomService({
