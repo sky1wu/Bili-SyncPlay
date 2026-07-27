@@ -58,7 +58,27 @@ interface RemoteAppliedPlayback {
 
 The rule: if a local event reports `(playState, currentTime, playbackRate)` matching the
 owned values (within tolerance), it is an echo and is suppressed — **however long ago the
-apply happened**.
+apply happened**. `playState` matches on stop-likeness rather than exact equality:
+`paused` and `buffering` are the same standstill seen at different moments, the late
+`waiting`/`pause` chain a remote paused hard-seek produces is classified as `buffering`,
+and the server files both under the same pause authority.
+
+Ownership is taken **twice per applied state**, and both are load-bearing:
+
+- once as soon as the state is known not to be stale, ahead of the noop and cooldown
+  branches that return without writing. Those branches skip the write because the local
+  player already matches, but a superseded ownership must still be replaced there, or a
+  stale `paused` ownership outlives a newer `playing` the local player already agreed with;
+- once the adjustment is actually written to the element, which restamps `appliedAtLocal`.
+  A state waiting on `loadedmetadata`/`canplay` can sit pending for a long time on a weak
+  network or a throttled tab, and the protection has to run from the write, not the
+  receipt — otherwise the backstop can elapse before the write it covers even happens.
+
+The room echoing back **our own state** is never owned. That is an acknowledgement, not an
+instruction: a later local report of it is a retry, not an echo, and the duplicate window
+decides whether it goes out. Owning it would silence exactly the repeats that exist because
+a send may have been dropped by the background, the socket, or the server's rate limiter —
+all of which are silent.
 
 The marker does not expire on time. It is cleared only by:
 
@@ -69,9 +89,12 @@ The marker does not expire on time. It is cleared only by:
 | C3  | A newer remote state arrives                                                  | Straight replacement                                             |
 | C4  | Shared video switch / room reset / `<video>` rebind                           | The context is gone                                              |
 
-**C1 must be evaluated first**, otherwise user actions get swallowed. It reads
-`lastUserGestureInPlayerAt` (a gesture inside the player) rather than the document-level
-`lastUserGestureAt`, so a stray click on blank page area cannot clear ownership.
+**C1 must be evaluated first**, otherwise user actions get swallowed. It keys off
+`lastExplicitUserAction` — the playback action the binding layer confirmed — and not off a
+raw gesture. An in-player gesture is too broad: volume, settings and danmaku controls all
+live inside the player container and express no intent about playback, so releasing on one
+of those while a remote paused hard-seek is still buffering would let the late `seeked`
+rebroadcast the room's own pause. The document-level `lastUserGestureAt` is broader still.
 
 ### The critical split: paused/buffering versus playing
 
@@ -119,16 +142,16 @@ path. Hitting it logs a warning, because it means the design has a hole.
 Changing this state machine requires enumerating every source of "local event that is not
 user intent" first, and confirming the new model does not break any of them:
 
-| #   | Source                                                                    | Existing guard                               | Under the new model                                                                  |
-| --- | ------------------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------ |
-| 1   | Events emitted synchronously as apply writes the DOM                      | `programmaticApplyUntil` (700ms) + signature | Unchanged. This layer is synchronous; 700ms suffices and it is not the failure point |
-| 2   | Transport events arriving late after apply (`seeked`/`canplay`/`waiting`) | `suppressedRemotePlayback` (700ms)           | **Replaced here** → `RemoteAppliedPlayback`                                          |
-| 3   | Forced pause (non-shared video autoplay block)                            | `lastForcedPauseAt`                          | Unchanged. Not a remote apply, stays out of the ownership model                      |
-| 4   | Soft-apply rate write-back and cancel                                     | `programmaticApplyScope = "ratechange"`      | Unchanged. The scope mechanism already separates it correctly                        |
-| 5   | `<video>` element rebuild (stall recovery)                                | `lastVideoElementBoundAt`                    | New C4 clearing path (the old element's ownership is meaningless for a new one)      |
-| 6   | Natural end / autoplay-next handoff                                       | `sharerEndedSuppression*` / `holdNonSharer*` | Unchanged                                                                            |
-| 7   | Stale page bridge during SPA navigation                                   | `postNavigationAnchor*`                      | Unchanged                                                                            |
-| 8   | Non-shared page                                                           | `non-shared-page` branch                     | Unchanged, and it runs before the ownership check                                    |
+| #   | Source                                                                    | Existing guard                               | Under the new model                                                                                                |
+| --- | ------------------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| 1   | Events emitted synchronously as apply writes the DOM                      | `programmaticApplyUntil` (700ms) + signature | Unchanged. This layer is synchronous; 700ms suffices and it is not the failure point                               |
+| 2   | Transport events arriving late after apply (`seeked`/`canplay`/`waiting`) | `suppressedRemotePlayback` (700ms)           | **Replaced here** → `RemoteAppliedPlayback`                                                                        |
+| 3   | Forced pause (non-shared video autoplay block)                            | `lastForcedPauseAt`                          | Unchanged. Not a remote apply, stays out of the ownership model                                                    |
+| 4   | Soft-apply rate write-back and cancel                                     | `programmaticApplyScope = "ratechange"`      | Unchanged. The scope mechanism already separates it correctly                                                      |
+| 5   | `<video>` element rebuild (stall recovery)                                | `lastVideoElementBoundAt`                    | New C4 clearing path; safe only because the pending state's own write re-establishes ownership for the new element |
+| 6   | Natural end / autoplay-next handoff                                       | `sharerEndedSuppression*` / `holdNonSharer*` | Unchanged                                                                                                          |
+| 7   | Stale page bridge during SPA navigation                                   | `postNavigationAnchor*`                      | Unchanged                                                                                                          |
+| 8   | Non-shared page                                                           | `non-shared-page` branch                     | Unchanged, and it runs before the ownership check                                                                  |
 
 Only #2 is replaced; #5 gains a clearing path. The other six keep their existing guards.
 

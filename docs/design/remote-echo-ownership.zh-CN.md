@@ -50,19 +50,38 @@ interface RemoteAppliedPlayback {
 ```
 
 判定规则：一个本地事件报告的 `(playState, currentTime, playbackRate)` 若与归属值一致
-（容差内），它就是回声，抑制广播——**无论过去了多久**。
+（容差内），它就是回声，抑制广播——**无论过去了多久**。其中 `playState` 按「是否停止态」
+匹配而非严格相等：`paused` 与 `buffering` 是同一次静止在不同时刻的样子，远端 paused 的
+hard-seek 触发的迟到 `waiting`/`pause` 链会被绑定层归类为 `buffering`，而服务端把两者
+同样计入 pause authority。
+
+归属**每次应用取两次**，两次都不可省：
+
+- 一次在确认状态非陈旧之后、所有不写入播放器就返回的 noop/cooldown 分支之前。那些分支
+  跳过写入正是因为本地已经匹配，但被取代的归属仍必须替换掉，否则陈旧的 paused 归属会
+  活过本地已经认可的、更新的 `playing`；
+- 一次在调整真正写入元素时，用以重置 `appliedAtLocal`。等待 `loadedmetadata`/`canplay`
+  的状态在弱网或后台节流下可能挂起很久，保护期必须从写入起算而不是从收到起算，否则
+  兜底上限可能在它要保护的那次写入发生之前就先耗尽。
+
+房间回显**我们自己的状态**一律不记归属。那是确认而非指令：之后本地对它的上报是重试而
+非回声，是否发出由 duplicate window 决定。为它记归属会恰好静音那些「因为上一次发送可能
+被丢弃（后台、socket、或服务端限流，全都无声）」而存在的重试。
 
 标记不按时间到期，只由下列事件清除：
 
-| 编号 | 清除条件                                                              | 理由                                     |
-| ---- | --------------------------------------------------------------------- | ---------------------------------------- |
-| C1   | player 内真实 gesture（`lastUserGestureInPlayerAt > appliedAtLocal`） | 用户接管，之后的一切都是本地意图         |
-| C2   | 本地状态偏离归属值且偏离无法由远端解释                                | 播放器自己动了（起播、跳变），不再是回声 |
-| C3   | 新的远端状态到达                                                      | 直接替换                                 |
-| C4   | 共享视频切换 / 房间重置 / `<video>` 重绑                              | 上下文没了                               |
+| 编号 | 清除条件                                                      | 理由                                     |
+| ---- | ------------------------------------------------------------- | ---------------------------------------- |
+| C1   | 晚于 apply 的、已确认的播放操作（play/pause/seek/ratechange） | 用户接管，之后的一切都是本地意图         |
+| C2   | 本地状态偏离归属值且偏离无法由远端解释                        | 播放器自己动了（起播、跳变），不再是回声 |
+| C3   | 新的远端状态到达                                              | 直接替换                                 |
+| C4   | 共享视频切换 / 房间重置 / `<video>` 重绑                      | 上下文没了                               |
 
-**C1 必须最先判定**，否则用户操作会被吞。它读的是 `lastUserGestureInPlayerAt`
-（player 内手势）而非文档级 `lastUserGestureAt`，避免页面空白处的误点清除归属。
+**C1 必须最先判定**，否则用户操作会被吞。它读的是 `lastExplicitUserAction`——绑定层
+确认过的播放操作——而不是原始手势。player 内手势的口径太宽：音量、设置、弹幕开关都在
+播放器容器内，却不表达任何播放意图；远端 paused 的 hard-seek 仍在缓冲时用户碰了这些，
+按手势释放归属会让迟到的 `seeked` 把房间自己的暂停重新广播出去。文档级
+`lastUserGestureAt` 的口径更宽。
 
 ### 关键区分：paused/buffering 与 playing 必须不同处理
 
@@ -102,16 +121,16 @@ paused 归属另设一个很长的兜底上限（`REMOTE_OWNERSHIP_MAX_AGE_MS = 
 改这类状态机必须先枚举全部「产生本地事件但非用户意图」的来源，逐一确认新模型不会
 踩坏它们：
 
-| #   | 污染源                                                          | 现有门槛                                     | 新模型下归谁                                     |
-| --- | --------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------ |
-| 1   | apply 写入 DOM 时同步产生的事件                                 | `programmaticApplyUntil` (700ms) + signature | 保持不变。这一层是同步的，700ms 足够，不是失效点 |
-| 2   | apply 之后迟到的 transport 事件（`seeked`/`canplay`/`waiting`） | `suppressedRemotePlayback` (700ms)           | **本次替换目标** → `RemoteAppliedPlayback`       |
-| 3   | forced pause（非共享视频自动播放拦截）                          | `lastForcedPauseAt`                          | 不变。它不是远端 apply，不进归属模型             |
-| 4   | soft-apply 的 rate 写回与取消                                   | `programmaticApplyScope = "ratechange"`      | 不变。作用域机制已正确区分                       |
-| 5   | `<video>` 元素重建（缓冲恢复）                                  | `lastVideoElementBoundAt`                    | 新增 C4 清除路径（旧元素的归属对新元素无意义）   |
-| 6   | 自然结束 / autoplay-next 交接                                   | `sharerEndedSuppression*` / `holdNonSharer*` | 不变                                             |
-| 7   | SPA 导航期 stale page bridge                                    | `postNavigationAnchor*`                      | 不变                                             |
-| 8   | 非共享页                                                        | `non-shared-page` 分支                       | 不变，且在归属判定之前                           |
+| #   | 污染源                                                          | 现有门槛                                     | 新模型下归谁                                                               |
+| --- | --------------------------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------- |
+| 1   | apply 写入 DOM 时同步产生的事件                                 | `programmaticApplyUntil` (700ms) + signature | 保持不变。这一层是同步的，700ms 足够，不是失效点                           |
+| 2   | apply 之后迟到的 transport 事件（`seeked`/`canplay`/`waiting`） | `suppressedRemotePlayback` (700ms)           | **本次替换目标** → `RemoteAppliedPlayback`                                 |
+| 3   | forced pause（非共享视频自动播放拦截）                          | `lastForcedPauseAt`                          | 不变。它不是远端 apply，不进归属模型                                       |
+| 4   | soft-apply 的 rate 写回与取消                                   | `programmaticApplyScope = "ratechange"`      | 不变。作用域机制已正确区分                                                 |
+| 5   | `<video>` 元素重建（缓冲恢复）                                  | `lastVideoElementBoundAt`                    | 新增 C4 清除路径；之所以安全，是因为待应用状态自身的写入会为新元素重建归属 |
+| 6   | 自然结束 / autoplay-next 交接                                   | `sharerEndedSuppression*` / `holdNonSharer*` | 不变                                                                       |
+| 7   | SPA 导航期 stale page bridge                                    | `postNavigationAnchor*`                      | 不变                                                                       |
+| 8   | 非共享页                                                        | `non-shared-page` 分支                       | 不变，且在归属判定之前                                                     |
 
 只有 #2 被替换，#5 新增一条清除路径。其余六类维持现有门槛不动。
 

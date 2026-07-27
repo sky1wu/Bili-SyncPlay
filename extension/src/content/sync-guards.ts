@@ -51,14 +51,21 @@ export interface RemoteOwnershipEchoGuardInput {
   playState: PlaybackState["playState"];
   currentTime: number;
   playbackRate: number;
-  lastUserGestureInPlayerAt: number;
+  /**
+   * When the user last performed a *playback* action (play/pause/seek/ratechange)
+   * that `rememberExplicitUserAction` accepted as genuine — not merely when they
+   * last touched the player. Adjusting volume, opening settings or toggling
+   * danmaku all land inside the player container without expressing any intent
+   * about playback, and must not hand back a state the room still owns.
+   */
+  lastExplicitPlaybackActionAt: number;
   now: number;
   maxAgeMs: number;
   positionToleranceSeconds: number;
 }
 
 export type RemoteOwnershipReleaseReason =
-  "user-gesture" | "left-state" | "url-changed" | "backstop-age";
+  "user-action" | "left-state" | "url-changed" | "backstop-age";
 
 export interface RemoteOwnershipEchoDecision {
   shouldSuppress: boolean;
@@ -278,15 +285,17 @@ export function rememberRemotePlaybackForSuppression(
  * Ownership is released, rather than consulted, whenever something proves the
  * state is no longer the room's:
  *
- * - `user-gesture` — a gesture *inside the player* postdating the apply. This is
- *   checked first and deliberately reads the in-player timestamp, not the
- *   document-level one: a stray click on blank page area must not hand the state
- *   back, while a real interaction always must, or the user's own pause would be
- *   swallowed silently.
+ * - `user-action` — a confirmed playback action (play/pause/seek/ratechange)
+ *   postdating the apply. Checked first, because failing to release here
+ *   swallows a real interaction silently. It deliberately keys off the action
+ *   rather than any in-player gesture: volume, settings and danmaku controls all
+ *   live inside the player container and say nothing about playback intent, so
+ *   using a raw gesture would hand the state back mid-buffering and let the very
+ *   echo this guards against escape.
  * - `left-state` — the local player reached `playing`. It moved on its own, so
  *   nothing that follows is this apply's echo. (`paused` ⇄ `buffering` is not a
- *   departure: both are the same stop-like state mid-transition, and treating
- *   the flicker as a departure would reopen the leak.)
+ *   departure: both are the same standstill mid-transition, which is also why a
+ *   match is judged on stop-likeness rather than exact equality.)
  * - `url-changed` — a different video is on screen; the ownership belonged to
  *   the old one.
  * - `backstop-age` — pure defence against a contamination source that was not
@@ -298,6 +307,10 @@ export function rememberRemotePlaybackForSuppression(
  * the player may still be settling toward the target, and releasing on the first
  * intermediate sample would put the leak back.
  */
+function isStopLikePlayState(playState: PlaybackState["playState"]): boolean {
+  return playState === "paused" || playState === "buffering";
+}
+
 export function shouldSuppressLeakedEchoByOwnership(
   input: RemoteOwnershipEchoGuardInput,
 ): RemoteOwnershipEchoDecision {
@@ -318,8 +331,8 @@ export function shouldSuppressLeakedEchoByOwnership(
     releaseReason: reason,
   });
 
-  if (input.lastUserGestureInPlayerAt > owned.appliedAtLocal) {
-    return release("user-gesture");
+  if (input.lastExplicitPlaybackActionAt > owned.appliedAtLocal) {
+    return release("user-action");
   }
 
   if (input.normalizedCurrentUrl !== owned.url) {
@@ -334,7 +347,13 @@ export function shouldSuppressLeakedEchoByOwnership(
     return release("backstop-age");
   }
 
-  const matchesState = input.playState === owned.playState;
+  // `paused` and `buffering` are the same standstill seen at different moments:
+  // the late `waiting`/`pause` chain a remote paused hard-seek produces is
+  // classified as `buffering` by the binding layer, and the server files both
+  // under the same pause authority. Requiring exact equality here would let that
+  // chain broadcast `buffering` — a playState *change*, so not a steady tick,
+  // which re-arms the very veto window this whole change exists to prevent.
+  const matchesState = isStopLikePlayState(input.playState);
   const matchesRate = Math.abs(input.playbackRate - owned.playbackRate) <= 0.01;
   const matchesPosition =
     Math.abs(input.currentTime - owned.currentTime) <=

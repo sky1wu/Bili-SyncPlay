@@ -96,6 +96,7 @@ export function createRoomStateApplyController(args: {
   ) => boolean;
   rememberRemoteFollowPlayingWindow: (playback: PlaybackState) => void;
   rememberRemotePlaybackForSuppression: (playback: PlaybackState) => void;
+  takeRemoteAppliedOwnership: (playback: PlaybackState) => void;
   armProgrammaticApplyWindow: (
     signature: ReturnType<typeof createProgrammaticPlaybackSignature>,
     reason: "pending" | "apply",
@@ -681,6 +682,16 @@ export function createRoomStateApplyController(args: {
       serverTime: state.playback.serverTime,
       seq: state.playback.seq,
     });
+
+    // Staleness is settled, so this state supersedes whatever the room owned
+    // before — hand ownership over here, ahead of every branch below that
+    // returns without writing to the player. Those branches skip the write
+    // precisely because the local player already matches, but the ownership
+    // still has to move: a newer `playing` must drop a `paused` ownership even
+    // when it changes nothing locally, or that ownership goes on suppressing
+    // later stop-like states it no longer describes. The write path restamps
+    // this again once it actually touches the element.
+    args.takeRemoteAppliedOwnership(state.playback);
 
     if (
       decision.isSelfPlayback &&

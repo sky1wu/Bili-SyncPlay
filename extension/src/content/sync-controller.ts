@@ -399,6 +399,11 @@ export function createSyncController(args: {
         // cooldown alive — and `shouldSuppressByCooldown` only screens
         // `playing` updates, so the next real position correction would be
         // suppressed with nothing to clear it.
+        // The write just landed on the element, so restamp ownership from here.
+        // This is also what makes the `<video>` rebind clear safe: a rebind
+        // drops an ownership that described the previous element, and the
+        // pending state's own write re-establishes it for the new one.
+        takeRemoteAppliedOwnership(playback);
         const isBufferingApply =
           adjustment.reason === "buffering-not-authoritative";
         if (
@@ -564,6 +569,49 @@ export function createSyncController(args: {
     );
   }
 
+  /**
+   * Hand ownership of a stop-like state to the room, or drop it when the room
+   * moved to `playing`.
+   *
+   * Called twice per applied state, and both are load-bearing:
+   *
+   * - once as soon as the state is known not to be stale, *before* the noop and
+   *   cooldown branches return. Those branches skip the write because the local
+   *   player already matches, but a superseded ownership must still be replaced
+   *   there — otherwise a stale `paused` ownership outlives a newer `playing`
+   *   the local player already agreed with, and goes on suppressing later
+   *   stop-like states that nobody owns;
+   * - once the adjustment has actually been written to the element, which
+   *   restamps `appliedAtLocal`. A state waiting on `loadedmetadata`/`canplay`
+   *   may sit pending for a long time on a weak network or a throttled tab, and
+   *   the protection has to run from the write, not from the receipt — otherwise
+   *   the backstop can elapse before the write it is meant to cover even
+   *   happens.
+   */
+  function takeRemoteAppliedOwnership(playback: PlaybackState): void {
+    // The room echoing back our *own* state is an acknowledgement, not an
+    // instruction: nothing was handed to us, so there is nothing to own, and a
+    // later local report of that state is a retry rather than an echo — the
+    // duplicate window decides whether it goes out. Owning it here would silence
+    // exactly the repeats that exist because a send may have been dropped by the
+    // background, the socket, or the server's rate limiter, all of which are
+    // silent. It still clears: the acknowledged state is the room's now, so
+    // whatever was owned before no longer describes it.
+    if (
+      args.runtimeState.localMemberId !== null &&
+      playback.actorId === args.runtimeState.localMemberId
+    ) {
+      args.runtimeState.remoteAppliedPlayback = null;
+      return;
+    }
+    args.runtimeState.remoteAppliedPlayback =
+      rememberRemoteAppliedPlaybackGuard({
+        playback,
+        normalizedUrl: args.normalizeUrl(playback.url),
+        now: nowOf(),
+      });
+  }
+
   function shouldSuppressLocalEcho(
     video: HTMLVideoElement,
     currentVideo: SharedVideo,
@@ -655,7 +703,8 @@ export function createSyncController(args: {
       playState,
       currentTime: video.currentTime,
       playbackRate: video.playbackRate,
-      lastUserGestureInPlayerAt: args.runtimeState.lastUserGestureInPlayerAt,
+      lastExplicitPlaybackActionAt:
+        args.runtimeState.lastExplicitUserAction?.at ?? 0,
       now: nowOf(),
       maxAgeMs: args.remoteOwnershipMaxAgeMs,
       positionToleranceSeconds: REMOTE_OWNERSHIP_POSITION_TOLERANCE_SECONDS,
@@ -1688,6 +1737,7 @@ export function createSyncController(args: {
     shouldSuppressRemotePlaybackByCooldown: softApply.shouldSuppressByCooldown,
     rememberRemoteFollowPlayingWindow,
     rememberRemotePlaybackForSuppression,
+    takeRemoteAppliedOwnership,
     armProgrammaticApplyWindow,
     applyPendingPlaybackApplication,
     formatPlaybackDiagnostic,

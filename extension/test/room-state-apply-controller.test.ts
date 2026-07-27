@@ -37,6 +37,9 @@ function createController(overrides: {
   rememberRemotePlaybackForSuppression?: (
     playback: import("@bili-syncplay/protocol").PlaybackState,
   ) => void;
+  takeRemoteAppliedOwnership?: (
+    playback: import("@bili-syncplay/protocol").PlaybackState,
+  ) => void;
   applyPendingPlaybackApplication?: (video: HTMLVideoElement) => void;
   resetPlaybackSyncState?: (reason: string) => void;
 }) {
@@ -99,6 +102,8 @@ function createController(overrides: {
     rememberRemoteFollowPlayingWindow: () => {},
     rememberRemotePlaybackForSuppression:
       overrides.rememberRemotePlaybackForSuppression ?? (() => {}),
+    takeRemoteAppliedOwnership:
+      overrides.takeRemoteAppliedOwnership ?? (() => {}),
     armProgrammaticApplyWindow: () => {},
     applyPendingPlaybackApplication:
       overrides.applyPendingPlaybackApplication ?? (() => {}),

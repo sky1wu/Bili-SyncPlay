@@ -2787,8 +2787,13 @@ test("sync controller still broadcasts a pause the user made after the apply", a
   harness.runtimeMessages.length = 0;
 
   harness.setNow(14_000);
-  harness.runtimeState.lastUserGestureInPlayerAt = 13_900;
+  // What the binding layer records for a genuine pause before it broadcasts:
+  // a gesture plus the confirmed playback action it produced. Ownership keys
+  // off the action, not the bare gesture — volume and settings controls also
+  // live inside the player and say nothing about playback intent.
   harness.runtimeState.lastUserGestureAt = 13_900;
+  harness.runtimeState.lastUserGestureInPlayerAt = 13_900;
+  harness.runtimeState.lastExplicitUserAction = { kind: "pause", at: 13_900 };
   await harness.controller.broadcastPlayback(video, "pause");
 
   // Deliberately the only assertion: this test is the "does not over-suppress"
@@ -2797,4 +2802,134 @@ test("sync controller still broadcasts a pause the user made after the apply", a
   // when the wiring is reverted, which is exactly how it would stop being a
   // control. The release is covered by the guard unit tests.
   assert.equal(harness.runtimeMessages.length >= 1, true);
+});
+
+test("sync controller hands ownership over on a newer state that changes nothing locally", async () => {
+  // The noop branches (within-threshold / self-version / cooldown) skip the
+  // write because the local player already matches. Ownership must still move:
+  // a stale `paused` ownership surviving a newer `playing` would go on
+  // suppressing later stop-like states nobody owns.
+  const harness = createControllerHarness();
+  const sharedUrl = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+  const sharedVideo: SharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: sharedUrl,
+    title: "Video",
+  };
+  const video = createVideo({ paused: true, currentTime: 49 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedUrl;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  harness.setNow(10_000);
+  await harness.controller.applyRoomState(
+    createRoomState({
+      url: sharedUrl,
+      currentTime: 49,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 12,
+    }),
+  );
+  assert.notEqual(harness.runtimeState.remoteAppliedPlayback, null);
+
+  // The room resumes. The local player is already at that position, so the
+  // apply lands in a noop branch and never writes.
+  harness.setNow(10_500);
+  video.paused = false;
+  await harness.controller.applyRoomState(
+    createRoomState({
+      url: sharedUrl,
+      currentTime: 49,
+      playState: "playing",
+      actorId: "remote-member",
+      seq: 13,
+    }),
+  );
+
+  assert.equal(harness.runtimeState.remoteAppliedPlayback, null);
+});
+
+test("sync controller does not let an unrelated in-player gesture release ownership", async () => {
+  // Volume, settings and danmaku controls all sit inside the player container.
+  // Touching them while a remote paused hard-seek is still buffering must not
+  // hand the state back, or the late `seeked` rebroadcasts the room's own pause.
+  const harness = createControllerHarness();
+  const sharedUrl = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+  const sharedVideo: SharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: sharedUrl,
+    title: "Video",
+  };
+  const video = createVideo({ paused: true, currentTime: 49 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedUrl;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  harness.setNow(10_000);
+  await harness.controller.applyRoomState(
+    createRoomState({
+      url: sharedUrl,
+      currentTime: 49,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 12,
+    }),
+  );
+  harness.runtimeMessages.length = 0;
+
+  harness.setNow(14_000);
+  // A gesture inside the player, but no playback action came of it.
+  harness.runtimeState.lastUserGestureAt = 13_900;
+  harness.runtimeState.lastUserGestureInPlayerAt = 13_900;
+  await harness.controller.broadcastPlayback(video, "seeked");
+
+  assert.equal(harness.runtimeMessages.length, 0);
+});
+
+test("sync controller takes no ownership of the room echoing our own state", async () => {
+  // Our own state coming back is an acknowledgement, not an instruction. Owning
+  // it would mute the repeats that are the only retry when a send was dropped.
+  const harness = createControllerHarness();
+  const sharedUrl = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+  const sharedVideo: SharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: sharedUrl,
+    title: "Video",
+  };
+  const video = createVideo({ paused: true, currentTime: 49 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedUrl;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  harness.setNow(10_000);
+  await harness.controller.applyRoomState(
+    createRoomState({
+      url: sharedUrl,
+      currentTime: 49,
+      playState: "paused",
+      actorId: "local-member",
+      seq: 3,
+    }),
+  );
+
+  assert.equal(harness.runtimeState.remoteAppliedPlayback, null);
 });

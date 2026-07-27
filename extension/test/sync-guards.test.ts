@@ -630,7 +630,7 @@ function ownershipInput(
     playState: "paused",
     currentTime: 49,
     playbackRate: 1,
-    lastUserGestureInPlayerAt: 0,
+    lastExplicitPlaybackActionAt: 0,
     now: 5_000,
     maxAgeMs: 30_000,
     positionToleranceSeconds: 0.2,
@@ -660,18 +660,18 @@ test("ownership keeps suppressing the second report of the same applied state", 
   assert.equal(second.shouldSuppress, true);
 });
 
-test("an in-player gesture releases ownership so the user's own pause broadcasts", () => {
+test("a confirmed playback action releases ownership so the user's own pause broadcasts", () => {
   const decision = shouldSuppressLeakedEchoByOwnership(
-    ownershipInput({ lastUserGestureInPlayerAt: 4_000 }),
+    ownershipInput({ lastExplicitPlaybackActionAt: 4_000 }),
   );
   assert.equal(decision.shouldSuppress, false);
-  assert.equal(decision.releaseReason, "user-gesture");
+  assert.equal(decision.releaseReason, "user-action");
   assert.equal(decision.nextRemoteAppliedPlayback, null);
 });
 
-test("a gesture predating the apply does not release ownership", () => {
+test("an action predating the apply does not release ownership", () => {
   const decision = shouldSuppressLeakedEchoByOwnership(
-    ownershipInput({ lastUserGestureInPlayerAt: 900 }),
+    ownershipInput({ lastExplicitPlaybackActionAt: 900 }),
   );
   assert.equal(decision.shouldSuppress, true);
   assert.equal(decision.releaseReason, null);
@@ -687,13 +687,26 @@ test("local playback releases ownership so a start-up is never swallowed", () =>
   assert.equal(decision.releaseReason, "left-state");
 });
 
-test("a paused/buffering flicker does not release ownership", () => {
+test("buffering and paused are the same owned standstill", () => {
+  // The late `waiting`/`pause` chain a remote paused hard-seek produces is
+  // classified as `buffering`. Letting it through would broadcast a playState
+  // *change* — not a steady tick — and re-arm the server veto window.
   const decision = shouldSuppressLeakedEchoByOwnership(
     ownershipInput({ playState: "buffering" }),
   );
-  assert.equal(decision.shouldSuppress, false);
+  assert.equal(decision.shouldSuppress, true);
   assert.equal(decision.releaseReason, null);
   assert.notEqual(decision.nextRemoteAppliedPlayback, null);
+});
+
+test("an owned buffering state also suppresses a paused report", () => {
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({
+      remoteAppliedPlayback: createOwnership({ playState: "buffering" }),
+      playState: "paused",
+    }),
+  );
+  assert.equal(decision.shouldSuppress, true);
 });
 
 test("a diverged position suppresses nothing but keeps ownership while settling", () => {
