@@ -1,6 +1,7 @@
 import type { Server as HttpServer } from "node:http";
 import { WebSocketServer } from "ws";
 import {
+  closeHttpServer,
   createSharedAdminHttpBootstrap,
   resolveServerRuntimeDependencies,
 } from "./bootstrap/admin-http-bootstrap.js";
@@ -338,26 +339,10 @@ export async function createSyncServer(
       // httpServer.close() returns synchronously after detaching the listener;
       // its callback only fires once existing sockets disconnect. Capture the
       // promises now so terminate_ws_clients can run with a stable client snapshot.
-      const httpServerClosed = new Promise<void>((resolve, reject) => {
-        httpServer.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
+      const httpServerClosed = closeHttpServer(httpServer);
       httpServerClosed.catch(() => undefined);
       const metricsHttpServerClosed = metricsHttpServer
-        ? new Promise<void>((resolve, reject) => {
-            metricsHttpServer.close((error) => {
-              if (error) {
-                reject(error);
-                return;
-              }
-              resolve();
-            });
-          })
+        ? closeHttpServer(metricsHttpServer)
         : null;
       metricsHttpServerClosed?.catch(() => undefined);
 

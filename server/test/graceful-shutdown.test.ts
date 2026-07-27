@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
+  createSyncServer,
+  getDefaultPersistenceConfig,
+  getDefaultSecurityConfig,
+} from "../src/app.js";
+import { createGlobalAdminServer } from "../src/global-admin-app.js";
+import {
   installGracefulShutdown,
   type GracefulShutdownHandle,
   type ShutdownCloseTarget,
@@ -228,6 +234,40 @@ test("attachCloseTarget keeps the caller running when no signal arrived", async 
   harness.signalTarget.emit("SIGTERM");
   await flush();
   assert.deepEqual(harness.exitCodes, [0]);
+});
+
+// A stop signal during startup tears the server down before the entry point
+// ever calls listen(). Node reports ERR_SERVER_NOT_RUNNING for a server that
+// never listened, and counting that as a failed step would turn this clean
+// shutdown into exit code 1.
+test("closing a server that never listened reports no failed steps", async () => {
+  const server = await createSyncServer(
+    getDefaultSecurityConfig(),
+    getDefaultPersistenceConfig(),
+    {
+      logEvent: () => {},
+      serviceVersion: "0.0.0-test",
+      adminUiConfig: { enabled: false },
+    },
+  );
+
+  assert.equal(server.httpServer.listening, false);
+  assert.deepEqual(await server.close(), []);
+});
+
+test("closing a global admin server that never listened reports no failed steps", async () => {
+  const server = await createGlobalAdminServer(
+    getDefaultSecurityConfig(),
+    getDefaultPersistenceConfig(),
+    {
+      logEvent: () => {},
+      serviceVersion: "0.0.0-test",
+      adminUiConfig: { enabled: false },
+    },
+  );
+
+  assert.equal(server.httpServer.listening, false);
+  assert.deepEqual(await server.close(), []);
 });
 
 test("handlers are detached after shutdown and by the returned detach", async () => {
