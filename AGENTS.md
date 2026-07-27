@@ -65,10 +65,13 @@ Checklist to run before opening any PR that touches the sync protocol:
    the extension sends) and `CURRENT_PROTOCOL_VERSION` in
    `server/src/messages.ts` (what the server implements and reports back).
 2. Grep for ALL call sites of any changed function signature, including
-   `server/src/app.ts` and the `index.ts` adapters. TypeScript accepts a
-   function that declares _fewer_ parameters than the target type expects, so an
-   adapter that quietly stops forwarding a trailing argument still typechecks —
-   the compiler will not flag it for you.
+   `server/src/app.ts` and the `index.ts` adapters. Know exactly where the
+   compiler stops helping: it _does_ flag a call that passes too few arguments
+   (`TS2554`), including inside an adapter that forwards. What it accepts
+   silently is a function that _declares_ fewer parameters than the type it is
+   assigned to — a callback written against the old signature keeps
+   typechecking, never receives the new trailing argument, and drops it without
+   a word. That is the case grep has to catch, because `tsc` never will.
 3. New enum values or new fields: the server accepts clients all the way down to
    `MIN_PROTOCOL_VERSION` (currently `1`), so confirm an older client's guards
    tolerate them, or gate the behaviour behind a version check.
