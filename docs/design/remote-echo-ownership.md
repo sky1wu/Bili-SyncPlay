@@ -1,5 +1,11 @@
 # Design: remote playback ownership replaces the fixed echo window
 
+**Describes the code as of `a4c4045` (2026-07-27).** No implementation is bound to this
+document and no CI check guards it, so the constants and code paths it names
+(`REMOTE_ECHO_SUPPRESSION_MS = 700`, the 2s `onTimeUpdate` heartbeat, the
+`rememberExplicitUserAction` gate) can drift out of date without anything failing.
+Check them against the source before relying on them.
+
 **Status: problem analysis and constraints. Not an implementable design, not implemented.**
 
 What is solid here: the problem (§1–2), the contamination sources (§4), and the timing traps
@@ -49,7 +55,7 @@ between two failure modes; moving it either way trades one for the other.
 > **This section is not an implementable design.** It is the direction that was explored,
 > recorded because the reasoning behind it is worth keeping — not because it is ready to
 > build. Every decision procedure below has at least one unresolved question, listed in
-> §3.1. Two reviews of this document found the section still contradicting itself in
+> §3.1. Three reviews of this document found the section still contradicting itself in
 > places; treat it as a starting point for a design, not as one.
 
 When a remote playback state is applied, record that the state **belongs to the remote**:
@@ -161,12 +167,23 @@ questions as settled.
    one; only position got a table. If the room asks for 1.5x while the player transiently
    reports 1.0x mid-write, nothing says whether to keep ownership or apply C2.
 5. **`D` is a guess.** The position-delta bound has not been measured against real player
-   behaviour.
-6. **A user takeover during a pending apply is not cancelled.** While a state waits for
-   metadata, the user can act. C1 releases the ownership taken at receipt, but the pending
-   write still happens on `canplay` and unconditionally re-takes ownership — overwriting the
-   takeover that just occurred. Either the second write must re-check for newer local
-   intent, or C1 must cancel the corresponding `pendingPlaybackApplication`.
+   behaviour. The same applies to the `ε < Δ ≤ D` band now being suppressed rather than
+   merely tolerated: that is the right call on the reasoning above, but it widens what
+   ownership silences and has never been exercised against a real player.
+6. **Nothing invalidates a superseded `pendingPlaybackApplication`.** A state that waits on
+   metadata sits in `pendingPlaybackApplication` and is applied later, on `canplay` — by
+   which time it may already be obsolete, and the write happens anyway and re-takes
+   ownership. Two distinct sources make it obsolete, and the design must address both:
+   - **A user takeover.** C1 releases the ownership taken at receipt, but the pending write
+     still lands and overwrites the takeover that just occurred.
+   - **A newer remote state.** If a later state is accepted through a noop, cooldown, or
+     self-confirmation branch, those branches return without touching the pending entry, so
+     the older state is still applied afterwards and rolls the room back to a state everyone
+     has already moved past.
+
+   Handing ownership over (as §3 requires of those branches) is not enough on its own —
+   every accepted state, and every C1 release, has to invalidate or replace a pending apply
+   it supersedes.
 
 ### The critical split: paused/buffering versus playing
 
@@ -177,18 +194,27 @@ A paused page emits no periodic heartbeat, so a long-lived marker is harmless �
 is the direction where leaking does the most damage, because a leaked `paused` becomes a
 server-side authority that vetoes everyone else's start-up.
 
-**A `playing` state is never owned at all.**
+**A `playing` state is owned only until playback actually starts.**
 While playing, `onTimeUpdate` broadcasts every 2 seconds
 (`playback-binding-controller.ts`: `nowOf() - getLastBroadcastAt() > 2000 && !video.paused`).
 Any ownership that outlived the arrival of `playing` would mute those heartbeats and the
-room would lose its drift correction entirely. Rather than bound it with yet another
-window — the very construct this design is replacing — `rememberRemoteAppliedPlayback`
-simply declines to own anything that is not stop-like, and the local player reaching
-`playing` releases an existing ownership (C2, `left-state`).
+room would lose its drift correction entirely.
 
-That asymmetry is the whole trick: the direction that can be owned indefinitely is
-exactly the direction with no heartbeat to lose, and it is also the direction where
-leaking does damage.
+It is tempting to conclude that `playing` should simply never be owned — the withdrawn
+implementation did exactly that — but it is too coarse. A remote `playing` can also carry a
+hard seek that takes a long time to buffer, and the `seeked`/`waiting`/`canplay` it produces
+can land after the existing 1.8s/3s transition guards. The receiver reports `buffering` for
+those, and the server files a `playing` → `buffering` transition as a non-steady pause,
+arming the very veto window this document exists to prevent.
+
+So ownership of a `playing` apply covers **only the stop-like states it explains before
+playback first starts**, and is released the moment the player first reaches `playing`.
+That keeps the late-buffering echo suppressed without muting a single heartbeat: the
+heartbeats only begin once playback is running, which is exactly when the ownership ends.
+
+The asymmetry that remains: a stop-like target may be owned indefinitely, because a paused
+page has no heartbeat to lose, while a `playing` target's ownership is bounded by an event
+(first arrival), never by a duration.
 
 ### Repeat reports stay suppressed
 
@@ -202,11 +228,11 @@ target" and "the player jumped somewhere else" both present as a position mismat
 says the second must release while the leak returns if the first does. Ordering by
 magnitude against the apply's target:
 
-| Position delta | Verdict                          | Why                                                                                            |
-| -------------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `≤ ε` (0.2s)   | match — suppress, keep ownership | The same standstill                                                                            |
-| `ε < Δ ≤ D`    | no suppression, keep ownership   | Plausibly still converging on the target; releasing on an intermediate sample reopens the leak |
-| `> D`          | **C2 — release**                 | Nothing the room asked for puts the playhead here; the player or a script moved it             |
+| Position delta | Verdict                          | Why                                                                                                                                                                                                                                                                                                                                           |
+| -------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `≤ ε` (0.2s)   | match — suppress, keep ownership | The same standstill                                                                                                                                                                                                                                                                                                                           |
+| `ε < Δ ≤ D`    | suppress, keep ownership         | Still explainable by the apply — an intermediate sample on the way to the target. It must be suppressed, not merely tolerated: the server files any `paused`/`buffering` update as a pause authority, and a 1.5s position change is not filtered by `isSteadyTick`, so broadcasting it arms a veto window from a frame the room itself caused |
+| `> D`          | **C2 — release**                 | Nothing the room asked for puts the playhead here; the player or a script moved it                                                                                                                                                                                                                                                            |
 
 `D` bounds how far a seek in progress may legitimately read from its own target. It has to
 be small enough that a real jump falls outside it and large enough to cover intermediate
@@ -216,14 +242,21 @@ against real player behaviour is part of implementing this.
 Without the `> D` arm, ownership survives an unexplained jump all the way to the backstop
 and can suppress a genuine state that happens to match the old position again.
 
-### Two clock domains
+### Clocks: durations and ordering
 
-Gesture timestamps live on the wall clock (`Date.now()`), so ownership records that instant
-to compare against them. Durations must not use it: a backwards NTP correction makes the
-wall-clock age negative — a single-domain backstop would then never fire and a matching
-pause would stay suppressed indefinitely — while a forwards one makes the apply look
-arbitrarily old and drops the protection on the spot. The backstop measures on
-`performance.now()`, recorded alongside as `appliedAtMonotonic`.
+Durations must not be measured on the wall clock: a backwards NTP correction makes the age
+negative — a single-domain backstop would then never fire and a matching pause would stay
+suppressed indefinitely — while a forwards one makes the apply look arbitrarily old and
+drops the protection on the spot. The backstop therefore measures on `performance.now()`.
+
+**Ordering is not exempt from this.** Recording the apply's wall-clock instant just to
+compare it against gesture timestamps looks safe because both live in the same domain, but
+a correction between the two reorders them: after a backwards jump a genuine later gesture
+reads as older than the apply and the user's takeover stays suppressed, and a jump landing
+between an old gesture and the apply makes that stale gesture read as newer and releases
+ownership wrongly. Ordering needs either the same monotonic clock on both sides or an
+explicit sequence number recorded at apply time — the wall-clock instant cannot establish
+"happened after" on its own.
 
 ### Backstop cap
 
@@ -298,7 +331,7 @@ The _premise_ — that echo suppression must key off state identity rather than 
 window — still holds. §2 makes that case on evidence and nothing has challenged it.
 
 The direction built on that premise did not survive review. "The design was fine, only the
-implementation failed" was the first explanation offered here, and it was wrong: two
+implementation failed" was the first explanation offered here, and it was wrong: three
 reviews of this document alone then found six unresolved questions in §3, including a
 backstop that is itself the fixed window the document argues against. An underspecified
 design is how an implementation ends up approximating — the two failures were never
@@ -353,10 +386,14 @@ this document.
    still be replaced, or a stale `paused` outlives a newer `playing`.
 9. **The room echoing back our own state is an acknowledgement, not an instruction.** Owning
    it mutes the repeats that are the only retry when a send was silently dropped.
-10. **Wall clock and monotonic clock are different domains.** Gesture ordering needs the
-    wall clock; durations need `performance.now()`. Using one for both means an NTP
-    correction either freezes ownership forever (backwards ⇒ negative age ⇒ the backstop
-    never fires) or drops it instantly (forwards).
+10. **The wall clock cannot establish ordering either, not just durations.** Durations need
+    `performance.now()` — using the wall clock means an NTP correction either freezes
+    ownership forever (backwards ⇒ negative age ⇒ the backstop never fires) or drops it
+    instantly (forwards). But "is this gesture newer than the apply" is equally unsafe on
+    wall-clock instants: a correction between the two reorders them, so a genuine takeover
+    can read as older (and stay suppressed) or a stale gesture as newer (and release
+    ownership). Ordering needs one monotonic clock on both sides, or an explicit sequence
+    number.
 
 ### Process notes
 
