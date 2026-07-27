@@ -9,52 +9,9 @@
 
 - Agents must respond in Chinese throughout the entire interaction unless the user explicitly requests another language.
 
-## Project Overview
-
-Bili-SyncPlay is a monorepo for synchronized Bilibili video playback across multiple users. It consists of:
-
-- **`packages/protocol/`** — Shared TypeScript types, type guards, and URL normalization utilities
-- **`packages/admin-ui/`** — Admin console (React + Vite + Ant Design, served at `/admin-next`; `/admin` 302-redirects to it)
-- **`extension/`** — Chrome/Edge browser extension (service worker + content scripts + popup)
-- **`server/`** — Node.js WebSocket server with admin API
-
 ## Commands
 
-```bash
-# Install dependencies
-npm install
-
-# Build all packages (protocol → server + extension, in dependency order)
-npm run build
-
-# Development server (watch mode)
-npm run dev:server
-
-# Admin console dev server (Vite, proxies /api to localhost:8787)
-npm run dev:admin-ui
-
-# Build extension only (Chrome/Edge → extension/dist)
-npm run build:extension
-
-# Build the Firefox target (event-page background → extension/dist-firefox)
-npm run build:extension:firefox
-
-# Code quality checks
-npm run lint
-npm run lint:fix
-npm run format:check
-npm run typecheck
-
-# Testing
-npm test
-npm run coverage
-
-# Release
-npm run build:release          # Package Chrome + Firefox (zip + xpi)
-npm run build:release:chrome   # Chrome/Edge zip only
-npm run build:release:firefox  # Firefox zip + xpi only
-npm run release:version        # Bump version numbers
-```
+Everyday commands are the `package.json` scripts — read them from there.
 
 **Before every commit**, run in order:
 
@@ -78,30 +35,9 @@ turns red. Findings that do not apply to this repository go in
 4. Server broadcasts to all room members
 5. Other clients receive the message and apply playback state to their video player
 
-### Key Extension Controllers (`extension/src/background/`)
-
-| Controller                   | Responsibility                                         |
-| ---------------------------- | ------------------------------------------------------ |
-| `socket-controller.ts`       | WebSocket connection, reconnection, health checks      |
-| `room-session-controller.ts` | Room create/join/leave/state                           |
-| `share-controller.ts`        | Shared video and pending local shares                  |
-| `clock-controller.ts`        | NTP-style clock offset for playback sync               |
-| `tab-controller.ts`          | Bilibili tab tracking, shared vs. local page switching |
-| `message-controller.ts`      | Routes popup/content messages to handlers              |
-
-The `background/index.ts` entry file only bootstraps and wires controllers — keep it thin.
-
-### Server (`server/src/`)
-
-- `app.ts` — HTTP/WebSocket setup and message routing
-- `config/` — Centralized environment parsing (`ALLOWED_ORIGINS`, `PORT`, `REDIS_URL`)
-- `admin/` — Admin panel, command bus, event store, session management
-
-Optional Redis support enables multi-node deployments.
-
 ### Protocol Package (`packages/protocol/`)
 
-Single source of truth for `ClientMessage`, `ServerMessage`, domain types (`RoomState`, `SharedVideo`, `PlaybackState`, `RoomMember`), type guards, and URL normalization. Always export through the package root to preserve import stability.
+Always export through the package root to preserve import stability.
 
 ## Structural Constraints
 
