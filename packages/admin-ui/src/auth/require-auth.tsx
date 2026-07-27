@@ -1,6 +1,6 @@
 import { Button, Result, Spin } from "antd";
 import type { ReactNode } from "react";
-import { Navigate, useLocation } from "react-router-dom";
+import { Navigate, useLocation } from "react-router";
 import { useAuth } from "./auth-context.js";
 
 export function RequireAuth({ children }: { children: ReactNode }) {

@@ -7,7 +7,7 @@ import {
 } from "@ant-design/icons";
 import { Button, Layout, Menu, Space, Tag, Typography } from "antd";
 import type { ReactNode } from "react";
-import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Outlet, useLocation, useNavigate } from "react-router";
 import { useAuth } from "../auth/auth-context.js";
 import { NAV_ITEMS, findNavItem } from "./nav-items.js";
 
