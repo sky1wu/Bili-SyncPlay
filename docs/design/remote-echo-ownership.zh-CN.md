@@ -40,13 +40,12 @@ apply 一个远端播放态时，记录这份状态**归属于远端**：
 ```ts
 interface RemoteAppliedPlayback {
   url: string; // 归属的视频（normalized）
-  playState: PlaybackState["playState"];
+  playState: "paused" | "buffering"; // 只记停止态，理由见下
   currentTime: number;
   playbackRate: number;
   actorId: string;
   seq: number;
-  appliedAtLocal: number; // 本地单调时刻，仅用于外推与兜底上限，不作为主过期条件
-  settled: boolean; // DOM 是否已确认到达该状态
+  appliedAtLocal: number; // 本地单调时刻，只与本地时刻相比，不与 serverTime 混用
 }
 ```
 
@@ -73,20 +72,24 @@ interface RemoteAppliedPlayback {
 暂停态下本地不产生周期性心跳广播，标记长期存在无害；而它正是泄漏危害最大的方向——
 泄漏出去的 `paused` 会被服务端记成 authority，把别人的起播挡掉。
 
-**playing 的归属必须有界。**
+**`playing` 根本不记归属。**
 playing 状态下 `onTimeUpdate` 每 2 秒触发一次广播
 （`playback-binding-controller.ts`：`nowOf() - getLastBroadcastAt() > 2000 && !video.paused`）。
-如果 playing 归属永不失效，房间会彻底失去播放心跳，其他成员无法校正漂移。
+任何活过 `playing` 到达时刻的归属都会把这些心跳静音，房间将彻底失去漂移校正。与其再用
+一个时间窗去限制它——那正是本设计要取代的构造——`rememberRemoteAppliedPlayback` 直接
+拒绝为非停止态记归属；而本地播放器进入 `playing` 会释放已有归属（C2，`left-state`）。
 
-因此 playing 归属只覆盖「**到达该状态之前**」的事件：一旦 DOM 确认进入 playing，
-标记立即清除，心跳恢复正常。
+这个不对称正是全部诀窍所在：可以无限期归属的方向，恰好是没有心跳可丢的方向，也正是
+泄漏会造成危害的方向。
 
-### 到达确认（settled）语义
+### 重复上报保持抑制
 
-- **paused 归属**：DOM 报告 `paused` 且 `|currentTime - target| ≤ ε` → `settled = true`。
-  settled **之后仍然抑制**重复报告同一状态的事件——这正是事故中两帧泄漏的来源
-  （`seeked` 和 `canplay` 各报一次同一个 paused@49）。直到 C1–C4 才放行。
-- **playing 归属**：确认到达即清除。
+归属刻意不在第一个匹配事件处终止。事故中泄漏了**两帧**——`seeked` 和 `canplay` 各报
+一次同一个 paused@49——正是第二帧把服务端否决窗口续到足以吞掉分享者的起播。所以匹配
+只抑制、不清除归属，只有 C1–C4 才放行。
+
+位置或速率不匹配则既不抑制、也**不**释放：播放器可能仍在向目标收敛，在第一个中间采样
+上就释放会把泄漏放回来。
 
 ### 兜底上限
 
@@ -115,13 +118,15 @@ paused 归属另设一个很长的兜底上限（`REMOTE_OWNERSHIP_MAX_AGE_MS = 
 ## 5. 分阶段实施
 
 **Phase 1（已实现）—— 并行兜底**
-新增 `RemoteAppliedPlayback`，只在旧的 700ms 窗**已过期**时补位判定。行为增量 =
-仅堵住泄漏，其余路径完全不变。抑制时记 `Suppressed leaked echo by ownership` 日志，
-线上可观察它触发的频率与场景。污染源 #5 的清除路径同期落地。
+新增 `RemoteAppliedPlayback`，只在旧的 700ms 窗**已判定不抑制**时补位。所有及时路径上
+行为与改动前逐字节一致，因此行为增量恰好等于「堵住泄漏」。归属只覆盖停止态，`playing`
+方向完全交给原有时间窗。抑制时记 `Suppressed leaked echo by ownership`，每次释放也记
+原因，使修复效果与潜在的过度抑制都能在用户可回传的日志里看到。污染源 #5 的清除路径
+同期落地。
 
 **Phase 2 —— 归属成为主判定**
-`shouldSuppressLocalEcho` 改为先查归属，`suppressedRemotePlayback` 退化为 playing
-归属的时间上界。
+`shouldSuppressLocalEcho` 改为先查归属，`suppressedRemotePlayback` 退化为 `playing`
+方向的时间上界——该方向归属仍然不覆盖。
 
 **Phase 3 —— 清理**
 删除 `REMOTE_ECHO_SUPPRESSION_MS` 与 `suppressedRemotePlayback`。

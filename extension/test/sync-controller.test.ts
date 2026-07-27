@@ -53,6 +53,7 @@ function createControllerHarness() {
     pauseHoldMs: 1_000,
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
+    remoteOwnershipMaxAgeMs: 30_000,
     remotePlayTransitionGuardMs: 500,
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
@@ -206,6 +207,7 @@ test("sync controller schedules hydration retry when room exists but initial roo
     pauseHoldMs: 1_000,
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
+    remoteOwnershipMaxAgeMs: 30_000,
     remotePlayTransitionGuardMs: 500,
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
@@ -1693,6 +1695,7 @@ test("sync controller broadcasts buffering when active pause is classified as bu
     pauseHoldMs: 1_000,
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
+    remoteOwnershipMaxAgeMs: 30_000,
     remotePlayTransitionGuardMs: 500,
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
@@ -1762,6 +1765,7 @@ test("sync controller broadcasts paused once buffer-pause upgrade window elapses
     pauseHoldMs: 1_000,
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
+    remoteOwnershipMaxAgeMs: 30_000,
     remotePlayTransitionGuardMs: 500,
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
@@ -1878,6 +1882,7 @@ test("sync controller tags broadcast with userInitiated:true on a fresh user pau
     pauseHoldMs: 1_000,
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
+    remoteOwnershipMaxAgeMs: 30_000,
     remotePlayTransitionGuardMs: 500,
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
@@ -1952,6 +1957,7 @@ test("sync controller omits userInitiated when a pause is buffer-induced", async
     pauseHoldMs: 1_000,
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
+    remoteOwnershipMaxAgeMs: 30_000,
     remotePlayTransitionGuardMs: 500,
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
@@ -2031,6 +2037,7 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
     pauseHoldMs: 1_000,
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
+    remoteOwnershipMaxAgeMs: 30_000,
     remotePlayTransitionGuardMs: 500,
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
@@ -2220,6 +2227,7 @@ test("programmatic apply signature stores the normalized url for mismatched (fes
     pauseHoldMs: 1_000,
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
+    remoteOwnershipMaxAgeMs: 30_000,
     remotePlayTransitionGuardMs: 500,
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
@@ -2636,6 +2644,7 @@ test("sync controller keeps userInitiated on a pause that cancelled a rate catch
     pauseHoldMs: 1_000,
     initialRoomStatePauseHoldMs: 1_500,
     remoteEchoSuppressionMs: 800,
+    remoteOwnershipMaxAgeMs: 30_000,
     remotePlayTransitionGuardMs: 500,
     remoteFollowPlayingWindowMs: 3_000,
     programmaticApplyWindowMs: 700,
@@ -2692,4 +2701,100 @@ test("sync controller does not reuse a pre-apply seek intent for programmatic ec
   // Treating the echo as the earlier user seek would answer the remote pause
   // with `playing` and restart the room.
   assert.notEqual(lastBroadcastPlayState(harness), "playing");
+});
+
+test("sync controller suppresses an apply echo that arrives after the wall-clock window", async () => {
+  // The production incident, end to end: the room switched to the next video
+  // paused at its remembered position, this side hard-seeked there, and the
+  // buffering made `seeked` land seconds later — long after
+  // remoteEchoSuppressionMs. Rebroadcasting that pause is what handed the server
+  // a pause authority that vetoed the sharer's start-up.
+  const harness = createControllerHarness();
+  const sharedUrl = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+  const sharedVideo: SharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: sharedUrl,
+    title: "Video",
+  };
+  const video = createVideo({ paused: true, currentTime: 49 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedUrl;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  harness.setNow(10_000);
+  await harness.controller.applyRoomState(
+    createRoomState({
+      url: sharedUrl,
+      currentTime: 49,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 12,
+    }),
+  );
+  harness.runtimeMessages.length = 0;
+
+  // 4s later: every wall-clock window (700-800ms) has long since closed.
+  harness.setNow(14_000);
+  await harness.controller.broadcastPlayback(video, "seeked");
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.equal(harness.runtimeMessages.length, 0);
+  assert.equal(
+    harness.debugLogs.some((line) =>
+      line.startsWith("Suppressed leaked echo by ownership paused"),
+    ),
+    true,
+  );
+});
+
+test("sync controller still broadcasts a pause the user made after the apply", async () => {
+  // The dangerous failure mode of ownership is the opposite one: swallowing a
+  // real interaction. An in-player gesture postdating the apply must release it.
+  const harness = createControllerHarness();
+  const sharedUrl = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+  const sharedVideo: SharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: sharedUrl,
+    title: "Video",
+  };
+  const video = createVideo({ paused: true, currentTime: 49 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedUrl;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  harness.setNow(10_000);
+  await harness.controller.applyRoomState(
+    createRoomState({
+      url: sharedUrl,
+      currentTime: 49,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 12,
+    }),
+  );
+  harness.runtimeMessages.length = 0;
+
+  harness.setNow(14_000);
+  harness.runtimeState.lastUserGestureInPlayerAt = 13_900;
+  harness.runtimeState.lastUserGestureAt = 13_900;
+  await harness.controller.broadcastPlayback(video, "pause");
+
+  // Deliberately the only assertion: this test is the "does not over-suppress"
+  // counterpart, so it must pass both with and without ownership wired in.
+  // Asserting the release itself here would make it fail for the wrong reason
+  // when the wiring is reverted, which is exactly how it would stop being a
+  // control. The release is covered by the guard unit tests.
+  assert.equal(harness.runtimeMessages.length >= 1, true);
 });

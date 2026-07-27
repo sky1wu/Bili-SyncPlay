@@ -29,8 +29,10 @@ import {
 import { createRoomStateApplyController } from "./room-state-apply-controller";
 import {
   hasRecentRemoteStopIntent as hasRecentRemoteStopIntentGuard,
+  rememberRemoteAppliedPlayback as rememberRemoteAppliedPlaybackGuard,
   rememberRemotePlaybackForSuppression as rememberRemotePlaybackForSuppressionGuard,
   shouldApplySelfPlayback as shouldApplySelfPlaybackGuard,
+  shouldSuppressLeakedEchoByOwnership as shouldSuppressLeakedEchoByOwnershipGuard,
   shouldSuppressLocalEcho as shouldSuppressLocalEchoGuard,
   shouldSuppressRemoteFollowupBroadcast as shouldSuppressRemoteFollowupBroadcastGuard,
   shouldSuppressProgrammaticEvent as shouldSuppressProgrammaticEventGuard,
@@ -46,6 +48,14 @@ import type {
 
 /** Tolerance for treating two broadcast positions as the same frozen instant. */
 const DUPLICATE_BROADCAST_TIME_EPSILON_SECONDS = 0.05;
+
+/**
+ * How far a local position may sit from an owned stop-like position and still
+ * count as the same standstill. Matches the paused branch of the local-echo
+ * threshold so the late path and the prompt path agree on what "same position"
+ * means.
+ */
+const REMOTE_OWNERSHIP_POSITION_TOLERANCE_SECONDS = 0.2;
 
 export interface SyncController {
   resetPlaybackSyncState(reason: string): void;
@@ -76,6 +86,12 @@ export function createSyncController(args: {
   pauseHoldMs: number;
   initialRoomStatePauseHoldMs: number;
   remoteEchoSuppressionMs: number;
+  /**
+   * Backstop age for remote playback ownership. Not the designed expiry — the
+   * release conditions in `shouldSuppressLeakedEchoByOwnership` are — so it is
+   * deliberately far longer than any transport delay it needs to survive.
+   */
+  remoteOwnershipMaxAgeMs: number;
   remotePlayTransitionGuardMs: number;
   remoteFollowPlayingWindowMs: number;
   programmaticApplyWindowMs: number;
@@ -155,6 +171,7 @@ export function createSyncController(args: {
     at: number;
   } | null = null;
   const localEchoLogState = { key: null as string | null, at: 0 };
+  const ownershipEchoLogState = { key: null as string | null, at: 0 };
   const dispatchPlaybackLogState = { key: null as string | null, at: 0 };
 
   function formatPlaybackDiagnostic(argsForLog: {
@@ -300,6 +317,7 @@ export function createSyncController(args: {
     args.lastAppliedVersionByActor.clear();
     clearRemoteFollowPlayingWindow();
     args.runtimeState.suppressedRemotePlayback = null;
+    args.runtimeState.remoteAppliedPlayback = null;
     args.runtimeState.recentRemotePlayingIntent = null;
     args.runtimeState.pendingPlaybackApplication = null;
     pendingLocalOverride.clearPendingLocalPlaybackOverride("reset");
@@ -518,10 +536,11 @@ export function createSyncController(args: {
 
   function rememberRemotePlaybackForSuppression(playback: PlaybackState): void {
     const url = args.normalizeUrl(playback.url);
+    const now = nowOf();
     const remembered = rememberRemotePlaybackForSuppressionGuard({
       playback,
       normalizedUrl: url,
-      now: nowOf(),
+      now,
       remoteEchoSuppressionMs: args.remoteEchoSuppressionMs,
       remotePlayTransitionGuardMs: args.remotePlayTransitionGuardMs,
     });
@@ -529,6 +548,14 @@ export function createSyncController(args: {
       remembered.suppressedRemotePlayback;
     args.runtimeState.recentRemotePlayingIntent =
       remembered.recentRemotePlayingIntent;
+    // A newer remote state always replaces the ownership, including replacing it
+    // with null when the room moved to `playing` — that is the C3 release.
+    args.runtimeState.remoteAppliedPlayback =
+      rememberRemoteAppliedPlaybackGuard({
+        playback,
+        normalizedUrl: url,
+        now,
+      });
     if (!url) {
       return;
     }
@@ -604,6 +631,57 @@ export function createSyncController(args: {
       `${decision.shouldSuppress ? "suppress" : "allow"}|${playState}|${args.normalizeUrl(currentVideo.url) ?? currentVideo.url}`,
       `${decision.shouldSuppress ? "Suppressed" : "Allowed"} local echo ${playState} ${currentVideo.url} delta=${delta.toFixed(2)} threshold=${threshold.toFixed(2)}`,
     );
+    if (decision.shouldSuppress) {
+      return true;
+    }
+    return shouldSuppressLeakedEchoByOwnership(video, currentVideo, playState);
+  }
+
+  /**
+   * Second opinion for the case the wall-clock window above cannot cover: the
+   * apply's own transport event arriving after 700ms. Runs only once that window
+   * has declined to suppress, so on every prompt path the behaviour is byte for
+   * byte what it was before ownership existed.
+   */
+  function shouldSuppressLeakedEchoByOwnership(
+    video: HTMLVideoElement,
+    currentVideo: SharedVideo,
+    playState: PlaybackState["playState"],
+  ): boolean {
+    const owned = args.runtimeState.remoteAppliedPlayback;
+    const decision = shouldSuppressLeakedEchoByOwnershipGuard({
+      remoteAppliedPlayback: owned,
+      normalizedCurrentUrl: args.normalizeUrl(currentVideo.url),
+      playState,
+      currentTime: video.currentTime,
+      playbackRate: video.playbackRate,
+      lastUserGestureInPlayerAt: args.runtimeState.lastUserGestureInPlayerAt,
+      now: nowOf(),
+      maxAgeMs: args.remoteOwnershipMaxAgeMs,
+      positionToleranceSeconds: REMOTE_OWNERSHIP_POSITION_TOLERANCE_SECONDS,
+    });
+    args.runtimeState.remoteAppliedPlayback =
+      decision.nextRemoteAppliedPlayback;
+
+    if (owned && decision.releaseReason) {
+      // `backstop-age` is not a routine release: it means one of the designed
+      // conditions should have fired and did not, so it is worth noticing in a
+      // log the user can send back.
+      args.debugLog(
+        `Released remote playback ownership ${owned.playState} ${owned.url} actor=${owned.actorId} seq=${owned.seq} ageMs=${nowOf() - owned.appliedAtLocal} reason=${decision.releaseReason}${
+          decision.releaseReason === "backstop-age" ? " (unexpected)" : ""
+        }`,
+      );
+      return false;
+    }
+
+    if (decision.shouldSuppress && owned) {
+      logHeartbeatMessage(
+        ownershipEchoLogState,
+        `${playState}|${owned.url}`,
+        `Suppressed leaked echo by ownership ${playState} ${owned.url} actor=${owned.actorId} seq=${owned.seq} ageMs=${nowOf() - owned.appliedAtLocal} localT=${video.currentTime.toFixed(2)} ownedT=${owned.currentTime.toFixed(2)}`,
+      );
+    }
     return decision.shouldSuppress;
   }
 

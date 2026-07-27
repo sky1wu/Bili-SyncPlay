@@ -26,6 +26,45 @@ export interface RecentRemotePlayingIntent {
   currentTime: number;
 }
 
+/**
+ * A stop-like playback state this side applied because the *room* asked for it,
+ * recorded so a local event reporting that same state can still be recognised as
+ * the apply's echo however late it arrives.
+ *
+ * [[SuppressedRemotePlayback]] answers the same question on a 700ms wall-clock
+ * window, which is only correct while the transport events an apply produces are
+ * prompt. They are not: a hard seek across a shared-video switch has to buffer
+ * the new position first, so `seeked`/`canplay` land well after the window shut,
+ * and the pause the room handed us gets rebroadcast as if this side had paused —
+ * which the server then treats as a pause authority and uses to veto the
+ * sharer's start-up (see docs/design/remote-echo-ownership.md).
+ *
+ * Ownership therefore does not expire on time. It is released only when
+ * something proves the state is no longer the room's to own: an in-player user
+ * gesture (the user took over), the local player leaving the state on its own,
+ * a newer remote state, or the context disappearing (shared video switch, room
+ * reset, `<video>` rebind). [[maxAgeMs]] is a backstop against an unenumerated
+ * path, not a design expiry.
+ *
+ * Only stop-like states are owned. A `playing` state cannot be: playback
+ * heartbeats broadcast every 2s while playing, so an ownership that outlived the
+ * arrival of `playing` would mute the room's drift correction entirely.
+ */
+export interface RemoteAppliedPlayback {
+  url: string;
+  playState: "paused" | "buffering";
+  currentTime: number;
+  playbackRate: number;
+  actorId: string;
+  seq: number;
+  /**
+   * Local monotonic instant of the apply. Compared only against other local
+   * instants (gesture timestamps, the backstop age) — never against
+   * `serverTime`, which belongs to a different clock.
+   */
+  appliedAtLocal: number;
+}
+
 export type LocalPlaybackEventSource =
   | "play"
   | "pause"
@@ -158,6 +197,7 @@ export interface ContentRuntimeState {
   remoteFollowPlayingUntil: number;
   remoteFollowPlayingUrl: string | null;
   suppressedRemotePlayback: SuppressedRemotePlayback | null;
+  remoteAppliedPlayback: RemoteAppliedPlayback | null;
   recentRemotePlayingIntent: RecentRemotePlayingIntent | null;
   lastExplicitUserAction: ExplicitUserAction | null;
   /**
@@ -345,6 +385,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     remoteFollowPlayingUntil: 0,
     remoteFollowPlayingUrl: null,
     suppressedRemotePlayback: null,
+    remoteAppliedPlayback: null,
     recentRemotePlayingIntent: null,
     lastExplicitUserAction: null,
     explicitSeekOriginPlayState: null,

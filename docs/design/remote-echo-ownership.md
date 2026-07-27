@@ -46,14 +46,13 @@ When a remote playback state is applied, record that the state **belongs to the 
 ```ts
 interface RemoteAppliedPlayback {
   url: string; // owning video (normalized)
-  playState: PlaybackState["playState"];
+  playState: "paused" | "buffering"; // stop-like only — see the split below
   currentTime: number;
   playbackRate: number;
   actorId: string;
   seq: number;
-  appliedAtLocal: number; // local monotonic instant; used for extrapolation and the
-  // backstop cap only, never as the primary expiry
-  settled: boolean; // has the DOM confirmed it reached this state
+  appliedAtLocal: number; // local monotonic instant; compared only against other
+  // local instants, never against serverTime
 }
 ```
 
@@ -83,22 +82,29 @@ A paused page emits no periodic heartbeat, so a long-lived marker is harmless �
 is the direction where leaking does the most damage, because a leaked `paused` becomes a
 server-side authority that vetoes everyone else's start-up.
 
-**Ownership of playing must be bounded.**
+**A `playing` state is never owned at all.**
 While playing, `onTimeUpdate` broadcasts every 2 seconds
 (`playback-binding-controller.ts`: `nowOf() - getLastBroadcastAt() > 2000 && !video.paused`).
-If playing ownership never lapsed, the room would lose its playback heartbeat entirely and
-peers could no longer correct drift.
+Any ownership that outlived the arrival of `playing` would mute those heartbeats and the
+room would lose its drift correction entirely. Rather than bound it with yet another
+window — the very construct this design is replacing — `rememberRemoteAppliedPlayback`
+simply declines to own anything that is not stop-like, and the local player reaching
+`playing` releases an existing ownership (C2, `left-state`).
 
-So playing ownership only covers events **before the state is reached**: once the DOM
-confirms playback started, the marker is cleared and the heartbeat resumes.
+That asymmetry is the whole trick: the direction that can be owned indefinitely is
+exactly the direction with no heartbeat to lose, and it is also the direction where
+leaking does damage.
 
-### Settled semantics
+### Repeat reports stay suppressed
 
-- **paused ownership**: the DOM reports `paused` with `|currentTime - target| ≤ ε` →
-  `settled = true`. It **keeps suppressing** repeat reports of the same state after that —
-  exactly the two leaked frames from the incident (`seeked` and `canplay` each reporting
-  the same paused@49). Only C1–C4 release it.
-- **playing ownership**: cleared as soon as arrival is confirmed.
+Ownership deliberately does not stop at the first matching event. The incident leaked
+_two_ frames — `seeked` and `canplay` each reporting the same paused@49 — and it was the
+second one that extended the server's veto window far enough to swallow the sharer's
+start-up. So a match suppresses and leaves the ownership in place; only C1–C4 release it.
+
+A non-matching position or rate suppresses nothing but does **not** release either: the
+player may still be settling toward the target, and releasing on the first intermediate
+sample would put the leak back.
 
 ### Backstop cap
 
@@ -129,14 +135,17 @@ Only #2 is replaced; #5 gains a clearing path. The other six keep their existing
 ## 5. Phased rollout
 
 **Phase 1 (implemented) — parallel backstop**
-Add `RemoteAppliedPlayback`, consulted **only once the old 700ms window has expired**. The
-behavioural delta is exactly "the leak is plugged"; every other path is untouched.
-Suppression logs `Suppressed leaked echo by ownership` so its real-world frequency and
-scenarios are observable. The #5 clearing path lands in the same phase.
+Add `RemoteAppliedPlayback`, consulted **only once the old 700ms window has declined to
+suppress**. On every prompt path the behaviour is byte for byte what it was before, so the
+behavioural delta is exactly "the leak is plugged". Ownership covers stop-like states only;
+`playing` stays entirely with the existing window. Suppression logs
+`Suppressed leaked echo by ownership` and every release logs its reason, so both the fix
+and any over-suppression are observable in a log the user can send back. The #5 clearing
+path lands in the same phase.
 
 **Phase 2 — ownership becomes the primary check**
 `shouldSuppressLocalEcho` consults ownership first; `suppressedRemotePlayback` degrades
-into the time bound for playing ownership.
+into the time bound for the `playing` direction, which ownership still does not cover.
 
 **Phase 3 — cleanup**
 Remove `REMOTE_ECHO_SUPPRESSION_MS` and `suppressedRemotePlayback`.

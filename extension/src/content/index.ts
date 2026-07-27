@@ -37,6 +37,11 @@ const LOCAL_INTENT_GUARD_MS = 1200;
 const PAUSE_HOLD_MS = 1200;
 const INITIAL_ROOM_STATE_PAUSE_HOLD_MS = 3000;
 const REMOTE_ECHO_SUPPRESSION_MS = 700;
+// Backstop only. Remote playback ownership is released by the conditions in
+// `shouldSuppressLeakedEchoByOwnership`, not by age; this exists so an
+// unenumerated contamination source cannot leave it in force forever, and is
+// therefore far longer than any transport delay it has to survive.
+const REMOTE_OWNERSHIP_MAX_AGE_MS = 30_000;
 const REMOTE_PLAY_TRANSITION_GUARD_MS = 1800;
 const REMOTE_FOLLOW_PLAYING_WINDOW_MS = 3000;
 const PROGRAMMATIC_APPLY_WINDOW_MS = 700;
@@ -110,6 +115,7 @@ const syncController = createSyncController({
   pauseHoldMs: PAUSE_HOLD_MS,
   initialRoomStatePauseHoldMs: INITIAL_ROOM_STATE_PAUSE_HOLD_MS,
   remoteEchoSuppressionMs: REMOTE_ECHO_SUPPRESSION_MS,
+  remoteOwnershipMaxAgeMs: REMOTE_OWNERSHIP_MAX_AGE_MS,
   remotePlayTransitionGuardMs: REMOTE_PLAY_TRANSITION_GUARD_MS,
   remoteFollowPlayingWindowMs: REMOTE_FOLLOW_PLAYING_WINDOW_MS,
   programmaticApplyWindowMs: PROGRAMMATIC_APPLY_WINDOW_MS,

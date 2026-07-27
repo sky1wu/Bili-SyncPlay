@@ -4,14 +4,17 @@ import type { PlaybackState } from "@bili-syncplay/protocol";
 import {
   evaluateNonSharedPageGuard,
   hasRecentRemoteStopIntent,
+  rememberRemoteAppliedPlayback,
   rememberRemotePlaybackForSuppression,
   shouldApplySelfPlayback,
   shouldForcePauseWhileWaitingForInitialRoomState,
   shouldSuppressRemoteFollowupBroadcast,
+  shouldSuppressLeakedEchoByOwnership,
   shouldSuppressLocalEcho,
   shouldSuppressProgrammaticEvent,
   shouldSuppressRemotePlayTransition,
 } from "../src/content/sync-guards";
+import type { RemoteAppliedPlayback } from "../src/content/runtime-state";
 
 function createPlayback(overrides: Partial<PlaybackState> = {}): PlaybackState {
   return {
@@ -599,4 +602,162 @@ test("a ratechange-scoped window still suppresses its own rate echo", () => {
   assert.equal(decision.shouldSuppress, true);
   // The window must survive so a follow-up rate echo is caught too.
   assert.equal(decision.nextProgrammaticApplyUntil, 10_700);
+});
+
+function createOwnership(
+  overrides: Partial<RemoteAppliedPlayback> = {},
+): RemoteAppliedPlayback {
+  return {
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    playState: "paused",
+    currentTime: 49,
+    playbackRate: 1,
+    actorId: "remote-member",
+    seq: 12,
+    appliedAtLocal: 1_000,
+    ...overrides,
+  };
+}
+
+function ownershipInput(
+  overrides: Partial<
+    Parameters<typeof shouldSuppressLeakedEchoByOwnership>[0]
+  > = {},
+): Parameters<typeof shouldSuppressLeakedEchoByOwnership>[0] {
+  return {
+    remoteAppliedPlayback: createOwnership(),
+    normalizedCurrentUrl: "https://www.bilibili.com/video/BV1xx411c7mD",
+    playState: "paused",
+    currentTime: 49,
+    playbackRate: 1,
+    lastUserGestureInPlayerAt: 0,
+    now: 5_000,
+    maxAgeMs: 30_000,
+    positionToleranceSeconds: 0.2,
+    ...overrides,
+  };
+}
+
+test("ownership suppresses an apply echo that arrives long after the 700ms window", () => {
+  // The incident: a cross-video hard seek buffers for seconds, so `seeked` lands
+  // 4s after the apply — far outside every wall-clock window.
+  const decision = shouldSuppressLeakedEchoByOwnership(ownershipInput());
+  assert.equal(decision.shouldSuppress, true);
+  assert.equal(decision.releaseReason, null);
+  assert.notEqual(decision.nextRemoteAppliedPlayback, null);
+});
+
+test("ownership keeps suppressing the second report of the same applied state", () => {
+  // `seeked` then `canplay` each report the same standstill; both leaked in the
+  // incident, and the second one is what extended the server's veto window.
+  const first = shouldSuppressLeakedEchoByOwnership(ownershipInput());
+  const second = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({
+      remoteAppliedPlayback: first.nextRemoteAppliedPlayback,
+      now: 5_120,
+    }),
+  );
+  assert.equal(second.shouldSuppress, true);
+});
+
+test("an in-player gesture releases ownership so the user's own pause broadcasts", () => {
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({ lastUserGestureInPlayerAt: 4_000 }),
+  );
+  assert.equal(decision.shouldSuppress, false);
+  assert.equal(decision.releaseReason, "user-gesture");
+  assert.equal(decision.nextRemoteAppliedPlayback, null);
+});
+
+test("a gesture predating the apply does not release ownership", () => {
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({ lastUserGestureInPlayerAt: 900 }),
+  );
+  assert.equal(decision.shouldSuppress, true);
+  assert.equal(decision.releaseReason, null);
+});
+
+test("local playback releases ownership so a start-up is never swallowed", () => {
+  // The sharer's autoplay-next start-up is exactly this: the room state was
+  // paused, then this side genuinely begins playing.
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({ playState: "playing" }),
+  );
+  assert.equal(decision.shouldSuppress, false);
+  assert.equal(decision.releaseReason, "left-state");
+});
+
+test("a paused/buffering flicker does not release ownership", () => {
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({ playState: "buffering" }),
+  );
+  assert.equal(decision.shouldSuppress, false);
+  assert.equal(decision.releaseReason, null);
+  assert.notEqual(decision.nextRemoteAppliedPlayback, null);
+});
+
+test("a diverged position suppresses nothing but keeps ownership while settling", () => {
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({ currentTime: 51 }),
+  );
+  assert.equal(decision.shouldSuppress, false);
+  assert.equal(decision.releaseReason, null);
+  assert.notEqual(decision.nextRemoteAppliedPlayback, null);
+});
+
+test("a different video releases ownership", () => {
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({
+      normalizedCurrentUrl: "https://www.bilibili.com/video/BV1other",
+    }),
+  );
+  assert.equal(decision.shouldSuppress, false);
+  assert.equal(decision.releaseReason, "url-changed");
+});
+
+test("the backstop releases ownership that outlived every designed condition", () => {
+  const decision = shouldSuppressLeakedEchoByOwnership(
+    ownershipInput({ now: 31_001 }),
+  );
+  assert.equal(decision.shouldSuppress, false);
+  assert.equal(decision.releaseReason, "backstop-age");
+  assert.equal(decision.nextRemoteAppliedPlayback, null);
+});
+
+test("ownership is only taken for stop-like states, never for playing", () => {
+  const url = "https://www.bilibili.com/video/BV1xx411c7mD";
+  assert.notEqual(
+    rememberRemoteAppliedPlayback({
+      playback: createPlayback({ playState: "paused" }),
+      normalizedUrl: url,
+      now: 1_000,
+    }),
+    null,
+  );
+  assert.notEqual(
+    rememberRemoteAppliedPlayback({
+      playback: createPlayback({ playState: "buffering" }),
+      normalizedUrl: url,
+      now: 1_000,
+    }),
+    null,
+  );
+  // Playing must not be owned: heartbeats broadcast every 2s while playing, and
+  // an ownership covering them would mute the room's drift correction.
+  assert.equal(
+    rememberRemoteAppliedPlayback({
+      playback: createPlayback({ playState: "playing" }),
+      normalizedUrl: url,
+      now: 1_000,
+    }),
+    null,
+  );
+  assert.equal(
+    rememberRemoteAppliedPlayback({
+      playback: createPlayback({ playState: "paused" }),
+      normalizedUrl: null,
+      now: 1_000,
+    }),
+    null,
+  );
 });

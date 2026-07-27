@@ -1169,6 +1169,11 @@ export function createPlaybackBindingController(args: {
       // whose paused state we never observed transitioning. The pause
       // classifiers use this timestamp to avoid reporting either as a user pause.
       args.runtimeState.lastVideoElementBoundAt = nowOf();
+      // Remote playback ownership describes a state applied to the *previous*
+      // element. The replacement never received that write, so anything it
+      // reports is its own — keeping the ownership would mute a genuine state as
+      // if it were the old element's echo.
+      args.runtimeState.remoteAppliedPlayback = null;
     }
   }
 

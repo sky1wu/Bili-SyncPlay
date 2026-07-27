@@ -7,6 +7,7 @@ import type {
   ProgrammaticApplyScope,
   ProgrammaticPlaybackSignature,
   RecentRemotePlayingIntent,
+  RemoteAppliedPlayback,
   SuppressedRemotePlayback,
 } from "./runtime-state";
 
@@ -42,6 +43,27 @@ export interface LocalEchoGuardInput {
   currentTime: number;
   playbackRate: number;
   now: number;
+}
+
+export interface RemoteOwnershipEchoGuardInput {
+  remoteAppliedPlayback: RemoteAppliedPlayback | null;
+  normalizedCurrentUrl: string | null;
+  playState: PlaybackState["playState"];
+  currentTime: number;
+  playbackRate: number;
+  lastUserGestureInPlayerAt: number;
+  now: number;
+  maxAgeMs: number;
+  positionToleranceSeconds: number;
+}
+
+export type RemoteOwnershipReleaseReason =
+  "user-gesture" | "left-state" | "url-changed" | "backstop-age";
+
+export interface RemoteOwnershipEchoDecision {
+  shouldSuppress: boolean;
+  nextRemoteAppliedPlayback: RemoteAppliedPlayback | null;
+  releaseReason: RemoteOwnershipReleaseReason | null;
 }
 
 export interface RecentRemoteStopIntentInput {
@@ -244,6 +266,113 @@ export function rememberRemotePlaybackForSuppression(
             currentTime: input.playback.currentTime,
           }
         : null,
+  };
+}
+
+/**
+ * Recognise a local event as the echo of a stop-like state the room asked this
+ * side to apply, in the window where [[shouldSuppressLocalEcho]] can no longer
+ * tell: its 700ms wall clock has run out, but the transport event it was meant
+ * to cover has only just arrived (a cross-video hard seek has to buffer first).
+ *
+ * Ownership is released, rather than consulted, whenever something proves the
+ * state is no longer the room's:
+ *
+ * - `user-gesture` — a gesture *inside the player* postdating the apply. This is
+ *   checked first and deliberately reads the in-player timestamp, not the
+ *   document-level one: a stray click on blank page area must not hand the state
+ *   back, while a real interaction always must, or the user's own pause would be
+ *   swallowed silently.
+ * - `left-state` — the local player reached `playing`. It moved on its own, so
+ *   nothing that follows is this apply's echo. (`paused` ⇄ `buffering` is not a
+ *   departure: both are the same stop-like state mid-transition, and treating
+ *   the flicker as a departure would reopen the leak.)
+ * - `url-changed` — a different video is on screen; the ownership belonged to
+ *   the old one.
+ * - `backstop-age` — pure defence against a contamination source that was not
+ *   enumerated. Reaching it means one of the conditions above should have fired
+ *   and did not, so callers log it as a warning rather than treating it as
+ *   routine.
+ *
+ * A non-matching position or rate suppresses nothing but does *not* release:
+ * the player may still be settling toward the target, and releasing on the first
+ * intermediate sample would put the leak back.
+ */
+export function shouldSuppressLeakedEchoByOwnership(
+  input: RemoteOwnershipEchoGuardInput,
+): RemoteOwnershipEchoDecision {
+  const owned = input.remoteAppliedPlayback;
+  if (!owned) {
+    return {
+      shouldSuppress: false,
+      nextRemoteAppliedPlayback: null,
+      releaseReason: null,
+    };
+  }
+
+  const release = (
+    reason: RemoteOwnershipReleaseReason,
+  ): RemoteOwnershipEchoDecision => ({
+    shouldSuppress: false,
+    nextRemoteAppliedPlayback: null,
+    releaseReason: reason,
+  });
+
+  if (input.lastUserGestureInPlayerAt > owned.appliedAtLocal) {
+    return release("user-gesture");
+  }
+
+  if (input.normalizedCurrentUrl !== owned.url) {
+    return release("url-changed");
+  }
+
+  if (input.playState === "playing") {
+    return release("left-state");
+  }
+
+  if (input.now - owned.appliedAtLocal >= input.maxAgeMs) {
+    return release("backstop-age");
+  }
+
+  const matchesState = input.playState === owned.playState;
+  const matchesRate = Math.abs(input.playbackRate - owned.playbackRate) <= 0.01;
+  const matchesPosition =
+    Math.abs(input.currentTime - owned.currentTime) <=
+    input.positionToleranceSeconds;
+
+  return {
+    shouldSuppress: matchesState && matchesRate && matchesPosition,
+    nextRemoteAppliedPlayback: owned,
+    releaseReason: null,
+  };
+}
+
+/**
+ * Take ownership of a stop-like state this side is about to apply on the room's
+ * behalf. A `playing` state is never owned — see [[RemoteAppliedPlayback]].
+ */
+export function rememberRemoteAppliedPlayback(input: {
+  playback: PlaybackState;
+  normalizedUrl: string | null;
+  now: number;
+}): RemoteAppliedPlayback | null {
+  if (!input.normalizedUrl) {
+    return null;
+  }
+  if (
+    input.playback.playState !== "paused" &&
+    input.playback.playState !== "buffering"
+  ) {
+    return null;
+  }
+  return {
+    url: input.normalizedUrl,
+    playState: input.playback.playState,
+    currentTime: input.playback.currentTime,
+    playbackRate: input.playback.playbackRate,
+    actorId: input.playback.actorId,
+    seq: input.playback.seq,
+    appliedAtLocal: input.now,
   };
 }
 
