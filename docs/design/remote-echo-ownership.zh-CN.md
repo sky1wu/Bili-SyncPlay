@@ -135,16 +135,16 @@ paused 归属另设一个很长的兜底上限（`REMOTE_OWNERSHIP_MAX_AGE_MS = 
 改这类状态机必须先枚举全部「产生本地事件但非用户意图」的来源，逐一确认新模型不会
 踩坏它们：
 
-| #   | 污染源                                                          | 现有门槛                                     | 新模型下归谁                                                               |
-| --- | --------------------------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------- |
-| 1   | apply 写入 DOM 时同步产生的事件                                 | `programmaticApplyUntil` (700ms) + signature | 保持不变。这一层是同步的，700ms 足够，不是失效点                           |
-| 2   | apply 之后迟到的 transport 事件（`seeked`/`canplay`/`waiting`） | `suppressedRemotePlayback` (700ms)           | **本次替换目标** → `RemoteAppliedPlayback`                                 |
-| 3   | forced pause（非共享视频自动播放拦截）                          | `lastForcedPauseAt`                          | 不变。它不是远端 apply，不进归属模型                                       |
-| 4   | soft-apply 的 rate 写回与取消                                   | `programmaticApplyScope = "ratechange"`      | 不变。作用域机制已正确区分                                                 |
-| 5   | `<video>` 元素重建（缓冲恢复）                                  | `lastVideoElementBoundAt`                    | 新增 C4 清除路径；之所以安全，是因为待应用状态自身的写入会为新元素重建归属 |
-| 6   | 自然结束 / autoplay-next 交接                                   | `sharerEndedSuppression*` / `holdNonSharer*` | 不变                                                                       |
-| 7   | SPA 导航期 stale page bridge                                    | `postNavigationAnchor*`                      | 不变                                                                       |
-| 8   | 非共享页                                                        | `non-shared-page` 分支                       | 不变，且在归属判定之前                                                     |
+| #   | 污染源                                                          | 现有门槛                                     | 新模型下归谁                                                                                                     |
+| --- | --------------------------------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 1   | apply 写入 DOM 时同步产生的事件                                 | `programmaticApplyUntil` (700ms) + signature | 保持不变。这一层是同步的，700ms 足够，不是失效点                                                                 |
+| 2   | apply 之后迟到的 transport 事件（`seeked`/`canplay`/`waiting`） | `suppressedRemotePlayback` (700ms)           | **本次替换目标** → `RemoteAppliedPlayback`                                                                       |
+| 3   | forced pause（非共享视频自动播放拦截）                          | `lastForcedPauseAt`                          | 不变。它不是远端 apply，不进归属模型                                                                             |
+| 4   | soft-apply 的 rate 写回与取消                                   | `programmaticApplyScope = "ratechange"`      | 不变。作用域机制已正确区分                                                                                       |
+| 5   | `<video>` 元素重建（缓冲恢复）                                  | `lastVideoElementBoundAt`                    | 新增 C4 清除路径，但**仅在真正替换已绑定元素时**——首次绑定一个已被应用过的元素若也清除，就没有任何东西能重建归属 |
+| 6   | 自然结束 / autoplay-next 交接                                   | `sharerEndedSuppression*` / `holdNonSharer*` | 不变                                                                                                             |
+| 7   | SPA 导航期 stale page bridge                                    | `postNavigationAnchor*`                      | 不变                                                                                                             |
+| 8   | 非共享页                                                        | `non-shared-page` 分支                       | 不变，且在归属判定之前                                                                                           |
 
 只有 #2 被替换，#5 新增一条清除路径。其余六类维持现有门槛不动。
 

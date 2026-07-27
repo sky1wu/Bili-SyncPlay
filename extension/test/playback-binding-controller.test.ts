@@ -22,17 +22,21 @@ function installDomStub() {
   const originalWindow = globalThis.window;
   const listeners: ListenerMap = new Map();
 
-  const video = {
-    paused: false,
-    addEventListener(type: string, listener: EventListener) {
-      listeners.set(type, listener);
-    },
-  } as unknown as StubVideoElement;
+  const makeVideo = () =>
+    ({
+      paused: false,
+      addEventListener(type: string, listener: EventListener) {
+        listeners.set(type, listener);
+      },
+    }) as unknown as StubVideoElement;
+
+  const video = makeVideo();
+  let currentVideo: StubVideoElement = video;
 
   Object.assign(globalThis, {
     document: {
       querySelector(selector: string) {
-        return selector === "video" ? video : null;
+        return selector === "video" ? currentVideo : null;
       },
     },
     window: {
@@ -54,6 +58,11 @@ function installDomStub() {
   return {
     video,
     listeners,
+    /** Simulate the player rebuilding its media element. */
+    swapVideo() {
+      currentVideo = makeVideo();
+      return currentVideo;
+    },
     restore() {
       Object.assign(globalThis, {
         document: originalDocument,
@@ -4216,6 +4225,85 @@ test("playback binding controller carries in-player provenance when the gesture 
 
     assert.equal(runtimeState.lastExplicitUserAction?.kind, "pause");
     assert.equal(runtimeState.lastExplicitUserAction?.inPlayerGestureAt, 1_000);
+  } finally {
+    dom.restore();
+  }
+});
+
+function createOwnedPause(): NonNullable<
+  ReturnType<typeof createContentRuntimeState>["remoteAppliedPlayback"]
+> {
+  return {
+    url: "https://www.bilibili.com/video/BVshared",
+    playState: "paused",
+    currentTime: 49,
+    playbackRate: 1,
+    actorId: "remote-member",
+    seq: 12,
+    appliedAtLocal: 1_000,
+    appliedAtMonotonic: 1_000,
+  };
+}
+
+function createBindingControllerForOwnership(
+  runtimeState: ReturnType<typeof createContentRuntimeState>,
+) {
+  return createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+}
+
+test("playback binding controller keeps ownership when it first binds an already-applied element", async () => {
+  // An element that already has metadata is reachable via `getVideoElement()`
+  // before the bind poll gets to it, so a remote pause can be applied to it —
+  // taking ownership and consuming the pending state — and only then does the
+  // first bind happen. Clearing here would leave nothing to re-establish it, and
+  // this very element's late `seeked`/`canplay` would leak the room's pause.
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.remoteAppliedPlayback = createOwnedPause();
+  const controller = createBindingControllerForOwnership(runtimeState);
+
+  try {
+    controller.attachPlaybackListeners();
+    assert.notEqual(runtimeState.remoteAppliedPlayback, null);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller drops ownership when the player replaces the element", async () => {
+  // The genuine replacement case: the new element never received the write, so
+  // whatever it reports is its own state, not the old element's echo.
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const controller = createBindingControllerForOwnership(runtimeState);
+
+  try {
+    controller.attachPlaybackListeners();
+    runtimeState.remoteAppliedPlayback = createOwnedPause();
+
+    dom.swapVideo();
+    controller.attachPlaybackListeners();
+
+    assert.equal(runtimeState.remoteAppliedPlayback, null);
   } finally {
     dom.restore();
   }

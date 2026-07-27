@@ -68,6 +68,14 @@ export function createPlaybackBindingController(args: {
   let videoBindingTimer: number | null = null;
   let pauseBufferUpgradeTimerId: number | null = null;
   let sharerEndedFlushTimerId: number | null = null;
+  /**
+   * The element bound on the previous pass, so a bind that *replaces* a live
+   * element can be told apart from the first bind of the page.
+   * `bindVideoElement` cannot answer this: it reports whether the element it was
+   * handed had been bound before, which is equally true of both. Only ever holds
+   * the latest element, and is replaced on the next bind.
+   */
+  let previouslyBoundVideo: HTMLVideoElement | null = null;
   const nowOf = () => args.getNow?.() ?? Date.now();
   const scheduleUpgradeTimer = (cb: () => void, ms: number): number | null => {
     if (
@@ -1170,12 +1178,23 @@ export function createPlaybackBindingController(args: {
       // whose paused state we never observed transitioning. The pause
       // classifiers use this timestamp to avoid reporting either as a user pause.
       args.runtimeState.lastVideoElementBoundAt = nowOf();
-      // Remote playback ownership describes a state applied to the *previous*
-      // element. The replacement never received that write, so anything it
-      // reports is its own — keeping the ownership would mute a genuine state as
-      // if it were the old element's echo.
-      args.runtimeState.remoteAppliedPlayback = null;
+      // Remote playback ownership describes a state written to the element that
+      // was live at the time. Only a genuine *replacement* invalidates it: the
+      // new element never received that write, so what it reports is its own,
+      // and keeping the ownership would mute a real state as the old element's
+      // echo.
+      //
+      // Binding an element for the first time must NOT clear, even though it
+      // takes the same branch. An element that already has metadata can be found
+      // by `getVideoElement()` before the bind poll reaches it, so a remote pause
+      // may have been applied to it and taken ownership already — with the
+      // pending state consumed, nothing would re-establish it, and this element's
+      // own late `seeked`/`canplay` would leak the room's pause right back.
+      if (previouslyBoundVideo !== null && previouslyBoundVideo !== video) {
+        args.runtimeState.remoteAppliedPlayback = null;
+      }
     }
+    previouslyBoundVideo = video;
   }
 
   return {
