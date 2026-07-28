@@ -33,6 +33,11 @@ import {
   type RoomEventBus,
   type RoomEventBusMessage,
 } from "../room-event-bus.js";
+import { ROOM_INDEX_RECONCILE_INTERVAL_MS } from "../redis-room-store.js";
+import {
+  createRoomIndexReconciler,
+  type RoomIndexReconciler,
+} from "../room-index-reconciler.js";
 import { createInMemoryRoomStore, type RoomStore } from "../room-store.js";
 import {
   instrumentRoomStore,
@@ -112,9 +117,15 @@ type BootstrapLoggingHooks = {
 
 export type ServerBootstrapContext = {
   serviceVersion: string;
-  // Maintainable rather than plain RoomStore so app.ts can see the optional
-  // reconcileRoomIndex hook without probing for it structurally.
+  // Maintainable rather than plain RoomStore so the reconcile hook is visible
+  // without probing for it structurally.
   roomStore: MaintainableRoomStore;
+  // Built here rather than in each entry point so every server that shares
+  // this Redis keeps the index converging. The standalone global admin reads
+  // rooms but writes none, so an entry point that forgot to start this would
+  // serve a listing and a count that silently drift from what the room nodes
+  // wrote — with nothing failing to say so. Null when the store keeps no index.
+  roomIndexReconciler: RoomIndexReconciler | null;
   localRuntimeStore: RuntimeStore;
   sharedRuntimeStore: RuntimeStore;
   runtimeStore: RuntimeStore;
@@ -278,7 +289,7 @@ export async function createServerBootstrapContext(
     roomStore: rawRoomStore,
     serviceVersion,
   });
-  const roomStore =
+  const roomStore: MaintainableRoomStore =
     persistenceConfig.provider === "redis" &&
     dependencies.roomStore === undefined
       ? instrumentRoomStore(rawRoomStore, metricsCollector)
@@ -390,9 +401,21 @@ export async function createServerBootstrapContext(
     });
   }
 
+  // Only the Redis store keeps an index that can drift from the room bodies;
+  // the in-memory one has nothing to reconcile.
+  const reconcileRoomIndex = roomStore.reconcileRoomIndex;
+  const roomIndexReconciler = reconcileRoomIndex
+    ? createRoomIndexReconciler({
+        intervalMs: ROOM_INDEX_RECONCILE_INTERVAL_MS,
+        reconcileRoomIndex: () => reconcileRoomIndex(),
+        logEvent,
+      })
+    : null;
+
   return {
     serviceVersion,
     roomStore,
+    roomIndexReconciler,
     localRuntimeStore,
     sharedRuntimeStore,
     runtimeStore,
@@ -405,7 +428,16 @@ export async function createServerBootstrapContext(
 }
 
 export function createSharedServerShutdownSteps(args: {
-  roomStore: RoomStore;
+  // Maintainable, not plain RoomStore: this function probes for close(), so
+  // the parameter should say the hook is expected rather than leave callers
+  // passing something the declared type claims cannot have one.
+  roomStore: MaintainableRoomStore;
+  // Required, not optional: an entry point that forgets it would silently stop
+  // reconciling the index, and nothing at runtime would say so. Making it
+  // mandatory turns that omission into a compile error — which is why the
+  // standalone global admin regressed here in the first place. Pass the
+  // context's value; null when the store keeps no index.
+  roomIndexReconciler: RoomIndexReconciler | null;
   eventStore: GlobalEventStore;
   runtimeStore?: RuntimeStore | null;
   runtimeStoreStepName?: string;
@@ -414,6 +446,12 @@ export function createSharedServerShutdownSteps(args: {
   closeAdminServices: () => Promise<void>;
 }): ShutdownStep[] {
   const steps: ShutdownStep[] = [
+    // Must precede close_room_store: stop() waits out the pass in flight, and
+    // a SCAN/GET/EVAL still in the air would otherwise race redis.quit().
+    {
+      name: "stop_room_index_reconciler",
+      run: () => args.roomIndexReconciler?.stop(),
+    },
     {
       name: "close_room_store",
       run: () =>

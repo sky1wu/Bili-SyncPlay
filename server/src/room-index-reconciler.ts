@@ -2,7 +2,8 @@ import { clampTimerIntervalMs } from "./timers.js";
 import type { LogEvent } from "./types.js";
 
 export type RoomIndexReconciler = {
-  stop: () => void;
+  /** Resolves once the pass in flight, if any, has settled. */
+  stop: () => Promise<void>;
   runNow: () => Promise<boolean>;
 };
 
@@ -38,13 +39,22 @@ export function createRoomIndexReconciler(options: {
     }
   }
 
+  // A pass in flight when shutdown starts must be waited out, not just
+  // unscheduled: the steps that follow close the room store, and a SCAN/GET/
+  // EVAL still in the air would then race `redis.quit()` and issue commands on
+  // a closed connection. Same shape as `runtime-index-reaper`.
+  let pendingPass: Promise<boolean> | null = null;
+
   const intervalId = setInterval(() => {
-    void runNow();
+    pendingPass = runNow();
   }, clampTimerIntervalMs(options.intervalMs));
 
   return {
-    stop() {
+    async stop() {
       clearInterval(intervalId);
+      // runNow never rejects, so awaiting it cannot fail the shutdown step.
+      await pendingPass;
+      pendingPass = null;
     },
     runNow,
   };

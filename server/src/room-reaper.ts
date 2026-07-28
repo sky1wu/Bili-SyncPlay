@@ -2,7 +2,8 @@ import { clampTimerIntervalMs } from "./timers.js";
 import type { LogEvent } from "./types.js";
 
 export type RoomReaper = {
-  stop: () => void;
+  /** Resolves once the sweep in flight, if any, has settled. */
+  stop: () => Promise<void>;
   runNow: () => Promise<number>;
 };
 
@@ -34,13 +35,21 @@ export function createRoomReaper(options: {
     }
   }
 
+  // Same reason as `room-index-reconciler`: shutdown closes the room store
+  // right after this timer is stopped, so a sweep still in flight would race
+  // `redis.quit()` and issue its EVAL on a closed connection.
+  let pendingSweep: Promise<number> | null = null;
+
   const intervalId = setInterval(() => {
-    void runNow();
+    pendingSweep = runNow();
   }, clampTimerIntervalMs(options.intervalMs));
 
   return {
-    stop() {
+    async stop() {
       clearInterval(intervalId);
+      // runNow never rejects, so awaiting it cannot fail the shutdown step.
+      await pendingSweep;
+      pendingSweep = null;
     },
     runNow,
   };
