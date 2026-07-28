@@ -7,6 +7,14 @@ import type {
 import type { SharedVideoToastPayload } from "../shared/messages";
 import { isSocketWritable } from "./socket-manager";
 
+/**
+ * `now` must come from a monotonic clock: it becomes a TTL deadline that
+ * {@link getPendingShareToastFor} compares against another reading of the same
+ * clock, which makes the pair an elapsed duration. The key also embeds it, but
+ * only needs to be unique per share event — and a monotonic reading is the
+ * better source for that too, since a stepped-back wall clock can hand out a
+ * value it already used.
+ */
 export function createPendingShareToast(args: {
   state: RoomState;
   normalizedSharedUrl: string | null;
@@ -27,6 +35,10 @@ export function createPendingShareToast(args: {
   };
 }
 
+/**
+ * `now` must be read from the same monotonic clock that produced `expiresAt`
+ * (see {@link createPendingShareToast}).
+ */
 export function getPendingShareToastFor(args: {
   pendingShareToast:
     (SharedVideoToastPayload & { expiresAt: number; roomCode: string }) | null;

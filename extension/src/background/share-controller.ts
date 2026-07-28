@@ -86,7 +86,14 @@ export function createShareController(args: {
   persistState: () => Promise<void>;
   notifyAll: () => void;
   rememberSharedSourceTab: (tabId?: number, videoUrl?: string | null) => void;
+  getMonotonicNow?: () => number;
 }): ShareController {
+  // The pending-share deadline is an elapsed duration measured entirely on this
+  // machine, so it must not move when the wall clock is stepped. It is never
+  // persisted (see `persistBackgroundState`) and never leaves this worker, so a
+  // clock whose origin resets with the service worker is safe here.
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
+
   function clearPendingLocalShareTimer(): void {
     if (args.shareState.pendingLocalShareTimer !== null) {
       clearTimeout(args.shareState.pendingLocalShareTimer);
@@ -318,7 +325,7 @@ export function createShareController(args: {
     return getActivePendingLocalShareUrl({
       pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
       pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
-      now: Date.now(),
+      now: monotonicNow(),
     });
   }
 
@@ -334,11 +341,10 @@ export function createShareController(args: {
   }
 
   function expirePendingLocalShareIfNeeded(): void {
-    const activePendingShare = getActivePendingLocalShareUrl({
-      pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
-      pendingLocalShareExpiresAt: args.shareState.pendingLocalShareExpiresAt,
-      now: Date.now(),
-    });
+    // Deliberately routed through the same reader every other caller uses:
+    // duplicating the liveness test means duplicating the clock read, and the
+    // duplicate is what has to be found by hand when the clock domain moves.
+    const activePendingShare = readActivePendingLocalShareUrl();
     if (args.shareState.pendingLocalShareUrl && activePendingShare === null) {
       clearPendingLocalShare(
         `share confirmation timed out after ${PENDING_LOCAL_SHARE_TIMEOUT_MS}ms`,
@@ -357,9 +363,8 @@ export function createShareController(args: {
     // manual share's marker should block the next auto-share).
     args.shareState.pendingLocalShareIsAutoShare = isAutoShare;
     args.shareState.pendingLocalShareUrl = url;
-    args.shareState.pendingLocalShareExpiresAt = createPendingLocalShareExpiry(
-      Date.now(),
-    );
+    args.shareState.pendingLocalShareExpiresAt =
+      createPendingLocalShareExpiry(monotonicNow());
     args.log(
       "background",
       `Waiting up to ${PENDING_LOCAL_SHARE_TIMEOUT_MS}ms for share confirmation ${url}`,

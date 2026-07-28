@@ -26,6 +26,13 @@ export type IncomingRoomStateDecision =
       confirmedPendingLocalShare: boolean;
     };
 
+/**
+ * `now` must come from a MONOTONIC clock (`performance.now()`), not `Date.now()`.
+ * The deadline it produces is only ever compared against another reading of the
+ * same clock by {@link getActivePendingLocalShareUrl}, so the two together
+ * measure an elapsed duration — and a wall clock does not measure durations. See
+ * that function for what a clock step does to this marker.
+ */
 export function createPendingLocalShareExpiry(
   now: number,
   timeoutMs = PENDING_LOCAL_SHARE_TIMEOUT_MS,
@@ -33,6 +40,17 @@ export function createPendingLocalShareExpiry(
   return now + timeoutMs;
 }
 
+/**
+ * `now` must be read from the same monotonic clock that produced
+ * `pendingLocalShareExpiresAt` (see {@link createPendingLocalShareExpiry}).
+ *
+ * On a wall clock a backward step inside the timeout window makes this keep
+ * answering "still pending" past the deadline, and the backstop does not save
+ * it: the expiry timer's callback re-runs this same check and, finding the
+ * marker still live, declines to clear it. That timer is one-shot and does not
+ * re-arm, so the marker leaks for the rest of the session and blocks every
+ * subsequent auto-share.
+ */
 export function getActivePendingLocalShareUrl(args: {
   pendingLocalShareUrl: string | null;
   pendingLocalShareExpiresAt: number | null;

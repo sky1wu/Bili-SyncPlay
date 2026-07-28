@@ -7,12 +7,14 @@ import {
 } from "@bili-syncplay/protocol";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
 import { createRoomSessionController } from "../src/background/room-session-controller";
+import { getActivePendingLocalShareUrl } from "../src/background/room-state";
 import { setLocaleForTests } from "../src/shared/i18n";
 
 function createControllerHarness(options?: {
   bootstrapRoomStateTimeoutMs?: number;
   persistState?: (callCount: number) => Promise<void> | void;
   getMonotonicNow?: () => number;
+  getActivePendingLocalShareUrl?: () => string | null;
   onEnsureSharedVideoOpen?: () => void;
 }) {
   const runtimeState = createBackgroundRuntimeState();
@@ -94,6 +96,18 @@ function createControllerHarness(options?: {
       runtimeState.share.pendingLocalShareExpiresAt = null;
     },
     expirePendingLocalShareIfNeeded: () => {},
+    // Stands in for the share controller, which owns the marker's clock. The
+    // default reproduces the wall-clock expiry the older tests below set up; a
+    // test that cares which clock answers overrides it.
+    getActivePendingLocalShareUrl:
+      options?.getActivePendingLocalShareUrl ??
+      (() =>
+        getActivePendingLocalShareUrl({
+          pendingLocalShareUrl: runtimeState.share.pendingLocalShareUrl,
+          pendingLocalShareExpiresAt:
+            runtimeState.share.pendingLocalShareExpiresAt,
+          now: Date.now(),
+        })),
     normalizeUrl: (url) => url?.trim() ?? null,
     logServerError: (code, message) => {
       logs.push(`server-error:${code}:${message}`);
@@ -1067,4 +1081,110 @@ test("drops a member delta that a later room state superseded", async () => {
       line.includes("Dropped superseded member state"),
     ),
   );
+});
+
+test("takes the pending-share verdict from the share controller, not a wall-clock re-derivation", async () => {
+  const pendingUrl = "https://www.bilibili.com/video/BVpending";
+  const harness = createControllerHarness({
+    // The share controller owns the marker and measures its deadline on a
+    // monotonic clock, so it still reports the share as in flight.
+    getActivePendingLocalShareUrl: () => pendingUrl,
+  });
+  harness.runtimeState.share.pendingLocalShareUrl = pendingUrl;
+  // The wall-clock stamp says the opposite. It is the same field a second copy
+  // of the liveness test would read, so re-deriving the verdict here instead of
+  // asking the owner flips the answer.
+  harness.runtimeState.share.pendingLocalShareExpiresAt = Date.now() - 60_000;
+
+  await harness.controller.handleServerMessage({
+    type: "room:state",
+    payload: {
+      roomCode: "ROOM11",
+      sharedVideo: {
+        videoId: "BVother",
+        url: "https://www.bilibili.com/video/BVother",
+        title: "Someone else's video",
+        sharedByMemberId: "member-9",
+      },
+      playback: null,
+      members: [{ id: "member-9", name: "Bob" }],
+    },
+  } satisfies ServerMessage);
+
+  // Our own share is still in flight, so a room state showing a different video
+  // is the pre-share snapshot and must not roll the room back onto it.
+  assert.equal(harness.runtimeState.room.roomState, null);
+  assert.deepEqual(harness.ensureSharedVideoOpenCalls, []);
+  assert.deepEqual(harness.notifyContentMessages, []);
+  assert.ok(
+    harness.logs.some((line) => line.startsWith("Ignored stale room state")),
+  );
+});
+
+test("expires the pending share toast on the monotonic clock", async () => {
+  let monotonic = 5_000;
+  const harness = createControllerHarness({
+    getMonotonicNow: () => monotonic,
+  });
+  const sharedVideo = {
+    videoId: "BVtoast",
+    url: "https://www.bilibili.com/video/BVtoast",
+    title: "Toast Video",
+    sharedByMemberId: "member-1",
+  };
+
+  // Creates the pending toast with an 8s TTL (`shareToastTtlMs` in the harness).
+  await harness.controller.handleServerMessage({
+    type: "room:state",
+    payload: {
+      roomCode: "ROOM12",
+      sharedVideo,
+      playback: null,
+      members: [{ id: "member-1", name: "Alice" }],
+    },
+  } satisfies ServerMessage);
+
+  // A later state for the SAME shared video mints no new toast, so the pending
+  // one is re-tested against its deadline. Still inside the TTL on the monotonic
+  // clock, so it rides along again.
+  monotonic = 9_000;
+  await harness.controller.handleServerMessage({
+    type: "room:state",
+    payload: {
+      roomCode: "ROOM12",
+      sharedVideo,
+      playback: null,
+      members: [
+        { id: "member-1", name: "Alice" },
+        { id: "member-2", name: "Bob" },
+      ],
+    },
+  } satisfies ServerMessage);
+
+  assert.ok(
+    (harness.notifyContentMessages[1] as { shareToast: unknown }).shareToast,
+  );
+
+  // Past it: the toast must be dropped. The wall clock is never touched in this
+  // test, so an implementation reading it would still call this fresh.
+  monotonic = 20_000;
+  await harness.controller.handleServerMessage({
+    type: "room:state",
+    payload: {
+      roomCode: "ROOM12",
+      sharedVideo,
+      playback: null,
+      members: [
+        { id: "member-1", name: "Alice" },
+        { id: "member-2", name: "Bob" },
+        { id: "member-3", name: "Carol" },
+      ],
+    },
+  } satisfies ServerMessage);
+
+  assert.equal(
+    (harness.notifyContentMessages[2] as { shareToast: unknown }).shareToast,
+    null,
+  );
+  assert.equal(harness.runtimeState.share.pendingShareToast, null);
 });

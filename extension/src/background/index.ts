@@ -132,6 +132,8 @@ const roomSessionController = createRoomSessionController({
     shareController.clearPendingLocalShare(reason),
   expirePendingLocalShareIfNeeded: () =>
     shareController.expirePendingLocalShareIfNeeded(),
+  getActivePendingLocalShareUrl: () =>
+    shareController.getActivePendingLocalShareUrl(),
   normalizeUrl,
   logServerError,
   shareToastTtlMs: SHARE_TOAST_TTL_MS,
