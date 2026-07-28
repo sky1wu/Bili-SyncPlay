@@ -66,11 +66,6 @@ function createControllerHarness(
     hasActivePendingLocalShare?: boolean;
     hasActivePendingManualShare?: boolean;
     activePendingLocalShareUrl?: string | null;
-    /**
-     * Skip the injected clock so the controller falls back to its production
-     * default. Only the clock-source test needs this.
-     */
-    omitMonotonicClock?: boolean;
   } = {},
 ) {
   const calls = {
@@ -137,8 +132,6 @@ function createControllerHarness(
     pageShareButtonEnabled: true,
   };
 
-  // Monotonic reading, as `performance.now()` would give (not a wall clock).
-  let clock = 1_000_000;
   const controller = createMessageController({
     connectionState,
     roomSessionState,
@@ -287,7 +280,6 @@ function createControllerHarness(
     notifyAll() {
       calls.notifyAll += 1;
     },
-    ...(overrides.omitMonotonicClock ? {} : { getMonotonicNow: () => clock }),
   });
 
   return {
@@ -297,9 +289,6 @@ function createControllerHarness(
     roomSessionState,
     popupState,
     settingsState,
-    advanceClock(ms: number) {
-      clock += ms;
-    },
     syncRequests: () =>
       calls.sendToServer.filter(
         (message) => (message as { type?: string }).type === "sync:request",
@@ -1678,7 +1667,7 @@ test("message controller forwards content playback updates only for the active s
 
 const GET_ROOM_STATE = { type: "content:get-room-state" } as const;
 
-/** Send one `content:get-room-state`, which also arms the refresh window. */
+/** Send one `content:get-room-state` and return the response. */
 async function getRoomState(
   harness: ReturnType<typeof createControllerHarness>,
 ): Promise<unknown> {
@@ -1693,64 +1682,25 @@ async function getRoomState(
   return response;
 }
 
-test("message controller answers content:get-room-state from cache within the refresh window", async () => {
-  // Regression for #229: content-side hydration retries call this message in a
-  // loop while waiting for a `<video>` element, and forwarding a `sync:request`
-  // on every pass saturated the per-session rate limiter (6 per 10s).
-  const harness = createControllerHarness();
-  await getRoomState(harness);
-  assert.equal(harness.syncRequests().length, 1, "first call arms the window");
+test("message controller always refreshes room state on content:get-room-state", async () => {
+  // #229 was fixed by stopping the CALLER from spinning, not by suppressing the
+  // forward here. Suppressing it locally is what stranded clients on stale
+  // snapshots: the server can silently fail to push, and a dropped
+  // `sync:request` is indistinguishable from a satisfied one, so no local
+  // predicate can decide the cache is still authoritative. A cached room state
+  // present or absent, this must reach the server every time.
+  const cached = createControllerHarness();
+  await getRoomState(cached);
+  const response = await getRoomState(cached);
 
-  // A tight hydration retry loop inside the window must add nothing.
-  harness.advanceClock(350);
-  const response = await getRoomState(harness);
-  harness.advanceClock(350);
-  await getRoomState(harness);
-
-  assert.equal(
-    harness.syncRequests().length,
-    1,
-    "an authoritative cache must be served locally, without a sync:request",
-  );
+  assert.deepEqual(cached.syncRequests(), [
+    { type: "sync:request", payload: { memberToken: "member-token-1" } },
+    { type: "sync:request", payload: { memberToken: "member-token-1" } },
+  ]);
   assert.equal((response as { ok: boolean }).ok, true);
   assert.equal((response as { roomCode: string }).roomCode, "ROOM01");
-});
 
-test("message controller refreshes room state once the trust window expires", async () => {
-  // The server can silently fail to push `room:state` (`room_event_consume_failed`
-  // in room-event-consumer.ts, and a null `getRoomStateByCode`), leaving the
-  // client with a stale snapshot and no local signal. Cache authority therefore
-  // has to expire rather than be permanent.
-  const harness = createControllerHarness();
-  await getRoomState(harness);
-  harness.advanceClock(9_999);
-  await getRoomState(harness);
-  assert.equal(
-    harness.syncRequests().length,
-    1,
-    "still inside the window: no extra request",
-  );
-
-  harness.advanceClock(2);
-  await getRoomState(harness);
-  assert.equal(
-    harness.syncRequests().length,
-    2,
-    "past the window: exactly one refresh goes through",
-  );
-
-  // The refresh re-arms the window rather than leaving it open.
-  harness.advanceClock(350);
-  await getRoomState(harness);
-  assert.equal(harness.syncRequests().length, 2);
-});
-
-test("message controller keeps requesting a sync while it has no cached room state", async () => {
-  // With nothing to answer from, the trust window must not apply at all: a
-  // client that has never received room state would otherwise be throttled to
-  // one attempt per window while it has no state to show. The retry rate here
-  // is bounded by the content-side hydration backoff instead.
-  const harness = createControllerHarness({
+  const uncached = createControllerHarness({
     roomSessionState: {
       roomCode: "ROOM01",
       memberToken: "member-token-1",
@@ -1759,78 +1709,19 @@ test("message controller keeps requesting a sync while it has no cached room sta
       roomState: null,
     },
   });
-  await getRoomState(harness);
-  harness.advanceClock(350);
-  await getRoomState(harness);
-
-  assert.deepEqual(harness.syncRequests(), [
-    { type: "sync:request", payload: { memberToken: "member-token-1" } },
-    { type: "sync:request", payload: { memberToken: "member-token-1" } },
-  ]);
+  const uncachedResponse = await getRoomState(uncached);
+  assert.equal(uncached.syncRequests().length, 1);
+  assert.equal((uncachedResponse as { ok: boolean }).ok, false);
 });
 
-test("message controller re-requests a sync while awaiting fresh room state after reconnect", async () => {
-  // During the reconnect handshake `awaitingFreshRoomState` marks the cache as
-  // stale, and the server drops a failed bootstrap snapshot silently
-  // (`sendRoomStateToSession` logs `room_state_bootstrap_failed` without
-  // retrying) while the client deliberately keeps the flag set
-  // (`expireBootstrapRoomStateWait`) — so this `sync:request` is the only way
-  // out of that state, and it must not wait for the trust window to expire.
-  const harness = createControllerHarness();
-  await getRoomState(harness);
-  assert.equal(harness.syncRequests().length, 1);
-
-  // Well inside the window, so only the flag can let this one through.
-  harness.roomSessionState.awaitingFreshRoomState = true;
-  harness.advanceClock(350);
+test("message controller does not request a sync while offline", async () => {
+  // The remaining guards: without a live socket there is nobody to ask, and the
+  // reconnect is kicked off instead.
+  const harness = createControllerHarness({
+    connectionState: { connected: false, lastError: null },
+  });
   await getRoomState(harness);
 
-  assert.deepEqual(
-    harness.syncRequests(),
-    [
-      { type: "sync:request", payload: { memberToken: "member-token-1" } },
-      { type: "sync:request", payload: { memberToken: "member-token-1" } },
-    ],
-    "a non-authoritative cache must still reach the server",
-  );
-});
-
-test("message controller measures the refresh window on a monotonic clock", async () => {
-  // `Date.now()` is not ordered: an NTP correction or a manual change steps it,
-  // and a *backward* step makes `now - lastRoomStateRefreshAt` negative — which
-  // compares as "well inside the window" and would freeze the recovery refresh
-  // for the whole duration of the step, precisely when a silently missed push
-  // most needs recovering from. The window must therefore come from
-  // `performance.now()`.
-  const realDateNow = Date.now;
-  const realPerformanceNow = performance.now;
-  let monotonic = 5_000;
-  let wallClock = 1_700_000_000_000;
-  Date.now = () => wallClock;
-  performance.now = () => monotonic;
-  try {
-    const harness = createControllerHarness({ omitMonotonicClock: true });
-    await getRoomState(harness);
-    assert.equal(
-      harness.syncRequests().length,
-      1,
-      "first call arms the window",
-    );
-
-    // The wall clock jumps an hour backwards while real time moves past the
-    // window. A `Date.now()`-based window would see -3_600_000ms elapsed and
-    // stay "authoritative"; a monotonic one sees 10_001ms and refreshes.
-    wallClock -= 3_600_000;
-    monotonic += 10_001;
-    await getRoomState(harness);
-
-    assert.equal(
-      harness.syncRequests().length,
-      2,
-      "a backward wall-clock step must not extend the trust window",
-    );
-  } finally {
-    Date.now = realDateNow;
-    performance.now = realPerformanceNow;
-  }
+  assert.deepEqual(harness.syncRequests(), []);
+  assert.equal(harness.calls.connect, 1);
 });

@@ -4121,3 +4121,49 @@ test("playback binding controller re-samples the seek origin after a forced paus
     dom.restore();
   }
 });
+
+test("playback binding controller reports a newly bound video element once", () => {
+  // This poll is the only place that learns a `<video>` exists. Hydration relies
+  // on being told, instead of running a second `document.querySelector("video")`
+  // timer of its own that also hit the server on every pass (#229).
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 1_000;
+  let bindings = 0;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    onVideoElementBound: () => {
+      bindings += 1;
+    },
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getNow: () => 1_100,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    assert.equal(bindings, 1, "first bind must be reported");
+
+    // The bind loop runs every 250ms; re-binding the same element must not
+    // re-report, otherwise hydration would be driven on a timer again.
+    controller.attachPlaybackListeners();
+    assert.equal(bindings, 1, "same element must not re-report");
+  } finally {
+    dom.restore();
+  }
+});

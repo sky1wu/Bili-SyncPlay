@@ -18,20 +18,28 @@ import type { ContentRuntimeState } from "./runtime-state";
 /**
  * Ceiling for the exponential hydration-retry backoff.
  *
- * Deliberately much lower than a "this tab is idle" timeout would be: a
- * hydration retry is the ONLY path that re-applies room state once a slow
- * player finally produces its `<video>` element (binding one merely records
- * `lastVideoElementBoundAt`, it does not re-apply), so the ceiling is also the
- * worst-case delay before such a tab catches up with the room. 5s keeps that
- * visible-but-tolerable while still cutting a stuck tab's wakeups from ~171/min
- * to ~12/min.
+ * Every wait this retry serves is unbounded — the page bridge, the `<video>`
+ * element, the room state itself — and none is guaranteed to arrive, so the
+ * retry must decay rather than re-arm a fixed delay forever: a tab whose player
+ * never produced a `<video>` used to re-hydrate every 350ms for the life of the
+ * tab, and each pass reached the server (#229).
  *
- * The server-side flood this bounds is already gone by the time we get here —
- * the background only forwards `sync:request` when it has no cached room state
- * (`message-controller`) — so this ceiling only has to bound local work, and
- * does not need to be as aggressive as the 30s floated in #229.
+ * A high ceiling costs nothing in responsiveness because the retry is no longer
+ * how the common waits end. The `<video>` element arrives by event
+ * (`notifyVideoElementBound`, which also clears the streak), and a room state
+ * arrives as a push. What is left is a genuine safety net, so it is sized to be
+ * cheap rather than prompt: 30s caps a stuck tab at 2 wakeups/min against a
+ * limiter that allows 36/min, leaving room for many tabs in one browser
+ * session — they share a single WebSocket, so they share one limiter.
  */
-const HYDRATION_RETRY_MAX_DELAY_MS = 5_000;
+const HYDRATION_RETRY_MAX_DELAY_MS = 30_000;
+
+/**
+ * Base delay for the hydration re-armed by a `<video>` element binding. Short
+ * enough to read as immediate, but routed through the backoff so a player that
+ * rebuilds its element in a loop cannot drive one hydration per rebuild.
+ */
+const BOUND_VIDEO_HYDRATION_DELAY_MS = 50;
 
 export interface RoomStateApplyController {
   applyRoomState(
@@ -40,6 +48,7 @@ export interface RoomStateApplyController {
   ): Promise<void>;
   hydrateRoomState(): Promise<void>;
   scheduleHydrationRetry(delayMs?: number): void;
+  notifyVideoElementBound(): void;
   destroy(): void;
 }
 
@@ -918,6 +927,31 @@ export function createRoomStateApplyController(args: {
     scheduleHydrationRetry(1500);
   }
 
+  /**
+   * The `<video>` element a deferred hydration was waiting for now exists.
+   *
+   * A no-op unless a retry is actually pending: a player rebuild during
+   * ordinary playback also rebinds, and hydrating on every rebind would put the
+   * `sync:request` back on a timer — the opposite of the point.
+   *
+   * Re-arms the retry at {@link BOUND_VIDEO_HYDRATION_DELAY_MS} rather than
+   * hydrating inline, so the existing backoff still governs it. That matters
+   * for a player that rebuilds its element repeatedly: each rebuild reports a
+   * bind, and an inline hydration would run one per rebuild — up to four a
+   * second at the 250ms bind interval. Going through the scheduler means a
+   * rebuild storm decays like any other unbounded wait, while the ordinary
+   * single bind still lands within a few hundred ms. The streak is not reset
+   * here; a hydration that actually applies clears it via `hydrateRoomState`.
+   */
+  function notifyVideoElementBound(): void {
+    if (destroyed || hydrateRetryTimer === null) {
+      return;
+    }
+    window.clearTimeout(hydrateRetryTimer);
+    hydrateRetryTimer = null;
+    scheduleHydrationRetry(BOUND_VIDEO_HYDRATION_DELAY_MS);
+  }
+
   function destroy(): void {
     destroyed = true;
     hydrateRetryAttempt = 0;
@@ -932,6 +966,7 @@ export function createRoomStateApplyController(args: {
     applyRoomState,
     hydrateRoomState,
     scheduleHydrationRetry,
+    notifyVideoElementBound,
     destroy,
   };
 }

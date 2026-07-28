@@ -1430,8 +1430,8 @@ test("backs off consecutive hydration retries instead of re-arming a flat delay"
 
     assert.deepEqual(
       win.scheduled.map((timer) => timer.ms),
-      [350, 700, 1400, 2800, 5000, 5000],
-      "consecutive retries must double up to the 5s ceiling",
+      [350, 700, 1400, 2800, 5600, 11200],
+      "consecutive retries must double toward the ceiling",
     );
   } finally {
     win.restore();
@@ -1486,6 +1486,147 @@ test("resets hydration retry backoff once a cycle completes without retrying", a
     assert.deepEqual(
       win.scheduled.map((timer) => timer.ms),
       [350, 700, 350],
+    );
+  } finally {
+    win.restore();
+  }
+});
+
+test("video element binding ends the hydration wait instead of a retry timer", async () => {
+  const win = installWindowTimerStub();
+  try {
+    // The retry that waits for a `<video>` element used to be a second poller
+    // over the same `document.querySelector("video")` the binding loop already
+    // runs — and every pass of it reached the server (#229). The element now
+    // arrives as an event.
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    });
+    let hydrations = 0;
+    const harness = createController({
+      video: createStubVideo(false),
+      now: 30_000,
+      currentVideo: null,
+      requestRoomStateHydration: async () => {
+        hydrations += 1;
+        return {
+          ok: true,
+          roomState,
+          memberId: "local-member",
+          roomCode: "ROOM01",
+        };
+      },
+    });
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 29_500;
+
+    await harness.controller.hydrateRoomState();
+    assert.equal(hydrations, 1);
+    assert.equal(win.scheduled.length, 1, "a retry is pending");
+
+    // Binding cancels the pending retry and re-arms a near-immediate one.
+    harness.controller.notifyVideoElementBound();
+    assert.deepEqual(
+      win.cleared,
+      [win.scheduled[0].id],
+      "the pending retry timer must be cancelled, not left to fire too",
+    );
+    assert.equal(win.scheduled.length, 2);
+    assert.equal(
+      win.scheduled[1].ms,
+      100,
+      "re-armed through the backoff (50ms base, one retry already elapsed)",
+    );
+
+    win.scheduled[1].cb();
+    await Promise.resolve();
+    assert.equal(hydrations, 2, "binding must drive the hydration");
+  } finally {
+    win.restore();
+  }
+});
+
+test("video element binding is a no-op when no hydration is waiting", async () => {
+  const win = installWindowTimerStub();
+  try {
+    // A player rebuild during ordinary playback also rebinds. Hydrating on every
+    // rebind would put `sync:request` back on a timer.
+    let hydrations = 0;
+    const harness = createController({
+      video: createStubVideo(false),
+      now: 30_000,
+      requestRoomStateHydration: async () => {
+        hydrations += 1;
+        return null;
+      },
+    });
+
+    harness.controller.notifyVideoElementBound();
+    await Promise.resolve();
+
+    assert.equal(hydrations, 0);
+    assert.equal(win.scheduled.length, 0);
+  } finally {
+    win.restore();
+  }
+});
+
+test("repeated video rebinds decay instead of hydrating once per rebind", async () => {
+  const win = installWindowTimerStub();
+  try {
+    // A player that rebuilds its element in a loop reports a bind every time.
+    // Routing those through the backoff is what stops them from becoming one
+    // `sync:request` per rebuild at the 250ms bind interval (#229).
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    });
+    const harness = createController({
+      video: createStubVideo(false),
+      now: 30_000,
+      currentVideo: null,
+      requestRoomStateHydration: async () => ({
+        ok: true,
+        roomState,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
+    });
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 29_500;
+
+    await harness.controller.hydrateRoomState();
+
+    // `hydrateRoomState` is async, so let it finish arming the next retry
+    // before the following rebind is reported.
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    const bindArmedDelays: number[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const before = win.scheduled.length;
+      harness.controller.notifyVideoElementBound();
+      assert.equal(
+        win.scheduled.length,
+        before + 1,
+        `rebind ${i} must re-arm exactly one hydration`,
+      );
+      const armed = win.scheduled[win.scheduled.length - 1];
+      bindArmedDelays.push(armed.ms);
+      armed.cb();
+      await settle();
+    }
+
+    assert.deepEqual(
+      bindArmedDelays,
+      [100, 400, 1600, 6400],
+      "successive rebinds must back off, not re-fire at the base delay",
     );
   } finally {
     win.restore();

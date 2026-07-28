@@ -14,15 +14,6 @@ import type {
   SharedVideo,
 } from "@bili-syncplay/protocol";
 
-/**
- * How long a cached `roomState` is trusted before one `sync:request` is let
- * through to re-establish authority. Bounds how long a client can hold a
- * snapshot the server silently failed to push (see the call site for why that
- * is unobservable locally), while capping a stuck hydration loop at 6
- * requests/min per browser session — the limiter allows 36/min.
- */
-const AUTHORITATIVE_REFRESH_INTERVAL_MS = 10_000;
-
 type RuntimeMessage = PopupToBackgroundMessage | ContentToBackgroundMessage;
 type QueueSharedVideoResult = { ok: true } | { ok: false; error: string };
 
@@ -108,29 +99,7 @@ export function createMessageController(args: {
   persistProfileState: () => Promise<void>;
   notifyPageShareButtonSettings: () => Promise<void>;
   notifyAll: () => void;
-  /**
-   * Monotonic time source for the authoritative-refresh window. Must not be the
-   * wall clock — see `lastRoomStateRefreshAt`.
-   */
-  getMonotonicNow?: () => number;
 }): MessageController {
-  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
-  /**
-   * When this session last asked the server for authoritative room state, or
-   * `null` if it never has. Read from a monotonic clock, never the wall clock:
-   * `Date.now()` moves when the clock is stepped, and a *backward* step makes
-   * `now - lastRoomStateRefreshAt` negative — which compares as "well inside
-   * the window" and would freeze the refresh for the entire duration of the
-   * step, exactly when a missed push most needs recovering from. Only ever
-   * compared against another reading of the same clock, so it stays an elapsed
-   * duration and never crosses machines.
-   *
-   * Resetting to `null` on an MV3 worker restart is correct and matches
-   * `performance.now()`'s own epoch resetting with the worker: the next call
-   * re-establishes authority instead of trusting a reading from a dead epoch.
-   */
-  let lastRoomStateRefreshAt: number | null = null;
-
   async function updatePageShareButtonEnabled(enabled: boolean): Promise<void> {
     args.settingsState.pageShareButtonEnabled = enabled;
     await args.persistProfileState();
@@ -644,54 +613,33 @@ export function createMessageController(args: {
         }
         sendResponse({ ok: true });
         return;
-      case "content:get-room-state": {
+      case "content:get-room-state":
         if (args.roomSessionState.roomCode && !args.connectionState.connected) {
           void args.socketController.connect();
         }
-        // Only ask the server when this message cannot be answered locally.
-        // `content:get-room-state` conflates "hand me the state you have" with
-        // "go refresh it", and content-side hydration retries call it in a loop
-        // for the former reason — a tab sitting on the shared video whose
-        // player has not produced a `<video>` element yet re-hydrates every
-        // 350ms (`room-state-apply-controller`), and each pass used to forward a
-        // `sync:request` even though the cached state was returned in the very
-        // same response. That loop alone saturated the per-session limiter
-        // (6 per 10s), which is how 72% of all `sync:request` got rejected
-        // upstream (#229).
+        // Deliberately unconditional. Every earlier attempt at #229 tried to
+        // decide locally whether the cached `roomState` was still authoritative,
+        // and each attempt stranded a client on a stale snapshot in some path:
+        // the server can silently fail to push (`sendRoomStateToSession` on
+        // bootstrap, and the `room_event_consume_failed` catch in
+        // `room-event-consumer.ts`, both swallow the error without retrying,
+        // closing the socket, or telling the client), and a dropped refresh is
+        // indistinguishable from a satisfied one because nothing acknowledges
+        // it. There is no local predicate for "I have not missed a push", so
+        // suppressing here can only trade one bug for another.
         //
-        // Cache authority DECAYS — it is not a property the cache either has or
-        // lacks. Two of its three terms are locally observable: an absent
-        // `roomState` means there is nothing to answer with, and
-        // `awaitingFreshRoomState` means the reconnect handshake has not yet
-        // delivered an authoritative snapshot. The third is not observable at
-        // all: the server can silently fail to push. Both
-        // `sendRoomStateToSession` (bootstrap) and the `room_event_consume_failed`
-        // catch in `room-event-consumer.ts` swallow the error without retrying,
-        // closing the socket, or telling the client — and the member-delta
-        // branch also drops the push when `getRoomStateByCode` returns null.
-        // A client left holding a pre-pause or pre-switch snapshot has no local
-        // signal that anything went wrong.
-        //
-        // So the cache is trusted only inside a bounded staleness window; past
-        // it exactly one request goes through and re-arms the window. That
-        // ceiling is what keeps #229 fixed: this timestamp lives in the
-        // background, which is per browser session — the same object every tab
-        // funnels through — so a stuck hydration loop costs 6 requests/min
-        // total no matter how many tabs are spinning, against a limiter that
-        // allows 36/min. The pre-fix loop sent ~171/min from a single tab.
-        const now = monotonicNow();
-        const cachedRoomStateIsAuthoritative =
-          args.roomSessionState.roomState !== null &&
-          !args.roomSessionState.awaitingFreshRoomState &&
-          lastRoomStateRefreshAt !== null &&
-          now - lastRoomStateRefreshAt < AUTHORITATIVE_REFRESH_INTERVAL_MS;
+        // The flood #229 reported was never caused by forwarding — it was
+        // caused by the CALLER spinning: a tab whose player had not produced a
+        // `<video>` element re-hydrated every 350ms for the life of the tab.
+        // That is fixed where it lives: the element is now awaited by event
+        // (`onVideoElementBound`) instead of polled, and the remaining waits
+        // back off (`room-state-apply-controller`). Both bound this send
+        // without giving up any recovery path.
         if (
           args.connectionState.connected &&
           args.roomSessionState.roomCode &&
-          args.roomSessionState.memberToken &&
-          !cachedRoomStateIsAuthoritative
+          args.roomSessionState.memberToken
         ) {
-          lastRoomStateRefreshAt = now;
           args.sendToServer({
             type: "sync:request",
             payload: { memberToken: args.roomSessionState.memberToken },
@@ -714,7 +662,6 @@ export function createMessageController(args: {
               },
         );
         return;
-      }
       case "content:debug-log":
         args.diagnosticsController.log(
           "content",
