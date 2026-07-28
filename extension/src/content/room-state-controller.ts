@@ -32,6 +32,7 @@ export function createRoomStateController(args: {
   debugLog: (message: string) => void;
   resetPlaybackSyncState: (reason: string) => void;
   scheduleHydrationRetry: (delayMs?: number) => void;
+  resetHydrationRetry: () => void;
 }): RoomStateController {
   let lastWaitingRoomStateLogRoomCode: string | null = null;
 
@@ -128,6 +129,11 @@ export function createRoomStateController(args: {
       args.resetPlaybackSyncState(
         `room changed ${previousRoomCode} -> ${payload.roomCode}`,
       );
+      // The hydration retry's backoff streaks measure how long the *previous*
+      // room's wait had been failing. Carrying them over would either stretch
+      // the 150ms bootstrap retry below to the ceiling, or have the old room's
+      // still-armed timer refuse it outright via the single-timer guard.
+      args.resetHydrationRetry();
       args.toastState.lastRoomState = null;
       args.runtimeState.hasReceivedInitialRoomState = false;
       args.runtimeState.pendingRoomStateHydration = true;
@@ -148,6 +154,11 @@ export function createRoomStateController(args: {
       if (previousRoomCode) {
         args.resetPlaybackSyncState(`room cleared from ${previousRoomCode}`);
       }
+      // Leaving is the other half of a room switch, and the common one:
+      // `roomChanged` above needs both codes non-null, but leaving then joining
+      // reports `ROOM01 -> null -> ROOM02`, so neither call satisfies it and the
+      // retry state would survive into the new room untouched.
+      args.resetHydrationRetry();
       clearRoomScopedSharedVideoState();
       args.toastState.lastRoomState = null;
       args.runtimeState.pendingRoomStateHydration = false;

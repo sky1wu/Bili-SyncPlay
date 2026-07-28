@@ -289,6 +289,10 @@ function createControllerHarness(
     roomSessionState,
     popupState,
     settingsState,
+    syncRequests: () =>
+      calls.sendToServer.filter(
+        (message) => (message as { type?: string }).type === "sync:request",
+      ),
   };
 }
 
@@ -1659,4 +1663,65 @@ test("message controller forwards content playback updates only for the active s
   );
 
   assert.deepEqual(inactiveHarness.calls.sendToServer, []);
+});
+
+const GET_ROOM_STATE = { type: "content:get-room-state" } as const;
+
+/** Send one `content:get-room-state` and return the response. */
+async function getRoomState(
+  harness: ReturnType<typeof createControllerHarness>,
+): Promise<unknown> {
+  let response: unknown;
+  await harness.controller.handleRuntimeMessage(
+    GET_ROOM_STATE,
+    createSender({ id: 123 }),
+    (value) => {
+      response = value;
+    },
+  );
+  return response;
+}
+
+test("message controller always refreshes room state on content:get-room-state", async () => {
+  // #229 was fixed by stopping the CALLER from spinning, not by suppressing the
+  // forward here. Suppressing it locally is what stranded clients on stale
+  // snapshots: the server can silently fail to push, and a dropped
+  // `sync:request` is indistinguishable from a satisfied one, so no local
+  // predicate can decide the cache is still authoritative. A cached room state
+  // present or absent, this must reach the server every time.
+  const cached = createControllerHarness();
+  await getRoomState(cached);
+  const response = await getRoomState(cached);
+
+  assert.deepEqual(cached.syncRequests(), [
+    { type: "sync:request", payload: { memberToken: "member-token-1" } },
+    { type: "sync:request", payload: { memberToken: "member-token-1" } },
+  ]);
+  assert.equal((response as { ok: boolean }).ok, true);
+  assert.equal((response as { roomCode: string }).roomCode, "ROOM01");
+
+  const uncached = createControllerHarness({
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: null,
+    },
+  });
+  const uncachedResponse = await getRoomState(uncached);
+  assert.equal(uncached.syncRequests().length, 1);
+  assert.equal((uncachedResponse as { ok: boolean }).ok, false);
+});
+
+test("message controller does not request a sync while offline", async () => {
+  // The remaining guards: without a live socket there is nobody to ask, and the
+  // reconnect is kicked off instead.
+  const harness = createControllerHarness({
+    connectionState: { connected: false, lastError: null },
+  });
+  await getRoomState(harness);
+
+  assert.deepEqual(harness.syncRequests(), []);
+  assert.equal(harness.calls.connect, 1);
 });

@@ -100,6 +100,7 @@ const roomStateController = createRoomStateController({
     syncController.resetPlaybackSyncState(reason),
   scheduleHydrationRetry: (delayMs) =>
     syncController.scheduleHydrationRetry(delayMs),
+  resetHydrationRetry: () => syncController.resetHydrationRetry(),
 });
 const syncController = createSyncController({
   runtimeState,
@@ -144,6 +145,9 @@ const syncController = createSyncController({
 const playbackBindingController = createPlaybackBindingController({
   runtimeState,
   videoBindIntervalMs: VIDEO_BIND_INTERVAL_MS,
+  // Hydration defers room state it cannot apply until a `<video>` exists; this
+  // is the event that says one now does, so it no longer has to poll for it.
+  onVideoElementBound: () => syncController.notifyVideoElementBound(),
   userGestureGraceMs: USER_GESTURE_GRACE_MS,
   initialRoomStatePauseHoldMs: INITIAL_ROOM_STATE_PAUSE_HOLD_MS,
   bufferSignalWindowMs: BUFFER_SIGNAL_WINDOW_MS,

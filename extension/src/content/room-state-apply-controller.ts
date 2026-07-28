@@ -15,6 +15,38 @@ import {
 } from "./player-binding";
 import type { ContentRuntimeState } from "./runtime-state";
 
+/**
+ * Ceiling for the exponential hydration-retry backoff.
+ *
+ * Every wait this retry serves is unbounded — the page bridge, the `<video>`
+ * element, the room state itself — and none is guaranteed to arrive, so the
+ * retry must decay rather than re-arm a fixed delay forever: a tab whose player
+ * never produced a `<video>` used to re-hydrate every 350ms for the life of the
+ * tab, and each pass reached the server (#229).
+ *
+ * The ceiling is a real latency, not a formality: it is the worst case before a
+ * wait that has NO terminating event notices the world changed. Only one of
+ * these waits has such an event — `notifyVideoElementBound` for the `<video>`
+ * element. The page-bridge identity behind `no-current-video` has none and
+ * cannot cheaply get one: `getSharedVideo()` derives from `location`, the
+ * document title and the DOM on every call, so there is no update to hook, and
+ * adding a watcher would recreate the duplicate poller this change removed.
+ *
+ * So it is sized as if every wait were timer-only. 10s means a stuck tab wakes
+ * 6 times/min; the limiter allows 36/min per browser session (tabs share one
+ * WebSocket, so they share one limiter), leaving headroom for six simultaneously
+ * stuck tabs before anything is rejected. For comparison the pre-fix spin sent
+ * ~171/min from a single tab.
+ */
+const HYDRATION_RETRY_MAX_DELAY_MS = 10_000;
+
+/**
+ * Base delay for the hydration re-armed by a `<video>` element binding. Short
+ * enough to read as immediate, but routed through the backoff so a player that
+ * rebuilds its element in a loop cannot drive one hydration per rebuild.
+ */
+const BOUND_VIDEO_HYDRATION_DELAY_MS = 50;
+
 export interface RoomStateApplyController {
   applyRoomState(
     state: RoomState,
@@ -22,6 +54,8 @@ export interface RoomStateApplyController {
   ): Promise<void>;
   hydrateRoomState(): Promise<void>;
   scheduleHydrationRetry(delayMs?: number): void;
+  notifyVideoElementBound(): void;
+  resetHydrationRetry(): void;
   destroy(): void;
 }
 
@@ -41,6 +75,11 @@ export function createRoomStateApplyController(args: {
    */
   remotePauseDebounceMs?: number;
   getNow?: () => number;
+  /**
+   * Monotonic time source for the hydration retry deadline. Must not be the
+   * wall clock — see {@link preemptHydrationRetry}.
+   */
+  getMonotonicNow?: () => number;
   debugLog: (message: string) => void;
   shouldLogHeartbeat: (
     state: { key: string | null; at: number },
@@ -114,7 +153,16 @@ export function createRoomStateApplyController(args: {
 }): RoomStateApplyController {
   const ignoredRoomStateLogState = { key: null as string | null, at: 0 };
   const nowOf = () => args.getNow?.() ?? Date.now();
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   let hydrateRetryTimer: number | null = null;
+  /**
+   * When the pending retry is due, or `null` when none is armed. Kept beside
+   * the timer id — and only ever cleared through `clearHydrationRetryTimer` —
+   * so `preemptHydrationRetry` can refuse to push the deadline later.
+   */
+  let hydrateRetryDeadline: number | null = null;
+  let hydrateRetryAttempt = 0;
+  let boundVideoAttempt = 0;
   let destroyed = false;
   const remotePauseDebounceMs = args.remotePauseDebounceMs ?? 0;
   const scheduleDeferTimer = (cb: () => void, ms: number): number | null => {
@@ -288,15 +336,95 @@ export function createRoomStateApplyController(args: {
     }
   }
 
-  function scheduleHydrationRetry(delayMs = 350): void {
-    if (destroyed || hydrateRetryTimer !== null) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
+  /**
+   * Back off consecutive hydration retries instead of re-arming the caller's
+   * fixed delay forever. Every wait this retry serves — the page bridge, the
+   * `<video>` element, the room state itself — is unbounded: none of them is
+   * guaranteed to arrive, and a tab whose player never produces a `<video>`
+   * used to re-hydrate every 350ms for the lifetime of the tab (#229).
+   *
+   * The delay the caller passes is the *first* interval; each consecutive retry
+   * doubles it up to {@link HYDRATION_RETRY_MAX_DELAY_MS}. The counter resets
+   * as soon as one hydration cycle finishes without arming another retry
+   * (see {@link hydrateRoomState}), so an isolated retry always starts fast.
+   */
+  function clearHydrationRetryTimer(): void {
+    if (hydrateRetryTimer !== null) {
+      window.clearTimeout(hydrateRetryTimer);
       hydrateRetryTimer = null;
-      void hydrateRoomState();
-    }, delayMs);
-    hydrateRetryTimer = timer;
+    }
+    hydrateRetryDeadline = null;
+  }
+
+  /**
+   * Arm the single hydration retry timer at `baseDelayMs` backed off by
+   * `attempt` doublings. Returns whether it armed, so the caller only advances
+   * its own streak when it actually consumed one.
+   */
+  function armHydrationRetry(baseDelayMs: number, attempt: number): boolean {
+    if (destroyed || hydrateRetryTimer !== null) {
+      return false;
+    }
+    const backedOffDelayMs = Math.min(
+      baseDelayMs * 2 ** attempt,
+      HYDRATION_RETRY_MAX_DELAY_MS,
+    );
+    hydrateRetryDeadline = monotonicNow() + backedOffDelayMs;
+    hydrateRetryTimer = window.setTimeout(() => {
+      hydrateRetryTimer = null;
+      hydrateRetryDeadline = null;
+      // Not `hydrateRoomState`: this is a consecutive retry, so it must keep
+      // the streaks that make it back off.
+      void runHydration();
+    }, backedOffDelayMs);
+    return true;
+  }
+
+  /**
+   * Replace the pending retry only when the replacement fires *sooner*.
+   *
+   * The armed deadline must never move later, or a repeating event starves the
+   * timer: a player rebuilding its `<video>` reports a bind every ~250ms, and
+   * once the bind backoff passes that interval each bind cancelled the pending
+   * timer and armed a longer one, so the callback never ran at all and the
+   * pending room state was held forever. Refusing to postpone makes the
+   * deadline monotonically non-increasing until it fires, which bounds the wait
+   * by whatever armed it first no matter how often the event repeats.
+   *
+   * Both readings come from a monotonic clock, never the wall clock. The
+   * deadline is a `nowOf()`-style reading captured when the timer was armed, so
+   * a *backward* wall-clock step would shrink `now + delay` and make the
+   * candidate look earlier than a deadline it is not — the comparison would
+   * preempt, cancel a timer that was about to fire, and restart the full delay,
+   * up to the 10s ceiling once the bind streak has grown. `setTimeout` itself is
+   * immune to clock steps, so the deadline that is compared against it must be
+   * too.
+   */
+  function preemptHydrationRetry(
+    baseDelayMs: number,
+    attempt: number,
+  ): boolean {
+    if (destroyed || hydrateRetryTimer === null) {
+      return false;
+    }
+    const backedOffDelayMs = Math.min(
+      baseDelayMs * 2 ** attempt,
+      HYDRATION_RETRY_MAX_DELAY_MS,
+    );
+    if (
+      hydrateRetryDeadline !== null &&
+      monotonicNow() + backedOffDelayMs >= hydrateRetryDeadline
+    ) {
+      return false;
+    }
+    clearHydrationRetryTimer();
+    return armHydrationRetry(baseDelayMs, attempt);
+  }
+
+  function scheduleHydrationRetry(delayMs = 350): void {
+    if (armHydrationRetry(delayMs, hydrateRetryAttempt)) {
+      hydrateRetryAttempt += 1;
+    }
   }
 
   async function applyRoomState(
@@ -787,15 +915,52 @@ export function createRoomStateApplyController(args: {
     args.acceptInitialRoomStateHydration();
   }
 
+  /**
+   * Hydration driven from outside this controller — a first load, or an SPA
+   * navigation within the same room.
+   *
+   * Such a call is a fresh start, so it drops the retry state first. Both
+   * streaks describe how long the *previous* page's wait had been failing, and
+   * that page is gone: inheriting them would make the new page's very first
+   * retry wait at the ceiling. Nothing wakes it early either — Bilibili reuses
+   * the same `<video>` element across an SPA navigation, so no bind is reported
+   * — leaving the new page behind the hydration gate with broadcasts suppressed
+   * and a pause held (#229).
+   *
+   * The streak is meant to grow only across *consecutive timer-driven* retries,
+   * which is why the timer callback goes to {@link runHydration} instead.
+   */
   async function hydrateRoomState(): Promise<void> {
     if (destroyed) {
       return;
     }
-    if (hydrateRetryTimer !== null) {
-      window.clearTimeout(hydrateRetryTimer);
-      hydrateRetryTimer = null;
-    }
+    resetHydrationRetry();
+    await runHydration();
+  }
 
+  /** One hydration attempt, preserving the retry streaks. */
+  async function runHydration(): Promise<void> {
+    if (destroyed) {
+      return;
+    }
+    clearHydrationRetryTimer();
+    try {
+      await runHydrationCycle();
+    } finally {
+      // A cycle that ends without arming another retry is not part of a retry
+      // loop, so the next isolated retry starts from its caller's delay again.
+      // Checked here rather than at the cycle's several exits because the retry
+      // can be armed from deep inside `applyRoomState`. Clears both streaks:
+      // reaching here means the hydration made progress, which is exactly what
+      // ends a rebind storm too.
+      if (!destroyed && hydrateRetryTimer === null) {
+        hydrateRetryAttempt = 0;
+        boundVideoAttempt = 0;
+      }
+    }
+  }
+
+  async function runHydrationCycle(): Promise<void> {
     const response = await args.requestRoomStateHydration();
     if (destroyed || response === null) {
       if (!destroyed) args.runtimeState.hydrationReady = true;
@@ -869,12 +1034,81 @@ export function createRoomStateApplyController(args: {
     scheduleHydrationRetry(1500);
   }
 
+  /**
+   * The `<video>` element a deferred hydration was waiting for now exists.
+   *
+   * A no-op unless a retry is actually pending: a player rebuild during
+   * ordinary playback also rebinds, and hydrating on every rebind would put the
+   * `sync:request` back on a timer — the opposite of the point.
+   *
+   * A binding and a fruitless wait are two different sequences, so they get two
+   * streaks. The wait streak is *spent* here: the element it was waiting for
+   * exists, so the pending room state must apply promptly no matter how long
+   * the wait ran. Sharing one counter meant a two-minute wait had grown it to
+   * ~10, and the nominal 50ms below became `50 * 2**10`, capped at the 30s
+   * ceiling — half a minute of suppressed broadcasts and a held pause *after*
+   * the video was usable.
+   *
+   * Repeated bindings that still fail to apply are the second sequence, and are
+   * unbounded in their own right: a player rebuilding its element reports a
+   * bind every time, and hydrating inline on each one would run up to four a
+   * second at the 250ms bind interval. So they back off on `boundVideoAttempt`,
+   * which — like the wait streak — clears once a cycle ends without re-arming.
+   *
+   * Goes through {@link preemptHydrationRetry} rather than cancel-and-re-arm,
+   * so a bind can only ever pull the hydration *earlier*. Cancelling
+   * unconditionally starved it outright: once the bind backoff passed the
+   * ~250ms bind interval, every bind cancelled the pending timer and armed a
+   * longer one, so the callback never ran and the pending state was held for
+   * as long as the player kept rebuilding.
+   */
+  function notifyVideoElementBound(): void {
+    if (destroyed || hydrateRetryTimer === null) {
+      return;
+    }
+    // Counted on every notification, not only on the ones that win: the streak
+    // measures how often this element has been rebinding, and a rebuild loop
+    // reports just as many binds whether or not each one manages to preempt.
+    // Advancing it only on wins let a storm hold the delay near the base value
+    // and kept hydration running ~1.6x/s — bounded, but still above the
+    // limiter's budget.
+    const attempt = boundVideoAttempt;
+    boundVideoAttempt += 1;
+    if (!preemptHydrationRetry(BOUND_VIDEO_HYDRATION_DELAY_MS, attempt)) {
+      // Declined because this bind would fire no sooner than what is already
+      // armed — the signature of a rebind storm rather than of the element
+      // finally arriving. Nothing is reset, so the wait streak goes on growing,
+      // which is what makes the storm decay.
+      return;
+    }
+    // The preemption won, so this bind really did carry news. The wait streak
+    // it accumulated is spent: a wait that follows must start over rather than
+    // resume at the ceiling.
+    hydrateRetryAttempt = 0;
+  }
+
+  /**
+   * Drop everything the hydration retry accumulated for the previous room.
+   *
+   * Both streaks measure "how long has *this* wait been failing", so they are
+   * meaningless across a room switch — and actively harmful: a tab that
+   * saturated them on the old room would either have the new room's 150ms
+   * bootstrap retry stretched to the ceiling, or have it refused outright by
+   * the single-timer guard because the old room's timer is still armed. The new
+   * room would then sit behind the hydration gate, suppressing broadcasts and
+   * holding a pause, if its bootstrap push happened to be lost.
+   */
+  function resetHydrationRetry(): void {
+    clearHydrationRetryTimer();
+    hydrateRetryAttempt = 0;
+    boundVideoAttempt = 0;
+  }
+
   function destroy(): void {
     destroyed = true;
-    if (hydrateRetryTimer !== null) {
-      window.clearTimeout(hydrateRetryTimer);
-      hydrateRetryTimer = null;
-    }
+    hydrateRetryAttempt = 0;
+    boundVideoAttempt = 0;
+    clearHydrationRetryTimer();
     clearDeferredRemotePaused();
   }
 
@@ -882,6 +1116,8 @@ export function createRoomStateApplyController(args: {
     applyRoomState,
     hydrateRoomState,
     scheduleHydrationRetry,
+    notifyVideoElementBound,
+    resetHydrationRetry,
     destroy,
   };
 }

@@ -617,6 +617,24 @@ export function createMessageController(args: {
         if (args.roomSessionState.roomCode && !args.connectionState.connected) {
           void args.socketController.connect();
         }
+        // Deliberately unconditional. Every earlier attempt at #229 tried to
+        // decide locally whether the cached `roomState` was still authoritative,
+        // and each attempt stranded a client on a stale snapshot in some path:
+        // the server can silently fail to push (`sendRoomStateToSession` on
+        // bootstrap, and the `room_event_consume_failed` catch in
+        // `room-event-consumer.ts`, both swallow the error without retrying,
+        // closing the socket, or telling the client), and a dropped refresh is
+        // indistinguishable from a satisfied one because nothing acknowledges
+        // it. There is no local predicate for "I have not missed a push", so
+        // suppressing here can only trade one bug for another.
+        //
+        // The flood #229 reported was never caused by forwarding — it was
+        // caused by the CALLER spinning: a tab whose player had not produced a
+        // `<video>` element re-hydrated every 350ms for the life of the tab.
+        // That is fixed where it lives: the element is now awaited by event
+        // (`onVideoElementBound`) instead of polled, and the remaining waits
+        // back off (`room-state-apply-controller`). Both bound this send
+        // without giving up any recovery path.
         if (
           args.connectionState.connected &&
           args.roomSessionState.roomCode &&

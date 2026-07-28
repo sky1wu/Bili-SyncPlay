@@ -64,6 +64,8 @@ export interface SyncController {
   ): Promise<void>;
   hydrateRoomState(): Promise<void>;
   scheduleHydrationRetry(delayMs?: number): void;
+  notifyVideoElementBound(): void;
+  resetHydrationRetry(): void;
   destroy(): void;
 }
 
@@ -1655,6 +1657,8 @@ export function createSyncController(args: {
     applyRoomState: recordRoomConfirmedBroadcast,
     hydrateRoomState: roomStateApplyController.hydrateRoomState,
     scheduleHydrationRetry: roomStateApplyController.scheduleHydrationRetry,
+    notifyVideoElementBound: roomStateApplyController.notifyVideoElementBound,
+    resetHydrationRetry: roomStateApplyController.resetHydrationRetry,
     destroy() {
       softApply.destroy();
       roomStateApplyController.destroy();

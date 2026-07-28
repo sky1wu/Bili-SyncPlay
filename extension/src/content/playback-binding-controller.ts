@@ -27,6 +27,11 @@ export interface PlaybackBindingController {
 export function createPlaybackBindingController(args: {
   runtimeState: ContentRuntimeState;
   videoBindIntervalMs: number;
+  /**
+   * Called when a `<video>` element is bound for the first time or replaced.
+   * Lets hydration wait for the element by event rather than polling for it.
+   */
+  onVideoElementBound?: () => void;
   userGestureGraceMs: number;
   initialRoomStatePauseHoldMs: number;
   /**
@@ -1169,6 +1174,12 @@ export function createPlaybackBindingController(args: {
       // whose paused state we never observed transitioning. The pause
       // classifiers use this timestamp to avoid reporting either as a user pause.
       args.runtimeState.lastVideoElementBoundAt = nowOf();
+      // This poll is the one place that learns a `<video>` exists. Hydration
+      // used to discover it by polling `document.querySelector("video")` on its
+      // own 350ms timer — the same query this loop already runs at 250ms — and
+      // every one of those passes also hit the server (#229). Telling it here
+      // removes the duplicate poller instead of slowing it down.
+      args.onVideoElementBound?.();
     }
   }
 
