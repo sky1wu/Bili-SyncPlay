@@ -100,10 +100,14 @@ git switch -c "feat/$BRANCH_SLUG"
 ## 5. 提交前的预提交检查（强制）
 
 ```bash
-npm run format:check && npm run lint && npm run typecheck && npm run build && npm test
+npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
 ```
 
 任一项失败就先修复，**不要跳过**。
+
+`npm run audit` 不被 `npm test` 覆盖，是 CI `verify` job 的同一道依赖闸门，且会在
+本地毫无改动的情况下因新公告而变红——所以要在推送前跑，而不是等 CI 红了再补。不
+适用于本仓库的条目写进 `audit-allowlist.json`，附理由和**必填的过期日期**。
 
 ## 6. 提交、推送、开 PR
 
@@ -152,7 +156,7 @@ git switch main && git pull --ff-only
 ## 硬性规则
 
 - **严禁直接推 main/master**。
-- **严禁跳过** `format:check` / `lint` / `typecheck` / `build` / `test`。
+- **严禁跳过** `format:check` / `lint` / `typecheck` / `build` / `test` / `audit`。
 - **严禁** `--no-verify` / `--no-gpg-sign` 绕过钩子或签名。
 - **严禁** `git add -A` / `git add .`。
 - **不要越界**：不要搭建"未来可能用到"的抽象；三行相似代码胜过过早抽象。
