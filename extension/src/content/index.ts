@@ -215,10 +215,23 @@ function debugLog(message: string): void {
   }).catch(() => undefined);
 }
 
+/**
+ * Every timestamp below is monotonic (`performance.now()`), and so is every
+ * timestamp the controllers this file wires up store. They are all intervals
+ * measured on this machine — a throttle window, a pause hold, the age of a user
+ * gesture — and none of them may move when the wall clock is stepped. Some of
+ * these fields (`lastUserGestureAt`) are written here and compared in three
+ * other controllers, so the domain is only consistent if every writer and every
+ * reader uses the same clock.
+ *
+ * The single exception in the content script is `PlaybackState.updatedAt`, a
+ * wire field that stays on the wall clock; it is produced in
+ * `playback-broadcast` / `page-video`, never here.
+ */
 function shouldLogHeartbeat(
   state: { key: string | null; at: number },
   key: string,
-  now = Date.now(),
+  now = performance.now(),
 ): boolean {
   if (state.key === key && now - state.at < HEARTBEAT_LOG_INTERVAL_MS) {
     return false;
@@ -229,12 +242,12 @@ function shouldLogHeartbeat(
 }
 
 function activatePauseHold(durationMs = PAUSE_HOLD_MS): void {
-  runtimeState.pauseHoldUntil = Date.now() + durationMs;
+  runtimeState.pauseHoldUntil = performance.now() + durationMs;
 }
 
 async function init(): Promise<void> {
   startUserGestureTracking((insidePlayer) => {
-    const now = Date.now();
+    const now = performance.now();
     runtimeState.lastUserGestureAt = now;
     if (insidePlayer) {
       runtimeState.lastUserGestureInPlayerAt = now;

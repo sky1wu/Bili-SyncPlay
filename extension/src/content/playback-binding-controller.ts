@@ -68,12 +68,18 @@ export function createPlaybackBindingController(args: {
   applyPendingPlaybackApplication: (video: HTMLVideoElement) => void;
   activatePauseHold: (durationMs?: number) => void;
   debugLog: (message: string) => void;
-  getNow?: () => number;
+  /**
+   * Monotonic time source. Every timestamp this controller stores and every
+   * window it compares is an interval measured on this machine, so none of them
+   * may move when the wall clock is stepped. The wall clock is only correct for
+   * the wire field `PlaybackState.updatedAt`, which is produced elsewhere.
+   */
+  getMonotonicNow?: () => number;
 }): PlaybackBindingController {
   let videoBindingTimer: number | null = null;
   let pauseBufferUpgradeTimerId: number | null = null;
   let sharerEndedFlushTimerId: number | null = null;
-  const nowOf = () => args.getNow?.() ?? Date.now();
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   const scheduleUpgradeTimer = (cb: () => void, ms: number): number | null => {
     if (
       typeof globalThis.window !== "undefined" &&
@@ -135,14 +141,15 @@ export function createPlaybackBindingController(args: {
     }, args.bufferPauseUpgradeMs);
   };
   const hasRecentUserGesture = () =>
-    nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs;
+    monotonicNow() - args.runtimeState.lastUserGestureAt <
+    args.userGestureGraceMs;
   // A genuine intent to control the player (pointer inside the player container
   // or a play-toggle key), as opposed to any document-level gesture. Authorizing
   // playback on a "load paused" non-shared page requires this stronger signal so
   // a stray click on blank space / a popup cannot wave the page-load autoplay
   // through.
   const hasRecentUserGestureInPlayer = () =>
-    nowOf() - args.runtimeState.lastUserGestureInPlayerAt <
+    monotonicNow() - args.runtimeState.lastUserGestureInPlayerAt <
     args.userGestureGraceMs;
   // A FRESH in-player play intent: an in-player gesture that also postdates the
   // last forced pause. While the page bridge resolves, the unconfirmed-context
@@ -158,7 +165,7 @@ export function createPlaybackBindingController(args: {
     const explicitAction = args.runtimeState.lastExplicitUserAction;
     if (
       explicitAction?.kind !== "seek" ||
-      nowOf() - explicitAction.at >= args.userGestureGraceMs
+      monotonicNow() - explicitAction.at >= args.userGestureGraceMs
     ) {
       return null;
     }
@@ -217,9 +224,9 @@ export function createPlaybackBindingController(args: {
    * same predicate authorizes playback on "load paused" pages, where arrow keys
    * must NOT count.
    *
-   * Both timestamps come from `Date.now()`, whose resolution browsers coarsen,
-   * so a gesture landing in the same tick as the window opening is genuinely
-   * ambiguous. Ties go to the user (`<`, not `<=`): mistaking an echo for a user
+   * Both timestamps come from `performance.now()`, whose resolution browsers
+   * coarsen, so a gesture landing in the same tick as the window opening is
+   * genuinely ambiguous. Ties go to the user (`<`, not `<=`): mistaking an echo for a user
    * action is merely the behaviour that existed before this guard, whereas
    * discarding a real interaction would be a new harm introduced by it.
    */
@@ -236,7 +243,7 @@ export function createPlaybackBindingController(args: {
       return false;
     }
     return (
-      nowOf() < args.runtimeState.programmaticApplyUntil &&
+      monotonicNow() < args.runtimeState.programmaticApplyUntil &&
       args.runtimeState.lastUserGestureInPlayerAt <
         args.runtimeState.programmaticApplyAt
     );
@@ -247,12 +254,13 @@ export function createPlaybackBindingController(args: {
       return;
     }
     if (
-      nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
+      monotonicNow() - args.runtimeState.lastUserGestureAt <
+        args.userGestureGraceMs &&
       args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
     ) {
       args.runtimeState.lastExplicitPlaybackAction = {
         playState,
-        at: nowOf(),
+        at: monotonicNow(),
       };
     }
   }
@@ -262,13 +270,14 @@ export function createPlaybackBindingController(args: {
       return;
     }
     if (
-      nowOf() - args.runtimeState.lastUserGestureAt < args.userGestureGraceMs &&
+      monotonicNow() - args.runtimeState.lastUserGestureAt <
+        args.userGestureGraceMs &&
       args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
     ) {
       if (
         kind === "play" &&
         args.runtimeState.lastExplicitUserAction?.kind === "seek" &&
-        nowOf() - args.runtimeState.lastExplicitUserAction.at <
+        monotonicNow() - args.runtimeState.lastExplicitUserAction.at <
           args.userGestureGraceMs &&
         args.runtimeState.lastUserGestureAt <=
           args.runtimeState.lastExplicitUserAction.at
@@ -278,7 +287,7 @@ export function createPlaybackBindingController(args: {
       const previousAction = args.runtimeState.lastExplicitUserAction;
       args.runtimeState.lastExplicitUserAction = {
         kind,
-        at: nowOf(),
+        at: monotonicNow(),
       };
       if (kind === "seek") {
         // One gesture produces `seeking` AND `seeked`, and the `seeking`
@@ -293,7 +302,7 @@ export function createPlaybackBindingController(args: {
         const continuesInFlightSeek =
           previousAction?.kind === "seek" &&
           previousAction.at > args.runtimeState.lastForcedPauseAt &&
-          nowOf() - previousAction.at < args.userGestureGraceMs;
+          monotonicNow() - previousAction.at < args.userGestureGraceMs;
         if (!continuesInFlightSeek) {
           args.runtimeState.explicitSeekOriginPlayState =
             args.runtimeState.intendedPlayState;
@@ -355,7 +364,7 @@ export function createPlaybackBindingController(args: {
    * it on the shared path is both safe and complete.
    */
   function classifyUnobservedPauseAsBuffer(video: HTMLVideoElement): void {
-    const now = nowOf();
+    const now = monotonicNow();
     if (
       !video.paused ||
       args.runtimeState.pauseStartedAt > 0 ||
@@ -381,7 +390,10 @@ export function createPlaybackBindingController(args: {
     video: HTMLVideoElement,
   ): boolean {
     const signature = args.runtimeState.programmaticApplySignature;
-    if (!signature || nowOf() >= args.runtimeState.programmaticApplyUntil) {
+    if (
+      !signature ||
+      monotonicNow() >= args.runtimeState.programmaticApplyUntil
+    ) {
       return false;
     }
 
@@ -420,7 +432,7 @@ export function createPlaybackBindingController(args: {
     }
     args.runtimeState.sharedVideoNaturalEndUrl =
       args.runtimeState.activeSharedUrl;
-    args.runtimeState.sharedVideoNaturalEndAt = nowOf();
+    args.runtimeState.sharedVideoNaturalEndAt = monotonicNow();
     // Whether this end was reached right after an in-video seek (seek-to-end),
     // captured now while the old page's action state is still intact (the next
     // page's `play` has not yet overwritten it). The navigation controller only
@@ -474,11 +486,11 @@ export function createPlaybackBindingController(args: {
     }
 
     args.runtimeState.intendedPlayState = "paused";
-    args.runtimeState.lastForcedPauseAt = nowOf();
+    args.runtimeState.lastForcedPauseAt = monotonicNow();
     args.runtimeState.suppressedLocalEndPauseUrl =
       args.runtimeState.activeSharedUrl;
     args.runtimeState.suppressedLocalEndPauseUntil =
-      nowOf() + args.initialRoomStatePauseHoldMs;
+      monotonicNow() + args.initialRoomStatePauseHoldMs;
     args.activatePauseHold(args.initialRoomStatePauseHoldMs);
     args.debugLog(
       `Held non-sharer at shared video natural end to block local autoplay-next`,
@@ -537,8 +549,8 @@ export function createPlaybackBindingController(args: {
     const armedUrl = args.runtimeState.activeSharedUrl;
     args.runtimeState.sharerEndedSuppressionUrl = armedUrl;
     args.runtimeState.sharerEndedSuppressionUntil =
-      nowOf() + args.initialRoomStatePauseHoldMs;
-    args.runtimeState.sharerEndedSuppressionArmedAt = nowOf();
+      monotonicNow() + args.initialRoomStatePauseHoldMs;
+    args.runtimeState.sharerEndedSuppressionArmedAt = monotonicNow();
     clearSharerEndedFlushTimer();
     sharerEndedFlushTimerId = scheduleUpgradeTimer(() => {
       sharerEndedFlushTimerId = null;
@@ -601,10 +613,10 @@ export function createPlaybackBindingController(args: {
       isCurrentVideoShared(currentVideo) &&
       args.runtimeState.intendedPlayState !== "playing" &&
       args.runtimeState.suppressedLocalEndPauseUrl !== null &&
-      nowOf() < args.runtimeState.suppressedLocalEndPauseUntil &&
+      monotonicNow() < args.runtimeState.suppressedLocalEndPauseUntil &&
       args.normalizeUrl(currentVideo.url) ===
         args.runtimeState.suppressedLocalEndPauseUrl &&
-      nowOf() - args.runtimeState.lastUserGestureAt >=
+      monotonicNow() - args.runtimeState.lastUserGestureAt >=
         args.userGestureGraceMs &&
       !video.paused,
     );
@@ -649,7 +661,7 @@ export function createPlaybackBindingController(args: {
     const lastAction = args.runtimeState.lastExplicitUserAction;
     if (
       lastAction?.kind === "seek" &&
-      nowOf() - lastAction.at < args.userGestureGraceMs &&
+      monotonicNow() - lastAction.at < args.userGestureGraceMs &&
       args.runtimeState.lastUserGestureAt <= lastAction.at
     ) {
       return false;
@@ -735,7 +747,7 @@ export function createPlaybackBindingController(args: {
     args.runtimeState.intendedPlayState = "paused";
     args.runtimeState.nonSharerAutoplayHoldUrl = normalizedCurrentUrl;
     args.activatePauseHold(args.initialRoomStatePauseHoldMs);
-    args.runtimeState.lastForcedPauseAt = nowOf();
+    args.runtimeState.lastForcedPauseAt = monotonicNow();
     args.debugLog(
       "Forced pause for non-shared video autoplay (in room, load paused)",
     );
@@ -767,7 +779,7 @@ export function createPlaybackBindingController(args: {
       `Suppressed page autoplay while waiting for initial room state of ${args.runtimeState.activeRoomCode}`,
     );
     args.runtimeState.intendedPlayState = "paused";
-    args.runtimeState.lastForcedPauseAt = nowOf();
+    args.runtimeState.lastForcedPauseAt = monotonicNow();
     window.setTimeout(() => {
       if (!video.paused) {
         pauseVideo(video);
@@ -782,7 +794,7 @@ export function createPlaybackBindingController(args: {
     if (
       !args.runtimeState.activeRoomCode ||
       !args.runtimeState.activeSharedUrl ||
-      nowOf() >= args.runtimeState.pauseHoldUntil
+      monotonicNow() >= args.runtimeState.pauseHoldUntil
     ) {
       return false;
     }
@@ -860,7 +872,7 @@ export function createPlaybackBindingController(args: {
       explicitNonSharedPlaybackUrl:
         args.runtimeState.explicitNonSharedPlaybackUrl,
       lastExplicitPlaybackAction: args.runtimeState.lastExplicitPlaybackAction,
-      now: nowOf(),
+      now: monotonicNow(),
       userGestureGraceMs: args.userGestureGraceMs,
     });
 
@@ -905,7 +917,7 @@ export function createPlaybackBindingController(args: {
         args.runtimeState.lastExplicitUserAction = null;
         args.runtimeState.explicitSeekOriginPlayState = null;
         args.runtimeState.lastExplicitPlaybackAction = null;
-        args.runtimeState.lastForcedPauseAt = nowOf();
+        args.runtimeState.lastForcedPauseAt = monotonicNow();
         window.setTimeout(() => {
           pauseVideo(video);
         }, 0);
@@ -921,7 +933,7 @@ export function createPlaybackBindingController(args: {
         args.debugLog(
           `Re-paused non-sharer multi-part autoplay after shared video natural end`,
         );
-        args.runtimeState.lastForcedPauseAt = nowOf();
+        args.runtimeState.lastForcedPauseAt = monotonicNow();
         window.setTimeout(() => {
           pauseVideo(video);
         }, 0);
@@ -933,12 +945,13 @@ export function createPlaybackBindingController(args: {
         isCurrentVideoShared(currentVideo) &&
         args.hasRecentRemoteStopIntent(currentVideo.url) &&
         args.runtimeState.intendedPlayState !== "playing" &&
-        nowOf() - args.runtimeState.lastUserGestureAt >= args.userGestureGraceMs
+        monotonicNow() - args.runtimeState.lastUserGestureAt >=
+          args.userGestureGraceMs
       ) {
         args.debugLog(
           `Forced pause hold reapplied after unexpected resume intended=${args.runtimeState.intendedPlayState}`,
         );
-        args.runtimeState.lastForcedPauseAt = nowOf();
+        args.runtimeState.lastForcedPauseAt = monotonicNow();
         window.setTimeout(() => {
           pauseVideo(video);
         }, 0);
@@ -951,7 +964,7 @@ export function createPlaybackBindingController(args: {
         );
         args.runtimeState.explicitNonSharedPlaybackUrl = null;
         args.runtimeState.lastNonSharedGuardUrl = null;
-        args.runtimeState.lastForcedPauseAt = nowOf();
+        args.runtimeState.lastForcedPauseAt = monotonicNow();
         window.setTimeout(() => {
           pauseVideo(video);
         }, 0);
@@ -1026,7 +1039,7 @@ export function createPlaybackBindingController(args: {
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "pause");
         }
-        const now = nowOf();
+        const now = monotonicNow();
         const recentBufferSignal =
           args.runtimeState.lastBufferSignalAt > 0 &&
           now - args.runtimeState.lastBufferSignalAt <
@@ -1086,11 +1099,11 @@ export function createPlaybackBindingController(args: {
         scheduleBroadcast(video, "pause", 120);
       },
       onWaiting: () => {
-        args.runtimeState.lastBufferSignalAt = nowOf();
+        args.runtimeState.lastBufferSignalAt = monotonicNow();
         scheduleBroadcast(video, "waiting");
       },
       onStalled: () => {
-        args.runtimeState.lastBufferSignalAt = nowOf();
+        args.runtimeState.lastBufferSignalAt = monotonicNow();
         scheduleBroadcast(video, "stalled");
       },
       onLoadedMetadata: () => {
@@ -1162,7 +1175,10 @@ export function createPlaybackBindingController(args: {
       },
       onTimeUpdate: () => {
         args.maintainActiveSoftApply(video);
-        if (nowOf() - args.getLastBroadcastAt() > 2000 && !video.paused) {
+        if (
+          monotonicNow() - args.getLastBroadcastAt() > 2000 &&
+          !video.paused
+        ) {
           void args.broadcastPlayback(video, "timeupdate");
         }
       },
@@ -1173,7 +1189,7 @@ export function createPlaybackBindingController(args: {
       // here from the first bind on a freshly loaded page; both leave an element
       // whose paused state we never observed transitioning. The pause
       // classifiers use this timestamp to avoid reporting either as a user pause.
-      args.runtimeState.lastVideoElementBoundAt = nowOf();
+      args.runtimeState.lastVideoElementBoundAt = monotonicNow();
       // This poll is the one place that learns a `<video>` exists. Hydration
       // used to discover it by polling `document.querySelector("video")` on its
       // own 350ms timer — the same query this loop already runs at 250ms — and

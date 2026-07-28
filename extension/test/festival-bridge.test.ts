@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createFestivalBridgeController } from "../src/content/festival-bridge";
+import { installClockStubs } from "./clock-stubs";
 
 interface PageBridgeDetail {
   epId?: string | number;
@@ -325,6 +326,45 @@ test("festival bridge does not fall back to another festival page snapshot", asy
 
     assert.equal(nextSnapshot, null);
   } finally {
+    dom.restore();
+  }
+});
+
+test("ages the cached snapshot on the monotonic clock", async () => {
+  const dom = installBridgeDomStub([
+    {
+      bvid: "BVfestival",
+      cid: 123,
+      title: "Festival Episode",
+    },
+  ]);
+  // This controller takes no clock, so the globals are the only way to drive it.
+  const clock = installClockStubs({
+    wall: 1_700_000_000_000,
+    monotonic: 5_000,
+  });
+  const controller = createFestivalBridgeController();
+
+  try {
+    await controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl: "https://www.bilibili.com/festival/demo",
+      maxAgeMs: 0,
+    });
+
+    // An NTP correction jumps the wall clock an hour forward while barely any
+    // time has actually passed. The snapshot is 100ms old, not an hour old, and
+    // discarding it would send the auto-share self-check back to the page bridge
+    // for a video that has not changed.
+    clock.clocks.wall += 3_600_000;
+    clock.clocks.monotonic += 100;
+
+    assert.equal(
+      controller.resolveVideoUrlForPage("/festival/demo", 60_000),
+      "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
+    );
+  } finally {
+    clock.restore();
     dom.restore();
   }
 });

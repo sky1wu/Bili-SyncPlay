@@ -208,7 +208,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
       // video, so the auto-share self-check cannot confirm a stale target.
       if (
         maxAgeMs !== undefined &&
-        Date.now() - festivalSnapshot.updatedAt >= maxAgeMs
+        performance.now() - festivalSnapshot.updatedAt >= maxAgeMs
       ) {
         return null;
       }
@@ -225,7 +225,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         !isBangumiPage &&
         festivalSnapshot &&
         canUseCachedFestivalSnapshot(pathname) &&
-        Date.now() - festivalSnapshot.updatedAt < maxAgeMs
+        performance.now() - festivalSnapshot.updatedAt < maxAgeMs
       ) {
         return {
           videoId: festivalSnapshot.videoId,
@@ -247,7 +247,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         return !isBangumiPage &&
           festivalSnapshot &&
           canUseCachedFestivalSnapshot(pathname) &&
-          Date.now() - festivalSnapshot.updatedAt < maxAgeMs
+          performance.now() - festivalSnapshot.updatedAt < maxAgeMs
           ? {
               videoId: festivalSnapshot.videoId,
               url: festivalSnapshot.url,
@@ -258,7 +258,11 @@ export function createFestivalBridgeController(): FestivalBridgeController {
 
       festivalSnapshot = {
         ...nextSnapshot,
-        updatedAt: Date.now(),
+        // Monotonic: this stamp exists only to age the snapshot out against
+        // `maxAgeMs` above, and an interval measured on this machine must not
+        // move when the wall clock is stepped. Unrelated to the wire field of
+        // the same name on `PlaybackState`.
+        updatedAt: performance.now(),
         pathname,
         pageUrl,
       };

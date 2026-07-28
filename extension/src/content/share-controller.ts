@@ -169,7 +169,9 @@ export function createShareController(args: {
         : null,
       actorId: args.runtimeState.localMemberId ?? "local",
       seq: args.nextSeq(),
-      now: Date.now(),
+      // Wall clock on purpose: this one goes on the wire. Everything the content
+      // script measures a duration with reads the monotonic clock instead.
+      updatedAt: Date.now(),
     });
   }
 
