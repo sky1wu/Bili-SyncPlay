@@ -1709,3 +1709,41 @@ test("message controller still requests a sync when it has no cached room state"
     [{ type: "sync:request", payload: { memberToken: "member-token-1" } }],
   );
 });
+
+test("message controller re-requests a sync while awaiting fresh room state after reconnect", async () => {
+  // The cache-hit short circuit must key on the state being *authoritative*,
+  // not merely present. During the reconnect handshake `awaitingFreshRoomState`
+  // marks the cache as stale, and the server drops a failed bootstrap snapshot
+  // silently (`sendRoomStateToSession` logs `room_state_bootstrap_failed`
+  // without retrying) while the client deliberately keeps the flag set
+  // (`expireBootstrapRoomStateWait`) — so this `sync:request` is the only way
+  // out of that state.
+  const harness = createControllerHarness({
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: {
+        roomCode: "ROOM01",
+        sharedVideo: null,
+        playback: null,
+        members: [],
+      },
+      awaitingFreshRoomState: true,
+    },
+  });
+  await harness.controller.handleRuntimeMessage(
+    { type: "content:get-room-state" },
+    createSender({ id: 123 }),
+    () => undefined,
+  );
+
+  assert.deepEqual(
+    harness.calls.sendToServer.filter(
+      (message) => (message as { type?: string }).type === "sync:request",
+    ),
+    [{ type: "sync:request", payload: { memberToken: "member-token-1" } }],
+    "a non-authoritative cache must still reach the server",
+  );
+});

@@ -628,16 +628,24 @@ export function createMessageController(args: {
         // (6 per 10s), which is how 72% of all `sync:request` got rejected
         // upstream (#229).
         //
-        // A cached `roomState` needs no poll to stay current: the server pushes
-        // `room:state` on every change, and a reconnect re-sends `room:join`
-        // (`socket-controller`'s open handler) whose handshake delivers a fresh
-        // snapshot — the window in between is exactly what
-        // `awaitingFreshRoomState` marks.
+        // An *authoritative* cached `roomState` needs no poll to stay current:
+        // the server pushes `room:state` on every change. A reconnect re-sends
+        // `room:join` (`socket-controller`'s open handler) whose handshake
+        // delivers a fresh snapshot, and `awaitingFreshRoomState` marks that
+        // window — during it the cache is explicitly NOT authoritative, so the
+        // request must still go through. That is not merely belt-and-braces:
+        // the server drops a failed bootstrap snapshot silently
+        // (`sendRoomStateToSession` logs `room_state_bootstrap_failed` and does
+        // not retry) while the client deliberately keeps the flag set
+        // (`expireBootstrapRoomStateWait`), so a `sync:request` from a
+        // hydration retry is the ONLY way out of that state. The retries are
+        // bounded by the hydration backoff, so this cannot re-open the flood.
         if (
           args.connectionState.connected &&
           args.roomSessionState.roomCode &&
           args.roomSessionState.memberToken &&
-          !args.roomSessionState.roomState
+          (!args.roomSessionState.roomState ||
+            args.roomSessionState.awaitingFreshRoomState)
         ) {
           args.sendToServer({
             type: "sync:request",
