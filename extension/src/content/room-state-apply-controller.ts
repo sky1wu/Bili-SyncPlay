@@ -15,6 +15,24 @@ import {
 } from "./player-binding";
 import type { ContentRuntimeState } from "./runtime-state";
 
+/**
+ * Ceiling for the exponential hydration-retry backoff.
+ *
+ * Deliberately much lower than a "this tab is idle" timeout would be: a
+ * hydration retry is the ONLY path that re-applies room state once a slow
+ * player finally produces its `<video>` element (binding one merely records
+ * `lastVideoElementBoundAt`, it does not re-apply), so the ceiling is also the
+ * worst-case delay before such a tab catches up with the room. 5s keeps that
+ * visible-but-tolerable while still cutting a stuck tab's wakeups from ~171/min
+ * to ~12/min.
+ *
+ * The server-side flood this bounds is already gone by the time we get here —
+ * the background only forwards `sync:request` when it has no cached room state
+ * (`message-controller`) — so this ceiling only has to bound local work, and
+ * does not need to be as aggressive as the 30s floated in #229.
+ */
+const HYDRATION_RETRY_MAX_DELAY_MS = 5_000;
+
 export interface RoomStateApplyController {
   applyRoomState(
     state: RoomState,
@@ -115,6 +133,7 @@ export function createRoomStateApplyController(args: {
   const ignoredRoomStateLogState = { key: null as string | null, at: 0 };
   const nowOf = () => args.getNow?.() ?? Date.now();
   let hydrateRetryTimer: number | null = null;
+  let hydrateRetryAttempt = 0;
   let destroyed = false;
   const remotePauseDebounceMs = args.remotePauseDebounceMs ?? 0;
   const scheduleDeferTimer = (cb: () => void, ms: number): number | null => {
@@ -288,14 +307,31 @@ export function createRoomStateApplyController(args: {
     }
   }
 
+  /**
+   * Back off consecutive hydration retries instead of re-arming the caller's
+   * fixed delay forever. Every wait this retry serves — the page bridge, the
+   * `<video>` element, the room state itself — is unbounded: none of them is
+   * guaranteed to arrive, and a tab whose player never produces a `<video>`
+   * used to re-hydrate every 350ms for the lifetime of the tab (#229).
+   *
+   * The delay the caller passes is the *first* interval; each consecutive retry
+   * doubles it up to {@link HYDRATION_RETRY_MAX_DELAY_MS}. The counter resets
+   * as soon as one hydration cycle finishes without arming another retry
+   * (see {@link hydrateRoomState}), so an isolated retry always starts fast.
+   */
   function scheduleHydrationRetry(delayMs = 350): void {
     if (destroyed || hydrateRetryTimer !== null) {
       return;
     }
+    const backedOffDelayMs = Math.min(
+      delayMs * 2 ** hydrateRetryAttempt,
+      HYDRATION_RETRY_MAX_DELAY_MS,
+    );
+    hydrateRetryAttempt += 1;
     const timer = window.setTimeout(() => {
       hydrateRetryTimer = null;
       void hydrateRoomState();
-    }, delayMs);
+    }, backedOffDelayMs);
     hydrateRetryTimer = timer;
   }
 
@@ -795,7 +831,20 @@ export function createRoomStateApplyController(args: {
       window.clearTimeout(hydrateRetryTimer);
       hydrateRetryTimer = null;
     }
+    try {
+      await runHydrationCycle();
+    } finally {
+      // A cycle that ends without arming another retry is not part of a retry
+      // loop, so the next isolated retry starts from its caller's delay again.
+      // Checked here rather than at the cycle's several exits because the retry
+      // can be armed from deep inside `applyRoomState`.
+      if (!destroyed && hydrateRetryTimer === null) {
+        hydrateRetryAttempt = 0;
+      }
+    }
+  }
 
+  async function runHydrationCycle(): Promise<void> {
     const response = await args.requestRoomStateHydration();
     if (destroyed || response === null) {
       if (!destroyed) args.runtimeState.hydrationReady = true;
@@ -871,6 +920,7 @@ export function createRoomStateApplyController(args: {
 
   function destroy(): void {
     destroyed = true;
+    hydrateRetryAttempt = 0;
     if (hydrateRetryTimer !== null) {
       window.clearTimeout(hydrateRetryTimer);
       hydrateRetryTimer = null;

@@ -1660,3 +1660,52 @@ test("message controller forwards content playback updates only for the active s
 
   assert.deepEqual(inactiveHarness.calls.sendToServer, []);
 });
+
+test("message controller answers content:get-room-state from cache without polling the server", async () => {
+  // Regression for #229: content-side hydration retries call this message in a
+  // loop while waiting for a `<video>` element, and forwarding a `sync:request`
+  // on every pass saturated the per-session rate limiter (6 per 10s).
+  const harness = createControllerHarness();
+  let response: unknown;
+  await harness.controller.handleRuntimeMessage(
+    { type: "content:get-room-state" },
+    createSender({ id: 123 }),
+    (value) => {
+      response = value;
+    },
+  );
+
+  assert.deepEqual(
+    harness.calls.sendToServer.filter(
+      (message) => (message as { type?: string }).type === "sync:request",
+    ),
+    [],
+    "a cached room state must be served locally, without a sync:request",
+  );
+  assert.equal((response as { ok: boolean }).ok, true);
+  assert.equal((response as { roomCode: string }).roomCode, "ROOM01");
+});
+
+test("message controller still requests a sync when it has no cached room state", async () => {
+  const harness = createControllerHarness({
+    roomSessionState: {
+      roomCode: "ROOM01",
+      memberToken: "member-token-1",
+      memberId: "member-1",
+      displayName: "Alice",
+      roomState: null,
+    },
+  });
+  await harness.controller.handleRuntimeMessage(
+    { type: "content:get-room-state" },
+    createSender({ id: 123 }),
+    () => undefined,
+  );
+
+  assert.deepEqual(
+    harness.calls.sendToServer.filter(
+      (message) => (message as { type?: string }).type === "sync:request",
+    ),
+    [{ type: "sync:request", payload: { memberToken: "member-token-1" } }],
+  );
+});

@@ -1393,3 +1393,101 @@ test("legacy remote paused (no userInitiated field) still goes through the debou
     win.restore();
   }
 });
+
+test("backs off consecutive hydration retries instead of re-arming a flat delay", async () => {
+  const win = installWindowTimerStub();
+  try {
+    // Regression for #229: a tab whose player never produces a `<video>`
+    // element re-armed the hydration retry at a flat 350ms for the lifetime of
+    // the tab. Each pass also forwarded a `sync:request`, which is how a single
+    // stuck tab saturated the server's per-session limiter.
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    });
+    const harness = createController({
+      video: createStubVideo(false),
+      now: 30_000,
+      currentVideo: null,
+      requestRoomStateHydration: async () => ({
+        ok: true,
+        roomState,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
+    });
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 29_500;
+
+    // Six consecutive cycles that each re-arm the retry (the page bridge never
+    // becomes ready), driven directly rather than through the timer stub.
+    for (let i = 0; i < 6; i += 1) {
+      await harness.controller.hydrateRoomState();
+    }
+
+    assert.deepEqual(
+      win.scheduled.map((timer) => timer.ms),
+      [350, 700, 1400, 2800, 5000, 5000],
+      "consecutive retries must double up to the 5s ceiling",
+    );
+  } finally {
+    win.restore();
+  }
+});
+
+test("resets hydration retry backoff once a cycle completes without retrying", async () => {
+  const win = installWindowTimerStub();
+  try {
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    });
+    let bridgeReady = false;
+    const harness = createController({
+      video: createStubVideo(false),
+      now: 30_000,
+      // `currentVideo` null keeps the page bridge "not ready" and re-arms the
+      // retry; returning the shared video lets the cycle complete cleanly.
+      currentVideo: null,
+      requestRoomStateHydration: async () =>
+        bridgeReady
+          ? null
+          : {
+              ok: true,
+              roomState,
+              memberId: "local-member",
+              roomCode: "ROOM01",
+            },
+    });
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 29_500;
+
+    await harness.controller.hydrateRoomState();
+    await harness.controller.hydrateRoomState();
+    assert.deepEqual(
+      win.scheduled.map((timer) => timer.ms),
+      [350, 700],
+    );
+
+    // A cycle that arms no retry clears the streak...
+    bridgeReady = true;
+    await harness.controller.hydrateRoomState();
+    assert.equal(win.scheduled.length, 2, "clean cycle must not arm a retry");
+
+    // ...so the next isolated retry starts from its caller's delay again.
+    bridgeReady = false;
+    await harness.controller.hydrateRoomState();
+    assert.deepEqual(
+      win.scheduled.map((timer) => timer.ms),
+      [350, 700, 350],
+    );
+  } finally {
+    win.restore();
+  }
+});

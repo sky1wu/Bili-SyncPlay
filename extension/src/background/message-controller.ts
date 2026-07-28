@@ -617,10 +617,27 @@ export function createMessageController(args: {
         if (args.roomSessionState.roomCode && !args.connectionState.connected) {
           void args.socketController.connect();
         }
+        // Only ask the server when this message cannot be answered locally.
+        // `content:get-room-state` conflates "hand me the state you have" with
+        // "go refresh it", and content-side hydration retries call it in a loop
+        // for the former reason — a tab sitting on the shared video whose
+        // player has not produced a `<video>` element yet re-hydrates every
+        // 350ms (`room-state-apply-controller`), and each pass used to forward a
+        // `sync:request` even though the cached state was returned in the very
+        // same response. That loop alone saturated the per-session limiter
+        // (6 per 10s), which is how 72% of all `sync:request` got rejected
+        // upstream (#229).
+        //
+        // A cached `roomState` needs no poll to stay current: the server pushes
+        // `room:state` on every change, and a reconnect re-sends `room:join`
+        // (`socket-controller`'s open handler) whose handshake delivers a fresh
+        // snapshot — the window in between is exactly what
+        // `awaitingFreshRoomState` marks.
         if (
           args.connectionState.connected &&
           args.roomSessionState.roomCode &&
-          args.roomSessionState.memberToken
+          args.roomSessionState.memberToken &&
+          !args.roomSessionState.roomState
         ) {
           args.sendToServer({
             type: "sync:request",
