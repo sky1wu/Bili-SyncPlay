@@ -140,7 +140,52 @@ echo "== 10. reply-resolve 部分失败后可安全重试 =="
 grep -q 'MINE" = "true"' "$HERE/reply-resolve.sh" &&
   ok "识别已存在的自身回复，重跑只补 resolve 不重复发" || no "缺少幂等重试路径"
 
-echo "== 11. 翻页一致性（需传入一个真实 PR 编号）=="
+echo "== 11. 基线必须比内容：已脏文件被继续修改要能识别 =="
+TMP3=$(mktemp -d)
+(
+  cd "$TMP3" && git init -q
+  git config user.email t@t && git config user.name t && git config commit.gpgsign false
+  echo v1 >tracked.txt && git add tracked.txt
+  git commit -q -m init || exit 9
+  echo v2 >tracked.txt # 技能启动前，该文件已经是 " M"
+  "$HERE/has-changes.sh" --baseline /tmp/rr-st2 >/dev/null
+  "$HERE/has-changes.sh" /tmp/rr-st2 >/dev/null 2>&1
+  [ $? -eq 1 ] || exit 1 # 尚未动手，应判 NO-CHANGES
+  echo v3 >tracked.txt   # 本轮继续修改同一个已脏文件——porcelain 状态行不变
+  "$HERE/has-changes.sh" /tmp/rr-st2 >/dev/null 2>&1
+  [ $? -eq 0 ] || exit 2 # 必须判 HAS-CHANGES
+)
+case $? in
+0) ok "已脏文件的后续内容修改能被识别（只比状态行会漏，导致修复不被提交）" ;;
+1) no "基线阶段被误判成有改动" ;;
+2) no "已脏文件的后续修改被漏判——修复会只留在工作树" ;;
+*) no "内容快照测试环境异常" ;;
+esac
+rm -rf "$TMP3" /tmp/rr-st2
+
+echo "== 12. 幂等重试不得绕过新评论保护 =="
+grep -q 'TOTAL" -ne "\$((SEEN + 1))' "$HERE/reply-resolve.sh" &&
+  ok "幂等分支要求增量恰为脚本自己那一条回复" || no "幂等分支仍会绕过新评论检查"
+
+echo "== 13. reaction 按时间取最新，而非存在性 =="
+grep -q 'sort_by(.created_at) | last' "$HERE/round-signal.sh" &&
+  ok "取时间上最新的 reaction" || no "仍按内容存在性判定"
+node -e '
+  // 同一 HEAD：先 +1，之后原地触发重审产生更新的 eyes
+  const rs = [
+    {content:"+1",   created_at:"2026-07-27T10:00:00Z"},
+    {content:"eyes", created_at:"2026-07-27T11:00:00Z"},
+  ];
+  const latest = rs.sort((a,b)=>a.created_at.localeCompare(b.created_at)).at(-1);
+  process.exit(latest.content === "eyes" ? 0 : 1);
+' && ok "对照组：旧 +1 与新 eyes 并存时取到 eyes（存在性判定会错报 PASSED）" ||
+  no "最新信号选择逻辑不正确"
+
+echo "== 14. author 为 null 不得中断解析 =="
+grep -c 'author\.login' "$HERE/list-unresolved.sh" "$HERE/reply-resolve.sh" |
+  grep -qv ':0' && no "仍有裸 .author.login 解引用" || ok "全部改为可选访问 + ghost 占位"
+
+echo "== 15. 翻页一致性（需传入一个真实 PR 编号）=="
 if [ -n "${1:-}" ]; then
   BIG=$("$HERE/list-unresolved.sh" "$1" --count 2>/dev/null)
   ONE=$(RR_PAGE_SIZE=1 "$HERE/list-unresolved.sh" "$1" --count 2>/dev/null)

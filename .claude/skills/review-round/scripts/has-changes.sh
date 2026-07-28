@@ -1,48 +1,71 @@
 #!/usr/bin/env bash
 # 用法:
-#   has-changes.sh --baseline <文件>    # 第 3 步开始编辑前，记录基线
+#   has-changes.sh --baseline <文件>    # 第 3 步开始编辑前，记录基线快照
 #   has-changes.sh <基线文件>           # 第 5 步，判断本轮相对基线是否产生改动
 #
 # 有本轮改动退出 0，无则退出 1。
 
 source "$(dirname "$0")/lib.sh"
 
+# 快照必须包含**内容**，不能只有 porcelain 的状态行。
+#
+# 只比状态行时：待修文件在基线里已经是 ` M path`（或落在基线已有的 `?? dir/` 下），
+# 本轮继续修改它并不会改变那一行，比对结果为空 → 判 NO-CHANGES → 跳过验证、提交和
+# 推送，却仍去回复并 resolve——修复就只留在工作树里，永远没提交。
+#
+# 三类都要覆盖：已跟踪文件的内容变更、未跟踪文件的新增与内容变更、以及删除。
+snapshot() {
+  echo "---STATUS---"
+  git status --porcelain
+  echo "---TRACKED-DIFF---"
+  git diff HEAD # 已暂存 + 未暂存的内容变更
+  echo "---UNTRACKED---"
+  git ls-files --others --exclude-standard -z |
+    sort -z |
+    while IFS= read -r -d '' f; do
+      printf '%s  %s\n' "$(sha1sum "$f" | cut -d' ' -f1)" "$f"
+    done
+}
+
+baseline_status() {
+  sed -n '/^---STATUS---$/,/^---TRACKED-DIFF---$/p' "$1" | sed '1d;$d;/^$/d'
+}
+
 if [ "${1:-}" = "--baseline" ]; then
   OUT=${2:?用法: has-changes.sh --baseline <文件>}
-  git status --porcelain >"$OUT"
-  echo "基线已记录到 $OUT（$(wc -l <"$OUT") 条既有条目）"
+  snapshot >"$OUT"
+  echo "基线快照已记录到 $OUT（工作树已有 $(baseline_status "$OUT" | wc -l) 条既有条目）"
   exit 0
 fi
 
 BASE=${1:?用法: has-changes.sh <基线文件>（先用 --baseline 生成）}
 [ -f "$BASE" ] || die "基线文件不存在：$BASE。第 3 步开始编辑前必须先跑 --baseline。"
 
-# 必须用 git status --porcelain：git diff --quiet 和 git diff --cached --quiet 都
-# 忽略未跟踪文件，只新增测试/文档的一轮会被误判成「无改动」而跳过验证与提交。
-CURRENT=$(git status --porcelain)
+CUR="/tmp/rr-snapshot.$$"
+trap 'rm -f "$CUR"' EXIT
+snapshot >"$CUR"
 
-# 但也不能直接看工作树是否非空：技能启动前就存在的无关未提交文件会让「本轮只需
-# 解释或拒绝意见」的轮次误判成有改动，进而卡在无内容可提交的 git commit 上，
-# 永远到不了回复线程那一步。所以要跟基线比。
-NEW=$(comm -13 <(sort "$BASE") <(printf '%s\n' "$CURRENT" | sort) | sed '/^$/d')
-
-if [ -z "$NEW" ]; then
-  echo "NO-CHANGES（相对基线无本轮改动，跳过验证与提交，直接回复线程）"
-  PRE=$(sed '/^$/d' "$BASE" | wc -l)
+if diff -q "$BASE" "$CUR" >/dev/null 2>&1; then
+  echo "NO-CHANGES（内容与基线完全一致，跳过验证与提交，直接回复线程）"
+  PRE=$(baseline_status "$BASE" | wc -l)
   [ "$PRE" -gt 0 ] && echo "（工作树里有 $PRE 条基线中就存在的既有改动，与本轮无关）"
   exit 1
 fi
 
-echo "HAS-CHANGES（相对基线新增）:"
-printf '%s\n' "$NEW"
+echo "HAS-CHANGES（相对基线的内容差异，前 40 行）:"
+# diff 在文件不同时返回 1，set -e + pipefail 会就地终止脚本——「有改动」反而以
+# 退出码 1 报出，与「无改动」撞在一起，语义完全颠倒。必须显式吞掉这个退出码。
+diff "$BASE" "$CUR" | head -40 || true
 
-UNTRACKED=$(printf '%s\n' "$NEW" | grep -c '^??' || true)
-[ "$UNTRACKED" -gt 0 ] && echo "（其中 $UNTRACKED 个未跟踪条目——git diff 看不到它们）"
+echo
+echo "当前工作树状态："
+git status --porcelain
 
-if [ -s "$BASE" ]; then
+BASE_STATUS=$(baseline_status "$BASE")
+if [ -n "$BASE_STATUS" ]; then
   echo
-  echo "⚠ 基线中已有既有改动，提交时对这些文件用 git add -p 按 hunk 只暂存本轮补丁："
-  sed '/^$/d' "$BASE"
+  echo "⚠ 下列条目在基线中就已存在，提交时对它们用 git add -p 按 hunk 只暂存本轮补丁："
+  printf '%s\n' "$BASE_STATUS"
 fi
 
 echo

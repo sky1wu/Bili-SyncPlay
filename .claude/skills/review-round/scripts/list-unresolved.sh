@@ -60,7 +60,7 @@ while :; do
         lines.push(`\n═══ ${n.path}:${n.line ?? n.originalLine}  id=${n.id}  评论数=${n.comments.totalCount}`);
         for (const c of n.comments.nodes) {
           const sha = c.pullRequestReview?.commit?.oid?.slice(0, 7) ?? "?";
-          lines.push(`[${c.author.login} @${sha}] ${strip(c.body)}`);
+          lines.push(`[${c.author?.login ?? "ghost"} @${sha}] ${strip(c.body)}`);
         }
         if (n.comments.pageInfo.hasNextPage)
           lines.push("  ⚠ 该线程评论超过 100 条，仍有未取出的内容");

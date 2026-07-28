@@ -32,8 +32,9 @@ read -r TOTAL RESOLVED MINE <<<"$(printf '%s' "$RESP" | BODY="$BODY" ME="$ME" no
   let s = "";
   process.stdin.on("data", (d) => (s += d)).on("end", () => {
     const n = JSON.parse(s).data.node;
+    // author 可为 null（账号已注销）——直接解引用会抛异常，整条流程被一条历史评论卡死
     const mine = n.comments.nodes.some(
-      (c) => c.author.login === process.env.ME && c.body.trim() === process.env.BODY.trim(),
+      (c) => (c.author?.login ?? "ghost") === process.env.ME && c.body.trim() === process.env.BODY.trim(),
     );
     process.stdout.write(`${n.comments.totalCount} ${n.isResolved} ${mine}`);
   });
@@ -55,7 +56,24 @@ resolve_now() {
 
 # 重试路径：回复已发但上次 resolve 失败。若不识别这种情况，按原 SEEN 重跑会因评论数
 # 变多而被拒，改用新计数重跑又会再发一条重复回复。
+#
+# 但幂等分支**不能**绕过新评论保护：上次回复成功、resolve 失败之后，评审者可能又补了
+# 内容。此时总数会超过 SEEN+1，直接 resolve 会把没分析过的反馈一起关掉。
+# 只有「唯一的增量就是脚本自己那条回复」才允许直接补 resolve。
 if [ "$MINE" = "true" ]; then
+  if [ "$TOTAL" -ne "$((SEEN + 1))" ]; then
+    echo "拒绝 resolve：回复已发，但评论数为 $TOTAL（期望 $((SEEN + 1))），说明之后还有新反馈。" >&2
+    printf '%s' "$RESP" | node -e '
+      const strip = eval(process.env.BADGE_STRIP_JS);
+      let s = "";
+      process.stdin.on("data", (d) => (s += d)).on("end", () => {
+        const c = JSON.parse(s).data.node.comments.nodes;
+        const last = c[c.length - 1];
+        console.error(`最新一条 [${last.author?.login ?? "ghost"}]: ${strip(last.body).slice(0, 500)}`);
+      });
+    '
+    die "先把新增内容纳入根因分析，再重跑本脚本"
+  fi
   echo "检测到本脚本的同一条回复已存在（上次 resolve 未完成），跳过发送，仅补做 resolve"
   resolve_now
   echo "OK: ${THREAD_ID:0:20} 已 resolved（复用既有回复）"
@@ -72,7 +90,7 @@ if [ "$TOTAL" -ne "$SEEN" ]; then
     process.stdin.on("data", (d) => (s += d)).on("end", () => {
       const c = JSON.parse(s).data.node.comments.nodes;
       const last = c[c.length - 1];
-      console.error(`最新一条 [${last.author.login}]: ${strip(last.body).slice(0, 500)}`);
+      console.error(`最新一条 [${last.author?.login ?? "ghost"}]: ${strip(last.body).slice(0, 500)}`);
     });
   '
   die "先把新增内容纳入根因分析，再重跑本脚本"

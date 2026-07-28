@@ -43,20 +43,31 @@ fi
 echo "head=${SHA:0:7} pushed≈$PUSHED"
 
 FRESH=$(gh api "repos/$REPO/issues/$PR/reactions" \
-  --jq "[.[] | select(.user.login==\"$BOT\") | select(.created_at > \"$PUSHED\")] | map(.content) | join(\",\")") ||
+  --jq "[.[] | select(.user.login==\"$BOT\") | select(.created_at > \"$PUSHED\")]
+        | sort_by(.created_at) | last | if . == null then \"\" else \"\(.content) \(.created_at)\" end") ||
   die "读取 reaction 失败"
 
-case "$FRESH" in
-*"+1"*)
-  echo "PASSED（本轮 Codex 👍，无意见）"
+# 必须取**时间上最新**的那一条，不能「只要存在 +1 就判通过」。
+# 同一 HEAD 上可能先有 +1、之后在不改代码的情况下原地触发新一轮评审并产生更新的
+# eyes（本仓库就是这么触发重审的）。按内容存在性判定会让旧的 +1 永久压过新的 eyes，
+# 明明还在评审中却报 PASSED。
+read -r KIND WHEN <<<"$FRESH"
+
+case "${KIND:-}" in
+"+1")
+  echo "PASSED（本轮最新信号是 👍 @$WHEN，无意见）"
   exit 0
   ;;
-*eyes*)
-  echo "REVIEWING（Codex 👀 评审中，等）"
+eyes)
+  echo "REVIEWING（本轮最新信号是 👀 @$WHEN，评审中，等）"
   exit 0
+  ;;
+"")
+  echo "NOT-TRIGGERED（本轮无 Codex reaction——不等于没问题，评论 @codex review 触发）"
+  exit 1
   ;;
 *)
-  echo "NOT-TRIGGERED（本轮无 Codex reaction——不等于没问题，评论 @codex review 触发）"
+  echo "UNKNOWN（本轮最新信号是 $KIND @$WHEN，人工确认）"
   exit 1
   ;;
 esac
