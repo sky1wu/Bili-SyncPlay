@@ -10,6 +10,8 @@ import { setLocaleForTests } from "../src/shared/i18n";
 function createController(shownToasts: string[]) {
   const runtimeState = createContentRuntimeState();
   runtimeState.localMemberId = "self";
+  const hydrationRetries: Array<number | undefined> = [];
+  let hydrationResets = 0;
   const controller = createRoomStateController({
     runtimeState,
     toastState: createToastCoordinatorState(),
@@ -21,9 +23,19 @@ function createController(shownToasts: string[]) {
     normalizeUrl: (url) => url ?? null,
     debugLog: () => {},
     resetPlaybackSyncState: () => {},
-    scheduleHydrationRetry: () => {},
+    scheduleHydrationRetry: (delayMs) => {
+      hydrationRetries.push(delayMs);
+    },
+    resetHydrationRetry: () => {
+      hydrationResets += 1;
+    },
   });
-  return { controller, runtimeState };
+  return {
+    controller,
+    runtimeState,
+    hydrationRetries,
+    hydrationResetCount: () => hydrationResets,
+  };
 }
 
 const sharedUrl = "https://www.bilibili.com/video/BV1?p=2";
@@ -70,4 +82,45 @@ test("room state controller stays silent for the local sharer's manual share", (
 
   assert.deepEqual(shownToasts, []);
   setLocaleForTests(null);
+});
+
+test("switching rooms clears the previous room's hydration backoff", () => {
+  // Both hydration backoff streaks measure how long *this* room's wait has been
+  // failing, and the retry timer belongs to it too. Carried into a new room they
+  // either stretch the 150ms bootstrap retry below to the ceiling, or make the
+  // single-timer guard refuse it outright — leaving the new room behind the
+  // hydration gate with broadcasts suppressed and a pause held (#229).
+  const harness = createController([]);
+
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM01",
+    connected: true,
+    memberId: "self",
+    rttMs: 10,
+  });
+  assert.equal(
+    harness.hydrationResetCount(),
+    0,
+    "the first room is not a switch",
+  );
+  assert.deepEqual(harness.hydrationRetries, [150]);
+
+  harness.runtimeState.hasReceivedInitialRoomState = true;
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM02",
+    connected: true,
+    memberId: "self",
+    rttMs: 10,
+  });
+
+  assert.equal(
+    harness.hydrationResetCount(),
+    1,
+    "a room switch must clear the previous room's retry state",
+  );
+  assert.deepEqual(
+    harness.hydrationRetries,
+    [150, 150],
+    "and the new room still gets its bootstrap retry",
+  );
 });

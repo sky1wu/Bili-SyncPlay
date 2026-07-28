@@ -1430,8 +1430,8 @@ test("backs off consecutive hydration retries instead of re-arming a flat delay"
 
     assert.deepEqual(
       win.scheduled.map((timer) => timer.ms),
-      [350, 700, 1400, 2800, 5600, 11200],
-      "consecutive retries must double toward the ceiling",
+      [350, 700, 1400, 2800, 5600, 10_000],
+      "consecutive retries must double up to the ceiling",
     );
   } finally {
     win.restore();
@@ -1665,7 +1665,7 @@ test("a video binding after a long wait hydrates promptly, not at the ceiling", 
 
     const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-    // Drive the wait to the ceiling: 350ms doubling reaches 30s by the 8th.
+    // Drive the wait to the ceiling: 350ms doubling clamps from the 6th on.
     await harness.controller.hydrateRoomState();
     for (let i = 0; i < 11; i += 1) {
       const armed = win.scheduled[win.scheduled.length - 1];
@@ -1675,7 +1675,7 @@ test("a video binding after a long wait hydrates promptly, not at the ceiling", 
     const saturated = win.scheduled[win.scheduled.length - 1];
     assert.equal(
       saturated.ms,
-      30_000,
+      10_000,
       "precondition: the wait streak must be saturated",
     );
 
@@ -1696,6 +1696,56 @@ test("a video binding after a long wait hydrates promptly, not at the ceiling", 
       win.scheduled[win.scheduled.length - 1].ms,
       350,
       "the wait that follows a binding restarts its backoff",
+    );
+  } finally {
+    win.restore();
+  }
+});
+
+test("resetting hydration retry frees the timer slot for the new room", async () => {
+  const win = installWindowTimerStub();
+  try {
+    // Clearing the streaks is only half of it. The single-timer guard in
+    // `scheduleHydrationRetry` refuses to arm while one is pending, so a room
+    // switch that left the old room's timer armed would silently drop the new
+    // room's 150ms bootstrap retry entirely (#229).
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    });
+    const harness = createController({
+      video: createStubVideo(false),
+      now: 30_000,
+      currentVideo: null,
+      requestRoomStateHydration: async () => ({
+        ok: true,
+        roomState,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
+    });
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 29_500;
+
+    await harness.controller.hydrateRoomState();
+    assert.equal(win.scheduled.length, 1, "the old room armed a retry");
+
+    harness.controller.resetHydrationRetry();
+    assert.deepEqual(
+      win.cleared,
+      [win.scheduled[0].id],
+      "the pending timer must be cancelled, not just the streak",
+    );
+
+    harness.controller.scheduleHydrationRetry(150);
+    assert.equal(win.scheduled.length, 2, "the new room's retry must arm");
+    assert.equal(
+      win.scheduled[1].ms,
+      150,
+      "and at its own delay, not the old room's backed-off one",
     );
   } finally {
     win.restore();

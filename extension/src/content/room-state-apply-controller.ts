@@ -24,15 +24,21 @@ import type { ContentRuntimeState } from "./runtime-state";
  * never produced a `<video>` used to re-hydrate every 350ms for the life of the
  * tab, and each pass reached the server (#229).
  *
- * A high ceiling costs nothing in responsiveness because the retry is no longer
- * how the common waits end. The `<video>` element arrives by event
- * (`notifyVideoElementBound`, which also clears the streak), and a room state
- * arrives as a push. What is left is a genuine safety net, so it is sized to be
- * cheap rather than prompt: 30s caps a stuck tab at 2 wakeups/min against a
- * limiter that allows 36/min, leaving room for many tabs in one browser
- * session — they share a single WebSocket, so they share one limiter.
+ * The ceiling is a real latency, not a formality: it is the worst case before a
+ * wait that has NO terminating event notices the world changed. Only one of
+ * these waits has such an event — `notifyVideoElementBound` for the `<video>`
+ * element. The page-bridge identity behind `no-current-video` has none and
+ * cannot cheaply get one: `getSharedVideo()` derives from `location`, the
+ * document title and the DOM on every call, so there is no update to hook, and
+ * adding a watcher would recreate the duplicate poller this change removed.
+ *
+ * So it is sized as if every wait were timer-only. 10s means a stuck tab wakes
+ * 6 times/min; the limiter allows 36/min per browser session (tabs share one
+ * WebSocket, so they share one limiter), leaving headroom for six simultaneously
+ * stuck tabs before anything is rejected. For comparison the pre-fix spin sent
+ * ~171/min from a single tab.
  */
-const HYDRATION_RETRY_MAX_DELAY_MS = 30_000;
+const HYDRATION_RETRY_MAX_DELAY_MS = 10_000;
 
 /**
  * Base delay for the hydration re-armed by a `<video>` element binding. Short
@@ -49,6 +55,7 @@ export interface RoomStateApplyController {
   hydrateRoomState(): Promise<void>;
   scheduleHydrationRetry(delayMs?: number): void;
   notifyVideoElementBound(): void;
+  resetHydrationRetry(): void;
   destroy(): void;
 }
 
@@ -974,6 +981,26 @@ export function createRoomStateApplyController(args: {
     }
   }
 
+  /**
+   * Drop everything the hydration retry accumulated for the previous room.
+   *
+   * Both streaks measure "how long has *this* wait been failing", so they are
+   * meaningless across a room switch — and actively harmful: a tab that
+   * saturated them on the old room would either have the new room's 150ms
+   * bootstrap retry stretched to the ceiling, or have it refused outright by
+   * the single-timer guard because the old room's timer is still armed. The new
+   * room would then sit behind the hydration gate, suppressing broadcasts and
+   * holding a pause, if its bootstrap push happened to be lost.
+   */
+  function resetHydrationRetry(): void {
+    if (hydrateRetryTimer !== null) {
+      window.clearTimeout(hydrateRetryTimer);
+      hydrateRetryTimer = null;
+    }
+    hydrateRetryAttempt = 0;
+    boundVideoAttempt = 0;
+  }
+
   function destroy(): void {
     destroyed = true;
     hydrateRetryAttempt = 0;
@@ -990,6 +1017,7 @@ export function createRoomStateApplyController(args: {
     hydrateRoomState,
     scheduleHydrationRetry,
     notifyVideoElementBound,
+    resetHydrationRetry,
     destroy,
   };
 }

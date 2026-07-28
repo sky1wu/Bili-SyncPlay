@@ -100,6 +100,7 @@ const roomStateController = createRoomStateController({
     syncController.resetPlaybackSyncState(reason),
   scheduleHydrationRetry: (delayMs) =>
     syncController.scheduleHydrationRetry(delayMs),
+  resetHydrationRetry: () => syncController.resetHydrationRetry(),
 });
 const syncController = createSyncController({
   runtimeState,

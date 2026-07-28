@@ -32,6 +32,7 @@ export function createRoomStateController(args: {
   debugLog: (message: string) => void;
   resetPlaybackSyncState: (reason: string) => void;
   scheduleHydrationRetry: (delayMs?: number) => void;
+  resetHydrationRetry: () => void;
 }): RoomStateController {
   let lastWaitingRoomStateLogRoomCode: string | null = null;
 
@@ -128,6 +129,11 @@ export function createRoomStateController(args: {
       args.resetPlaybackSyncState(
         `room changed ${previousRoomCode} -> ${payload.roomCode}`,
       );
+      // The hydration retry's backoff streaks measure how long the *previous*
+      // room's wait had been failing. Carrying them over would either stretch
+      // the 150ms bootstrap retry below to the ceiling, or have the old room's
+      // still-armed timer refuse it outright via the single-timer guard.
+      args.resetHydrationRetry();
       args.toastState.lastRoomState = null;
       args.runtimeState.hasReceivedInitialRoomState = false;
       args.runtimeState.pendingRoomStateHydration = true;

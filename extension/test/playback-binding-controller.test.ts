@@ -449,6 +449,7 @@ test("playback binding controller keeps hydration guard after direct room switch
     scheduleHydrationRetry: (delayMs) => {
       hydrationRetries.push(delayMs ?? 0);
     },
+    resetHydrationRetry: () => {},
   });
 
   const controller = createPlaybackBindingController({
