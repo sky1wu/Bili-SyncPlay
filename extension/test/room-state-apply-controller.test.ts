@@ -29,6 +29,8 @@ function createController(overrides: {
   runtimeState?: ReturnType<typeof createContentRuntimeState>;
   video?: HTMLVideoElement | null;
   now?: number;
+  /** Virtual clock for tests that need time to advance during the test. */
+  getNow?: () => number;
   userGestureGraceMs?: number;
   remotePauseDebounceMs?: number;
   normalizeUrl?: (url: string | undefined | null) => string | null;
@@ -64,7 +66,7 @@ function createController(overrides: {
     initialRoomStatePauseHoldMs: 3_000,
     userGestureGraceMs: overrides.userGestureGraceMs ?? 1_200,
     remotePauseDebounceMs: overrides.remotePauseDebounceMs ?? 0,
-    getNow: () => overrides.now ?? 10_000,
+    getNow: () => overrides.getNow?.() ?? overrides.now ?? 10_000,
     debugLog: (msg) => logs.push(msg),
     shouldLogHeartbeat: () => true,
     requestRoomStateHydration:
@@ -1575,12 +1577,14 @@ test("video element binding is a no-op when no hydration is waiting", async () =
   }
 });
 
-test("repeated video rebinds decay instead of hydrating once per rebind", async () => {
+test("a rebind storm cannot starve hydration by resetting the timer", async () => {
   const win = installWindowTimerStub();
   try {
-    // A player that rebuilds its element in a loop reports a bind every time.
-    // Routing those through the backoff is what stops them from becoming one
-    // `sync:request` per rebuild at the 250ms bind interval (#229).
+    // Real timing, not hand-fired callbacks: a player rebuilding its element
+    // reports a bind about every 250ms (the bind poll interval). A binding that
+    // cancelled the pending timer and armed a longer one would be re-cancelled
+    // before it ever fired, so hydration would never run at all and the pending
+    // state would be held for as long as the rebuilding lasted (#229).
     const roomState = createRoomStateWithPlayback({
       url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
       currentTime: 42,
@@ -1588,45 +1592,79 @@ test("repeated video rebinds decay instead of hydrating once per rebind", async 
       actorId: "remote-member",
       seq: 5,
     });
+    const startClock = 30_000;
+    let clock = startClock;
+    const hydrationClocks: number[] = [];
     const harness = createController({
       video: createStubVideo(false),
-      now: 30_000,
+      getNow: () => clock,
       currentVideo: null,
-      requestRoomStateHydration: async () => ({
-        ok: true,
-        roomState,
-        memberId: "local-member",
-        roomCode: "ROOM01",
-      }),
+      requestRoomStateHydration: async () => {
+        hydrationClocks.push(clock);
+        return {
+          ok: true,
+          roomState,
+          memberId: "local-member",
+          roomCode: "ROOM01",
+        };
+      },
     });
     harness.runtimeState.pendingRoomStateHydration = true;
-    harness.runtimeState.lastUserGestureAt = 29_500;
+    harness.runtimeState.lastUserGestureAt = 0;
+
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    // The stub records delays, not deadlines; pair each armed timer with the
+    // clock reading it was armed at so the simulation can fire it on time.
+    let armedCount = 0;
+    let dueAt: number | null = null;
+    let dueCb: (() => void) | null = null;
+    const trackArming = () => {
+      while (armedCount < win.scheduled.length) {
+        const timer = win.scheduled[armedCount];
+        armedCount += 1;
+        dueAt = clock + timer.ms;
+        dueCb = timer.cb;
+      }
+    };
 
     await harness.controller.hydrateRoomState();
+    trackArming();
+    assert.equal(hydrationClocks.length, 1);
 
-    // `hydrateRoomState` is async, so let it finish arming the next retry
-    // before the following rebind is reported.
-    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-    const bindArmedDelays: number[] = [];
-    for (let i = 0; i < 4; i += 1) {
-      const before = win.scheduled.length;
-      harness.controller.notifyVideoElementBound();
-      assert.equal(
-        win.scheduled.length,
-        before + 1,
-        `rebind ${i} must re-arm exactly one hydration`,
-      );
-      const armed = win.scheduled[win.scheduled.length - 1];
-      bindArmedDelays.push(armed.ms);
-      armed.cb();
-      await settle();
+    // 10 seconds of virtual time, stepping 50ms, rebinding every 250ms.
+    for (let step = 0; step < 200; step += 1) {
+      clock += 50;
+      if (dueAt !== null && clock >= dueAt && dueCb) {
+        const fire = dueCb;
+        dueAt = null;
+        dueCb = null;
+        fire();
+        await settle();
+        trackArming();
+      }
+      if (step % 5 === 0) {
+        harness.controller.notifyVideoElementBound();
+        trackArming();
+      }
     }
 
-    assert.deepEqual(
-      bindArmedDelays,
-      [50, 100, 200, 400],
-      "successive rebinds must back off on their own streak",
+    // Counting alone cannot tell "few because it decayed" from "few because it
+    // starved" — both are small. What distinguishes them is *when*: a starved
+    // timer stops firing once the bind backoff passes the rebind interval, so
+    // the tail of the window is empty.
+    // The bind backoff passes the 250ms rebind interval within the first
+    // second, which is when a cancel-and-re-arm implementation stops firing for
+    // good (measured: its last hydration lands at +750ms). A decaying one keeps
+    // going with growing gaps (measured: +6450ms and still counting), so any
+    // hydration well past that first second separates the two.
+    assert.ok(
+      hydrationClocks.some((at) => at >= startClock + 3_000),
+      `hydration must keep running in a rebind storm (ran at ${hydrationClocks.join(", ")})`,
+    );
+    // …but nowhere near one per rebind: 40 rebinds happened in this window.
+    assert.ok(
+      hydrationClocks.length < 15,
+      `and must still back off rather than run per rebind (ran ${hydrationClocks.length}x)`,
     );
   } finally {
     win.restore();

@@ -124,3 +124,48 @@ test("switching rooms clears the previous room's hydration backoff", () => {
     "and the new room still gets its bootstrap retry",
   );
 });
+
+test("leaving a room clears the hydration backoff for the next one", () => {
+  // `roomChanged` needs both codes non-null, but leaving then joining reports
+  // `ROOM01 -> null -> ROOM02`: neither call satisfies it, so without a reset on
+  // the clearing path the old room's timer and streaks survive into the new
+  // room and its 150ms bootstrap retry is stretched or refused outright (#229).
+  const harness = createController([]);
+
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM01",
+    connected: true,
+    memberId: "self",
+    rttMs: 10,
+  });
+  assert.equal(harness.hydrationResetCount(), 0);
+
+  harness.controller.handleSyncStatus({
+    roomCode: null,
+    connected: true,
+    memberId: null,
+    rttMs: null,
+  });
+  assert.equal(
+    harness.hydrationResetCount(),
+    1,
+    "leaving must clear the retry state, since the later join will not",
+  );
+
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM02",
+    connected: true,
+    memberId: "self",
+    rttMs: 10,
+  });
+  assert.equal(
+    harness.hydrationResetCount(),
+    1,
+    "the join itself is not a switch, so it adds no further reset",
+  );
+  assert.deepEqual(
+    harness.hydrationRetries,
+    [150, 150],
+    "and the new room still gets its bootstrap retry",
+  );
+});

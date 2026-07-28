@@ -154,6 +154,11 @@ export function createRoomStateController(args: {
       if (previousRoomCode) {
         args.resetPlaybackSyncState(`room cleared from ${previousRoomCode}`);
       }
+      // Leaving is the other half of a room switch, and the common one:
+      // `roomChanged` above needs both codes non-null, but leaving then joining
+      // reports `ROOM01 -> null -> ROOM02`, so neither call satisfies it and the
+      // retry state would survive into the new room untouched.
+      args.resetHydrationRetry();
       clearRoomScopedSharedVideoState();
       args.toastState.lastRoomState = null;
       args.runtimeState.pendingRoomStateHydration = false;

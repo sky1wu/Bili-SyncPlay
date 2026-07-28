@@ -149,6 +149,12 @@ export function createRoomStateApplyController(args: {
   const ignoredRoomStateLogState = { key: null as string | null, at: 0 };
   const nowOf = () => args.getNow?.() ?? Date.now();
   let hydrateRetryTimer: number | null = null;
+  /**
+   * When the pending retry is due, or `null` when none is armed. Kept beside
+   * the timer id — and only ever cleared through `clearHydrationRetryTimer` —
+   * so `preemptHydrationRetry` can refuse to push the deadline later.
+   */
+  let hydrateRetryDeadline: number | null = null;
   let hydrateRetryAttempt = 0;
   let boundVideoAttempt = 0;
   let destroyed = false;
@@ -336,6 +342,14 @@ export function createRoomStateApplyController(args: {
    * as soon as one hydration cycle finishes without arming another retry
    * (see {@link hydrateRoomState}), so an isolated retry always starts fast.
    */
+  function clearHydrationRetryTimer(): void {
+    if (hydrateRetryTimer !== null) {
+      window.clearTimeout(hydrateRetryTimer);
+      hydrateRetryTimer = null;
+    }
+    hydrateRetryDeadline = null;
+  }
+
   /**
    * Arm the single hydration retry timer at `baseDelayMs` backed off by
    * `attempt` doublings. Returns whether it armed, so the caller only advances
@@ -349,11 +363,52 @@ export function createRoomStateApplyController(args: {
       baseDelayMs * 2 ** attempt,
       HYDRATION_RETRY_MAX_DELAY_MS,
     );
+    hydrateRetryDeadline = nowOf() + backedOffDelayMs;
     hydrateRetryTimer = window.setTimeout(() => {
       hydrateRetryTimer = null;
+      hydrateRetryDeadline = null;
       void hydrateRoomState();
     }, backedOffDelayMs);
     return true;
+  }
+
+  /**
+   * Replace the pending retry only when the replacement fires *sooner*.
+   *
+   * The armed deadline must never move later, or a repeating event starves the
+   * timer: a player rebuilding its `<video>` reports a bind every ~250ms, and
+   * once the bind backoff passes that interval each bind cancelled the pending
+   * timer and armed a longer one, so the callback never ran at all and the
+   * pending room state was held forever. Refusing to postpone makes the
+   * deadline monotonically non-increasing until it fires, which bounds the wait
+   * by whatever armed it first no matter how often the event repeats.
+   *
+   * `nowOf()` is a wall clock here, and unlike the refresh window it removed in
+   * an earlier round, a step is benign in both directions: a step forward at
+   * worst preempts a timer that was going to fire anyway, and a step backward at
+   * worst declines to preempt and leaves the already-armed `setTimeout` — which
+   * is itself immune to clock steps — to fire on schedule. Neither can strand
+   * the hydration, because nothing is ever cancelled without a replacement.
+   */
+  function preemptHydrationRetry(
+    baseDelayMs: number,
+    attempt: number,
+  ): boolean {
+    if (destroyed || hydrateRetryTimer === null) {
+      return false;
+    }
+    const backedOffDelayMs = Math.min(
+      baseDelayMs * 2 ** attempt,
+      HYDRATION_RETRY_MAX_DELAY_MS,
+    );
+    if (
+      hydrateRetryDeadline !== null &&
+      nowOf() + backedOffDelayMs >= hydrateRetryDeadline
+    ) {
+      return false;
+    }
+    clearHydrationRetryTimer();
+    return armHydrationRetry(baseDelayMs, attempt);
   }
 
   function scheduleHydrationRetry(delayMs = 350): void {
@@ -854,10 +909,7 @@ export function createRoomStateApplyController(args: {
     if (destroyed) {
       return;
     }
-    if (hydrateRetryTimer !== null) {
-      window.clearTimeout(hydrateRetryTimer);
-      hydrateRetryTimer = null;
-    }
+    clearHydrationRetryTimer();
     try {
       await runHydrationCycle();
     } finally {
@@ -968,17 +1020,37 @@ export function createRoomStateApplyController(args: {
    * bind every time, and hydrating inline on each one would run up to four a
    * second at the 250ms bind interval. So they back off on `boundVideoAttempt`,
    * which — like the wait streak — clears once a cycle ends without re-arming.
+   *
+   * Goes through {@link preemptHydrationRetry} rather than cancel-and-re-arm,
+   * so a bind can only ever pull the hydration *earlier*. Cancelling
+   * unconditionally starved it outright: once the bind backoff passed the
+   * ~250ms bind interval, every bind cancelled the pending timer and armed a
+   * longer one, so the callback never ran and the pending state was held for
+   * as long as the player kept rebuilding.
    */
   function notifyVideoElementBound(): void {
     if (destroyed || hydrateRetryTimer === null) {
       return;
     }
-    window.clearTimeout(hydrateRetryTimer);
-    hydrateRetryTimer = null;
-    hydrateRetryAttempt = 0;
-    if (armHydrationRetry(BOUND_VIDEO_HYDRATION_DELAY_MS, boundVideoAttempt)) {
-      boundVideoAttempt += 1;
+    // Counted on every notification, not only on the ones that win: the streak
+    // measures how often this element has been rebinding, and a rebuild loop
+    // reports just as many binds whether or not each one manages to preempt.
+    // Advancing it only on wins let a storm hold the delay near the base value
+    // and kept hydration running ~1.6x/s — bounded, but still above the
+    // limiter's budget.
+    const attempt = boundVideoAttempt;
+    boundVideoAttempt += 1;
+    if (!preemptHydrationRetry(BOUND_VIDEO_HYDRATION_DELAY_MS, attempt)) {
+      // Declined because this bind would fire no sooner than what is already
+      // armed — the signature of a rebind storm rather than of the element
+      // finally arriving. Nothing is reset, so the wait streak goes on growing,
+      // which is what makes the storm decay.
+      return;
     }
+    // The preemption won, so this bind really did carry news. The wait streak
+    // it accumulated is spent: a wait that follows must start over rather than
+    // resume at the ceiling.
+    hydrateRetryAttempt = 0;
   }
 
   /**
@@ -993,10 +1065,7 @@ export function createRoomStateApplyController(args: {
    * holding a pause, if its bootstrap push happened to be lost.
    */
   function resetHydrationRetry(): void {
-    if (hydrateRetryTimer !== null) {
-      window.clearTimeout(hydrateRetryTimer);
-      hydrateRetryTimer = null;
-    }
+    clearHydrationRetryTimer();
     hydrateRetryAttempt = 0;
     boundVideoAttempt = 0;
   }
@@ -1005,10 +1074,7 @@ export function createRoomStateApplyController(args: {
     destroyed = true;
     hydrateRetryAttempt = 0;
     boundVideoAttempt = 0;
-    if (hydrateRetryTimer !== null) {
-      window.clearTimeout(hydrateRetryTimer);
-      hydrateRetryTimer = null;
-    }
+    clearHydrationRetryTimer();
     clearDeferredRemotePaused();
   }
 
