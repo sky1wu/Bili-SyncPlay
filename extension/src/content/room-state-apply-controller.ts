@@ -75,6 +75,11 @@ export function createRoomStateApplyController(args: {
    */
   remotePauseDebounceMs?: number;
   getNow?: () => number;
+  /**
+   * Monotonic time source for the hydration retry deadline. Must not be the
+   * wall clock — see {@link preemptHydrationRetry}.
+   */
+  getMonotonicNow?: () => number;
   debugLog: (message: string) => void;
   shouldLogHeartbeat: (
     state: { key: string | null; at: number },
@@ -148,6 +153,7 @@ export function createRoomStateApplyController(args: {
 }): RoomStateApplyController {
   const ignoredRoomStateLogState = { key: null as string | null, at: 0 };
   const nowOf = () => args.getNow?.() ?? Date.now();
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   let hydrateRetryTimer: number | null = null;
   /**
    * When the pending retry is due, or `null` when none is armed. Kept beside
@@ -363,11 +369,13 @@ export function createRoomStateApplyController(args: {
       baseDelayMs * 2 ** attempt,
       HYDRATION_RETRY_MAX_DELAY_MS,
     );
-    hydrateRetryDeadline = nowOf() + backedOffDelayMs;
+    hydrateRetryDeadline = monotonicNow() + backedOffDelayMs;
     hydrateRetryTimer = window.setTimeout(() => {
       hydrateRetryTimer = null;
       hydrateRetryDeadline = null;
-      void hydrateRoomState();
+      // Not `hydrateRoomState`: this is a consecutive retry, so it must keep
+      // the streaks that make it back off.
+      void runHydration();
     }, backedOffDelayMs);
     return true;
   }
@@ -383,12 +391,14 @@ export function createRoomStateApplyController(args: {
    * deadline monotonically non-increasing until it fires, which bounds the wait
    * by whatever armed it first no matter how often the event repeats.
    *
-   * `nowOf()` is a wall clock here, and unlike the refresh window it removed in
-   * an earlier round, a step is benign in both directions: a step forward at
-   * worst preempts a timer that was going to fire anyway, and a step backward at
-   * worst declines to preempt and leaves the already-armed `setTimeout` — which
-   * is itself immune to clock steps — to fire on schedule. Neither can strand
-   * the hydration, because nothing is ever cancelled without a replacement.
+   * Both readings come from a monotonic clock, never the wall clock. The
+   * deadline is a `nowOf()`-style reading captured when the timer was armed, so
+   * a *backward* wall-clock step would shrink `now + delay` and make the
+   * candidate look earlier than a deadline it is not — the comparison would
+   * preempt, cancel a timer that was about to fire, and restart the full delay,
+   * up to the 10s ceiling once the bind streak has grown. `setTimeout` itself is
+   * immune to clock steps, so the deadline that is compared against it must be
+   * too.
    */
   function preemptHydrationRetry(
     baseDelayMs: number,
@@ -403,7 +413,7 @@ export function createRoomStateApplyController(args: {
     );
     if (
       hydrateRetryDeadline !== null &&
-      nowOf() + backedOffDelayMs >= hydrateRetryDeadline
+      monotonicNow() + backedOffDelayMs >= hydrateRetryDeadline
     ) {
       return false;
     }
@@ -905,7 +915,31 @@ export function createRoomStateApplyController(args: {
     args.acceptInitialRoomStateHydration();
   }
 
+  /**
+   * Hydration driven from outside this controller — a first load, or an SPA
+   * navigation within the same room.
+   *
+   * Such a call is a fresh start, so it drops the retry state first. Both
+   * streaks describe how long the *previous* page's wait had been failing, and
+   * that page is gone: inheriting them would make the new page's very first
+   * retry wait at the ceiling. Nothing wakes it early either — Bilibili reuses
+   * the same `<video>` element across an SPA navigation, so no bind is reported
+   * — leaving the new page behind the hydration gate with broadcasts suppressed
+   * and a pause held (#229).
+   *
+   * The streak is meant to grow only across *consecutive timer-driven* retries,
+   * which is why the timer callback goes to {@link runHydration} instead.
+   */
   async function hydrateRoomState(): Promise<void> {
+    if (destroyed) {
+      return;
+    }
+    resetHydrationRetry();
+    await runHydration();
+  }
+
+  /** One hydration attempt, preserving the retry streaks. */
+  async function runHydration(): Promise<void> {
     if (destroyed) {
       return;
     }

@@ -31,6 +31,8 @@ function createController(overrides: {
   now?: number;
   /** Virtual clock for tests that need time to advance during the test. */
   getNow?: () => number;
+  /** Virtual monotonic clock, as `performance.now()` would give. */
+  getMonotonicNow?: () => number;
   userGestureGraceMs?: number;
   remotePauseDebounceMs?: number;
   normalizeUrl?: (url: string | undefined | null) => string | null;
@@ -67,6 +69,11 @@ function createController(overrides: {
     userGestureGraceMs: overrides.userGestureGraceMs ?? 1_200,
     remotePauseDebounceMs: overrides.remotePauseDebounceMs ?? 0,
     getNow: () => overrides.getNow?.() ?? overrides.now ?? 10_000,
+    getMonotonicNow: () =>
+      overrides.getMonotonicNow?.() ??
+      overrides.getNow?.() ??
+      overrides.now ??
+      10_000,
     debugLog: (msg) => logs.push(msg),
     shouldLogHeartbeat: () => true,
     requestRoomStateHydration:
@@ -1425,9 +1432,14 @@ test("backs off consecutive hydration retries instead of re-arming a flat delay"
     harness.runtimeState.lastUserGestureAt = 29_500;
 
     // Six consecutive cycles that each re-arm the retry (the page bridge never
-    // becomes ready), driven directly rather than through the timer stub.
-    for (let i = 0; i < 6; i += 1) {
-      await harness.controller.hydrateRoomState();
+    // becomes ready). Driven through the timer, because only timer-driven
+    // retries accumulate the streak — an externally initiated
+    // `hydrateRoomState` is a fresh start and resets it.
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    await harness.controller.hydrateRoomState();
+    for (let i = 0; i < 5; i += 1) {
+      win.scheduled[win.scheduled.length - 1].cb();
+      await settle();
     }
 
     assert.deepEqual(
@@ -1470,21 +1482,25 @@ test("resets hydration retry backoff once a cycle completes without retrying", a
     harness.runtimeState.pendingRoomStateHydration = true;
     harness.runtimeState.lastUserGestureAt = 29_500;
 
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
     await harness.controller.hydrateRoomState();
-    await harness.controller.hydrateRoomState();
+    win.scheduled[win.scheduled.length - 1].cb();
+    await settle();
     assert.deepEqual(
       win.scheduled.map((timer) => timer.ms),
       [350, 700],
     );
 
-    // A cycle that arms no retry clears the streak...
+    // A timer-driven cycle that arms no retry clears the streak...
     bridgeReady = true;
-    await harness.controller.hydrateRoomState();
+    win.scheduled[win.scheduled.length - 1].cb();
+    await settle();
     assert.equal(win.scheduled.length, 2, "clean cycle must not arm a retry");
 
-    // ...so the next isolated retry starts from its caller's delay again.
+    // ...so the next retry starts from its caller's delay again.
     bridgeReady = false;
-    await harness.controller.hydrateRoomState();
+    harness.controller.scheduleHydrationRetry();
     assert.deepEqual(
       win.scheduled.map((timer) => timer.ms),
       [350, 700, 350],
@@ -1784,6 +1800,115 @@ test("resetting hydration retry frees the timer slot for the new room", async ()
       win.scheduled[1].ms,
       150,
       "and at its own delay, not the old room's backed-off one",
+    );
+  } finally {
+    win.restore();
+  }
+});
+
+test("an externally driven hydration drops the previous page's backoff", async () => {
+  const win = installWindowTimerStub();
+  try {
+    // An SPA navigation within the same room calls `hydrateRoomState` directly
+    // (`navigation-controller`). The streaks belong to the page that just went
+    // away, and nothing would wake the new page early — Bilibili reuses the same
+    // `<video>` element across such a navigation, so no bind is reported (#229).
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    });
+    const harness = createController({
+      video: createStubVideo(false),
+      now: 30_000,
+      currentVideo: null,
+      requestRoomStateHydration: async () => ({
+        ok: true,
+        roomState,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
+    });
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 29_500;
+
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    await harness.controller.hydrateRoomState();
+    for (let i = 0; i < 5; i += 1) {
+      win.scheduled[win.scheduled.length - 1].cb();
+      await settle();
+    }
+    assert.equal(
+      win.scheduled[win.scheduled.length - 1].ms,
+      10_000,
+      "precondition: the old page saturated the backoff",
+    );
+
+    await harness.controller.hydrateRoomState();
+
+    assert.equal(
+      win.scheduled[win.scheduled.length - 1].ms,
+      350,
+      "a navigation must start the new page's backoff over",
+    );
+  } finally {
+    win.restore();
+  }
+});
+
+test("the retry deadline is compared on a monotonic clock", async () => {
+  const win = installWindowTimerStub();
+  try {
+    // The deadline is captured when the timer is armed. Read from `Date.now()`,
+    // a backward step shrinks `now + delay` and makes a candidate look earlier
+    // than a deadline it is not — so the comparison would preempt, cancel a
+    // timer that was about to fire, and restart the full delay.
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    });
+    let monotonic = 100_000;
+    let wallClock = 1_700_000_000_000;
+    const harness = createController({
+      video: createStubVideo(false),
+      getNow: () => wallClock,
+      getMonotonicNow: () => monotonic,
+      currentVideo: null,
+      requestRoomStateHydration: async () => ({
+        ok: true,
+        roomState,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
+    });
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 0;
+
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    await harness.controller.hydrateRoomState();
+    // Grow the bind streak so a preemption would cost a long re-wait.
+    for (let i = 0; i < 6; i += 1) {
+      harness.controller.notifyVideoElementBound();
+      monotonic += 1;
+      if (win.scheduled[win.scheduled.length - 1].ms <= 1) break;
+    }
+    const armedBefore = win.scheduled.length;
+
+    // Real time barely moved; the wall clock jumped an hour backwards.
+    monotonic += 5;
+    wallClock -= 3_600_000;
+    harness.controller.notifyVideoElementBound();
+    await settle();
+
+    assert.equal(
+      win.scheduled.length,
+      armedBefore,
+      "a backward wall-clock step must not preempt the pending retry",
     );
   } finally {
     win.restore();
