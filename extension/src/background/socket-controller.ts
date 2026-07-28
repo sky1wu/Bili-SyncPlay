@@ -47,7 +47,14 @@ export function createSocketController(args: {
   onOpen: () => void;
   onAdminSessionReset: (reason: string) => void;
   formatAdminSessionResetReason: (reason: string) => string;
+  getMonotonicNow?: () => number;
 }): SocketController {
+  // `reconnectDeadlineMs` exists only so the popup can count down to the retry
+  // that `setTimeout` is already going to perform. A wall clock would make the
+  // two disagree after a clock step — the countdown would read minutes while the
+  // timer fires on schedule — because only one of them is measuring a duration.
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
+
   async function connect(): Promise<void> {
     if (
       args.connectionState.socket &&
@@ -445,7 +452,7 @@ export function createSocketController(args: {
     const retryDelayMs = getReconnectDelayMs(
       args.connectionState.reconnectAttempt,
     );
-    args.connectionState.reconnectDeadlineMs = Date.now() + retryDelayMs;
+    args.connectionState.reconnectDeadlineMs = monotonicNow() + retryDelayMs;
     args.log("background", `Reconnect scheduled in ${retryDelayMs}ms`);
     args.connectionState.reconnectTimer = self.setTimeout(() => {
       args.connectionState.reconnectDeadlineMs = null;
@@ -466,7 +473,10 @@ export function createSocketController(args: {
     if (args.connectionState.reconnectDeadlineMs === null) {
       return null;
     }
-    return Math.max(0, args.connectionState.reconnectDeadlineMs - Date.now());
+    return Math.max(
+      0,
+      args.connectionState.reconnectDeadlineMs - monotonicNow(),
+    );
   }
 
   function resetReconnectState(): void {

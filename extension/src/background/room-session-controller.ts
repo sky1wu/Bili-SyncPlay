@@ -8,7 +8,6 @@ import { PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import type { BackgroundToContentMessage } from "../shared/messages";
 import {
   decideIncomingRoomState,
-  getActivePendingLocalShareUrl,
   isSharedVideoChange,
   type RoomLifecycleAction,
 } from "./room-state";
@@ -71,6 +70,13 @@ export function createRoomSessionController(args: {
   markPlaybackArrival: (playback: RoomState["playback"], atMs: number) => void;
   clearPendingLocalShare: (reason: string) => void;
   expirePendingLocalShareIfNeeded: () => void;
+  /**
+   * Asked of the share controller rather than re-derived here: the marker's
+   * deadline lives on a monotonic clock owned by that controller, and a second
+   * copy of the comparison would be a second clock read that nothing keeps in
+   * the same domain.
+   */
+  getActivePendingLocalShareUrl: () => string | null;
   normalizeUrl: (url: string | undefined | null) => string | null;
   logServerError: (code: string, message: string) => void;
   shareToastTtlMs: number;
@@ -540,12 +546,7 @@ export function createRoomSessionController(args: {
     const decision = decideIncomingRoomState({
       currentRoomState: args.roomSessionState.roomState,
       normalizedPendingLocalShareUrl: args.normalizeUrl(
-        getActivePendingLocalShareUrl({
-          pendingLocalShareUrl: args.shareState.pendingLocalShareUrl,
-          pendingLocalShareExpiresAt:
-            args.shareState.pendingLocalShareExpiresAt,
-          now: Date.now(),
-        }),
+        args.getActivePendingLocalShareUrl(),
       ),
       normalizedIncomingSharedUrl: args.normalizeUrl(
         nextState.sharedVideo?.url,
@@ -636,7 +637,7 @@ export function createRoomSessionController(args: {
     return createRoomPendingShareToast({
       state,
       normalizedSharedUrl: args.normalizeUrl(state.sharedVideo?.url),
-      now: Date.now(),
+      now: monotonicNow(),
       ttlMs: args.shareToastTtlMs,
     });
   }
@@ -649,7 +650,7 @@ export function createRoomSessionController(args: {
         args.shareState.pendingShareToast?.videoUrl,
       ),
       normalizedSharedUrl: args.normalizeUrl(state.sharedVideo?.url),
-      now: Date.now(),
+      now: monotonicNow(),
     });
     args.shareState.pendingShareToast = result.pendingShareToast;
     return result.shareToast;

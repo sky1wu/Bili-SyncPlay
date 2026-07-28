@@ -3,6 +3,7 @@ import test from "node:test";
 import { PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
 import { createShareController } from "../src/background/share-controller";
+import { installClockStubs, installFakeSelfTimers } from "./clock-stubs";
 
 // Node < 22 has no global WebSocket; production `isSocketWritable` reads
 // `WebSocket.OPEN`. Provide the readyState statics so these unit tests run on
@@ -424,4 +425,85 @@ test("background share controller reports missing member token without queuing a
   assert.deepEqual(harness.sendToServerCalls, []);
   assert.equal(harness.runtimeState.share.pendingLocalShareUrl, null);
   assert.equal(harness.notifyAllCalls, 0);
+});
+
+const PENDING_SHARE_VIDEO = {
+  video: {
+    videoId: "BV199W9zEEcH",
+    url: "https://www.bilibili.com/video/BV199W9zEEcH",
+    title: "New Video",
+  },
+  playback: null,
+};
+
+test("background share controller expires a pending local share across a backward wall-clock step", async () => {
+  // No clock is injected into the controller: this asserts which source its
+  // DEFAULT reads, which an injected one would hide.
+  const clock = installClockStubs({
+    wall: 1_700_000_000_000,
+    monotonic: 1_000,
+  });
+  const timers = installFakeSelfTimers();
+  const harness = createControllerHarness();
+  harness.runtimeState.connection.connected = true;
+  harness.runtimeState.room.roomCode = "ROOM01";
+  harness.runtimeState.room.memberToken = "member-token-1";
+  harness.runtimeState.room.memberId = "member-1";
+
+  try {
+    await harness.controller.queueOrSendSharedVideo(PENDING_SHARE_VIDEO, 123);
+    assert.equal(harness.controller.hasActivePendingLocalShare(), true);
+    assert.equal(timers.pending().length, 1);
+
+    // The full 10s confirmation window elapses...
+    clock.clocks.monotonic += 10_001;
+    // ...and an NTP correction steps the wall clock back a minute inside it.
+    clock.clocks.wall -= 60_000;
+
+    // The one-shot backstop fires on schedule (setTimeout is unaffected by the
+    // step) and re-tests the deadline.
+    timers.runAll();
+
+    assert.equal(harness.runtimeState.share.pendingLocalShareUrl, null);
+    assert.equal(harness.controller.hasActivePendingLocalShare(), false);
+    // Nothing is left to have another go: the backstop does not re-arm, so a
+    // marker this pass declines to clear is a marker that leaks for the rest of
+    // the session, blocking every later auto-share.
+    assert.deepEqual(timers.pending(), []);
+  } finally {
+    timers.restore();
+    clock.restore();
+  }
+});
+
+test("background share controller keeps a pending local share across a forward wall-clock step", async () => {
+  const clock = installClockStubs({
+    wall: 1_700_000_000_000,
+    monotonic: 1_000,
+  });
+  const timers = installFakeSelfTimers();
+  const harness = createControllerHarness();
+  harness.runtimeState.connection.connected = true;
+  harness.runtimeState.room.roomCode = "ROOM01";
+  harness.runtimeState.room.memberToken = "member-token-1";
+  harness.runtimeState.room.memberId = "member-1";
+
+  try {
+    await harness.controller.queueOrSendSharedVideo(PENDING_SHARE_VIDEO, 123);
+
+    // The clock jumps a minute forward while barely any time has actually
+    // passed. Expiring here would let the very next `room:state` — still the
+    // pre-share snapshot — roll the room back off the video just shared.
+    clock.clocks.wall += 60_000;
+    clock.clocks.monotonic += 100;
+
+    assert.equal(harness.controller.hasActivePendingLocalShare(), true);
+    assert.equal(
+      harness.controller.getActivePendingLocalShareUrl(),
+      "https://www.bilibili.com/video/BV199W9zEEcH",
+    );
+  } finally {
+    timers.restore();
+    clock.restore();
+  }
 });

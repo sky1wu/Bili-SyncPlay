@@ -4,6 +4,7 @@ import type { SharedVideo } from "@bili-syncplay/protocol";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
 import { createSocketController } from "../src/background/socket-controller";
 import { setLocaleForTests, t } from "../src/shared/i18n";
+import { installClockStubs } from "./clock-stubs";
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -521,6 +522,42 @@ test("an admin reset aborts an in-flight reconnect probe instead of opening a gh
     assert.equal(harness.runtimeState.connection.connected, false);
   } finally {
     harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("counts down the reconnect retry on the monotonic clock", () => {
+  const globals = installGlobals();
+  // No clock injected: this asserts which source the default reads.
+  const clock = installClockStubs({
+    wall: 1_700_000_000_000,
+    monotonic: 1_000,
+  });
+  let harness: ReturnType<typeof createHarness> | undefined;
+
+  try {
+    harness = createHarness();
+    harness.controller.scheduleReconnect();
+
+    const armedDelayMs = harness.controller.getRetryInMs();
+    assert.equal(armedDelayMs, 1_000);
+
+    // A forward wall-clock correction must not shorten the countdown: the
+    // `setTimeout` it is narrating has not moved, so the popup would claim a
+    // retry that has not happened.
+    clock.clocks.wall += 60_000;
+    assert.equal(harness.controller.getRetryInMs(), 1_000);
+
+    // Time actually passing does shorten it.
+    clock.clocks.monotonic += 400;
+    assert.equal(harness.controller.getRetryInMs(), 600);
+
+    // ...and a backward correction must not stretch it back out.
+    clock.clocks.wall -= 120_000;
+    assert.equal(harness.controller.getRetryInMs(), 600);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    clock.restore();
     globals.restore();
   }
 });
