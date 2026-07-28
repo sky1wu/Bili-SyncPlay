@@ -66,6 +66,11 @@ function createControllerHarness(
     hasActivePendingLocalShare?: boolean;
     hasActivePendingManualShare?: boolean;
     activePendingLocalShareUrl?: string | null;
+    /**
+     * Skip the injected clock so the controller falls back to its production
+     * default. Only the clock-source test needs this.
+     */
+    omitMonotonicClock?: boolean;
   } = {},
 ) {
   const calls = {
@@ -132,6 +137,7 @@ function createControllerHarness(
     pageShareButtonEnabled: true,
   };
 
+  // Monotonic reading, as `performance.now()` would give (not a wall clock).
   let clock = 1_000_000;
   const controller = createMessageController({
     connectionState,
@@ -281,7 +287,7 @@ function createControllerHarness(
     notifyAll() {
       calls.notifyAll += 1;
     },
-    now: () => clock,
+    ...(overrides.omitMonotonicClock ? {} : { getMonotonicNow: () => clock }),
   });
 
   return {
@@ -1787,4 +1793,44 @@ test("message controller re-requests a sync while awaiting fresh room state afte
     ],
     "a non-authoritative cache must still reach the server",
   );
+});
+
+test("message controller measures the refresh window on a monotonic clock", async () => {
+  // `Date.now()` is not ordered: an NTP correction or a manual change steps it,
+  // and a *backward* step makes `now - lastRoomStateRefreshAt` negative — which
+  // compares as "well inside the window" and would freeze the recovery refresh
+  // for the whole duration of the step, precisely when a silently missed push
+  // most needs recovering from. The window must therefore come from
+  // `performance.now()`.
+  const realDateNow = Date.now;
+  const realPerformanceNow = performance.now;
+  let monotonic = 5_000;
+  let wallClock = 1_700_000_000_000;
+  Date.now = () => wallClock;
+  performance.now = () => monotonic;
+  try {
+    const harness = createControllerHarness({ omitMonotonicClock: true });
+    await getRoomState(harness);
+    assert.equal(
+      harness.syncRequests().length,
+      1,
+      "first call arms the window",
+    );
+
+    // The wall clock jumps an hour backwards while real time moves past the
+    // window. A `Date.now()`-based window would see -3_600_000ms elapsed and
+    // stay "authoritative"; a monotonic one sees 10_001ms and refreshes.
+    wallClock -= 3_600_000;
+    monotonic += 10_001;
+    await getRoomState(harness);
+
+    assert.equal(
+      harness.syncRequests().length,
+      2,
+      "a backward wall-clock step must not extend the trust window",
+    );
+  } finally {
+    Date.now = realDateNow;
+    performance.now = realPerformanceNow;
+  }
 });

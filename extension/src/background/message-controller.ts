@@ -108,16 +108,26 @@ export function createMessageController(args: {
   persistProfileState: () => Promise<void>;
   notifyPageShareButtonSettings: () => Promise<void>;
   notifyAll: () => void;
-  /** Local clock for the authoritative-refresh window. Injected by tests. */
-  now?: () => number;
+  /**
+   * Monotonic time source for the authoritative-refresh window. Must not be the
+   * wall clock — see `lastRoomStateRefreshAt`.
+   */
+  getMonotonicNow?: () => number;
 }): MessageController {
-  const nowOf = () => args.now?.() ?? Date.now();
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   /**
    * When this session last asked the server for authoritative room state, or
-   * `null` if it never has. Only ever compared against another local reading,
-   * so it is an elapsed duration and never crosses machines. A wall clock is
-   * enough here — a clock step costs at most one extra or one late refresh,
-   * unlike playback anchoring which must stay monotonic.
+   * `null` if it never has. Read from a monotonic clock, never the wall clock:
+   * `Date.now()` moves when the clock is stepped, and a *backward* step makes
+   * `now - lastRoomStateRefreshAt` negative — which compares as "well inside
+   * the window" and would freeze the refresh for the entire duration of the
+   * step, exactly when a missed push most needs recovering from. Only ever
+   * compared against another reading of the same clock, so it stays an elapsed
+   * duration and never crosses machines.
+   *
+   * Resetting to `null` on an MV3 worker restart is correct and matches
+   * `performance.now()`'s own epoch resetting with the worker: the next call
+   * re-establishes authority instead of trusting a reading from a dead epoch.
    */
   let lastRoomStateRefreshAt: number | null = null;
 
@@ -669,7 +679,7 @@ export function createMessageController(args: {
         // funnels through — so a stuck hydration loop costs 6 requests/min
         // total no matter how many tabs are spinning, against a limiter that
         // allows 36/min. The pre-fix loop sent ~171/min from a single tab.
-        const now = nowOf();
+        const now = monotonicNow();
         const cachedRoomStateIsAuthoritative =
           args.roomSessionState.roomState !== null &&
           !args.roomSessionState.awaitingFreshRoomState &&
