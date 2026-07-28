@@ -66,14 +66,14 @@ flowchart LR
 
 `app.ts` 只负责运行时装配；`index.ts`（Room Node）和 `global-admin-index.ts`（独立管理进程）是两个入口。
 
-| 层次       | 模块                                                                                               | 职责                                           |
-| ---------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| 配置       | `config/*`                                                                                         | 环境变量 / 配置文件解析（读取 env 的唯一位置） |
-| Bootstrap  | `bootstrap/*`                                                                                      | provider 选择与依赖装配                        |
-| 会话处理   | `ws-session-handler.ts`、`message-handler.ts`、`rate-limit.ts`、`security.ts`、`origin.ts`         | 握手检查、消息校验、鉴权、限流                 |
-| 房间领域   | `room-service.ts`、`room-store.ts`、`playback-authority.ts`、`room-reaper.ts`                      | 房间生命周期、播放状态权威、过期清理           |
-| 多节点管道 | `redis-*.ts`、`room-event-bus.ts`、`admin-command-bus.ts`、`runtime-store.ts`、`node-heartbeat.ts` | Redis 后端存储、跨节点广播、命令路由、心跳     |
-| 管理后台   | `admin/*`、`admin-panel.ts`、`admin-session-store.ts`                                              | 管理面板 UI、路由、会话、事件、审计日志        |
+| 层次       | 模块                                                                                                      | 职责                                               |
+| ---------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| 配置       | `config/*`                                                                                                | 环境变量 / 配置文件解析（读取 env 的唯一位置）     |
+| Bootstrap  | `bootstrap/*`                                                                                             | provider 选择与依赖装配                            |
+| 会话处理   | `ws-session-handler.ts`、`message-handler.ts`、`rate-limit.ts`、`security.ts`、`origin.ts`                | 握手检查、消息校验、鉴权、限流                     |
+| 房间领域   | `room-service.ts`、`room-store.ts`、`playback-authority.ts`、`room-reaper.ts`、`room-index-reconciler.ts` | 房间生命周期、播放状态权威、过期清理、房间索引对账 |
+| 多节点管道 | `redis-*.ts`、`room-event-bus.ts`、`admin-command-bus.ts`、`runtime-store.ts`、`node-heartbeat.ts`        | Redis 后端存储、跨节点广播、命令路由、心跳         |
+| 管理后台   | `admin/*`、`admin-panel.ts`、`admin-session-store.ts`                                                     | 管理面板 UI、路由、会话、事件、审计日志            |
 
 每个 store 和 bus 都在同一接口后提供 `memory` 和 `redis` 两种实现；多节点拓扑需要启用哪些 provider 见[多节点部署指南](./operations/multi-node.zh-CN.md)。
 

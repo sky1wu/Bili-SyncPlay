@@ -96,6 +96,7 @@ export async function createSyncServer(
   const {
     serviceVersion,
     roomStore,
+    roomIndexReconciler,
     localRuntimeStore,
     sharedRuntimeStore,
     runtimeStore,
@@ -367,9 +368,7 @@ export async function createSyncServer(
         [
           {
             name: "stop_room_reaper",
-            run: () => {
-              roomReaper.stop();
-            },
+            run: () => roomReaper.stop(),
           },
           {
             name: "stop_node_heartbeat",
@@ -488,6 +487,7 @@ export async function createSyncServer(
           },
           ...createSharedServerShutdownSteps({
             roomStore,
+            roomIndexReconciler,
             eventStore,
             runtimeStore: maybeClosableRuntimeStore,
             runtimeStoreStepName: "close_shared_runtime_store",

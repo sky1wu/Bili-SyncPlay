@@ -13,6 +13,14 @@ import {
 } from "../src/app.js";
 import { createGlobalAdminServer } from "../src/global-admin-app.js";
 import {
+  createSharedServerShutdownSteps,
+  runShutdownSteps,
+} from "../src/bootstrap/server-bootstrap.js";
+import { createInMemoryAdminCommandBus } from "../src/admin-command-bus.js";
+import { createInMemoryRoomEventBus } from "../src/room-event-bus.js";
+import { createInMemoryRoomStore } from "../src/room-store.js";
+import type { GlobalEventStore } from "../src/admin/global-event-store.js";
+import {
   installGracefulShutdown,
   type GracefulShutdownHandle,
   type ShutdownCloseTarget,
@@ -462,4 +470,51 @@ test("handlers are detached after shutdown and by the returned detach", async ()
   await flush();
   assert.equal(other.signalTarget.listenerCount("SIGTERM"), 0);
   assert.equal(other.signalTarget.listenerCount("SIGINT"), 0);
+});
+
+// Neither entry point's shutdown touches these beyond a structural close()
+// probe, so an inert implementation of the real contract is honest here — no
+// cast needed, and a field added to either type surfaces as a type error.
+const inertEventStore: GlobalEventStore = {
+  append: (input) => ({
+    id: "evt-test",
+    timestamp: input.timestamp ?? "1970-01-01T00:00:00.000Z",
+    event: input.event,
+    roomCode: null,
+    sessionId: null,
+    remoteAddress: null,
+    origin: null,
+    result: null,
+    details: { ...input.data },
+  }),
+  query: () => ({ items: [], total: 0 }),
+  totalCountsByEvent: () => ({}),
+  countsByEventInWindow: () => ({}),
+};
+
+test("the reconciler is stopped before the room store it talks to is closed", async () => {
+  const order: string[] = [];
+  const steps = createSharedServerShutdownSteps({
+    roomStore: {
+      ...createInMemoryRoomStore({ now: () => 0 }),
+      close: async () => {
+        order.push("close_room_store");
+      },
+    },
+    roomIndexReconciler: {
+      runNow: async () => true,
+      stop: async () => {
+        order.push("stop_room_index_reconciler");
+      },
+    },
+    eventStore: inertEventStore,
+    adminCommandBus: createInMemoryAdminCommandBus(() => 0),
+    roomEventBus: createInMemoryRoomEventBus(),
+    closeAdminServices: async () => undefined,
+  });
+
+  assert.deepEqual(await runShutdownSteps(steps, () => undefined), []);
+
+  // Reversing these two lets a SCAN/GET/EVAL in flight hit a closed connection.
+  assert.deepEqual(order, ["stop_room_index_reconciler", "close_room_store"]);
 });

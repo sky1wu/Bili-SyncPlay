@@ -55,6 +55,7 @@ export async function createGlobalAdminServer(
   const {
     serviceVersion,
     roomStore,
+    roomIndexReconciler,
     runtimeStore,
     adminCommandBus,
     roomEventBus,
@@ -118,6 +119,7 @@ export async function createGlobalAdminServer(
           },
           ...createSharedServerShutdownSteps({
             roomStore,
+            roomIndexReconciler,
             eventStore,
             runtimeStore,
             adminCommandBus,

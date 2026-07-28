@@ -66,14 +66,14 @@ Cross-area helpers: normalized video URL handling (`url.ts`, wrapping the protoc
 
 `app.ts` is runtime assembly only; `index.ts` (room node) and `global-admin-index.ts` (dedicated admin process) are the two entrypoints.
 
-| Layer               | Modules                                                                                            | Responsibility                                                      |
-| ------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Config              | `config/*`                                                                                         | Env / config-file parsing (the only place env vars are read)        |
-| Bootstrap           | `bootstrap/*`                                                                                      | Provider selection and dependency wiring                            |
-| Session handling    | `ws-session-handler.ts`, `message-handler.ts`, `rate-limit.ts`, `security.ts`, `origin.ts`         | Handshake checks, message validation, auth, rate limits             |
-| Room domain         | `room-service.ts`, `room-store.ts`, `playback-authority.ts`, `room-reaper.ts`                      | Room lifecycle, playback-state authority, expiry cleanup            |
-| Multi-node plumbing | `redis-*.ts`, `room-event-bus.ts`, `admin-command-bus.ts`, `runtime-store.ts`, `node-heartbeat.ts` | Redis-backed stores, cross-node fanout, command routing, heartbeats |
-| Admin               | `admin/*`, `admin-panel.ts`, `admin-session-store.ts`                                              | Admin panel UI, routes, sessions, events, audit logs                |
+| Layer               | Modules                                                                                                   | Responsibility                                                                 |
+| ------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Config              | `config/*`                                                                                                | Env / config-file parsing (the only place env vars are read)                   |
+| Bootstrap           | `bootstrap/*`                                                                                             | Provider selection and dependency wiring                                       |
+| Session handling    | `ws-session-handler.ts`, `message-handler.ts`, `rate-limit.ts`, `security.ts`, `origin.ts`                | Handshake checks, message validation, auth, rate limits                        |
+| Room domain         | `room-service.ts`, `room-store.ts`, `playback-authority.ts`, `room-reaper.ts`, `room-index-reconciler.ts` | Room lifecycle, playback-state authority, expiry cleanup, room index reconcile |
+| Multi-node plumbing | `redis-*.ts`, `room-event-bus.ts`, `admin-command-bus.ts`, `runtime-store.ts`, `node-heartbeat.ts`        | Redis-backed stores, cross-node fanout, command routing, heartbeats            |
+| Admin               | `admin/*`, `admin-panel.ts`, `admin-session-store.ts`                                                     | Admin panel UI, routes, sessions, events, audit logs                           |
 
 Every store and bus has a `memory` and a `redis` provider behind the same interface; the [multi-node guide](./operations/multi-node.md) describes which providers must be enabled for a multi-node topology.
 

@@ -235,11 +235,11 @@ return deletedCount
 // single long-running script.
 const REPAIR_CHUNK_SIZE = 500;
 
-// How long a completed reconcile is trusted. It repeats rather than running
-// once per process because a node still on an older build — mid rolling
-// upgrade, sharing this Redis — writes rooms this set never hears about, and
-// reaps rooms whose membership nobody removes.
-const RECONCILE_INTERVAL_MS = 900_000;
+// How often the index is reconciled against the room bodies. It repeats
+// rather than running once per process because a node still on an older build
+// — mid rolling upgrade, sharing this Redis — writes rooms this set never
+// hears about, and reaps rooms whose membership nobody removes.
+export const ROOM_INDEX_RECONCILE_INTERVAL_MS = 900_000;
 
 // SCAN MATCH takes a glob, so a namespace carrying glob metacharacters — a
 // plain string as far as the config layer is concerned, e.g. "tenant[1]" —
@@ -329,11 +329,17 @@ export async function createRedisRoomStore(
   redisUrl: string,
   options: {
     namespace?: string;
-    // Injectable only so the reconcile cooldown is testable without waiting it
-    // out; every other timestamp in this module stays on Date.now.
+    // Injectable only so a test can place rooms either side of the expiry
+    // cutoff without waiting; every other timestamp in this module stays on
+    // Date.now.
     now?: () => number;
   } = {},
-): Promise<RoomStore & { close: () => Promise<void> }> {
+): Promise<
+  RoomStore & {
+    close: () => Promise<void>;
+    reconcileRoomIndex: () => Promise<void>;
+  }
+> {
   const redis = new Redis(redisUrl, {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
@@ -469,36 +475,27 @@ export async function createRedisRoomStore(
   }
 
   let reconcile: Promise<void> | null = null;
-  let lastReconciledAt = 0;
+  let bootstrapReconciled = false;
 
   async function runReconcile(): Promise<void> {
     await reconcileFromRoomBodies();
     await pruneOrphanedMembers();
-    lastReconciledAt = now();
   }
 
-  // Started here but deliberately not awaited: createSyncServer resolves
-  // before httpServer.listen, so awaiting a keyspace walk would delay
-  // readiness and can trip deployment health checks on a Redis shared with
-  // other services. Only reads depend on the result, so they await it instead.
-  function ensureReconciled(): Promise<void> {
+  // De-duplicates concurrent passes: the periodic timer and a read still
+  // waiting on the first pass must not walk the keyspace twice at once.
+  // Cleared once settled, and rethrown on failure so a read that depends on
+  // this fails loudly rather than reporting a count built on a set known to be
+  // incomplete. The identity checks keep a late settlement from discarding a
+  // newer attempt that already replaced this one.
+  function reconcileRoomIndex(): Promise<void> {
     if (reconcile) {
       return reconcile;
     }
-    if (
-      lastReconciledAt !== 0 &&
-      now() - lastReconciledAt < RECONCILE_INTERVAL_MS
-    ) {
-      return Promise.resolve();
-    }
 
-    // Cleared once settled so the cooldown governs the next run, and rethrown
-    // on failure so a read fails loudly rather than reporting a list or count
-    // built on a set known to be incomplete. The identity checks keep a late
-    // settlement from discarding a newer attempt that already replaced this
-    // one.
     const pending = runReconcile().then(
       () => {
+        bootstrapReconciled = true;
         if (reconcile === pending) {
           reconcile = null;
         }
@@ -514,7 +511,26 @@ export async function createRedisRoomStore(
     return pending;
   }
 
-  void ensureReconciled().catch(() => undefined);
+  // Reads wait for the *first* pass only. That one is the migration: until it
+  // lands, a database written before this set existed answers every count and
+  // listing with rooms missing, so a read that skipped it would be wrong.
+  // Every later pass exists to pick up rooms a node on an older build wrote
+  // mid rolling upgrade — nothing a caller is holding depends on it, so making
+  // callers wait only charged one unlucky read per interval for a keyspace
+  // walk. `createRoomIndexReconciler` drives those on its own timer instead,
+  // where the cost is attributable and nobody is blocked by it.
+  function ensureBootstrapReconciled(): Promise<void> {
+    if (bootstrapReconciled) {
+      return Promise.resolve();
+    }
+    return reconcileRoomIndex();
+  }
+
+  // Started here but deliberately not awaited: createSyncServer resolves
+  // before httpServer.listen, so awaiting a keyspace walk would delay
+  // readiness and can trip deployment health checks on a Redis shared with
+  // other services. Only reads depend on the result, so they await it instead.
+  void reconcileRoomIndex().catch(() => undefined);
 
   async function fetchRooms(
     query: Pick<
@@ -527,7 +543,7 @@ export async function createRedisRoomStore(
       | "sortOrder"
     >,
   ) {
-    await ensureReconciled();
+    await ensureBootstrapReconciled();
 
     // Members are the room codes; ordering here is irrelevant because rooms
     // are re-sorted below by query.sortBy once their bodies are loaded.
@@ -701,12 +717,12 @@ export async function createRedisRoomStore(
       );
     },
     async deleteExpiredRooms(currentTime) {
-      // The reaper is the only caller that runs on its own timer, so it is
-      // what guarantees the reconcile keeps happening. Leaving that to
-      // listings and metric scrapes would mean a deployment with neither
-      // never picks up rooms an older node wrote, and those rooms — absent
-      // from this set — would never be reaped.
-      await ensureReconciled();
+      // Candidates come from the index, so on a database that predates it the
+      // reaper would see nothing until the migration pass lands. It waits for
+      // that one pass only — keeping it waiting on every later pass put a
+      // keyspace walk inside one reaper tick per interval, which is what made
+      // this operation's histogram bimodal.
+      await ensureBootstrapReconciled();
       const deletedCount = await redis.eval(
         DELETE_EXPIRED_ROOMS_LUA,
         1,
@@ -734,7 +750,7 @@ export async function createRedisRoomStore(
     // and none of them loads a room body — which matters because the metrics
     // collector calls this on every scrape.
     async countRooms(query: Pick<RoomListQuery, "keyword" | "includeExpired">) {
-      await ensureReconciled();
+      await ensureBootstrapReconciled();
 
       if (!query.keyword) {
         return query.includeExpired
@@ -759,6 +775,11 @@ export async function createRedisRoomStore(
         return false;
       }
     },
+    // Outside the RoomStore contract: only this implementation keeps an index
+    // that can drift from the room bodies. `createRoomIndexReconciler` owns
+    // the schedule; exposing it here is what lets that timer's cost land on
+    // its own histogram label instead of on whichever read triggered it.
+    reconcileRoomIndex,
     async close() {
       await redis.quit();
     },
