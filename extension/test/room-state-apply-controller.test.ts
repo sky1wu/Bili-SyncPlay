@@ -1538,8 +1538,8 @@ test("video element binding ends the hydration wait instead of a retry timer", a
     assert.equal(win.scheduled.length, 2);
     assert.equal(
       win.scheduled[1].ms,
-      100,
-      "re-armed through the backoff (50ms base, one retry already elapsed)",
+      50,
+      "a first binding must not inherit the wait's backoff",
     );
 
     win.scheduled[1].cb();
@@ -1625,8 +1625,77 @@ test("repeated video rebinds decay instead of hydrating once per rebind", async 
 
     assert.deepEqual(
       bindArmedDelays,
-      [100, 400, 1600, 6400],
-      "successive rebinds must back off, not re-fire at the base delay",
+      [50, 100, 200, 400],
+      "successive rebinds must back off on their own streak",
+    );
+  } finally {
+    win.restore();
+  }
+});
+
+test("a video binding after a long wait hydrates promptly, not at the ceiling", async () => {
+  const win = installWindowTimerStub();
+  try {
+    // The wait streak and the rebind streak are different sequences. A page
+    // bridge that stays unready for minutes drives the wait streak to
+    // saturation; if the binding inherited it, `50 * 2**n` would clamp to the
+    // 30s ceiling and the room state would sit unapplied for half a minute
+    // AFTER the video became usable — with broadcasts suppressed and the
+    // initial pause still held throughout.
+    const roomState = createRoomStateWithPlayback({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 42,
+      playState: "paused",
+      actorId: "remote-member",
+      seq: 5,
+    });
+    const harness = createController({
+      video: createStubVideo(false),
+      now: 30_000,
+      currentVideo: null,
+      requestRoomStateHydration: async () => ({
+        ok: true,
+        roomState,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
+    });
+    harness.runtimeState.pendingRoomStateHydration = true;
+    harness.runtimeState.lastUserGestureAt = 29_500;
+
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Drive the wait to the ceiling: 350ms doubling reaches 30s by the 8th.
+    await harness.controller.hydrateRoomState();
+    for (let i = 0; i < 11; i += 1) {
+      const armed = win.scheduled[win.scheduled.length - 1];
+      armed.cb();
+      await settle();
+    }
+    const saturated = win.scheduled[win.scheduled.length - 1];
+    assert.equal(
+      saturated.ms,
+      30_000,
+      "precondition: the wait streak must be saturated",
+    );
+
+    harness.controller.notifyVideoElementBound();
+    const afterBind = win.scheduled[win.scheduled.length - 1];
+    assert.equal(
+      afterBind.ms,
+      50,
+      "the element arrived, so the wait's accumulated penalty is spent",
+    );
+
+    // If that hydration still cannot apply, what it is waiting for now is
+    // something else (the page bridge here) — a new wait, which must start its
+    // own backoff rather than resume the spent one at the ceiling.
+    afterBind.cb();
+    await settle();
+    assert.equal(
+      win.scheduled[win.scheduled.length - 1].ms,
+      350,
+      "the wait that follows a binding restarts its backoff",
     );
   } finally {
     win.restore();
