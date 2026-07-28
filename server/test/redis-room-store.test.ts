@@ -314,7 +314,7 @@ test("redis room listing prunes members whose room body is gone", async (t) => {
   }
 });
 
-test("redis room reconcile sweeps orphans again once the cooldown lapses", async (t) => {
+test("redis room reconcile sweeps orphans again when the reconciler drives it", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
@@ -337,16 +337,52 @@ test("redis room reconcile sweeps orphans again once the cooldown lapses", async
     await redis.zadd(roomsKey, "+inf", "LATEGH");
     assert.equal(await store.countRooms({ includeExpired: true }), 1);
 
-    clock += 60_000;
+    // No amount of elapsed time makes a read reconcile any more: the pass used
+    // to be triggered by whichever read first arrived after a cooldown lapsed,
+    // which charged one unlucky caller per interval for a keyspace walk and
+    // hid the cost under that caller's metric label.
+    clock += 900_000 * 4;
     assert.equal(await store.countRooms({ includeExpired: true }), 1);
+    assert.equal(await redis.zcard(roomsKey), 1);
 
-    clock += 900_000;
+    // createRoomIndexReconciler calls exactly this on its own timer.
+    await store.reconcileRoomIndex();
     assert.equal(await store.countRooms({ includeExpired: true }), 0);
     assert.equal(await redis.zcard(roomsKey), 0);
   } finally {
     await redis.del(roomsKey);
     await redis.quit();
     await store.close();
+  }
+});
+
+test("redis room store still reconciles once before answering the first read", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("bootstrapreconcile");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const redis = await connect();
+
+  let store: Store | null = null;
+  try {
+    // A room body written before this index existed: the migration pass is the
+    // only thing that can put it in the set, so a read that skipped waiting on
+    // it would answer with the room missing.
+    await redis.set(
+      `${namespace}:room:OLDBLD`,
+      legacyRoomBody("OLDBLD", { expiresAt: null, lastActiveAt: 5 }),
+    );
+
+    store = await createRedisRoomStore(REDIS_URL, { namespace });
+    assert.equal(await store.countRooms({ includeExpired: true }), 1);
+    assert.equal(await redis.zscore(roomsKey, "OLDBLD"), "inf");
+  } finally {
+    await redis.del(`${namespace}:room:OLDBLD`, roomsKey);
+    await redis.quit();
+    await store?.close();
   }
 });
 
@@ -661,7 +697,7 @@ test("redis room save rolls the room body back when indexing fails", async (t) =
   }
 });
 
-test("redis room reaper triggers the reconcile itself", async (t) => {
+test("redis room reaper waits for the migration pass before its first sweep", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
@@ -688,6 +724,53 @@ test("redis room reaper triggers the reconcile itself", async (t) => {
     assert.equal(await redis.zscore(roomsKey, "NOREAD"), null);
   } finally {
     await redis.del(`${namespace}:room:NOREAD`, roomsKey);
+    await redis.quit();
+    await store?.close();
+  }
+});
+
+test("redis room reaper does not reconcile again after the migration pass", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("reapnoreconcile");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const redis = await connect();
+  let clock = 1_000_000;
+
+  let store: Store | null = null;
+  try {
+    store = await createRedisRoomStore(REDIS_URL, {
+      namespace,
+      now: () => clock,
+    });
+    // Settle the migration pass first, so what follows can only be a later one.
+    assert.equal(await store.deleteExpiredRooms(100), 0);
+
+    // Written straight to Redis afterwards, exactly as a node on an older
+    // build would: expired, but with no membership for the reaper's range
+    // query to find. A reaper tick that still reconciled would pick it up —
+    // and pay for a keyspace walk to do so, which is the spike this change
+    // removes from delete_expired_rooms.
+    await redis.set(
+      `${namespace}:room:LATEBD`,
+      legacyRoomBody("LATEBD", { expiresAt: 70, lastActiveAt: 65 }),
+    );
+
+    // Well past the interval the pass used to be re-triggered on, so a tick
+    // that still reconciled would be free to do so here.
+    clock += 900_000 * 4;
+    assert.equal(await store.deleteExpiredRooms(100), 0);
+    assert.equal(await redis.exists(`${namespace}:room:LATEBD`), 1);
+
+    // The reconciler's timer is what collects it, one tick later.
+    await store.reconcileRoomIndex();
+    assert.equal(await store.deleteExpiredRooms(100), 1);
+    assert.equal(await redis.exists(`${namespace}:room:LATEBD`), 0);
+  } finally {
+    await redis.del(`${namespace}:room:LATEBD`, roomsKey);
     await redis.quit();
     await store?.close();
   }

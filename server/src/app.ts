@@ -16,7 +16,9 @@ import {
 import { createAdminCommandConsumer } from "./admin-command-consumer.js";
 import { createMessageHandler } from "./message-handler.js";
 import { createNodeHeartbeat } from "./node-heartbeat.js";
+import { ROOM_INDEX_RECONCILE_INTERVAL_MS } from "./redis-room-store.js";
 import { createRoomEventConsumer } from "./room-event-consumer.js";
+import { createRoomIndexReconciler } from "./room-index-reconciler.js";
 import { type RoomStore } from "./room-store.js";
 import { createRoomReaper } from "./room-reaper.js";
 import { createRoomService } from "./room-service.js";
@@ -258,6 +260,16 @@ export async function createSyncServer(
     logEvent,
     now,
   });
+  // Only the Redis store keeps an index that can drift from the room bodies;
+  // the in-memory one has nothing to reconcile.
+  const reconcileRoomIndex = roomStore.reconcileRoomIndex;
+  const roomIndexReconciler = reconcileRoomIndex
+    ? createRoomIndexReconciler({
+        intervalMs: ROOM_INDEX_RECONCILE_INTERVAL_MS,
+        reconcileRoomIndex: () => reconcileRoomIndex(),
+        logEvent,
+      })
+    : null;
   const nodeHeartbeatRuntimeStore = {
     ...localRuntimeStore,
     heartbeatNode: (
@@ -369,6 +381,12 @@ export async function createSyncServer(
             name: "stop_room_reaper",
             run: () => {
               roomReaper.stop();
+            },
+          },
+          {
+            name: "stop_room_index_reconciler",
+            run: () => {
+              roomIndexReconciler?.stop();
             },
           },
           {

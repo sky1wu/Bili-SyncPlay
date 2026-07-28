@@ -105,3 +105,65 @@ test("instrumented room store adds no close hook when the underlying store has n
 
   assert.equal("close" in store, false);
 });
+
+test("instrumented room store measures the reconcile hook under its own label", async () => {
+  const recorder = createRecorder();
+  let reconciled = 0;
+  const store = instrumentRoomStore(
+    {
+      ...createInMemoryRoomStore({ now: () => 0 }),
+      async reconcileRoomIndex() {
+        reconciled += 1;
+      },
+    },
+    recorder.collector,
+  );
+
+  // Dropping this hook while wrapping would stop the index from ever
+  // converging again, with nothing failing to say so.
+  const reconcileRoomIndex = store.reconcileRoomIndex;
+  assert.ok(reconcileRoomIndex);
+  await reconcileRoomIndex();
+
+  assert.equal(reconciled, 1);
+  // Its own label is the point of the change: charged to the reconcile, not
+  // to whichever read used to trigger it.
+  assert.deepEqual(
+    recorder.durations.map((entry) => entry.operation),
+    ["reconcile_room_index"],
+  );
+  assert.deepEqual(recorder.failures, []);
+});
+
+test("instrumented room store reports a failed reconcile and rethrows", async () => {
+  const recorder = createRecorder();
+  const store = instrumentRoomStore(
+    {
+      ...createInMemoryRoomStore({ now: () => 0 }),
+      async reconcileRoomIndex() {
+        throw new Error("scan failed");
+      },
+    },
+    recorder.collector,
+  );
+
+  const reconcileRoomIndex = store.reconcileRoomIndex;
+  assert.ok(reconcileRoomIndex);
+  await assert.rejects(reconcileRoomIndex(), /scan failed/);
+
+  assert.deepEqual(recorder.failures, ["reconcile_room_index"]);
+  assert.deepEqual(
+    recorder.durations.map((entry) => entry.operation),
+    ["reconcile_room_index"],
+  );
+});
+
+test("instrumented room store adds no reconcile hook when the underlying store has none", () => {
+  const recorder = createRecorder();
+  const store = instrumentRoomStore(
+    createInMemoryRoomStore({ now: () => 0 }),
+    recorder.collector,
+  );
+
+  assert.equal("reconcileRoomIndex" in store, false);
+});

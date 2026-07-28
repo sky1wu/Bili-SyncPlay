@@ -12,17 +12,20 @@ type RoomStoreMetricsCollector = Pick<
  * the in-memory store is synchronous and would just add noise.
  */
 /**
- * Redis 版实现额外带一个 RoomStore 契约之外的 close() 钩子,关服时按结构探测
- * (见 server-bootstrap 的 hasClose)。把它写进类型里,包装前后都不必强转。
+ * Redis 版实现额外带两个 RoomStore 契约之外的钩子:关服用的 close() (按结构
+ * 探测,见 server-bootstrap 的 hasClose),以及索引对账 reconcileRoomIndex()
+ * (由 createRoomIndexReconciler 定时驱动)。把它们写进类型里,包装前后都不必
+ * 强转。
  */
-export type CloseableRoomStore = RoomStore & {
+export type MaintainableRoomStore = RoomStore & {
   close?: () => Promise<void>;
+  reconcileRoomIndex?: () => Promise<void>;
 };
 
 export function instrumentRoomStore(
-  roomStore: CloseableRoomStore,
+  roomStore: MaintainableRoomStore,
   metricsCollector: RoomStoreMetricsCollector,
-): CloseableRoomStore {
+): MaintainableRoomStore {
   function measure<Args extends unknown[], Result>(
     operation: string,
     run: (...args: Args) => Promise<Result>,
@@ -59,11 +62,19 @@ export function instrumentRoomStore(
     isReady: measure("is_ready", () => roomStore.isReady()),
   };
 
-  // close() must survive wrapping or server.close() would leak the Redis
-  // connection.
+  // Both hooks must survive wrapping: losing close() would leak the Redis
+  // connection, and losing reconcileRoomIndex() would silently stop the index
+  // from ever converging again — a rolling upgrade's rooms would go unreaped
+  // with nothing failing.
+  const hooks: Pick<MaintainableRoomStore, "close" | "reconcileRoomIndex"> = {};
   if (typeof roomStore.close === "function") {
-    const close = roomStore.close.bind(roomStore);
-    return Object.assign(instrumented, { close });
+    hooks.close = roomStore.close.bind(roomStore);
   }
-  return instrumented;
+  if (typeof roomStore.reconcileRoomIndex === "function") {
+    hooks.reconcileRoomIndex = measure(
+      "reconcile_room_index",
+      roomStore.reconcileRoomIndex.bind(roomStore),
+    );
+  }
+  return Object.assign(instrumented, hooks);
 }

@@ -34,7 +34,10 @@ import {
   type RoomEventBusMessage,
 } from "../room-event-bus.js";
 import { createInMemoryRoomStore, type RoomStore } from "../room-store.js";
-import { instrumentRoomStore } from "../room-store-instrumentation.js";
+import {
+  instrumentRoomStore,
+  type MaintainableRoomStore,
+} from "../room-store-instrumentation.js";
 import {
   createInMemoryRuntimeStore,
   type RuntimeStore,
@@ -109,7 +112,9 @@ type BootstrapLoggingHooks = {
 
 export type ServerBootstrapContext = {
   serviceVersion: string;
-  roomStore: RoomStore;
+  // Maintainable rather than plain RoomStore so app.ts can see the optional
+  // reconcileRoomIndex hook without probing for it structurally.
+  roomStore: MaintainableRoomStore;
   localRuntimeStore: RuntimeStore;
   sharedRuntimeStore: RuntimeStore;
   runtimeStore: RuntimeStore;
