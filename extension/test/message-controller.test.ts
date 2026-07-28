@@ -132,6 +132,7 @@ function createControllerHarness(
     pageShareButtonEnabled: true,
   };
 
+  let clock = 1_000_000;
   const controller = createMessageController({
     connectionState,
     roomSessionState,
@@ -280,6 +281,7 @@ function createControllerHarness(
     notifyAll() {
       calls.notifyAll += 1;
     },
+    now: () => clock,
   });
 
   return {
@@ -289,6 +291,13 @@ function createControllerHarness(
     roomSessionState,
     popupState,
     settingsState,
+    advanceClock(ms: number) {
+      clock += ms;
+    },
+    syncRequests: () =>
+      calls.sendToServer.filter(
+        (message) => (message as { type?: string }).type === "sync:request",
+      ),
   };
 }
 
@@ -1661,32 +1670,80 @@ test("message controller forwards content playback updates only for the active s
   assert.deepEqual(inactiveHarness.calls.sendToServer, []);
 });
 
-test("message controller answers content:get-room-state from cache without polling the server", async () => {
-  // Regression for #229: content-side hydration retries call this message in a
-  // loop while waiting for a `<video>` element, and forwarding a `sync:request`
-  // on every pass saturated the per-session rate limiter (6 per 10s).
-  const harness = createControllerHarness();
+const GET_ROOM_STATE = { type: "content:get-room-state" } as const;
+
+/** Send one `content:get-room-state`, which also arms the refresh window. */
+async function getRoomState(
+  harness: ReturnType<typeof createControllerHarness>,
+): Promise<unknown> {
   let response: unknown;
   await harness.controller.handleRuntimeMessage(
-    { type: "content:get-room-state" },
+    GET_ROOM_STATE,
     createSender({ id: 123 }),
     (value) => {
       response = value;
     },
   );
+  return response;
+}
 
-  assert.deepEqual(
-    harness.calls.sendToServer.filter(
-      (message) => (message as { type?: string }).type === "sync:request",
-    ),
-    [],
-    "a cached room state must be served locally, without a sync:request",
+test("message controller answers content:get-room-state from cache within the refresh window", async () => {
+  // Regression for #229: content-side hydration retries call this message in a
+  // loop while waiting for a `<video>` element, and forwarding a `sync:request`
+  // on every pass saturated the per-session rate limiter (6 per 10s).
+  const harness = createControllerHarness();
+  await getRoomState(harness);
+  assert.equal(harness.syncRequests().length, 1, "first call arms the window");
+
+  // A tight hydration retry loop inside the window must add nothing.
+  harness.advanceClock(350);
+  const response = await getRoomState(harness);
+  harness.advanceClock(350);
+  await getRoomState(harness);
+
+  assert.equal(
+    harness.syncRequests().length,
+    1,
+    "an authoritative cache must be served locally, without a sync:request",
   );
   assert.equal((response as { ok: boolean }).ok, true);
   assert.equal((response as { roomCode: string }).roomCode, "ROOM01");
 });
 
-test("message controller still requests a sync when it has no cached room state", async () => {
+test("message controller refreshes room state once the trust window expires", async () => {
+  // The server can silently fail to push `room:state` (`room_event_consume_failed`
+  // in room-event-consumer.ts, and a null `getRoomStateByCode`), leaving the
+  // client with a stale snapshot and no local signal. Cache authority therefore
+  // has to expire rather than be permanent.
+  const harness = createControllerHarness();
+  await getRoomState(harness);
+  harness.advanceClock(9_999);
+  await getRoomState(harness);
+  assert.equal(
+    harness.syncRequests().length,
+    1,
+    "still inside the window: no extra request",
+  );
+
+  harness.advanceClock(2);
+  await getRoomState(harness);
+  assert.equal(
+    harness.syncRequests().length,
+    2,
+    "past the window: exactly one refresh goes through",
+  );
+
+  // The refresh re-arms the window rather than leaving it open.
+  harness.advanceClock(350);
+  await getRoomState(harness);
+  assert.equal(harness.syncRequests().length, 2);
+});
+
+test("message controller keeps requesting a sync while it has no cached room state", async () => {
+  // With nothing to answer from, the trust window must not apply at all: a
+  // client that has never received room state would otherwise be throttled to
+  // one attempt per window while it has no state to show. The retry rate here
+  // is bounded by the content-side hydration backoff instead.
   const harness = createControllerHarness({
     roomSessionState: {
       roomCode: "ROOM01",
@@ -1696,54 +1753,38 @@ test("message controller still requests a sync when it has no cached room state"
       roomState: null,
     },
   });
-  await harness.controller.handleRuntimeMessage(
-    { type: "content:get-room-state" },
-    createSender({ id: 123 }),
-    () => undefined,
-  );
+  await getRoomState(harness);
+  harness.advanceClock(350);
+  await getRoomState(harness);
 
-  assert.deepEqual(
-    harness.calls.sendToServer.filter(
-      (message) => (message as { type?: string }).type === "sync:request",
-    ),
-    [{ type: "sync:request", payload: { memberToken: "member-token-1" } }],
-  );
+  assert.deepEqual(harness.syncRequests(), [
+    { type: "sync:request", payload: { memberToken: "member-token-1" } },
+    { type: "sync:request", payload: { memberToken: "member-token-1" } },
+  ]);
 });
 
 test("message controller re-requests a sync while awaiting fresh room state after reconnect", async () => {
-  // The cache-hit short circuit must key on the state being *authoritative*,
-  // not merely present. During the reconnect handshake `awaitingFreshRoomState`
-  // marks the cache as stale, and the server drops a failed bootstrap snapshot
-  // silently (`sendRoomStateToSession` logs `room_state_bootstrap_failed`
-  // without retrying) while the client deliberately keeps the flag set
+  // During the reconnect handshake `awaitingFreshRoomState` marks the cache as
+  // stale, and the server drops a failed bootstrap snapshot silently
+  // (`sendRoomStateToSession` logs `room_state_bootstrap_failed` without
+  // retrying) while the client deliberately keeps the flag set
   // (`expireBootstrapRoomStateWait`) — so this `sync:request` is the only way
-  // out of that state.
-  const harness = createControllerHarness({
-    roomSessionState: {
-      roomCode: "ROOM01",
-      memberToken: "member-token-1",
-      memberId: "member-1",
-      displayName: "Alice",
-      roomState: {
-        roomCode: "ROOM01",
-        sharedVideo: null,
-        playback: null,
-        members: [],
-      },
-      awaitingFreshRoomState: true,
-    },
-  });
-  await harness.controller.handleRuntimeMessage(
-    { type: "content:get-room-state" },
-    createSender({ id: 123 }),
-    () => undefined,
-  );
+  // out of that state, and it must not wait for the trust window to expire.
+  const harness = createControllerHarness();
+  await getRoomState(harness);
+  assert.equal(harness.syncRequests().length, 1);
+
+  // Well inside the window, so only the flag can let this one through.
+  harness.roomSessionState.awaitingFreshRoomState = true;
+  harness.advanceClock(350);
+  await getRoomState(harness);
 
   assert.deepEqual(
-    harness.calls.sendToServer.filter(
-      (message) => (message as { type?: string }).type === "sync:request",
-    ),
-    [{ type: "sync:request", payload: { memberToken: "member-token-1" } }],
+    harness.syncRequests(),
+    [
+      { type: "sync:request", payload: { memberToken: "member-token-1" } },
+      { type: "sync:request", payload: { memberToken: "member-token-1" } },
+    ],
     "a non-authoritative cache must still reach the server",
   );
 });

@@ -14,6 +14,15 @@ import type {
   SharedVideo,
 } from "@bili-syncplay/protocol";
 
+/**
+ * How long a cached `roomState` is trusted before one `sync:request` is let
+ * through to re-establish authority. Bounds how long a client can hold a
+ * snapshot the server silently failed to push (see the call site for why that
+ * is unobservable locally), while capping a stuck hydration loop at 6
+ * requests/min per browser session — the limiter allows 36/min.
+ */
+const AUTHORITATIVE_REFRESH_INTERVAL_MS = 10_000;
+
 type RuntimeMessage = PopupToBackgroundMessage | ContentToBackgroundMessage;
 type QueueSharedVideoResult = { ok: true } | { ok: false; error: string };
 
@@ -99,7 +108,19 @@ export function createMessageController(args: {
   persistProfileState: () => Promise<void>;
   notifyPageShareButtonSettings: () => Promise<void>;
   notifyAll: () => void;
+  /** Local clock for the authoritative-refresh window. Injected by tests. */
+  now?: () => number;
 }): MessageController {
+  const nowOf = () => args.now?.() ?? Date.now();
+  /**
+   * When this session last asked the server for authoritative room state, or
+   * `null` if it never has. Only ever compared against another local reading,
+   * so it is an elapsed duration and never crosses machines. A wall clock is
+   * enough here — a clock step costs at most one extra or one late refresh,
+   * unlike playback anchoring which must stay monotonic.
+   */
+  let lastRoomStateRefreshAt: number | null = null;
+
   async function updatePageShareButtonEnabled(enabled: boolean): Promise<void> {
     args.settingsState.pageShareButtonEnabled = enabled;
     await args.persistProfileState();
@@ -613,7 +634,7 @@ export function createMessageController(args: {
         }
         sendResponse({ ok: true });
         return;
-      case "content:get-room-state":
+      case "content:get-room-state": {
         if (args.roomSessionState.roomCode && !args.connectionState.connected) {
           void args.socketController.connect();
         }
@@ -628,25 +649,39 @@ export function createMessageController(args: {
         // (6 per 10s), which is how 72% of all `sync:request` got rejected
         // upstream (#229).
         //
-        // An *authoritative* cached `roomState` needs no poll to stay current:
-        // the server pushes `room:state` on every change. A reconnect re-sends
-        // `room:join` (`socket-controller`'s open handler) whose handshake
-        // delivers a fresh snapshot, and `awaitingFreshRoomState` marks that
-        // window — during it the cache is explicitly NOT authoritative, so the
-        // request must still go through. That is not merely belt-and-braces:
-        // the server drops a failed bootstrap snapshot silently
-        // (`sendRoomStateToSession` logs `room_state_bootstrap_failed` and does
-        // not retry) while the client deliberately keeps the flag set
-        // (`expireBootstrapRoomStateWait`), so a `sync:request` from a
-        // hydration retry is the ONLY way out of that state. The retries are
-        // bounded by the hydration backoff, so this cannot re-open the flood.
+        // Cache authority DECAYS — it is not a property the cache either has or
+        // lacks. Two of its three terms are locally observable: an absent
+        // `roomState` means there is nothing to answer with, and
+        // `awaitingFreshRoomState` means the reconnect handshake has not yet
+        // delivered an authoritative snapshot. The third is not observable at
+        // all: the server can silently fail to push. Both
+        // `sendRoomStateToSession` (bootstrap) and the `room_event_consume_failed`
+        // catch in `room-event-consumer.ts` swallow the error without retrying,
+        // closing the socket, or telling the client — and the member-delta
+        // branch also drops the push when `getRoomStateByCode` returns null.
+        // A client left holding a pre-pause or pre-switch snapshot has no local
+        // signal that anything went wrong.
+        //
+        // So the cache is trusted only inside a bounded staleness window; past
+        // it exactly one request goes through and re-arms the window. That
+        // ceiling is what keeps #229 fixed: this timestamp lives in the
+        // background, which is per browser session — the same object every tab
+        // funnels through — so a stuck hydration loop costs 6 requests/min
+        // total no matter how many tabs are spinning, against a limiter that
+        // allows 36/min. The pre-fix loop sent ~171/min from a single tab.
+        const now = nowOf();
+        const cachedRoomStateIsAuthoritative =
+          args.roomSessionState.roomState !== null &&
+          !args.roomSessionState.awaitingFreshRoomState &&
+          lastRoomStateRefreshAt !== null &&
+          now - lastRoomStateRefreshAt < AUTHORITATIVE_REFRESH_INTERVAL_MS;
         if (
           args.connectionState.connected &&
           args.roomSessionState.roomCode &&
           args.roomSessionState.memberToken &&
-          (!args.roomSessionState.roomState ||
-            args.roomSessionState.awaitingFreshRoomState)
+          !cachedRoomStateIsAuthoritative
         ) {
+          lastRoomStateRefreshAt = now;
           args.sendToServer({
             type: "sync:request",
             payload: { memberToken: args.roomSessionState.memberToken },
@@ -669,6 +704,7 @@ export function createMessageController(args: {
               },
         );
         return;
+      }
       case "content:debug-log":
         args.diagnosticsController.log(
           "content",
