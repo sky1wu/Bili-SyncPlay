@@ -22,9 +22,16 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 
 改动这些脚本后必须跑 `.claude/skills/review-round/scripts/selftest.sh <PR编号>`。
 
-## 0. 切到该 PR 的 head 分支并校验
+## 0. 确定 PR 编号，切到它的 head 分支并校验
+
+后面每个代码块都用 `$PR`，**先把它定下来**（Bash 工具不保留 shell 状态，每次新开的
+代码块都要重新赋值，或直接把编号写进命令）：
 
 ```bash
+PR=<编号>                                    # 用户指定了就用指定的
+PR=$(gh pr view --json number --jq .number)  # 否则取当前分支对应的 PR
+[ -n "$PR" ] || { echo "无法确定 PR 编号"; exit 1; }
+
 .claude/skills/review-round/scripts/verify-branch.sh "$PR" --switch
 ```
 
