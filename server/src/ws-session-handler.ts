@@ -9,6 +9,7 @@ import {
   type ServerMessage,
 } from "@bili-syncplay/protocol";
 import { createSessionRateLimitState } from "./rate-limit.js";
+import type { LeaveRoomReason } from "./room-service.js";
 import { hasAttachedSocket } from "./types.js";
 import type { LogEvent, SecurityConfig, Session } from "./types.js";
 import {
@@ -64,7 +65,9 @@ export async function cleanupSessionAfterClose(options: {
   session: Session;
   code: number;
   reason: Buffer;
-  messageHandler: { leaveRoom: (session: Session) => Promise<void> };
+  messageHandler: {
+    leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<void>;
+  };
   runtimeStore: Pick<RuntimeStore, "unregisterSession">;
   securityPolicy: {
     decrementConnectionCount: (remoteAddress: string | null) => void;
@@ -76,7 +79,11 @@ export async function cleanupSessionAfterClose(options: {
   const roomCodeAtClose = options.session.roomCode;
 
   try {
-    await options.messageHandler.leaveRoom(options.session);
+    // `"disconnect"`, never the default: the socket closed, the member did
+    // not ask to leave. Their `memberToken` must outlive this so the rejoin
+    // reclaims the same `memberId` — a server restart closes every socket at
+    // once, and revoking here reissued the whole room new ids (#234).
+    await options.messageHandler.leaveRoom(options.session, "disconnect");
   } catch (error) {
     options.logEvent("ws_connection_cleanup_failed", {
       sessionId: options.session.id,
@@ -209,7 +216,7 @@ export function createWsConnectionHandler(args: {
       session: Session,
       message: ClientMessage,
     ) => Promise<void>;
-    leaveRoom: (session: Session) => Promise<void>;
+    leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<void>;
   };
   logEvent: LogEvent;
   pendingSessionCleanup: Set<Promise<void>>;

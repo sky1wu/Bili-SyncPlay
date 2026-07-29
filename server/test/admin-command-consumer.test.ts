@@ -54,6 +54,7 @@ test("admin command consumer disconnects a local session", async () => {
       return [];
     },
     blockMemberToken() {},
+    revokeMemberToken() {},
     disconnectSessionSocket(_session, reason) {
       disconnectedReason = reason;
     },
@@ -79,6 +80,7 @@ test("admin command consumer disconnects a local session", async () => {
 test("admin command consumer blocks token and disconnects a kicked member", async () => {
   const bus = createInMemoryAdminCommandBus(() => 3_000);
   const session = createSession("session-b", "ROOM02", "member-b");
+  const revoked: Array<{ roomCode: string; memberId: string }> = [];
   const blocked: Array<{ roomCode: string; token: string; expiresAt: number }> =
     [];
 
@@ -93,6 +95,9 @@ test("admin command consumer blocks token and disconnects a kicked member", asyn
     },
     blockMemberToken(roomCode, token, expiresAt) {
       blocked.push({ roomCode, token, expiresAt });
+    },
+    revokeMemberToken(roomCode, memberId) {
+      revoked.push({ roomCode, memberId });
     },
     disconnectSessionSocket() {},
     now: () => 3_000,
@@ -116,6 +121,10 @@ test("admin command consumer blocks token and disconnects a kicked member", asyn
         expiresAt: 63_000,
       },
     ]);
+    // The block only holds them out for its TTL. Since #234 the disconnect below
+    // no longer revokes identity, so the kick has to do it explicitly — without
+    // this the member would come back as themselves once the block lapsed.
+    assert.deepEqual(revoked, [{ roomCode: "ROOM02", memberId: "member-b" }]);
   } finally {
     await consumer.close();
   }
@@ -138,6 +147,7 @@ test("admin command consumer does not disconnect a member when token blocking fa
     blockMemberToken() {
       throw new Error("block failed");
     },
+    revokeMemberToken() {},
     disconnectSessionSocket() {
       disconnected = true;
     },
@@ -179,6 +189,7 @@ test("admin command consumer keeps a kick block when disconnect fails", async ()
     blockMemberToken(_roomCode, token) {
       blocked.push(token);
     },
+    revokeMemberToken() {},
     disconnectSessionSocket() {
       throw new Error("disconnect failed");
     },

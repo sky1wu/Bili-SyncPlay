@@ -218,6 +218,8 @@ export async function createSyncServer(
       localRuntimeStore.listSessionsByRoom(roomCode),
     blockMemberToken: (roomCode, memberToken, expiresAt) =>
       runtimeStore.blockMemberToken(roomCode, memberToken, expiresAt),
+    revokeMemberToken: (roomCode, memberId) =>
+      runtimeStore.revokeMemberToken(roomCode, memberId),
     disconnectSessionSocket: (session, reason) => {
       if (!hasAttachedSocket(session)) {
         return;

@@ -77,6 +77,9 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
         hdel() {
           return this;
         },
+        persist() {
+          return this;
+        },
         exec() {
           return execPromise;
         },
@@ -93,6 +96,12 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
     },
     async scard() {
       return 0;
+    },
+    async pexpire() {
+      return 1;
+    },
+    async persist() {
+      return 1;
     },
     async sadd() {
       return null;
@@ -309,6 +318,61 @@ test("redis runtime store can purge stale sessions for a restarted instance", as
     assert.deepEqual(await observer.listClusterSessionsByRoom("ROOMRS"), []);
     const room = await observer.getRoom("ROOMRS");
     assert.equal(room?.members.size ?? 0, 0);
+    // The purge clears the stale session→member binding, but must NOT revoke
+    // identity: it runs at startup, immediately before those same clients
+    // reconnect, and dropping their tokens is what reissued every member a new
+    // memberId after each restart (#234).
+    assert.equal(room?.memberTokens.get("member-restart"), "token-restart");
+    assert.equal(
+      await observer.findMemberIdByToken("ROOMRS", "token-restart"),
+      "member-restart",
+    );
+  } finally {
+    await store.close();
+    await observer.close();
+  }
+});
+
+test("redis runtime store keeps the member token when only presence is dropped", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const observer = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const session = createSession("session-presence");
+  session.memberId = "member-presence";
+  session.memberToken = "token-presence";
+
+  try {
+    store.registerSession(session);
+    store.markSessionJoinedRoom(session.id, "ROOMPR");
+    store.addMember("ROOMPR", session.memberId, session, session.memberToken);
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // A disconnect: presence goes, identity stays, so the reconnect can reclaim
+    // the same memberId.
+    store.removeMember("ROOMPR", session.memberId, session);
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(
+      await observer.findMemberIdByToken("ROOMPR", "token-presence"),
+      "member-presence",
+    );
+
+    // An explicit leave / kick: identity goes too.
+    store.revokeMemberToken("ROOMPR", session.memberId);
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(
+      await observer.findMemberIdByToken("ROOMPR", "token-presence"),
+      null,
+    );
   } finally {
     await store.close();
     await observer.close();
@@ -540,6 +604,168 @@ test("redis runtime store counts a timed-out operation failure only once", async
     await store.flush?.();
 
     assert.deepEqual(failureOperations, ["register_session"]);
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store bounds member token retention to the emptied room", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  // A retention short enough to observe. Production derives it from
+  // `emptyRoomTtlMs` so tokens outlive the room, never the reverse.
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    memberTokenRetentionMs: 120,
+  });
+  const session = createSession("session-retention");
+  session.memberId = "member-retention";
+  session.memberToken = "token-retention";
+
+  try {
+    store.registerSession(session);
+    store.markSessionJoinedRoom(session.id, "ROOMRT");
+    store.addMember("ROOMRT", session.memberId, session, session.memberToken);
+    await store.flush?.();
+
+    // Still connected: no clock at all, so a room that stays busy for days
+    // never loses the identities of the people in it.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(
+      await store.findMemberIdByToken("ROOMRT", "token-retention"),
+      "member-retention",
+    );
+
+    // The last session goes. Identity outlives the disconnect...
+    store.removeMember("ROOMRT", session.memberId, session);
+    store.unregisterSession(session.id);
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(
+      await store.findMemberIdByToken("ROOMRT", "token-retention"),
+      "member-retention",
+    );
+
+    // ...but not indefinitely: nothing else would ever collect it once the room
+    // is left to expire untouched.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(
+      await store.findMemberIdByToken("ROOMRT", "token-retention"),
+      null,
+    );
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store lifts member token retention when someone reconnects", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    memberTokenRetentionMs: 150,
+  });
+  // A second instance stands in for another node: its local mirror is empty, so
+  // it can only answer from Redis. Asking `store` itself would be answered from
+  // the copy `addMember` just put back in its own map, which is exactly the
+  // reading that cannot tell whether Redis still holds the token.
+  const observer = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const session = createSession("session-relift");
+  session.memberId = "member-relift";
+  session.memberToken = "token-relift";
+
+  try {
+    store.registerSession(session);
+    store.markSessionJoinedRoom(session.id, "ROOMRL");
+    store.addMember("ROOMRL", session.memberId, session, session.memberToken);
+    await store.flush?.();
+
+    store.removeMember("ROOMRL", session.memberId, session);
+    store.unregisterSession(session.id);
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // Reconnect inside the window: the clock must be lifted, not merely
+    // restarted, or a room that keeps churning members would eventually drop
+    // identities while people are still in it.
+    const reconnected = createSession("session-relift-2");
+    reconnected.memberId = "member-relift";
+    reconnected.memberToken = "token-relift";
+    store.registerSession(reconnected);
+    store.markSessionJoinedRoom(reconnected.id, "ROOMRL");
+    store.addMember("ROOMRL", "member-relift", reconnected, "token-relift");
+    await store.flush?.();
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(
+      await observer.findMemberIdByToken("ROOMRL", "token-relift"),
+      "member-relift",
+    );
+  } finally {
+    await store.close();
+    await observer.close();
+  }
+});
+
+test("redis runtime store empties a room in a single atomic step", async () => {
+  // The emptiness check and the two writes it authorises must be ONE command.
+  // Read-then-write from the client let a reconnect land in between: `SCARD`
+  // saw zero, the returning client's join + `addMember` (including its
+  // `PERSIST`) ran, and only then did the cleanup drop a now-active room from
+  // the index and re-arm a TTL on the tokens of members who were back.
+  const evalCalls: Array<{ script: string; args: Array<string | number> }> = [];
+  const forbidden: string[] = [];
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async scard() {
+      forbidden.push("scard");
+      return 0;
+    },
+    async srem() {
+      forbidden.push("srem");
+      return null;
+    },
+    async pexpire() {
+      forbidden.push("pexpire");
+      return 1;
+    },
+    async hgetall() {
+      return { id: "session-atomic", roomCode: "ROOMAT" };
+    },
+    async eval(
+      script: string,
+      _numKeys: number,
+      ...args: Array<string | number>
+    ) {
+      evalCalls.push({ script, args });
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:atomic:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    store.markSessionLeftRoom("session-atomic", "ROOMAT");
+    await store.flush?.();
+
+    const cleanup = evalCalls.find((call) => call.script.includes("SCARD"));
+    assert.ok(cleanup, "the empty-room cleanup must run as a script");
+    // Same script also does the two writes, so nothing can interleave with the
+    // decision it just made.
+    assert.ok(cleanup.script.includes("SREM"));
+    assert.ok(cleanup.script.includes("PEXPIRE"));
+    assert.deepEqual(forbidden, []);
   } finally {
     await store.close();
   }

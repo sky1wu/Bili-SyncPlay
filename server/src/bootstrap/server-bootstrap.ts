@@ -304,6 +304,9 @@ export async function createServerBootstrapContext(
       ? await createRedisRuntimeStore(persistenceConfig.redisUrl, {
           now,
           keyPrefix: getRedisRuntimeKeyPrefix(persistenceConfig.redisNamespace),
+          // Twice the room's own empty-room lifetime, so a member token always
+          // outlives the room it identifies a member of, never the reverse.
+          memberTokenRetentionMs: persistenceConfig.emptyRoomTtlMs * 2,
           metricsCollector,
           ...(runtimeStorePendingOperationLogger
             ? {

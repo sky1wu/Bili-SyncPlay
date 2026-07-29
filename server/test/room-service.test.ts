@@ -839,6 +839,86 @@ test("room service reuses member identity when reconnecting with the same member
   assert.deepEqual(state.members, [{ id: originalMemberId, name: "Alice" }]);
 });
 
+function createIdentityService(roomStore: RoomStore, roomCode: string) {
+  return createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => roomCode,
+  });
+}
+
+const IDENTITY_TEST_VIDEO: SharedVideo = {
+  videoId: "BV1Cx3q6gELa",
+  url: "https://www.bilibili.com/video/BV1Cx3q6gELa",
+  title: "Shared Video",
+};
+
+test("a disconnect keeps the identity that owns the shared video", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const service = createIdentityService(roomStore, "ROOMID");
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  const sharerMemberId = sharer.memberId;
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    IDENTITY_TEST_VIDEO,
+  );
+
+  // A server restart closes every socket at once. That is a disconnect, not a
+  // departure: the client still holds the memberToken it persisted.
+  await service.leaveRoomForSession(sharer, "disconnect");
+
+  const reconnected = createSession("sharer-reconnect");
+  await service.joinRoomForSession(
+    reconnected,
+    created.room.code,
+    created.room.joinToken,
+    "Alice",
+    created.memberToken,
+  );
+
+  assert.equal(reconnected.memberId, sharerMemberId);
+  // The whole point: `sharedVideo.sharedByMemberId` is written once at share
+  // time and never rewritten, so if the reconnect had been issued a new
+  // memberId nobody in the room would match it and the room could no longer
+  // advance to the next video (#234).
+  const persisted = await roomStore.getRoom(created.room.code);
+  assert.equal(persisted?.sharedVideo?.sharedByMemberId, reconnected.memberId);
+});
+
+test("an explicit leave revokes the identity", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const service = createIdentityService(roomStore, "ROOMLV");
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const originalMemberId = owner.memberId;
+
+  // The member said they were done, unlike the disconnect above.
+  await service.leaveRoomForSession(owner, "client-request");
+
+  const returning = createSession("owner-returns");
+  await service.joinRoomForSession(
+    returning,
+    created.room.code,
+    created.room.joinToken,
+    "Alice",
+    created.memberToken,
+  );
+
+  assert.notEqual(returning.memberId, originalMemberId);
+});
+
 test("room service updates member display name after join", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const service = createRoomService({
@@ -986,6 +1066,9 @@ test("room service flushes pending runtime store writes before exposing updated 
     },
     removeMember(code, memberId, session) {
       return activeRooms.removeMember(code, memberId, session);
+    },
+    revokeMemberToken(code, memberId) {
+      activeRooms.revokeMemberToken(code, memberId);
     },
     deleteRoom(code) {
       activeRooms.deleteRoom(code);
@@ -2757,6 +2840,10 @@ test("join admission restores shared previous session when reconnect rollback ha
       shared.removeMember(code, memberId, session);
       return removal;
     },
+    revokeMemberToken: (code, memberId) => {
+      local.revokeMemberToken(code, memberId);
+      shared.revokeMemberToken(code, memberId);
+    },
     flush: async () => {
       await local.flush?.();
       await shared.flush?.();
@@ -2845,6 +2932,10 @@ test("join admission does not restore stale reconnect session over newer shared 
       const removal = local.removeMember(code, memberId, session);
       shared.removeMember(code, memberId, session);
       return removal;
+    },
+    revokeMemberToken: (code, memberId) => {
+      local.revokeMemberToken(code, memberId);
+      shared.revokeMemberToken(code, memberId);
     },
     flush: async () => {
       await local.flush?.();

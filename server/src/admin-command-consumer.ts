@@ -15,6 +15,16 @@ export async function createAdminCommandConsumer(options: {
     memberToken: string,
     expiresAt: number,
   ) => void | Promise<void>;
+  /**
+   * Ends the kicked member's identity so their `memberToken` can no longer
+   * reclaim their `memberId`. Required explicitly since #234: the disconnect
+   * below no longer revokes it, and without this the block would only hold them
+   * out for its TTL before they returned as the same member.
+   */
+  revokeMemberToken: (
+    roomCode: string,
+    memberId: string,
+  ) => void | Promise<void>;
   disconnectSessionSocket: (
     session: Session,
     reason: string,
@@ -119,6 +129,7 @@ export async function createAdminCommandConsumer(options: {
               now() + 60_000,
             );
           }
+          await options.revokeMemberToken(command.roomCode, command.memberId);
         } catch (error) {
           options.logEvent?.("admin_command_executed", {
             commandType: command.kind,

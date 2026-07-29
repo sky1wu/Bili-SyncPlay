@@ -74,6 +74,12 @@ export class RoomServiceError extends Error {
 export type RoomServiceRuntimeStore = ActiveRoomRegistry &
   Partial<Pick<RuntimeStore, "registerSession" | "flush">>;
 
+/**
+ * Why a session is leaving a room. Identity (`memberToken`) survives a
+ * `"disconnect"` and is revoked on a `"client-request"`; see `leaveCurrentRoom`.
+ */
+export type LeaveRoomReason = "client-request" | "disconnect";
+
 type JoinedRoomAccess = {
   session: Session;
   persistedRoom: PersistedRoom;
@@ -144,7 +150,10 @@ export function createRoomService(options: {
     displayName?: string,
     previousMemberToken?: string,
   ) => Promise<{ room: PersistedRoom; memberToken: string }>;
-  leaveRoomForSession: (session: Session) => Promise<{
+  leaveRoomForSession: (
+    session: Session,
+    reason?: LeaveRoomReason,
+  ) => Promise<{
     room: PersistedRoom | null;
     notifyRoom?: boolean;
     memberRemoved?: boolean;
@@ -801,7 +810,22 @@ export function createRoomService(options: {
     return readyState === OPEN;
   }
 
-  async function leaveCurrentRoom(session: Session): Promise<{
+  /**
+   * `reason` decides whether the member's identity survives.
+   *
+   * - `"client-request"` — an explicit `room:leave`. The member is done with the
+   *   room, so their `memberToken` is revoked and a later join is issued a fresh
+   *   `memberId`.
+   * - `"disconnect"` — the socket closed. The client still holds its token and
+   *   is expected to come back with it, so identity is KEPT. Revoking here is
+   *   what broke #234: every server restart closes every socket at once, so
+   *   every member returned with a new `memberId` and
+   *   `sharedVideo.sharedByMemberId` matched nobody.
+   */
+  async function leaveCurrentRoom(
+    session: Session,
+    reason: LeaveRoomReason = "client-request",
+  ): Promise<{
     room: PersistedRoom | null;
     notifyRoom?: boolean;
     memberRemoved?: boolean;
@@ -821,6 +845,14 @@ export function createRoomService(options: {
           roomEmpty: false,
           removed: false,
         };
+    // Gated on `removal.removed`, exactly like the removal itself: a superseded
+    // session leaving must not revoke the identity a NEWER session already
+    // reclaimed. `removeMemberFromRoom` returns `removed: false` in that case
+    // (the memberId now maps to a different session), and revoking anyway would
+    // invalidate the live member's token.
+    if (reason === "client-request" && session.memberId && removal.removed) {
+      runtimeStore.revokeMemberToken(roomCode, session.memberId);
+    }
     await runtimeStore.flush?.();
     clearSessionRoom(session);
 
@@ -1104,6 +1136,12 @@ export function createRoomService(options: {
             joinIdentity.memberId,
             session,
           );
+          // Deliberately no `revokeMemberToken` here. `removeMember` already
+          // declines when a newer session owns this memberId, but a bare revoke
+          // has no such guard and would delete that live session's binding. The
+          // leftover binding is harmless either way: the client whose join failed
+          // reclaims the same memberId when it retries with the same token, which
+          // is what we want.
           await runtimeStore.flush?.();
 
           const currentRuntimeSession =

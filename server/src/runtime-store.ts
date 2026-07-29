@@ -7,6 +7,7 @@ import {
   getOrCreateActiveRoom,
   type KickedMemberBlock,
   removeMemberFromRoom,
+  revokeMemberTokenInRoom,
   resolveRoomCodeToLeave,
 } from "./runtime-store-state.js";
 
@@ -53,11 +54,22 @@ export type RuntimeStore = {
     memberToken: string,
     currentTime?: number,
   ) => boolean;
+  /**
+   * Drop a member's presence. Their `memberToken` survives so a reconnect can
+   * reclaim the same `memberId`; use {@link RuntimeStore.revokeMemberToken} to
+   * end that. See `removeMemberFromRoom` for why the two are separate.
+   */
   removeMember: (
     code: string,
     memberId: string,
     session?: Session,
   ) => { room: ActiveRoom | null; roomEmpty: boolean; removed: boolean };
+  /**
+   * Revoke a member's identity so their `memberToken` can no longer reclaim
+   * their `memberId`. Only for deliberate departures: an explicit `room:leave`,
+   * an admin kick, or unwinding a join that failed partway.
+   */
+  revokeMemberToken: (code: string, memberId: string) => void;
   deleteRoom: (code: string) => void;
   heartbeatNode: (status: ClusterNodeStatus) => Promise<void>;
   listNodeStatuses: (currentTime?: number) => Promise<ClusterNodeStatus[]>;
@@ -315,6 +327,9 @@ export function createInMemoryRuntimeStore(
     },
     removeMember(code, memberId, session) {
       return removeMemberFromRoom(rooms, code, memberId, session);
+    },
+    revokeMemberToken(code, memberId) {
+      revokeMemberTokenInRoom(rooms, code, memberId);
     },
     deleteRoom(code) {
       rooms.delete(code);
