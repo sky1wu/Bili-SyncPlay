@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SharedVideo } from "@bili-syncplay/protocol";
 import { createContentRuntimeState } from "../src/content/runtime-state";
+import { installClockStubs } from "./clock-stubs";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
 import { createRoomStateController } from "../src/content/room-state-controller";
 import { createToastCoordinatorState } from "../src/content/toast";
@@ -89,7 +90,7 @@ test("playback binding controller forwards ratechange event source", async () =>
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   try {
@@ -137,7 +138,7 @@ test("playback binding controller cancels active soft apply on pause and seek", 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   try {
@@ -178,7 +179,7 @@ test("playback binding controller does not cancel active soft apply for programm
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 2_500,
+    getMonotonicNow: () => 2_500,
   });
 
   try {
@@ -217,7 +218,7 @@ test("playback binding controller preserves explicit seek intent across immediat
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -273,7 +274,7 @@ test("playback binding controller does not mark programmatic ratechange as expli
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   try {
@@ -322,7 +323,7 @@ test("playback binding controller re-pauses seek-triggered autoplay when intende
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   const originalPause = dom.video.pause;
@@ -386,7 +387,7 @@ test("playback binding controller keeps hydration pause guard when shared url is
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   dom.video.pause = () => {
@@ -474,7 +475,7 @@ test("playback binding controller keeps hydration guard after direct room switch
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   dom.video.pause = () => {
@@ -552,7 +553,7 @@ test("playback binding controller keeps hydration pause guard for unstable festi
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   dom.video.pause = () => {
@@ -620,7 +621,7 @@ test("playback binding controller reapplies pause hold for unstable identity aft
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   dom.video.pause = () => {
@@ -690,7 +691,7 @@ test("playback binding controller reapplies pause hold for unstable room shared 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   dom.video.pause = () => {
@@ -754,7 +755,7 @@ test("playback binding controller clears explicit seek intent after seek-trigger
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   globalThis.window.setTimeout = ((callback: TimerHandler) => {
@@ -818,7 +819,7 @@ test("playback binding controller allows manual play after a newer gesture follo
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -885,7 +886,7 @@ test("playback binding controller holds a page-load autoplay authorized only by 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   dom.video.pause = () => {
@@ -979,7 +980,7 @@ test("playback binding controller still holds the delayed autoplay when the only
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   dom.video.pause = () => {
@@ -1059,7 +1060,7 @@ test("playback binding controller holds a seek-triggered non-shared autoplay, th
       runtimeState.pauseHoldUntil = now + durationMs;
     },
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   dom.video.pause = () => {
@@ -1144,7 +1145,7 @@ test("playback binding controller allows explicit play on a non-shared page", as
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   try {
@@ -1204,7 +1205,7 @@ test("playback binding controller suppresses auto-resumed non-shared broadcast a
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   dom.video.pause = () => {
@@ -1285,7 +1286,7 @@ test("playback binding controller pauses delayed non-sharer autoplay into a non-
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_200,
+    getMonotonicNow: () => 1_200,
   });
 
   dom.video.pause = () => {
@@ -1360,7 +1361,7 @@ test("playback binding controller pauses delayed non-sharer autoplay even after 
     activatePauseHold: () => {},
     debugLog: () => {},
     // Well past the expired pauseHoldUntil of 5_000.
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   dom.video.pause = () => {
@@ -1430,7 +1431,7 @@ test("playback binding controller lets the user watch an explicitly opened local
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   dom.video.pause = () => {
@@ -1502,7 +1503,7 @@ test("playback binding controller pauses an unmarked non-shared page reached by 
       runtimeState.pauseHoldUntil = 20_000 + durationMs;
     },
     debugLog: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   dom.video.pause = () => {
@@ -1577,7 +1578,7 @@ test("playback binding controller pauses a non-shared video even when room inten
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   dom.video.pause = () => {
@@ -1642,7 +1643,7 @@ test("playback binding controller periodic tick pauses a non-shared video alread
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   dom.video.pause = () => {
@@ -1732,7 +1733,7 @@ test("playback binding controller holds a play while the page bridge is resolvin
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   dom.video.pause = () => {
@@ -1828,7 +1829,7 @@ test("playback binding controller stops force-pausing an unresolved non-shared p
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   dom.video.pause = () => {
@@ -1905,7 +1906,7 @@ test("playback binding controller does not re-pause an authorized non-shared pla
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   dom.video.pause = () => {
@@ -1994,7 +1995,7 @@ test("playback binding controller preserves the explicit non-shared authorizatio
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   globalThis.window.setTimeout = ((callback: TimerHandler) => {
@@ -2065,7 +2066,7 @@ test("playback binding controller re-pauses a pre-pause stale gesture while the 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   dom.video.pause = () => {
@@ -2132,7 +2133,7 @@ test("playback binding controller still holds an unsolicited autoplay while the 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
   });
 
   dom.video.pause = () => {
@@ -2200,7 +2201,7 @@ test("playback binding controller allows manual play on non-shared page after au
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   dom.video.pause = () => {
@@ -2290,7 +2291,7 @@ test("playback binding controller suppresses non-shared autoplay replayed after 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   dom.video.pause = () => {
@@ -2368,7 +2369,7 @@ test("playback binding controller holds a non-sharer at the shared video natural
       runtimeState.pauseHoldUntil = 10_000 + durationMs;
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   dom.video.pause = () => {
@@ -2441,7 +2442,7 @@ test("playback binding controller does not pause the sharer at the shared video 
       pauseHoldCalls += 1;
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   dom.video.pause = () => {
@@ -2506,7 +2507,7 @@ test("playback binding controller does not pause a non-sharer before the shared 
       pauseHoldCalls += 1;
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   dom.video.pause = () => {
@@ -2571,7 +2572,7 @@ test("playback binding controller re-pauses non-sharer multi-part autoplay after
       runtimeState.pauseHoldUntil = 10_000 + durationMs;
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   dom.video.pause = () => {
@@ -2633,7 +2634,7 @@ test("playback binding controller classifies pause as buffer when waiting fired 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -2677,7 +2678,7 @@ test("playback binding controller treats pause as user-initiated when fresh gest
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -2720,7 +2721,7 @@ test("playback binding controller clears buffer-pause classification on resume",
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -2790,7 +2791,7 @@ test("playback binding controller does not classify pause as buffer-induced insi
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -2850,7 +2851,7 @@ test("playback binding controller still classifies pause as buffer-induced when 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -2901,7 +2902,7 @@ test("playback binding controller re-broadcasts paused after buffer-pause upgrad
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -2972,7 +2973,7 @@ test("playback binding controller suppresses the natural-end pause for a non-sha
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 5_000,
+    getMonotonicNow: () => 5_000,
   });
 
   dom.video.pause = () => {
@@ -3048,7 +3049,7 @@ test("playback binding controller suppresses the natural-end pause broadcast for
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 5_000,
+    getMonotonicNow: () => 5_000,
   });
 
   dom.video.pause = () => {
@@ -3133,7 +3134,7 @@ test("playback binding controller records the seek-to-end flag when a seek prece
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 5_000,
+    getMonotonicNow: () => 5_000,
   });
 
   dom.video.pause = () => {
@@ -3202,7 +3203,7 @@ test("playback binding controller flushes the sharer's terminal paused state whe
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 5_000,
+    getMonotonicNow: () => 5_000,
   });
 
   try {
@@ -3279,7 +3280,7 @@ test("playback binding controller does not flush a sharer end state once autopla
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 5_000,
+    getMonotonicNow: () => 5_000,
   });
 
   try {
@@ -3340,7 +3341,7 @@ test("playback binding controller does not arm sharer end suppression for a non-
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 5_000,
+    getMonotonicNow: () => 5_000,
   });
 
   dom.video.pause = () => {
@@ -3390,7 +3391,7 @@ test("playback binding controller classifies a stall on a rebuilt element as buf
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -3435,7 +3436,7 @@ test("playback binding controller does not reclassify a user pause when transpor
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -3483,7 +3484,7 @@ test("playback binding controller leaves an unobserved pause alone when the room
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -3524,7 +3525,7 @@ test("playback binding controller classifies a pause right after a video rebind 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -3586,7 +3587,7 @@ test("playback binding controller upgrades an unobserved stall to paused after t
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -3616,7 +3617,7 @@ test("playback binding controller upgrades an unobserved stall to paused after t
 
 function createEchoHarness(
   runtimeState: ReturnType<typeof createContentRuntimeState>,
-  getNow: () => number,
+  getMonotonicNow: () => number,
 ) {
   return createPlaybackBindingController({
     runtimeState,
@@ -3636,7 +3637,7 @@ function createEchoHarness(
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow,
+    getMonotonicNow,
   });
 }
 
@@ -3811,7 +3812,7 @@ test("a user seek that cancels an active rate catch-up is still recorded", async
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   try {
@@ -3867,7 +3868,7 @@ test("a user pause that cancels an active rate catch-up is still recorded", () =
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   try {
@@ -3917,7 +3918,7 @@ test("a ratechange is enough to classify an unobserved pause as buffering", () =
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -3958,7 +3959,7 @@ test("a real user pause is not reclassified by the shared broadcast path", () =>
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -4001,7 +4002,7 @@ test("playback binding controller keeps the seek origin across seeking and seeke
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -4047,7 +4048,7 @@ test("playback binding controller re-snapshots the origin for a new seek gesture
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -4095,7 +4096,7 @@ test("playback binding controller re-samples the seek origin after a forced paus
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -4153,7 +4154,7 @@ test("playback binding controller reports a newly bound video element once", () 
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 1_100,
+    getMonotonicNow: () => 1_100,
   });
 
   try {
@@ -4165,6 +4166,63 @@ test("playback binding controller reports a newly bound video element once", () 
     controller.attachPlaybackListeners();
     assert.equal(bindings, 1, "same element must not re-report");
   } finally {
+    dom.restore();
+  }
+});
+
+test("records explicit user actions on the monotonic clock by default", async () => {
+  const dom = installDomStub();
+  // Stub the GLOBALS and inject NO clock: which source the default reads is the
+  // whole question, and an injected clock answers it for free. The two domains
+  // must also hold different values — equal ones pass either way.
+  const clock = installClockStubs({
+    wall: 1_700_000_000_000,
+    monotonic: 1_100,
+  });
+  const runtimeState = createContentRuntimeState();
+  // A gesture recorded moments ago, in the monotonic domain.
+  runtimeState.lastUserGestureAt = 1_000;
+  const events: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      events.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("ratechange")!(new Event("ratechange"));
+    await Promise.resolve();
+
+    // Two claims at once. The stamp is a monotonic reading, not a wall-clock
+    // one; and the 100ms-old gesture that authorizes this event was only
+    // recognised as recent because both sides of `now - lastUserGestureAt` are
+    // in the same domain — on the wall clock the gap reads as ~54 years, the
+    // gesture looks ancient, and the event is no longer an explicit user action.
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "ratechange",
+      at: 1_100,
+    });
+    assert.deepEqual(events, ["ratechange"]);
+  } finally {
+    clock.restore();
     dom.restore();
   }
 });

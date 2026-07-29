@@ -183,7 +183,7 @@ test("navigation controller suppresses autoplay (load paused) when switching to 
       runtimeState.pauseHoldUntil = 10_000 + durationMs;
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -244,7 +244,7 @@ test("navigation controller suppresses a non-shared SPA navigation immediately v
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -309,7 +309,7 @@ test("navigation controller schedules auto-share when a shared source autoplays 
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -347,7 +347,7 @@ test("navigation controller schedules auto-share when a bangumi season page auto
   runtimeState.activeSharedByMemberId = "member-1";
   runtimeState.localMemberId = "member-1";
   // The shared episode just naturally ended on this page (durable timestamp,
-  // within the hold window of getNow 10_000 / initialRoomStatePauseHoldMs 1_500).
+  // within the hold window of getMonotonicNow 10_000 / initialRoomStatePauseHoldMs 1_500).
   runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
   runtimeState.sharedVideoNaturalEndAt = 9_000;
@@ -378,7 +378,7 @@ test("navigation controller schedules auto-share when a bangumi season page auto
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -442,7 +442,7 @@ test("navigation controller holds a non-sharer when a bangumi season page autopl
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -474,7 +474,7 @@ test("navigation controller does not treat an expired end marker as a season-pag
   runtimeState.activeSharedByMemberId = "member-2";
   runtimeState.localMemberId = "member-1";
   // A natural-end timestamp that is now EXPIRED (older than the hold window:
-  // getNow 10_000 − 8_000 = 2_000 > 1_500). A later unrelated navigation must
+  // getMonotonicNow 10_000 − 8_000 = 2_000 > 1_500). A later unrelated navigation must
   // not be misread as the shared episode's autoplay-next.
   runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
@@ -501,7 +501,7 @@ test("navigation controller does not treat an expired end marker as a season-pag
     activatePauseHold: () => {},
     scheduleAutoShareNextVideo: () => {},
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -530,7 +530,7 @@ test("navigation controller schedules auto-share on a natural-end autoplay despi
   runtimeState.localMemberId = "member-1";
   // The sharer dragged to the last seconds of the shared episode: the seek
   // gesture is still inside the grace window when it auto-advances.
-  runtimeState.lastUserGestureAt = 9_800; // getNow 10_000, grace 300 → recent
+  runtimeState.lastUserGestureAt = 9_800; // getMonotonicNow 10_000, grace 300 → recent
   // The shared episode then naturally ended, recorded as preceded by a seek.
   runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/bangumi/play/ep249469";
@@ -562,7 +562,7 @@ test("navigation controller schedules auto-share on a natural-end autoplay despi
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -625,7 +625,7 @@ test("navigation controller does not auto-share a manual click even when its ges
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -682,7 +682,7 @@ test("navigation controller does not reuse a stale seek-to-end flag for a later 
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -731,7 +731,7 @@ test("navigation controller chains the next auto-share before the room confirms 
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -817,7 +817,7 @@ test("navigation controller does not auto-share a recent user-initiated navigati
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -867,7 +867,7 @@ test("navigation controller cancels a pending auto-share on a manual non-autopla
       cancelCalls += 1;
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -927,7 +927,7 @@ test("navigation controller suppresses autoplay and does not auto-share a manual
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -990,7 +990,7 @@ test("navigation controller does not auto-share an autoplay that started from a 
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -1059,7 +1059,7 @@ test("navigation controller pauses non-sharer autoplay to a different video", ()
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -1127,7 +1127,7 @@ test("navigation controller arms autoplay suppression for a non-shared video tha
       pauseHoldCalls += 1;
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -1250,7 +1250,7 @@ test("navigation controller keeps autoplay suppression armed when switching to a
       pauseHoldCalls += 1;
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -1422,7 +1422,7 @@ test("navigation controller anchors active shared url for post-navigation settle
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -1641,7 +1641,7 @@ test("navigation controller schedules auto-share when a festival page autoplays 
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -1680,7 +1680,7 @@ test("navigation controller schedules auto-share when the first festival resolut
   runtimeState.activeSharedByMemberId = "member-1";
   runtimeState.localMemberId = "member-1";
   // The shared video A ended on this festival page (durable natural-end marker
-  // within the hold window of getNow 10_000 / initialRoomStatePauseHoldMs 1_500).
+  // within the hold window of getMonotonicNow 10_000 / initialRoomStatePauseHoldMs 1_500).
   runtimeState.sharedVideoNaturalEndUrl =
     "https://www.bilibili.com/video/BVa?cid=1";
   runtimeState.sharedVideoNaturalEndAt = 9_000;
@@ -1715,7 +1715,7 @@ test("navigation controller schedules auto-share when the first festival resolut
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -1776,7 +1776,7 @@ test("navigation controller pauses when the first festival resolution is a diffe
     activatePauseHold: () => {},
     scheduleAutoShareNextVideo: () => {},
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -1826,7 +1826,7 @@ test("navigation controller suppresses a first festival resolution while a joine
     },
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -1881,7 +1881,7 @@ test("navigation controller adopts a first festival resolution without pausing t
     },
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -1943,7 +1943,7 @@ test("navigation controller does not flip-flop when a festival snapshot is brief
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -2004,7 +2004,7 @@ test("navigation controller adopts a first festival resolution when the room sha
     },
     activatePauseHold: () => {},
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -2067,7 +2067,7 @@ test("navigation controller defers, not cancels, when a festival address bar kee
       cancelCalls += 1;
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -2141,7 +2141,7 @@ test("navigation controller auto-shares a same-page autoplay off a bare-route fe
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -2220,7 +2220,7 @@ test("navigation controller anchors a bare-route festival share even when the ad
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -2295,7 +2295,7 @@ test("navigation controller anchors a bare-route festival share when the resolve
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -2372,7 +2372,7 @@ test("navigation controller does not auto-share a first festival resolution to a
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -2423,7 +2423,7 @@ test("navigation controller does not pause a non-sharer on a first festival reso
     activatePauseHold: () => {},
     scheduleAutoShareNextVideo: () => {},
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {
@@ -2478,7 +2478,7 @@ test("navigation controller does not auto-share a gesture-driven first festival 
       autoShareRequests.push(input);
     },
     debugLog: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
   });
 
   try {

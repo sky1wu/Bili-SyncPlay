@@ -3,6 +3,7 @@ import test from "node:test";
 import type { RoomState, SharedVideo } from "@bili-syncplay/protocol";
 import type { RoomStateHydrationResponse } from "../src/shared/messages";
 import { createContentRuntimeState } from "../src/content/runtime-state";
+import { installClockStubs } from "./clock-stubs";
 import { createRoomStateApplyController } from "../src/content/room-state-apply-controller";
 
 function createEmptyRoomState(roomCode = "ROOM01"): RoomState {
@@ -29,10 +30,14 @@ function createController(overrides: {
   runtimeState?: ReturnType<typeof createContentRuntimeState>;
   video?: HTMLVideoElement | null;
   now?: number;
-  /** Virtual clock for tests that need time to advance during the test. */
-  getNow?: () => number;
-  /** Virtual monotonic clock, as `performance.now()` would give. */
+  /** Virtual monotonic clock for tests that need time to advance. */
   getMonotonicNow?: () => number;
+  /**
+   * Inject no clock at all, so the controller falls back to its default source.
+   * Required by any test asking WHICH clock the default is: an injected one
+   * answers that for free.
+   */
+  omitMonotonicClock?: boolean;
   userGestureGraceMs?: number;
   remotePauseDebounceMs?: number;
   normalizeUrl?: (url: string | undefined | null) => string | null;
@@ -68,12 +73,9 @@ function createController(overrides: {
     initialRoomStatePauseHoldMs: 3_000,
     userGestureGraceMs: overrides.userGestureGraceMs ?? 1_200,
     remotePauseDebounceMs: overrides.remotePauseDebounceMs ?? 0,
-    getNow: () => overrides.getNow?.() ?? overrides.now ?? 10_000,
-    getMonotonicNow: () =>
-      overrides.getMonotonicNow?.() ??
-      overrides.getNow?.() ??
-      overrides.now ??
-      10_000,
+    getMonotonicNow: overrides.omitMonotonicClock
+      ? undefined
+      : () => overrides.getMonotonicNow?.() ?? overrides.now ?? 10_000,
     debugLog: (msg) => logs.push(msg),
     shouldLogHeartbeat: () => true,
     requestRoomStateHydration:
@@ -1613,7 +1615,7 @@ test("a rebind storm cannot starve hydration by resetting the timer", async () =
     const hydrationClocks: number[] = [];
     const harness = createController({
       video: createStubVideo(false),
-      getNow: () => clock,
+      getMonotonicNow: () => clock,
       currentVideo: null,
       requestRoomStateHydration: async () => {
         hydrationClocks.push(clock);
@@ -1860,6 +1862,12 @@ test("an externally driven hydration drops the previous page's backoff", async (
 
 test("the retry deadline is compared on a monotonic clock", async () => {
   const win = installWindowTimerStub();
+  // Stub the GLOBALS and inject nothing: the question is which source the
+  // controller's default reads, and an injected clock answers it for free.
+  const clock = installClockStubs({
+    wall: 1_700_000_000_000,
+    monotonic: 100_000,
+  });
   try {
     // The deadline is captured when the timer is armed. Read from `Date.now()`,
     // a backward step shrinks `now + delay` and makes a candidate look earlier
@@ -1872,12 +1880,9 @@ test("the retry deadline is compared on a monotonic clock", async () => {
       actorId: "remote-member",
       seq: 5,
     });
-    let monotonic = 100_000;
-    let wallClock = 1_700_000_000_000;
     const harness = createController({
       video: createStubVideo(false),
-      getNow: () => wallClock,
-      getMonotonicNow: () => monotonic,
+      omitMonotonicClock: true,
       currentVideo: null,
       requestRoomStateHydration: async () => ({
         ok: true,
@@ -1894,14 +1899,14 @@ test("the retry deadline is compared on a monotonic clock", async () => {
     // Grow the bind streak so a preemption would cost a long re-wait.
     for (let i = 0; i < 6; i += 1) {
       harness.controller.notifyVideoElementBound();
-      monotonic += 1;
+      clock.clocks.monotonic += 1;
       if (win.scheduled[win.scheduled.length - 1].ms <= 1) break;
     }
     const armedBefore = win.scheduled.length;
 
     // Real time barely moved; the wall clock jumped an hour backwards.
-    monotonic += 5;
-    wallClock -= 3_600_000;
+    clock.clocks.monotonic += 5;
+    clock.clocks.wall -= 3_600_000;
     harness.controller.notifyVideoElementBound();
     await settle();
 
@@ -1911,6 +1916,7 @@ test("the retry deadline is compared on a monotonic clock", async () => {
       "a backward wall-clock step must not preempt the pending retry",
     );
   } finally {
+    clock.restore();
     win.restore();
   }
 });

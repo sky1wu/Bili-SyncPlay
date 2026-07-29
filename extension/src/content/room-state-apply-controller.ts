@@ -74,7 +74,6 @@ export function createRoomStateApplyController(args: {
    * synchronously.
    */
   remotePauseDebounceMs?: number;
-  getNow?: () => number;
   /**
    * Monotonic time source for the hydration retry deadline. Must not be the
    * wall clock — see {@link preemptHydrationRetry}.
@@ -152,7 +151,6 @@ export function createRoomStateApplyController(args: {
   }) => string;
 }): RoomStateApplyController {
   const ignoredRoomStateLogState = { key: null as string | null, at: 0 };
-  const nowOf = () => args.getNow?.() ?? Date.now();
   const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   let hydrateRetryTimer: number | null = null;
   /**
@@ -294,7 +292,7 @@ export function createRoomStateApplyController(args: {
     args.activatePauseHold(args.initialRoomStatePauseHoldMs);
     const video = args.getVideoElement();
     if (video && !video.paused) {
-      args.runtimeState.lastForcedPauseAt = nowOf();
+      args.runtimeState.lastForcedPauseAt = monotonicNow();
       args.debugLog(`${input.logReason} for ${input.roomCode}`);
       pauseVideo(video);
     }
@@ -329,7 +327,8 @@ export function createRoomStateApplyController(args: {
     if (
       video &&
       !video.paused &&
-      nowOf() - args.runtimeState.lastUserGestureAt >= args.userGestureGraceMs
+      monotonicNow() - args.runtimeState.lastUserGestureAt >=
+        args.userGestureGraceMs
     ) {
       args.debugLog(`Suppressed autoplay for empty room ${roomCode}`);
       pauseVideo(video);
@@ -392,7 +391,7 @@ export function createRoomStateApplyController(args: {
    * by whatever armed it first no matter how often the event repeats.
    *
    * Both readings come from a monotonic clock, never the wall clock. The
-   * deadline is a `nowOf()`-style reading captured when the timer was armed, so
+   * deadline is a `monotonicNow()`-style reading captured when the timer was armed, so
    * a *backward* wall-clock step would shrink `now + delay` and make the
    * candidate look earlier than a deadline it is not — the comparison would
    * preempt, cancel a timer that was about to fire, and restart the full delay,
@@ -445,7 +444,7 @@ export function createRoomStateApplyController(args: {
       pendingRoomStateHydration: args.runtimeState.pendingRoomStateHydration,
       explicitNonSharedPlaybackUrl:
         args.runtimeState.explicitNonSharedPlaybackUrl,
-      now: nowOf(),
+      now: monotonicNow(),
       lastLocalIntentAt: args.runtimeState.lastLocalIntentAt,
       lastLocalIntentPlayState: args.runtimeState.lastLocalIntentPlayState,
       localIntentGuardMs: args.localIntentGuardMs,
@@ -709,7 +708,7 @@ export function createRoomStateApplyController(args: {
           args.debugLog(
             `Suppressed autoplay during unstable shared url hydration for ${state.roomCode}`,
           );
-          args.runtimeState.lastForcedPauseAt = nowOf();
+          args.runtimeState.lastForcedPauseAt = monotonicNow();
           pauseVideo(video);
         }
       }
@@ -1004,10 +1003,11 @@ export function createRoomStateApplyController(args: {
         !video.paused &&
         playback &&
         shouldPreserveInitialPause &&
-        nowOf() - args.runtimeState.lastUserGestureAt >= args.userGestureGraceMs
+        monotonicNow() - args.runtimeState.lastUserGestureAt >=
+          args.userGestureGraceMs
       ) {
         args.runtimeState.intendedPlayState = playback.playState;
-        args.runtimeState.lastForcedPauseAt = nowOf();
+        args.runtimeState.lastForcedPauseAt = monotonicNow();
         args.debugLog(
           `Suppressed autoplay during hydrate for ${response.roomState.roomCode}`,
         );

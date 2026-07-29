@@ -51,6 +51,15 @@ export function shouldPauseForNonSharedBroadcast(args: {
   );
 }
 
+/**
+ * `updatedAt` is the one timestamp in this module that leaves the machine: it is
+ * the protocol's "sender timestamp (ms)", so it must be a WALL-CLOCK reading
+ * (`Date.now()`) even though every other `now` here is a monotonic one. Nothing
+ * currently reads it back — the server deliberately measures elapsed time from
+ * its own `serverTime` instead (`room-service.ts`) — but it is a documented wire
+ * field, and putting a `performance.now()` reading there would silently redefine
+ * it for anyone who does.
+ */
 export function createPlaybackBroadcastPayload(args: {
   currentVideo: SharedVideo;
   currentTime: number;
@@ -61,7 +70,7 @@ export function createPlaybackBroadcastPayload(args: {
   playbackRate: number;
   actorId: string;
   seq: number;
-  now: number;
+  updatedAt: number;
 }): PlaybackState {
   const payload: PlaybackState = {
     url: args.currentVideo.url,
@@ -69,7 +78,7 @@ export function createPlaybackBroadcastPayload(args: {
     playState: args.playState,
     syncIntent: args.syncIntent,
     playbackRate: args.playbackRate,
-    updatedAt: args.now,
+    updatedAt: args.updatedAt,
     serverTime: 0,
     actorId: args.actorId,
     seq: args.seq,

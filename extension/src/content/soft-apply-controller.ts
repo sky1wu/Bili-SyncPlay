@@ -68,7 +68,13 @@ export function createSoftApplyController(args: {
   debugLog: (message: string) => void;
   userGestureGraceMs: number;
   programmaticApplyWindowMs: number;
-  getNow?: () => number;
+  /**
+   * Monotonic time source. Every timestamp this controller stores and every
+   * window it compares is an interval measured on this machine, so none of them
+   * may move when the wall clock is stepped. The wall clock is only correct for
+   * the wire field `PlaybackState.updatedAt`, which is produced elsewhere.
+   */
+  getMonotonicNow?: () => number;
   armProgrammaticApplyWindow: (
     signature: ReturnType<typeof createProgrammaticPlaybackSignature>,
     reason: "pending" | "apply",
@@ -76,7 +82,7 @@ export function createSoftApplyController(args: {
     scope?: ProgrammaticApplyScope,
   ) => void;
 }): SoftApplyController {
-  const nowOf = () => args.getNow?.() ?? Date.now();
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   let activeSoftApply: {
     normalizedUrl: string;
     targetTime: number;
@@ -109,7 +115,8 @@ export function createSoftApplyController(args: {
 
   function armSoftApplyCooldown(normalizedUrl: string, reason: string): void {
     args.runtimeState.softApplyCooldownUrl = normalizedUrl;
-    args.runtimeState.softApplyCooldownUntil = nowOf() + SOFT_APPLY_COOLDOWN_MS;
+    args.runtimeState.softApplyCooldownUntil =
+      monotonicNow() + SOFT_APPLY_COOLDOWN_MS;
     args.debugLog(
       `Soft apply cooldown armed url=${normalizedUrl} result=${reason} until=${args.runtimeState.softApplyCooldownUntil}`,
     );
@@ -219,7 +226,7 @@ export function createSoftApplyController(args: {
     if (activeSoftApplyTimer !== null) {
       window.clearTimeout(activeSoftApplyTimer);
     }
-    const delayMs = Math.max(0, activeSoftApply.deadlineAt - nowOf());
+    const delayMs = Math.max(0, activeSoftApply.deadlineAt - monotonicNow());
     activeSoftApplyTimer = window.setTimeout(() => {
       activeSoftApplyTimer = null;
       if (!activeSoftApply) {
@@ -286,10 +293,10 @@ export function createSoftApplyController(args: {
       normalizedUrl,
       targetTime: playback.currentTime,
       restorePlaybackRate,
-      deadlineAt: nowOf() + timeoutMs,
+      deadlineAt: monotonicNow() + timeoutMs,
       armCooldownOnConverge: nextArmCooldownOnConverge,
       convergeByRelativeDrift,
-      startedAt: nowOf(),
+      startedAt: monotonicNow(),
     };
     scheduleActiveSoftApplyTimeout();
     args.debugLog(
@@ -358,7 +365,7 @@ export function createSoftApplyController(args: {
     }
     const elapsedSeconds = Math.max(
       0,
-      (nowOf() - activeSoftApply.startedAt) / 1_000,
+      (monotonicNow() - activeSoftApply.startedAt) / 1_000,
     );
     const expectedTargetTime =
       activeSoftApply.targetTime +
@@ -376,7 +383,7 @@ export function createSoftApplyController(args: {
     if (!activeSoftApply) {
       return;
     }
-    if (nowOf() >= activeSoftApply.deadlineAt) {
+    if (monotonicNow() >= activeSoftApply.deadlineAt) {
       cancelActiveSoftApply(
         video,
         activeSoftApply.convergeByRelativeDrift ? "drift-closed" : "timeout",
@@ -453,7 +460,7 @@ export function createSoftApplyController(args: {
     playback: PlaybackState,
   ): boolean {
     if (
-      args.runtimeState.softApplyCooldownUntil <= nowOf() ||
+      args.runtimeState.softApplyCooldownUntil <= monotonicNow() ||
       !args.runtimeState.softApplyCooldownUrl
     ) {
       return false;

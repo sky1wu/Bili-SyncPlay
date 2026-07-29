@@ -101,7 +101,7 @@ test("builds share payload from video playback snapshot", () => {
     },
     actorId: "member-1",
     seq: 7,
-    now: 99,
+    updatedAt: 99,
   });
 
   assert.equal(payload.playback?.seq, 7);

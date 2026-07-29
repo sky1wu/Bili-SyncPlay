@@ -59,9 +59,15 @@ export function createNavigationController(args: {
   }) => void;
   cancelAutoShareNextVideo?: () => void;
   debugLog: (message: string) => void;
-  getNow?: () => number;
+  /**
+   * Monotonic time source. Every timestamp this controller stores and every
+   * window it compares is an interval measured on this machine, so none of them
+   * may move when the wall clock is stepped. The wall clock is only correct for
+   * the wire field `PlaybackState.updatedAt`, which is produced elsewhere.
+   */
+  getMonotonicNow?: () => number;
 }): NavigationController {
-  const nowOf = () => args.getNow?.() ?? Date.now();
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   // Compares the path portion of two page URLs (ignoring query/hash), used to
   // tell a same-page festival autoplay from a navigation to a different page.
   const samePathname = (a: string, b: string): boolean => {
@@ -269,7 +275,7 @@ export function createNavigationController(args: {
       activeSharedUrl !== null && isUnstableSharedVideoUrl(activeSharedUrl)
         ? (previousResolvedSharedVideoUrl ?? activeSharedUrl)
         : activeSharedUrl;
-    const now = nowOf();
+    const now = monotonicNow();
     // Captured before `resetUserGestureState` below zeroes it, so the
     // natural-end check can tell whether a gesture postdates the natural end.
     const lastUserGestureAt = args.runtimeState.lastUserGestureAt;

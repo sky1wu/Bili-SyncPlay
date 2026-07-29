@@ -73,12 +73,17 @@ export function resolveSharedVideoTitle(
   );
 }
 
+/**
+ * `updatedAt` goes on the wire as the protocol's "sender timestamp (ms)", so it
+ * is a WALL-CLOCK reading — unlike every elapsed-duration reading in the content
+ * script. See {@link createPlaybackBroadcastPayload} for the full reasoning.
+ */
 export function createSharePayload(args: {
   sharedVideo: SharedVideo;
   playback: VideoPlaybackSnapshot | null;
   actorId: string;
   seq: number;
-  now: number;
+  updatedAt: number;
 }): { video: SharedVideo; playback: PlaybackState | null } {
   if (!args.playback) {
     return {
@@ -94,7 +99,7 @@ export function createSharePayload(args: {
       currentTime: args.playback.currentTime,
       playState: args.playback.playState,
       playbackRate: args.playback.playbackRate,
-      updatedAt: args.now,
+      updatedAt: args.updatedAt,
       serverTime: 0,
       actorId: args.actorId,
       seq: args.seq,

@@ -6,6 +6,10 @@ import type {
   SharedVideo,
 } from "@bili-syncplay/protocol";
 import { createContentRuntimeState } from "../src/content/runtime-state";
+import { installClockStubs } from "./clock-stubs";
+
+/** A wall-clock reading, deliberately nowhere near the tests' monotonic values. */
+const WIRE_UPDATED_AT = 1_700_000_000_000;
 import { createSyncController } from "../src/content/sync-controller";
 
 function installWindowStub() {
@@ -62,7 +66,7 @@ function createControllerHarness() {
     duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => now,
+    getMonotonicNow: () => now,
     debugLog: (message) => {
       debugLogs.push(message);
     },
@@ -215,7 +219,7 @@ test("sync controller schedules hydration retry when room exists but initial roo
     duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => 10_000,
+    getMonotonicNow: () => 10_000,
     debugLog: (message) => {
       harness.debugLogs.push(message);
     },
@@ -627,8 +631,14 @@ test("sync controller does not force-pause local playback after remote buffering
   );
 });
 
-test("sync controller allows explicit user seek inside the silence window", async () => {
+test("sync controller allows explicit user seek inside the silence window", async (t) => {
   const harness = createControllerHarness();
+  // `updatedAt` is a WIRE field and stays on the wall clock; every window this
+  // test exercises is on the injected monotonic clock (`setNow`). Pinning the
+  // wall clock to a value far from the monotonic one is what makes the payload
+  // assertion below prove the two are separate domains rather than one clock.
+  const clock = installClockStubs({ wall: WIRE_UPDATED_AT, monotonic: 0 });
+  t.after(() => clock.restore());
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
     url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -673,7 +683,7 @@ test("sync controller allows explicit user seek inside the silence window", asyn
       playState: "playing",
       syncIntent: "explicit-seek",
       playbackRate: 1,
-      updatedAt: 22_000,
+      updatedAt: WIRE_UPDATED_AT,
       serverTime: 0,
       actorId: "local-member",
       seq: 1,
@@ -790,8 +800,14 @@ test("sync controller lets the seek grace window expire back to the real state",
   assert.equal(lastBroadcastPlayState(harness), "buffering");
 });
 
-test("sync controller does not treat a seek as explicit after a forced pause invalidates it", async () => {
+test("sync controller does not treat a seek as explicit after a forced pause invalidates it", async (t) => {
   const harness = createControllerHarness();
+  // `updatedAt` is a WIRE field and stays on the wall clock; every window this
+  // test exercises is on the injected monotonic clock (`setNow`). Pinning the
+  // wall clock to a value far from the monotonic one is what makes the payload
+  // assertion below prove the two are separate domains rather than one clock.
+  const clock = installClockStubs({ wall: WIRE_UPDATED_AT, monotonic: 0 });
+  t.after(() => clock.restore());
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
     url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -826,7 +842,7 @@ test("sync controller does not treat a seek as explicit after a forced pause inv
       playState: "paused",
       syncIntent: undefined,
       playbackRate: 1,
-      updatedAt: 22_000,
+      updatedAt: WIRE_UPDATED_AT,
       serverTime: 0,
       actorId: "local-member",
       seq: 1,
@@ -840,8 +856,14 @@ test("sync controller does not treat a seek as explicit after a forced pause inv
   );
 });
 
-test("sync controller marks explicit user ratechange with explicit-ratechange intent", async () => {
+test("sync controller marks explicit user ratechange with explicit-ratechange intent", async (t) => {
   const harness = createControllerHarness();
+  // `updatedAt` is a WIRE field and stays on the wall clock; every window this
+  // test exercises is on the injected monotonic clock (`setNow`). Pinning the
+  // wall clock to a value far from the monotonic one is what makes the payload
+  // assertion below prove the two are separate domains rather than one clock.
+  const clock = installClockStubs({ wall: WIRE_UPDATED_AT, monotonic: 0 });
+  t.after(() => clock.restore());
   const sharedVideo = {
     videoId: "BV1xx411c7mD",
     url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
@@ -876,7 +898,7 @@ test("sync controller marks explicit user ratechange with explicit-ratechange in
       playState: "playing",
       syncIntent: "explicit-ratechange",
       playbackRate: 1.5,
-      updatedAt: 22_000,
+      updatedAt: WIRE_UPDATED_AT,
       serverTime: 0,
       actorId: "local-member",
       seq: 1,
@@ -1702,7 +1724,7 @@ test("sync controller broadcasts buffering when active pause is classified as bu
     duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => 20_400,
+    getMonotonicNow: () => 20_400,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
     sendPlaybackUpdate: async (payload) => {
@@ -1771,7 +1793,7 @@ test("sync controller broadcasts paused once buffer-pause upgrade window elapses
     duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => 21_700, // 1700ms after pauseStartedAt, past upgrade threshold
+    getMonotonicNow: () => 21_700, // 1700ms after pauseStartedAt, past upgrade threshold
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
     sendPlaybackUpdate: async (payload) => {
@@ -1887,7 +1909,7 @@ test("sync controller tags broadcast with userInitiated:true on a fresh user pau
     duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => 20_400,
+    getMonotonicNow: () => 20_400,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
     sendPlaybackUpdate: async (payload) => {
@@ -1961,7 +1983,7 @@ test("sync controller omits userInitiated when a pause is buffer-induced", async
     duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => 20_400,
+    getMonotonicNow: () => 20_400,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
     sendPlaybackUpdate: async (payload) => {
@@ -2040,7 +2062,7 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
     duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => 21_700,
+    getMonotonicNow: () => 21_700,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
     sendPlaybackUpdate: async (payload) => {
@@ -2229,7 +2251,7 @@ test("programmatic apply signature stores the normalized url for mismatched (fes
     duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => 20_000,
+    getMonotonicNow: () => 20_000,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
     sendPlaybackUpdate: async (payload) => {
@@ -2645,7 +2667,7 @@ test("sync controller keeps userInitiated on a pause that cancelled a rate catch
     duplicateBroadcastWindowMs: 1_000,
     nextSeq: () => 1,
     markBroadcastAt: () => {},
-    getNow: () => 20_400,
+    getMonotonicNow: () => 20_400,
     debugLog: (message) => harness.debugLogs.push(message),
     shouldLogHeartbeat: () => true,
     sendPlaybackUpdate: async (payload) => {

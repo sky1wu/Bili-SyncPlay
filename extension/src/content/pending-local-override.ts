@@ -26,10 +26,16 @@ export function createPendingLocalOverrideController(args: {
   runtimeState: ContentRuntimeState;
   userGestureGraceMs: number;
   normalizeUrl: (url: string | undefined | null) => string | null;
-  getNow?: () => number;
+  /**
+   * Monotonic time source. Every timestamp this controller stores and every
+   * window it compares is an interval measured on this machine, so none of them
+   * may move when the wall clock is stepped. The wall clock is only correct for
+   * the wire field `PlaybackState.updatedAt`, which is produced elsewhere.
+   */
+  getMonotonicNow?: () => number;
   debugLog: (message: string) => void;
 }): PendingLocalOverrideController {
-  const nowOf = () => args.getNow?.() ?? Date.now();
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
 
   function clearPendingLocalPlaybackOverride(reason = "unknown"): void {
     if (args.runtimeState.pendingLocalPlaybackOverride) {
@@ -108,7 +114,7 @@ export function createPendingLocalOverrideController(args: {
       return { shouldIgnore: false };
     }
 
-    if (nowOf() >= pending.expiresAt) {
+    if (monotonicNow() >= pending.expiresAt) {
       clearPendingLocalPlaybackOverride("expired");
       return { shouldIgnore: false };
     }

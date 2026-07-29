@@ -101,7 +101,13 @@ export function createSyncController(args: {
   duplicateBroadcastWindowMs: number;
   nextSeq: () => number;
   markBroadcastAt: (at: number) => void;
-  getNow?: () => number;
+  /**
+   * Monotonic time source. Every timestamp this controller stores and every
+   * window it compares is an interval measured on this machine, so none of them
+   * may move when the wall clock is stepped. The wall clock is only correct for
+   * the wire field `PlaybackState.updatedAt`, which is produced elsewhere.
+   */
+  getMonotonicNow?: () => number;
   debugLog: (message: string) => void;
   shouldLogHeartbeat: (
     state: { key: string | null; at: number },
@@ -127,7 +133,7 @@ export function createSyncController(args: {
     state: RoomState,
   ) => void;
 }): SyncController {
-  const nowOf = () => args.getNow?.() ?? Date.now();
+  const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   const ignoredRemotePlaybackLogState = { key: null as string | null, at: 0 };
   const duplicateBroadcastLogState = { key: null as string | null, at: 0 };
   /**
@@ -222,7 +228,7 @@ export function createSyncController(args: {
     state: { key: string | null; at: number },
     key: string,
     message: string,
-    now = nowOf(),
+    now = monotonicNow(),
   ): void {
     if (args.shouldLogHeartbeat(state, key, now)) {
       args.debugLog(message);
@@ -234,7 +240,7 @@ export function createSyncController(args: {
     eventSource: LocalPlaybackEventSource,
     trace: string,
     _normalizedUrl: string | null,
-    _now = nowOf(),
+    _now = monotonicNow(),
   ): void {
     if (
       eventSource === "timeupdate" ||
@@ -248,7 +254,7 @@ export function createSyncController(args: {
   }
 
   function activatePauseHold(durationMs = args.pauseHoldMs): void {
-    args.runtimeState.pauseHoldUntil = nowOf() + durationMs;
+    args.runtimeState.pauseHoldUntil = monotonicNow() + durationMs;
   }
 
   function armProgrammaticApplyWindow(
@@ -269,10 +275,10 @@ export function createSyncController(args: {
       ...signature,
       url: normalizedSignatureUrl,
     };
-    args.runtimeState.programmaticApplyAt = nowOf();
+    args.runtimeState.programmaticApplyAt = monotonicNow();
     args.runtimeState.programmaticApplyScope = scope;
     args.runtimeState.programmaticApplyUntil =
-      nowOf() + args.programmaticApplyWindowMs;
+      monotonicNow() + args.programmaticApplyWindowMs;
     args.debugLog(
       `Programmatic apply window armed actor=${actorId} playState=${signature.playState} url=${signature.url} delta=n/a result=${reason} scope=${scope} until=${args.runtimeState.programmaticApplyUntil}`,
     );
@@ -285,7 +291,7 @@ export function createSyncController(args: {
     debugLog: args.debugLog,
     userGestureGraceMs: args.userGestureGraceMs,
     programmaticApplyWindowMs: args.programmaticApplyWindowMs,
-    getNow: args.getNow,
+    getMonotonicNow: args.getMonotonicNow,
     armProgrammaticApplyWindow,
   });
 
@@ -293,7 +299,7 @@ export function createSyncController(args: {
     runtimeState: args.runtimeState,
     userGestureGraceMs: args.userGestureGraceMs,
     normalizeUrl: args.normalizeUrl,
-    getNow: args.getNow,
+    getMonotonicNow: args.getMonotonicNow,
     debugLog: args.debugLog,
   });
 
@@ -503,13 +509,13 @@ export function createSyncController(args: {
     }
 
     args.runtimeState.remoteFollowPlayingUntil =
-      nowOf() + args.remoteFollowPlayingWindowMs;
+      monotonicNow() + args.remoteFollowPlayingWindowMs;
     args.runtimeState.remoteFollowPlayingUrl = args.normalizeUrl(playback.url);
   }
 
   function hasRecentRemoteStopIntent(currentVideoUrl: string): boolean {
     return hasRecentRemoteStopIntentGuard({
-      now: nowOf(),
+      now: monotonicNow(),
       pauseHoldUntil: args.runtimeState.pauseHoldUntil,
       normalizedCurrentUrl: args.normalizeUrl(currentVideoUrl),
       activeSharedUrl: args.runtimeState.activeSharedUrl,
@@ -523,7 +529,7 @@ export function createSyncController(args: {
     const remembered = rememberRemotePlaybackForSuppressionGuard({
       playback,
       normalizedUrl: url,
-      now: nowOf(),
+      now: monotonicNow(),
       remoteEchoSuppressionMs: args.remoteEchoSuppressionMs,
       remotePlayTransitionGuardMs: args.remotePlayTransitionGuardMs,
     });
@@ -550,7 +556,7 @@ export function createSyncController(args: {
       playState,
       currentTime: video.currentTime,
       playbackRate: video.playbackRate,
-      now: nowOf(),
+      now: monotonicNow(),
     });
 
     if (
@@ -620,7 +626,7 @@ export function createSyncController(args: {
       playState,
       currentTime,
       lastExplicitPlaybackAction: args.runtimeState.lastExplicitPlaybackAction,
-      now: nowOf(),
+      now: monotonicNow(),
       userGestureGraceMs: args.userGestureGraceMs,
     });
 
@@ -628,7 +634,7 @@ export function createSyncController(args: {
       args.runtimeState.recentRemotePlayingIntent &&
       decision.nextRecentRemotePlayingIntent &&
       args.runtimeState.lastExplicitPlaybackAction &&
-      nowOf() - args.runtimeState.lastExplicitPlaybackAction.at <
+      monotonicNow() - args.runtimeState.lastExplicitPlaybackAction.at <
         args.userGestureGraceMs &&
       args.runtimeState.lastExplicitPlaybackAction.playState === "paused" &&
       playState === "paused"
@@ -847,7 +853,7 @@ export function createSyncController(args: {
     eventSource: LocalPlaybackEventSource = "manual",
     naturalEnd?: boolean,
   ): Promise<void> {
-    const now = nowOf();
+    const now = monotonicNow();
     if (!args.runtimeState.hydrationReady) {
       args.debugLog("Skip broadcast before hydration ready");
       logBroadcastTrace(
@@ -1527,7 +1533,11 @@ export function createSyncController(args: {
       playbackRate: video.playbackRate,
       actorId: args.runtimeState.localMemberId ?? "local",
       seq: args.nextSeq(),
-      now,
+      // NOT `now`. `now` is this machine's monotonic reading, which every local
+      // window in this function is measured against; `updatedAt` is a wire field
+      // documented as a wall-clock sender timestamp. They are different clocks
+      // and this is the only place in the function where the wire one is right.
+      updatedAt: Date.now(),
     });
     pendingLocalOverride.rememberPendingLocalPlaybackOverride(payload, now);
 
@@ -1586,7 +1596,7 @@ export function createSyncController(args: {
     initialRoomStatePauseHoldMs: args.initialRoomStatePauseHoldMs,
     userGestureGraceMs: args.userGestureGraceMs,
     remotePauseDebounceMs: args.remotePauseDebounceMs,
-    getNow: args.getNow,
+    getMonotonicNow: args.getMonotonicNow,
     debugLog: args.debugLog,
     shouldLogHeartbeat: args.shouldLogHeartbeat,
     requestRoomStateHydration: args.requestRoomStateHydration,
@@ -1641,7 +1651,7 @@ export function createSyncController(args: {
         naturalEnd: playback.naturalEnd === true,
         currentTime: playback.currentTime,
         playbackRate: playback.playbackRate,
-        at: nowOf(),
+        at: monotonicNow(),
       };
     }
     await roomStateApplyController.applyRoomState(state, shareToast);

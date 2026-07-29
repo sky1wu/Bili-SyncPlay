@@ -3,6 +3,7 @@ import test from "node:test";
 import type { PlaybackState } from "@bili-syncplay/protocol";
 import { createContentRuntimeState } from "../src/content/runtime-state";
 import { createSoftApplyController } from "../src/content/soft-apply-controller";
+import { installClockStubs } from "./clock-stubs";
 
 function installWindowStub() {
   const originalWindow = globalThis.window;
@@ -80,7 +81,7 @@ test("chained upsertActiveSoftApply preserves the first session's restore rate",
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => now,
+      getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -123,7 +124,7 @@ test("upsertActiveSoftApply for a different url starts a fresh restore rate", ()
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => 10_000,
+      getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -169,7 +170,7 @@ test("explicit user ratechange cancels a rate-only session without reverting the
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => now,
+      getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -214,7 +215,7 @@ test("drift-closed honors the sticky cooldown of a soft-apply taken over by a ra
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => now,
+      getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -259,7 +260,7 @@ test("isActiveRateOnlyCatchUp flags pure rate-only sessions but not real soft-ap
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => 10_000,
+      getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -311,7 +312,7 @@ test("relative-drift session settling via the timer still honors a sticky cooldo
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => now,
+      getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -356,7 +357,7 @@ test("a steadily advancing peer no longer cancels a catch-up as target-shifted",
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => now,
+      getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -405,7 +406,7 @@ test("a peer's buffering does not abort an active catch-up, a real pause still d
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => now,
+      getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -459,7 +460,7 @@ test("hasActiveCorrectionSession covers real soft-apply, not just rate-only catc
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => 20_000,
+      getMonotonicNow: () => 20_000,
       armProgrammaticApplyWindow: () => {},
     });
     const url = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
@@ -494,7 +495,7 @@ test("the rate restore on cancel arms a ratechange-scoped window", () => {
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => 10_000,
+      getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: (_signature, _reason, actorId, scope) => {
         armed.push({ actorId, scope });
       },
@@ -534,7 +535,7 @@ test("cancel restores an elevated defaultPlaybackRate the player already reset",
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => 10_000,
+      getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -579,7 +580,7 @@ test("cancel still leaves an explicit user rate alone", () => {
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
-      getNow: () => 10_000,
+      getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -596,6 +597,44 @@ test("cancel still leaves an explicit user rate alone", () => {
     assert.equal(video.playbackRate, 2);
     assert.equal(video.defaultPlaybackRate, 2);
   } finally {
+    windowStub.restore();
+  }
+});
+
+test("arms the soft-apply cooldown on the monotonic clock by default", () => {
+  const windowStub = installWindowStub();
+  // Globals stubbed, no clock injected: an injected clock cannot tell us which
+  // source the default reads. The two domains hold very different values so
+  // only one of them can satisfy the assertion.
+  const clock = installClockStubs({
+    wall: 1_700_000_000_000,
+    monotonic: 10_000,
+  });
+  try {
+    const runtimeState = createContentRuntimeState();
+    const video = createVideo({ currentTime: 24, playbackRate: 1 });
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    controller.upsertActiveSoftApply(
+      createPlayback({ currentTime: 24.5, playbackRate: 1 }),
+      0.5,
+    );
+    controller.cancelActiveSoftApply(video, "converged");
+
+    // 10_000 + SOFT_APPLY_COOLDOWN_MS. A wall-clock reading here would put the
+    // deadline ~54 years out and the cooldown would never lift for the rest of
+    // the page's life.
+    assert.equal(runtimeState.softApplyCooldownUntil, 12_500);
+  } finally {
+    clock.restore();
     windowStub.restore();
   }
 });
