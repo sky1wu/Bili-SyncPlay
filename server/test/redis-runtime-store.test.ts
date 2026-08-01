@@ -1505,3 +1505,42 @@ test("redis runtime store treats leftover session keys as residue on a room code
     await store.close();
   }
 });
+
+test("redis runtime store stops reserving a code whose blocked and dedup entries have lapsed", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  let currentTime = 1_000;
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+  });
+
+  try {
+    store.evictMemberToken(
+      "ROOMLP",
+      "member-lapsed",
+      "token-lapsed",
+      currentTime + 60_000,
+    );
+    await store.tryClaimMessageSlot(
+      "ROOMLP",
+      "dedup-lapsed",
+      currentTime + 30_000,
+    );
+    await store.flush?.();
+    assert.equal(await store.hasRoomResidue("ROOMLP"), true);
+
+    currentTime += 3_600_000;
+
+    // Redis does not drop zset members when their score passes, and the lazy
+    // sweeps that normally do it are only reached through a room that no longer
+    // exists — so without trimming here the code stayed reserved forever.
+    assert.equal(await store.hasRoomResidue("ROOMLP"), false);
+  } finally {
+    await store.close();
+  }
+});

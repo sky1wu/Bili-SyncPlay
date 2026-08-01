@@ -67,7 +67,9 @@ test("room state query uses cluster sessions instead of only local active member
     async listClusterSessionsByRoom() {
       return [localOwner, remoteJoiner];
     },
-    deleteRoom() {},
+    deleteRoom() {
+      return true;
+    },
   } as Pick<
     RuntimeStore,
     "getRoom" | "listClusterSessionsByRoom" | "deleteRoom"

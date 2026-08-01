@@ -97,3 +97,38 @@ test("mirrored runtime store keeps room generations out of the local mirror", as
   // Reads go to the shared view, so nothing is lost by not keeping a copy.
   assert.equal(await store.getRoomGeneration("ROOMMG"), "generation-1");
 });
+
+test("mirrored teardown clears the local mirror whenever the shared one applied", async () => {
+  const local = createInMemoryRuntimeStore();
+  const shared = createInMemoryRuntimeStore();
+  const store = createMirroredRuntimeStore(local, shared);
+
+  store.addMember("ROOMTD", "member-td", createSession("session-td"), "tok-td");
+  await store.markRoomGeneration("ROOMTD", "generation-td");
+
+  assert.equal(await store.deleteRoom("ROOMTD", "generation-td"), true);
+
+  // The generation only exists in the shared store, so handing the expected
+  // value to the local delete too compared it against a local `null` that never
+  // matches: an ordinary room could never clear its local mirror at all.
+  assert.equal(local.getRoom("ROOMTD"), null);
+  assert.equal(shared.getRoom("ROOMTD"), null);
+});
+
+test("mirrored teardown leaves the local mirror alone when the shared one declines", async () => {
+  const local = createInMemoryRuntimeStore();
+  const shared = createInMemoryRuntimeStore();
+  const store = createMirroredRuntimeStore(local, shared);
+
+  store.addMember("ROOMTS", "member-ts", createSession("session-ts"), "tok-ts");
+  await store.markRoomGeneration("ROOMTS", "generation-live");
+
+  // A teardown scheduled before the room was stamped still expects `null`.
+  assert.equal(await store.deleteRoom("ROOMTS", null), false);
+
+  // Local generations are always `null`, so `null` matched there unconditionally
+  // and the stale teardown wiped this node's view of a room the shared store had
+  // just declined to delete.
+  assert.notEqual(local.getRoom("ROOMTS"), null);
+  assert.notEqual(shared.getRoom("ROOMTS"), null);
+});

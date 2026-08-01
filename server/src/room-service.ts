@@ -941,6 +941,9 @@ export function createRoomService(options: {
     // considered its stale session the current member and would revoke the token
     // the new node was using (#237 review).
 
+    // Recomputed from the shared view inside the try; the catch reads it too.
+    let roomEmpty = removal.roomEmpty;
+
     try {
       // Inside the try: revoking is a durable write that now rejects when it
       // fails, and outside the recovery path a failure left the member removed
@@ -963,7 +966,18 @@ export function createRoomService(options: {
         return { room: null };
       }
 
-      if (!removal.roomEmpty) {
+      // Emptiness has to come from the SHARED member state. `removal.roomEmpty`
+      // is this node's local view: when an old node's socket cleanup interleaves
+      // with the same member reconnecting elsewhere, the old node removes its
+      // only local member and calls the room empty — then writes an `expiresAt`
+      // over the one the new node's join had just cleared, and the reaper
+      // eventually deletes a room that still has members (#237 review).
+      const sharedRoom = await resolveActiveRoom(roomCode).catch(() => null);
+      roomEmpty = sharedRoom
+        ? sharedRoom.members.size === 0
+        : removal.roomEmpty;
+
+      if (!roomEmpty) {
         logEvent("room_left", {
           sessionId: session.id,
           roomCode,
@@ -1036,7 +1050,7 @@ export function createRoomService(options: {
             origin: session.origin,
             reason: "socket_detached",
           });
-          if (removal.roomEmpty) {
+          if (roomEmpty) {
             // Emptying-leave plus failed expiry write may leave the persisted
             // room without `expiresAt`, so the reaper won't collect it. We
             // can NOT force-delete here: the expiry write could have failed
@@ -1198,7 +1212,18 @@ export function createRoomService(options: {
       try {
         await runtimeStore.markRoomGeneration(room.code, randomUUID());
       } catch (error) {
-        await roomStore.deleteRoom(room.code).catch(() => undefined);
+        // CAS on the version we just created, not a delete by code. Between the
+        // failure and this line an admin can expire the (still memberless) room
+        // and another request can take the code — deleting by code would then
+        // remove the replacement out from under its owner, who had already been
+        // told the creation succeeded (#237 review).
+        //
+        // Expiring rather than deleting: `updateRoom` is the only conditional
+        // primitive the store has, and a room marked expired is collected by the
+        // reaper and can never be mistaken for a live one.
+        await roomStore
+          .updateRoom(room.code, room.version, { expiresAt: now() })
+          .catch(() => undefined);
         logEvent("room_persist_failed", {
           sessionId: session.id,
           roomCode: room.code,

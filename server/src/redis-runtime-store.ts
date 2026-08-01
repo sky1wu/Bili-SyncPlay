@@ -346,8 +346,19 @@ end
 return 1
 `;
 
-/** Any key still present means the code is not free to hand out. */
+/**
+ * Any key still present means the code is not free to hand out.
+ *
+ * The two score-indexed sets are trimmed by the current time first. Redis does
+ * not drop zset members when their score passes, and the lazy sweeps that
+ * normally do it (`isMemberTokenBlocked`, `tryClaimMessageSlot`) are only
+ * reached through a room that no longer exists — so a long-lapsed block or a
+ * dedup slot whose TTL ran out years ago would keep the code reserved forever
+ * (#237 review).
+ */
 const ROOM_RESIDUE_LUA = `
+redis.call("ZREMRANGEBYSCORE", KEYS[4], "-inf", ARGV[1])
+redis.call("ZREMRANGEBYSCORE", KEYS[6], "-inf", ARGV[1])
 for index = 1, #KEYS do
   if redis.call("EXISTS", KEYS[index]) == 1 then
     return 1
@@ -1134,6 +1145,7 @@ export async function createRedisRuntimeStore(
         blockedTokensKey(keyPrefix, code),
         roomSessionsKey(keyPrefix, code),
         dedupTrackingZsetKey(keyPrefix, code),
+        String(now()),
       );
       return Number(found) === 1;
     },
@@ -1183,9 +1195,11 @@ export async function createRedisRuntimeStore(
           );
         })(),
       ).then((applied) => {
-        if (Number(applied) === 1) {
-          localRuntimeStore.deleteRoom(code);
+        if (Number(applied) !== 1) {
+          return false;
         }
+        localRuntimeStore.deleteRoom(code);
+        return true;
       });
     },
     async close() {

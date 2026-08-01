@@ -126,7 +126,7 @@ export type RuntimeStore = {
   deleteRoom: (
     code: string,
     expectedGeneration?: string | null,
-  ) => void | Promise<void>;
+  ) => boolean | Promise<boolean>;
   /**
    * Whether ANY runtime state remains under this code.
    *
@@ -502,7 +502,7 @@ export function createInMemoryRuntimeStore(
         expectedGeneration !== undefined &&
         (roomGenerations.get(code) ?? null) !== expectedGeneration
       ) {
-        return;
+        return false;
       }
       roomGenerations.delete(code);
       rooms.delete(code);
@@ -511,6 +511,7 @@ export function createInMemoryRuntimeStore(
       blockedMemberTokensByRoom.delete(code);
       claimedSlotsByRoom.delete(code);
       ownedRoomLocks.delete(code);
+      return true;
     },
     async heartbeatNode(status) {
       nodeStatuses.set(status.instanceId, { ...status });

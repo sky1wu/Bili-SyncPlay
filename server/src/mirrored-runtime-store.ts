@@ -33,20 +33,26 @@ function mirrorAwaitedWrite<TArgs extends unknown[]>(
 }
 
 /**
- * Mirrors a teardown and hands back the SHARED store's promise.
+ * Runs a conditional teardown against the SHARED store and mirrors it locally
+ * only once that reported it applied.
  *
- * Local first, unlike {@link mirrorAwaitedWrite}: a teardown that half-fails
- * should still drop the local copy, because keeping runtime state for a room
- * that no longer exists is worse than losing it. The promise is still returned
- * so the caller can see the shared side fail.
+ * The condition can only be judged where the generation lives, which is the
+ * shared store — this store no longer keeps a local copy. Handing the expected
+ * generation to the local delete as well compared it against a value that is
+ * always `null`: a legacy room (expected `null`) wiped the local state even when
+ * the shared side went on to decline, and an ordinary room (expected non-null)
+ * could never clear the local mirror at all (#237 review).
  */
-function mirrorAwaitedTeardown<TArgs extends unknown[]>(
-  localMethod: (...args: TArgs) => unknown,
-  sharedMethod: (...args: TArgs) => void | Promise<void>,
-): (...args: TArgs) => Promise<void> {
-  return async (...args: TArgs) => {
-    localMethod(...args);
-    await sharedMethod(...args);
+function mirrorConditionalTeardown(
+  localDelete: RuntimeStore["deleteRoom"],
+  sharedDelete: RuntimeStore["deleteRoom"],
+): RuntimeStore["deleteRoom"] {
+  return async (code, expectedGeneration) => {
+    const applied = await sharedDelete(code, expectedGeneration);
+    if (applied) {
+      localDelete(code);
+    }
+    return applied;
   };
 }
 
@@ -152,7 +158,7 @@ export function createMirroredRuntimeStore(
     // reads the local copy here anyway: the reads above go to the shared store,
     // and the shared store's own teardown clears its local mirror unconditionally.
     markRoomGeneration: readShared(sharedRuntimeStore.markRoomGeneration),
-    deleteRoom: mirrorAwaitedTeardown(
+    deleteRoom: mirrorConditionalTeardown(
       localRuntimeStore.deleteRoom,
       sharedRuntimeStore.deleteRoom,
     ),
