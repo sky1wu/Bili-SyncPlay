@@ -23,8 +23,20 @@ Clients send `protocolVersion` inside the `room:create` / `room:join` payload; t
 | `videoId`             | `string`  | Normalized video identity                                                                                                                                                     |
 | `url`                 | `string`  | Share URL as sent by the sharer — accepted by the normalization helpers but not guaranteed pre-normalized (festival shares keep the raw page URL); normalize before comparing |
 | `title`               | `string`  | Display title                                                                                                                                                                 |
-| `sharedByMemberId`    | `string?` | Member who shared the video                                                                                                                                                   |
-| `sharedByDisplayName` | `string?` | Display name of that member                                                                                                                                                   |
+| `sharedByMemberId`    | `string?` | Member who currently owns the share. In `room:state` this is resolved against the live member list, so it names the original sharer only while they are present — see below   |
+| `sharedByDisplayName` | `string?` | Display name of that member; moves with `sharedByMemberId`                                                                                                                    |
+
+A member id only exists while that member holds a seat, so the id stored at
+`video:share` goes stale as soon as the sharer leaves or their `memberToken`
+expires. Every `room:state` therefore resolves it: if the stored member is
+online it is returned unchanged, otherwise the longest-tenured online member
+inherits the share (ties broken by member id). The stored value is never
+rewritten, so a sharer who merely dropped off gets the share back on reconnect.
+
+Clients are told the answer and must not derive their own. A membership change
+that moves ownership is always followed by a full `room:state`, because
+`room:member-joined` / `room:member-left` only edit the recipient's member list
+and leave its cached `sharedVideo` untouched.
 
 ### `PlaybackState`
 

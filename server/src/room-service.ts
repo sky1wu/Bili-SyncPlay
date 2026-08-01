@@ -26,6 +26,7 @@ import {
   type RoomStore,
 } from "./room-store.js";
 import type { RuntimeStore } from "./runtime-store.js";
+import { sharedVideoOwnerChangedOnLeave } from "./shared-video-owner.js";
 import { hasAttachedSocket } from "./types.js";
 import type {
   ActiveRoom,
@@ -169,6 +170,13 @@ export function createRoomService(options: {
     room: PersistedRoom | null;
     notifyRoom?: boolean;
     memberRemoved?: boolean;
+    /**
+     * The leave moved the share to another member (#235). The caller has to
+     * follow the `room:member-left` delta with a full `room:state`, because a
+     * delta only edits the recipient's member list and leaves its cached
+     * `sharedVideo` naming somebody who is gone.
+     */
+    sharedOwnerChanged?: boolean;
   }>;
   shareVideoForSession: (
     session: Session,
@@ -918,6 +926,7 @@ export function createRoomService(options: {
     room: PersistedRoom | null;
     notifyRoom?: boolean;
     memberRemoved?: boolean;
+    sharedOwnerChanged?: boolean;
   }> {
     if (!session.roomCode) {
       return { room: null };
@@ -926,6 +935,7 @@ export function createRoomService(options: {
     const roomCode = session.roomCode;
     const leavingMemberId = session.memberId ?? session.id;
     const leavingDisplayName = session.displayName;
+    const leavingJoinedAt = session.joinedAt;
     const sessionSnapshot = snapshotJoinedSession(session);
     const removal = session.memberId
       ? runtimeStore.removeMember(roomCode, session.memberId, session)
@@ -977,6 +987,31 @@ export function createRoomService(options: {
         ? sharedRoom.members.size === 0
         : removal.roomEmpty;
 
+      // Derived from the member list this leave already loaded, so it adds no
+      // store read. Without a shared view we cannot tell, and reporting "changed"
+      // on a guess would broadcast a room state built from that same unreadable
+      // view — so stay silent and let the next real room event resync (#235).
+      // An emptied room has nobody left to hold a wrong owner, and the election
+      // has no candidates to run over — it would report a change back to the
+      // stored id that no client will ever see.
+      const sharedOwnerChanged =
+        sharedRoom && !roomEmpty
+          ? sharedVideoOwnerChangedOnLeave({
+              sharedByMemberId: persistedRoom.sharedVideo?.sharedByMemberId,
+              membersAfter: Array.from(
+                sharedRoom.members,
+                ([memberId, member]) => ({
+                  id: memberId,
+                  joinedAt: member.joinedAt,
+                }),
+              ),
+              leavingMember: {
+                id: leavingMemberId,
+                joinedAt: sessionSnapshot?.joinedAt ?? leavingJoinedAt,
+              },
+            })
+          : false;
+
       if (!roomEmpty) {
         logEvent("room_left", {
           sessionId: session.id,
@@ -987,7 +1022,11 @@ export function createRoomService(options: {
           origin: session.origin,
           result: "ok",
         });
-        return { room: persistedRoom, memberRemoved: removal.removed };
+        return {
+          room: persistedRoom,
+          memberRemoved: removal.removed,
+          sharedOwnerChanged,
+        };
       }
 
       const expiresAt = now() + persistence.emptyRoomTtlMs;

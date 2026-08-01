@@ -1921,3 +1921,162 @@ test("room:state is aged at the send, not at the room-store read", async () => {
   assert.equal(sentPayloads.length, 1);
   assert.equal(sentPayloads[0].playbackAgeMs, 2_400);
 });
+
+/**
+ * A protocol >= 2 client learns about a join/leave from `room:member-joined` /
+ * `room:member-left`, which only edit its member list — its cached `sharedVideo`
+ * keeps whatever owner the last full `room:state` carried. So whenever the share
+ * changes hands the delta has to be followed by a `room_state_updated`, which is
+ * the event the consumer answers by rebuilding and broadcasting room state
+ * (#235).
+ */
+function createSharedOwnerHandler(options: {
+  published: string[];
+  leaveResult?: { sharedOwnerChanged?: boolean };
+  joinedRoom?: { code: string; sharedVideo?: { sharedByMemberId?: string } };
+}) {
+  return createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = "ROOM01";
+        currentSession.memberId = "member-1";
+        currentSession.memberToken = "member-token-1";
+        return {
+          room: options.joinedRoom ?? { code: "ROOM01" },
+          memberToken: "member-token-1",
+        };
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        return {
+          room: { code: "ROOM01" },
+          memberRemoved: true,
+          ...options.leaveResult,
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        return {
+          roomCode: "ROOM01",
+          sharedVideo: null,
+          playback: null,
+          members: [{ id: "member-1", name: "Alice" }],
+        };
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    async publishRoomEvent(message) {
+      options.published.push(message.type);
+    },
+    instanceId: "node-a",
+  });
+}
+
+test("a leave that moves the share follows the delta with a full room state", async () => {
+  const published: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+  const handler = createSharedOwnerHandler({
+    published,
+    leaveResult: { sharedOwnerChanged: true },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  await handler.flushPendingPublishes();
+
+  // Order matters: the authoritative state has to be the last word, and both
+  // events ride the same channel.
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+});
+
+test("a leave that leaves the share alone publishes only the delta", async () => {
+  const published: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+  const handler = createSharedOwnerHandler({
+    published,
+    leaveResult: { sharedOwnerChanged: false },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_left"]);
+});
+
+test("the stored sharer rejoining follows the delta with a full room state", async () => {
+  const published: string[] = [];
+  const session = createSession("member-1");
+  const handler = createSharedOwnerHandler({
+    published,
+    joinedRoom: {
+      code: "ROOM01",
+      sharedVideo: { sharedByMemberId: "member-1" },
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      displayName: "Alice",
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_joined", "room_state_updated"]);
+});
+
+test("somebody else joining leaves the share where it is", async () => {
+  // A join can only move ownership when the joiner is the stored sharer coming
+  // back: the successor is the longest-tenured member and a join always carries
+  // the newest join time.
+  const published: string[] = [];
+  const session = createSession("member-1");
+  const handler = createSharedOwnerHandler({
+    published,
+    joinedRoom: {
+      code: "ROOM01",
+      sharedVideo: { sharedByMemberId: "member-elsewhere" },
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      displayName: "Alice",
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_joined"]);
+});

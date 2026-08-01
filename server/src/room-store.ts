@@ -1,5 +1,9 @@
 import type { PlaybackState, SharedVideo } from "@bili-syncplay/protocol";
 import type { RoomListQuery } from "./admin/types.js";
+import {
+  resolveSharedVideoOwnerId,
+  type SharedVideoOwnerCandidate,
+} from "./shared-video-owner.js";
 import type { ActiveRoom, PersistedRoom, RoomStoreRoomState } from "./types.js";
 
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -215,21 +219,60 @@ export function roomStateFromSessions(
     id: string;
     memberId: string | null;
     displayName: string;
+    joinedAt?: number | null;
   }>,
 ): RoomStoreRoomState {
   const members = new Map<string, { id: string; name: string }>();
+  const candidates: SharedVideoOwnerCandidate[] = [];
   for (const session of sessions) {
     const memberId = session.memberId ?? session.id;
     members.set(memberId, {
       id: memberId,
       name: session.displayName,
     });
+    candidates.push({ id: memberId, joinedAt: session.joinedAt });
   }
 
   return {
     roomCode: room.code,
-    sharedVideo: room.sharedVideo,
+    sharedVideo: withResolvedSharedOwner(room.sharedVideo, members, candidates),
     playback: room.playback,
     members: Array.from(members.values()),
+  };
+}
+
+/**
+ * The one place `sharedVideo` reaches a client, so the one place share
+ * ownership is resolved against the live member list (#235). Every `room:state`
+ * is built from `roomStateFromSessions`, and the persisted room is left alone —
+ * see `resolveSharedVideoOwnerId` for why ownership is derived and not stored.
+ *
+ * `sharedByDisplayName` moves with the id. It is only a fallback for a name the
+ * member list cannot supply, and the successor is by construction in that list,
+ * so leaving the previous sharer's name behind would not change what a client
+ * renders — it would just leave a contradiction in the payload for the next
+ * reader to trip over.
+ */
+function withResolvedSharedOwner(
+  sharedVideo: SharedVideo | null,
+  members: ReadonlyMap<string, { id: string; name: string }>,
+  candidates: readonly SharedVideoOwnerCandidate[],
+): SharedVideo | null {
+  if (!sharedVideo) {
+    return null;
+  }
+  const ownerId = resolveSharedVideoOwnerId(
+    sharedVideo.sharedByMemberId,
+    candidates,
+  );
+  if (ownerId === sharedVideo.sharedByMemberId) {
+    return sharedVideo;
+  }
+  return {
+    ...sharedVideo,
+    sharedByMemberId: ownerId,
+    sharedByDisplayName:
+      (ownerId ? members.get(ownerId)?.name : undefined) ??
+      sharedVideo.sharedByDisplayName,
   };
 }

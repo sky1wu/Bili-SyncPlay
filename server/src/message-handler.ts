@@ -56,7 +56,17 @@ export function createMessageHandler(options: {
       joinToken: string,
       displayName?: string,
       previousMemberToken?: string,
-    ) => Promise<{ room: { code: string }; memberToken: string }>;
+    ) => Promise<{
+      // Only the share owner: a join hands the share back when the joiner IS the
+      // stored sharer returning, and that is decided here rather than in the room
+      // service so the publish stays next to the member delta it accompanies
+      // (#235).
+      room: {
+        code: string;
+        sharedVideo?: { sharedByMemberId?: string } | null;
+      };
+      memberToken: string;
+    }>;
     leaveRoomForSession: (
       session: Session,
       reason?: LeaveRoomReason,
@@ -64,6 +74,7 @@ export function createMessageHandler(options: {
       room: { code: string } | null;
       notifyRoom?: boolean;
       memberRemoved?: boolean;
+      sharedOwnerChanged?: boolean;
     }>;
     shareVideoForSession: (
       session: Session,
@@ -371,7 +382,7 @@ export function createMessageHandler(options: {
     const roomCode = session.roomCode;
     const memberId = session.memberId ?? session.id;
     const displayName = session.displayName;
-    const { room, notifyRoom, memberRemoved } =
+    const { room, notifyRoom, memberRemoved, sharedOwnerChanged } =
       await roomService.leaveRoomForSession(session, reason);
     if (!roomCode || (!room && !notifyRoom)) {
       return;
@@ -390,6 +401,38 @@ export function createMessageHandler(options: {
       },
       {
         reason: "leave_room_broadcast_failed",
+        sessionId: session.id,
+        remoteAddress: session.remoteAddress,
+        origin: session.origin,
+      },
+    );
+
+    if (sharedOwnerChanged) {
+      await publishSharedOwnerResync(session, roomCode);
+    }
+  }
+
+  /**
+   * Follow a membership delta with a full `room:state` because the share
+   * changed hands (#235).
+   *
+   * `room_state_updated` rather than a bespoke event: the consumer already
+   * answers it by rebuilding and broadcasting the room state, and that rebuild
+   * is where ownership is resolved (`roomStateFromSessions`). Sent AFTER the
+   * delta so the authoritative state is the last word — the two ride the same
+   * channel, so their order survives.
+   */
+  async function publishSharedOwnerResync(
+    session: Session,
+    roomCode: string,
+  ): Promise<void> {
+    await firePublishRoomEvent(
+      {
+        type: "room_state_updated",
+        roomCode,
+      },
+      {
+        reason: "shared_owner_resync_broadcast_failed",
         sessionId: session.id,
         remoteAddress: session.remoteAddress,
         origin: session.origin,
@@ -626,6 +669,14 @@ export function createMessageHandler(options: {
                 origin: session.origin,
               },
             );
+            // The stored sharer is back, so the share returns to them from
+            // whoever was standing in (#235). Only this joiner can move
+            // ownership: the successor is the longest-tenured member and a join
+            // always carries the newest `joinedAt`, so nobody else's arrival
+            // changes the answer.
+            if (room.sharedVideo?.sharedByMemberId === joinedMemberId) {
+              await publishSharedOwnerResync(session, joinedRoomCode);
+            }
             logEvent("room_joined", {
               sessionId: session.id,
               roomCode: joinedRoomCode,

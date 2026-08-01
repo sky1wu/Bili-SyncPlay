@@ -4542,3 +4542,180 @@ test("leave does not schedule expiry when the shared room still has members", as
     null,
   );
 });
+
+test("the room keeps exactly one sharer after the sharer leaves", async () => {
+  // The #235 scenario: three members, the sharer leaves, and the two who stay
+  // must resolve to exactly one owner between them — zero means nobody advances
+  // the room, two means both auto-share the next episode.
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM35",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+
+  // Ids ordered against tenure on purpose: the successor must be the member who
+  // has been here longest, not the one with the smallest id. A rule that sorted
+  // on id would pick `aaa-late` and this stays green either way otherwise.
+  currentTime = 2_000;
+  const early = createSession("zzz-early");
+  await service.joinRoomForSession(
+    early,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  currentTime = 3_000;
+  const late = createSession("aaa-late");
+  await service.joinRoomForSession(
+    late,
+    created.room.code,
+    created.room.joinToken,
+    "Carol",
+  );
+
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+  const sharerMemberId = sharer.memberId;
+
+  currentTime = 4_000;
+  const leave = await service.leaveRoomForSession(sharer, "client-request");
+  // The remaining members only hear `room:member-left`, which edits their member
+  // list and nothing else, so the leave has to announce that a full `room:state`
+  // is owed.
+  assert.equal(leave.sharedOwnerChanged, true);
+
+  const state = await service.getRoomStateByCode(created.room.code);
+  assert.deepEqual(
+    state?.members.map((member) => member.id).sort(),
+    [late.memberId, early.memberId].sort(),
+  );
+  assert.equal(state?.sharedVideo?.sharedByMemberId, early.memberId);
+  assert.equal(state?.sharedVideo?.sharedByDisplayName, "Bob");
+
+  // The persisted room is untouched: ownership is derived at every read so the
+  // original sharer stays the preferred owner.
+  const persisted = await roomStore.getRoom(created.room.code);
+  assert.equal(persisted?.sharedVideo?.sharedByMemberId, sharerMemberId);
+  assert.equal(persisted?.sharedVideo?.sharedByDisplayName, "Alice");
+});
+
+test("a bystander leaving does not move the share", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM36",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  currentTime = 2_000;
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  currentTime = 3_000;
+  const leave = await service.leaveRoomForSession(guest, "client-request");
+
+  assert.equal(leave.sharedOwnerChanged, false);
+  const state = await service.getRoomStateByCode(created.room.code);
+  assert.equal(state?.sharedVideo?.sharedByMemberId, sharer.memberId);
+});
+
+test("the sharer reclaims the share on reconnect", async () => {
+  // The stand-in only holds the share while the sharer is away. #237 keeps the
+  // memberToken alive across a disconnect, so a suspended service worker coming
+  // back must get its room back rather than lose it for good — which is what a
+  // persisted transfer would have done.
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM37",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  const sharerMemberId = sharer.memberId;
+  currentTime = 2_000;
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  currentTime = 3_000;
+  await service.leaveRoomForSession(sharer, "disconnect");
+  assert.equal(
+    (await service.getRoomStateByCode(created.room.code))?.sharedVideo
+      ?.sharedByMemberId,
+    guest.memberId,
+  );
+
+  currentTime = 4_000;
+  const reconnected = createSession("sharer-reconnect");
+  await service.joinRoomForSession(
+    reconnected,
+    created.room.code,
+    created.room.joinToken,
+    "Alice",
+    created.memberToken,
+  );
+
+  assert.equal(reconnected.memberId, sharerMemberId);
+  assert.equal(
+    (await service.getRoomStateByCode(created.room.code))?.sharedVideo
+      ?.sharedByMemberId,
+    sharerMemberId,
+  );
+});

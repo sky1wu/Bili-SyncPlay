@@ -131,6 +131,29 @@ background path touches room state or playback timing.
   `expireBootstrapRoomStateWait` each carry this check; a new delivery path needs
   its own.
 
+### Share ownership is derived, and deltas do not carry it
+
+`sharedVideo.sharedByMemberId` is written once, at `video:share`, and is a
+durable reference to a volatile identity — the sharer's seat. #235 is what
+happens when it dangles: nobody computes `isLocalSharedSource()`, so nobody
+advances the room. Two rules keep it working, neither enforced by a type:
+
+- **Resolve at build, never rewrite the room.** `roomStateFromSessions` is the
+  single place `sharedVideo` reaches a client, and the only place the stored id
+  is reconciled with the live member list (`resolveSharedVideoOwnerId`). A new
+  `room:state` build site must go through it. The persisted room keeps the
+  original id on purpose: it is the _preferred_ owner, so a sharer whose socket
+  merely blipped reclaims the share on reconnect instead of losing it for good.
+- **A membership delta that moves ownership owes a full `room:state`.**
+  Protocol >= 2 clients get `room:member-joined` / `room:member-left`, which edit
+  the recipient's member list and nothing else — their cached `sharedVideo` still
+  names whoever the last full state named. `leaveRoom` publishes an extra
+  `room_state_updated` when `sharedOwnerChanged`, and the join path does the same
+  when the joiner is the stored sharer returning. That join check is only
+  sufficient because the successor rule is tenure-based: a later arrival can
+  never displace a sitting successor. Changing the rule to anything a join can
+  win means the join path has to re-derive the answer instead.
+
 ## Engineering Constraints
 
 - Repository-wide contribution and refactoring constraints are defined in [CONTRIBUTING.md](./CONTRIBUTING.md).
