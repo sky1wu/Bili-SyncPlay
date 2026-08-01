@@ -92,6 +92,24 @@ grep -q 'TOTAL" -ne "\$SEEN' "$HERE/reply-resolve.sh" &&
   ok "reply-resolve.sh 比对扫描后是否有新评论" || no "缺少评论数比对"
 grep -q '不执行 resolve' "$HERE/reply-resolve.sh" &&
   ok "回复失败时不 resolve" || no "缺少回复失败保护"
+# 非整数的「已见评论数」会让上面那个 test 以 integer expression expected 失败，而失败的
+# test 只是让 if 不成立——保护被静默跳过，线程照样被 resolve。实测触发方式：回复正文
+# 里含 ASCII 双引号，参数被截断并发生词拆分。
+# 断言的是错误信息而不只是退出码：假 thread id 本来就会让查询失败并 exit 1，
+# 只看退出码的话，去掉校验后这条用例照样是绿的。
+# 断言错误信息而不只是退出码：假 thread id 本来就会让查询失败并 exit 1，只看退出码
+# 的话，去掉校验后这两条照样是绿的。输出先落到变量——pipefail 下把被测脚本放在管道
+# 左侧，它的非零退出会让整条管道判失败，`grep` 命中与否就无从体现。
+BAD_SEEN_OUT=$("$HERE/reply-resolve.sh" PRRT_fake "body" "+" 2>&1 || true)
+case $BAD_SEEN_OUT in
+  *必须是整数*) ok "非整数的已见评论数被拒（否则新评论保护会被静默跳过）" ;;
+  *) no "非整数评论数未被拒" ;;
+esac
+EXTRA_ARG_OUT=$("$HERE/reply-resolve.sh" PRRT_fake "a" "b" 1 2>&1 || true)
+case $EXTRA_ARG_OUT in
+  *"参数多于 3 个"*) ok "参数多于 3 个被拒（回复正文未被完整引起来的信号）" ;;
+  *) no "多余参数未被拒" ;;
+esac
 
 echo "== 6. 分支校验必须比 SHA 而非只比分支名 =="
 grep -q 'headRefOid' "$HERE/verify-branch.sh" && ok "verify-branch.sh 读取 headRefOid" || no "未校验 SHA"
