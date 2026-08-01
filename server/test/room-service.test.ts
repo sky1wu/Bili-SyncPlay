@@ -1213,6 +1213,12 @@ test("room service flushes pending runtime store writes before exposing updated 
     evictMemberToken(code, memberId, memberToken, blockedUntil) {
       activeRooms.evictMemberToken(code, memberId, memberToken, blockedUntil);
     },
+    getRoomGeneration(code) {
+      return activeRooms.getRoomGeneration(code);
+    },
+    markRoomGeneration(code, generation) {
+      return activeRooms.markRoomGeneration(code, generation);
+    },
     deleteRoom(code) {
       activeRooms.deleteRoom(code);
       clusterSessionsByRoom.delete(code);
@@ -4167,4 +4173,68 @@ test("keeps an owed teardown when the room store cannot be read", async () => {
   failRoomRead = false;
   await service.deleteExpiredRooms();
   assert.deepEqual(teardowns, ["ROOMRD"]);
+});
+
+test("an owed teardown does not wipe a room that took the code in the meantime", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  // Short identity retention so the residue can expire on its own, which is
+  // what frees the code — and, unlike a teardown, leaves the generation behind.
+  const runtime = createInMemoryRuntimeStore(() => currentTime, 5_000);
+  let releaseTeardown!: () => void;
+  const teardownGate = new Promise<void>((resolve) => {
+    releaseTeardown = resolve;
+  });
+  let gateTeardown = false;
+
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+        if (gateTeardown) {
+          await teardownGate;
+        }
+        runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMGR",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  const first = createSession("first-owner");
+  await service.createRoomForSession(first, "Alice");
+  await service.leaveRoomForSession(first, "disconnect");
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  // The reaper clears the room-store guard and then stalls inside the delete —
+  // the exact gap the two check-then-act guards cannot cover.
+  gateTeardown = true;
+  const reaping = service.deleteExpiredRooms();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // The previous occupant's identity retention runs out, which frees the code.
+  currentTime += 5_001;
+  const second = createSession("second-owner");
+  const recreated = await service.createRoomForSession(second, "Bob");
+  assert.equal(recreated.room.code, "ROOMGR");
+
+  releaseTeardown();
+  await reaping;
+
+  // The stale teardown was decided against the previous room instance, so the
+  // delete itself has to refuse. No arrangement of the guards around it helps:
+  // both had already passed before this room existed.
+  assert.equal(
+    runtime.findMemberIdByToken("ROOMGR", recreated.memberToken),
+    second.memberId,
+  );
 });

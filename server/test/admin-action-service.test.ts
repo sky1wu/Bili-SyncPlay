@@ -97,7 +97,9 @@ function createService(options: {
     runtimeStore: {
       listSessionsByRoom: () => options.sessionsByRoom ?? [],
       getSession: () => options.session ?? null,
-      deleteRoom: options.deleteRuntimeRoom ?? (() => {}),
+    },
+    teardownRoomRuntime: async (roomCode) => {
+      options.deleteRuntimeRoom?.(roomCode);
     },
     listClusterSessions: async () => (options.session ? [options.session] : []),
     listClusterSessionsByRoom: async () => options.sessionsByRoom ?? [],

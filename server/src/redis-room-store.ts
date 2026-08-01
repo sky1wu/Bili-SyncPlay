@@ -208,7 +208,12 @@ for _, code in ipairs(candidates) do
   if not readable then
     redis.call("ZREM", roomsKey, code)
   elseif not rawRoom then
+    -- Index entry without a body: the room is gone, so report it like any other
+    -- deletion. Staying silent left its runtime state uncollected, and since a
+    -- code is only handed out once nothing remains under it, that code stopped
+    -- being allocatable (#237 review).
     redis.call("ZREM", roomsKey, code)
+    deletedCodes[#deletedCodes + 1] = code
   else
     local ok, room = pcall(cjson.decode, rawRoom)
     -- cjson.decode("1") yields a truthy scalar; indexing it raises a Lua

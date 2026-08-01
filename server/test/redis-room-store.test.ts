@@ -1183,3 +1183,41 @@ test("redis room reaper survives a candidate whose key turns the wrong type", as
     await store.close();
   }
 });
+
+test("redis room store reports codes whose index entry outlived the room body", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("nobody");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const room = await store.createRoom({
+      code: "NOBODY",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    const expiring = await store.updateRoom(room.code, room.version, {
+      expiresAt: 10,
+      lastActiveAt: 2,
+    });
+    assert.equal(expiring.ok, true);
+
+    // The body disappears while the expiry index still lists the code.
+    await redis.del(`${namespace}:room:NOBODY`);
+
+    // Reporting it is what gets its runtime state collected. Staying silent
+    // stranded that state, and since a code is only handed out once nothing
+    // remains under it, the code stopped being allocatable altogether.
+    assert.deepEqual(await store.deleteExpiredRooms(10), ["NOBODY"]);
+    assert.equal(await redis.zscore(roomsKey, "NOBODY"), null);
+  } finally {
+    await redis.del(roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});

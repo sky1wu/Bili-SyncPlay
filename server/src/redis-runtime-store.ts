@@ -54,6 +54,7 @@ type RedisClient = {
     ...args: Array<string | number>
   ) => Promise<unknown>;
   del: (...keys: string[]) => Promise<unknown>;
+  get: (key: string) => Promise<string | null>;
 };
 
 type PendingOperationLogContext = {
@@ -126,6 +127,8 @@ const RUNTIME_STORE_METHOD_NAMES = [
   "removeMember",
   "revokeMemberToken",
   "evictMemberToken",
+  "getRoomGeneration",
+  "markRoomGeneration",
   "deleteRoom",
   "heartbeatNode",
   "listNodeStatuses",
@@ -175,6 +178,10 @@ function roomMemberTokensKey(prefix: string, roomCode: string): string {
 
 function roomMemberTokenExpiryKey(prefix: string, roomCode: string): string {
   return `${prefix}room:${roomCode}:member-token-expiry`;
+}
+
+function roomGenerationKey(prefix: string, roomCode: string): string {
+  return `${prefix}room:${roomCode}:generation`;
 }
 
 function blockedTokensKey(prefix: string, roomCode: string): string {
@@ -292,6 +299,32 @@ const EVICT_MEMBER_LUA = `
 redis.call("ZADD", KEYS[1], ARGV[3], ARGV[2])
 redis.call("HDEL", KEYS[2], ARGV[1])
 redis.call("ZREM", KEYS[3], ARGV[1])
+return 1
+`;
+
+/**
+ * Delete a room's runtime keys only while its generation is the one the caller
+ * decided against. `ARGV[1]` is `""` for "no generation", which matches only an
+ * absent key — a room that predates generations is still collected, one that has
+ * since been stamped by a new occupant is left alone.
+ */
+const DELETE_ROOM_LUA = `
+if ARGV[1] ~= "*" then
+  local stored = redis.call("GET", KEYS[1])
+  if (stored or "") ~= ARGV[1] then
+    return 0
+  end
+end
+for index = 3, #KEYS do
+  redis.call("DEL", KEYS[index])
+end
+redis.call("DEL", KEYS[1])
+redis.call("SREM", KEYS[2], ARGV[2])
+return 1
+`;
+
+const MARK_ROOM_GENERATION_LUA = `
+redis.call("SET", KEYS[1], ARGV[1])
 return 1
 `;
 
@@ -1019,34 +1052,58 @@ export async function createRedisRuntimeStore(
         localRuntimeStore.revokeMemberToken(code, memberId, session);
       });
     },
-    deleteRoom(code: string) {
+    async getRoomGeneration(code: string) {
+      return await redis.get(roomGenerationKey(keyPrefix, code));
+    },
+    markRoomGeneration(code: string, generation: string) {
+      ensurePendingCapacity("mark_room_generation");
+      return trackAwaitedOperation(
+        "mark_room_generation",
+        redis.eval(
+          MARK_ROOM_GENERATION_LUA,
+          1,
+          roomGenerationKey(keyPrefix, code),
+          generation,
+        ),
+      ).then(() => {
+        localRuntimeStore.markRoomGeneration(code, generation);
+      });
+    },
+    deleteRoom(code: string, expectedGeneration?: string | null) {
       ensurePendingCapacity("delete_room");
-      // Local first: this is a teardown, so leaving a copy of a room that no
-      // longer exists behind is worse than a partial apply. The shared promise
-      // is returned so the caller can tell whether the runtime keys actually
-      // went — the persisted room and its expiry index are already gone by
-      // then, so nothing will ever hand out this room code again (#237 review).
-      localRuntimeStore.deleteRoom(code);
+      // Shared first here, unlike the other teardowns: whether this delete may
+      // proceed at all is decided by the script, against the generation every
+      // node agrees on. Dropping the local copy before knowing the answer would
+      // be exactly the wipe the generation exists to prevent (#237 review).
       return trackAwaitedOperation(
         "delete_room",
         (async () => {
           const trackingKey = dedupTrackingZsetKey(keyPrefix, code);
           const dedupKeys = await redis.zrange(trackingKey, 0, -1);
-          const multi = redis
-            .multi()
-            .del(roomMembersKey(keyPrefix, code))
-            .del(roomMemberTokensKey(keyPrefix, code))
-            .del(roomMemberTokenExpiryKey(keyPrefix, code))
-            .del(blockedTokensKey(keyPrefix, code))
-            .del(roomSessionsKey(keyPrefix, code))
-            .del(trackingKey)
-            .srem(`${keyPrefix}rooms`, code);
-          if (dedupKeys.length > 0) {
-            multi.del(...dedupKeys);
-          }
-          return multi.exec();
+          const keys = [
+            roomGenerationKey(keyPrefix, code),
+            `${keyPrefix}rooms`,
+            roomMembersKey(keyPrefix, code),
+            roomMemberTokensKey(keyPrefix, code),
+            roomMemberTokenExpiryKey(keyPrefix, code),
+            blockedTokensKey(keyPrefix, code),
+            roomSessionsKey(keyPrefix, code),
+            trackingKey,
+            ...dedupKeys,
+          ];
+          return await redis.eval(
+            DELETE_ROOM_LUA,
+            keys.length,
+            ...keys,
+            expectedGeneration === undefined ? "*" : (expectedGeneration ?? ""),
+            code,
+          );
         })(),
-      );
+      ).then((applied) => {
+        if (Number(applied) === 1) {
+          localRuntimeStore.deleteRoom(code);
+        }
+      });
     },
     async close() {
       await Promise.allSettled(Array.from(pendingOperations));

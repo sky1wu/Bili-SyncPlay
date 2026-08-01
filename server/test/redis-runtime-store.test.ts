@@ -127,6 +127,9 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
     async del() {
       return null;
     },
+    async get() {
+      return null;
+    },
     // 仅用于 releaseRoomLock 的 CAS 脚本;这些用例不走锁路径,返回 null 表示未释放。
     async eval() {
       return null;
@@ -1133,9 +1136,13 @@ test("redis runtime store surfaces a failed room teardown to the caller", async 
   // The persisted room is deleted in the same breath, after which nothing will
   // ever name this room code again — a silent failure strands the runtime keys.
   const fakeRedis = {
-    ...createFakeRedisClient([Promise.reject(new Error("redis unavailable"))]),
+    ...createFakeRedisClient([]),
     async zrange() {
       return [];
+    },
+    // The teardown is one conditional script now, so that is what has to fail.
+    async eval() {
+      throw new Error("redis unavailable");
     },
   };
   const store = await createRedisRuntimeStore("redis://unused", {
@@ -1244,6 +1251,61 @@ test("redis runtime store leaves a kick entirely unapplied when it fails", async
     );
   } finally {
     await store.flush?.();
+    await store.close();
+  }
+});
+
+test("redis runtime store declines a teardown decided against an older room generation", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const previous = createSession("session-gen-old");
+  previous.memberId = "member-gen-old";
+  previous.memberToken = "token-gen-old";
+  const current = createSession("session-gen-new");
+  current.memberId = "member-gen-new";
+  current.memberToken = "token-gen-new";
+
+  try {
+    await store.markRoomGeneration("ROOMGN", "generation-1");
+    store.addMember(
+      "ROOMGN",
+      previous.memberId,
+      previous,
+      previous.memberToken,
+    );
+    await store.flush?.();
+
+    // A teardown is decided against the room as it stands now.
+    const decidedAgainst = await store.getRoomGeneration("ROOMGN");
+    assert.equal(decidedAgainst, "generation-1");
+
+    // Before it runs, the code comes back into use as a different room.
+    await store.markRoomGeneration("ROOMGN", "generation-2");
+    store.addMember("ROOMGN", current.memberId, current, current.memberToken);
+    await store.flush?.();
+
+    await store.deleteRoom("ROOMGN", decidedAgainst);
+    await store.flush?.();
+
+    // The stale teardown must not take the new room's state with it.
+    assert.equal(
+      await store.findMemberIdByToken("ROOMGN", "token-gen-new"),
+      "member-gen-new",
+    );
+
+    // A teardown decided against the CURRENT generation still works.
+    await store.deleteRoom("ROOMGN", "generation-2");
+    await store.flush?.();
+    assert.equal(
+      await store.findMemberIdByToken("ROOMGN", "token-gen-new"),
+      null,
+    );
+  } finally {
     await store.close();
   }
 });

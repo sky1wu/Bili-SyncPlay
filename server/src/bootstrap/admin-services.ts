@@ -151,6 +151,8 @@ export function createAdminServices(args: {
       instanceId: args.persistenceConfig.instanceId,
       roomStore: args.roomStore,
       runtimeStore: args.runtimeStore,
+      teardownRoomRuntime: (roomCode) =>
+        args.roomService.teardownRoomRuntime(roomCode),
       listClusterSessions: () => args.runtimeStore.listClusterSessions(),
       listClusterSessionsByRoom: (roomCode) =>
         args.runtimeStore.listClusterSessionsByRoom(roomCode),

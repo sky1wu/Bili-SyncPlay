@@ -141,6 +141,13 @@ export function createMirroredRuntimeStore(
       localRuntimeStore.revokeMemberToken,
       sharedRuntimeStore.revokeMemberToken,
     ),
+    // Read from the shared view: the generation has to be the one every node
+    // agrees on, or a teardown decided here would compare against a local copy.
+    getRoomGeneration: readShared(sharedRuntimeStore.getRoomGeneration),
+    markRoomGeneration: mirrorAwaitedTeardown(
+      localRuntimeStore.markRoomGeneration,
+      sharedRuntimeStore.markRoomGeneration,
+    ),
     deleteRoom: mirrorAwaitedTeardown(
       localRuntimeStore.deleteRoom,
       sharedRuntimeStore.deleteRoom,

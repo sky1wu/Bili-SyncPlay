@@ -196,6 +196,7 @@ export function createRoomService(options: {
     roomCode: string,
   ) => Promise<ReturnType<typeof roomStateOf> | null>;
   deleteExpiredRooms: (currentTime?: number) => Promise<number>;
+  teardownRoomRuntime: (code: string) => Promise<void>;
 } {
   const { config, persistence, roomStore, generateToken, logEvent } = options;
   const runtimeStoreOption = options.runtimeStore ?? options.activeRooms;
@@ -448,7 +449,15 @@ export function createRoomService(options: {
         continue;
       }
       try {
-        await runtimeStore.deleteRoom(code);
+        // The generation is read HERE, where the teardown is decided, and the
+        // delete only applies while it still holds. That is what finally closes
+        // the recycled-code race: the two guards around this are both
+        // check-then-act, and no arrangement of them makes the delete itself
+        // conditional (#237 review).
+        await runtimeStore.deleteRoom(
+          code,
+          await runtimeStore.getRoomGeneration(code),
+        );
         pendingRuntimeTeardowns.delete(code);
       } catch (error) {
         pendingRuntimeTeardowns.add(code);
@@ -1094,6 +1103,16 @@ export function createRoomService(options: {
   }
 
   return {
+    /**
+     * Tear down a deleted room's runtime state, guarded and retried.
+     *
+     * Exposed so the admin paths use the same one entry point: they delete the
+     * persisted room irrecoverably first, so a teardown that fails there has no
+     * way back — the room code would never reach the reaper again (#237 review).
+     */
+    async teardownRoomRuntime(code: string) {
+      await collectRuntimeStateForDeletedRooms([code]);
+    },
     async createRoomForSession(session, displayName) {
       setSessionDisplayName(session, displayName);
       await leaveCurrentRoom(session);
@@ -1142,6 +1161,11 @@ export function createRoomService(options: {
           "internal_error",
         );
       }
+
+      // A fresh generation marks the start of this room instance. Any teardown
+      // still owed for the code's previous occupant was decided against the old
+      // one and will now decline.
+      await runtimeStore.markRoomGeneration(room.code, randomUUID());
 
       const memberToken = generateToken();
       session.memberId = session.id;

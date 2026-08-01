@@ -109,8 +109,34 @@ export type RuntimeStore = {
    * the teardown is durable and rejects if it failed — the caller is usually
    * deleting the persisted room in the same breath, after which nothing will
    * ever name this room code again, so a silent failure strands the keys.
+   *
+   * `expectedGeneration` makes the teardown target ONE room instance. Room codes
+   * are recycled, and a teardown is decided (the room is gone) and performed
+   * (delete its keys) at two different moments; between them the code can come
+   * back into use, and an unconditional delete would then wipe the new room's
+   * members and tokens. Two check-then-act guards cannot compose their way out
+   * of that — only the delete itself can be conditional (#237 review).
+   *
+   * Read the generation with {@link RuntimeStore.getRoomGeneration} when the
+   * teardown is decided and pass it here; a mismatch means the code changed
+   * hands and the teardown is skipped. `null` matches only `null`, so a room
+   * that predates generations is still collected, and one that has since been
+   * stamped is left alone.
    */
-  deleteRoom: (code: string) => void | Promise<void>;
+  deleteRoom: (
+    code: string,
+    expectedGeneration?: string | null,
+  ) => void | Promise<void>;
+  /** The generation stamped on this code's runtime state, or null. */
+  getRoomGeneration: (code: string) => string | null | Promise<string | null>;
+  /**
+   * Stamp a fresh generation on a code, marking the start of a new room
+   * instance. Called once when a room is created.
+   */
+  markRoomGeneration: (
+    code: string,
+    generation: string,
+  ) => void | Promise<void>;
   heartbeatNode: (status: ClusterNodeStatus) => Promise<void>;
   listNodeStatuses: (currentTime?: number) => Promise<ClusterNodeStatus[]>;
   purgeNodeStatus: (instanceId: string) => Promise<void>;
@@ -169,6 +195,8 @@ export function createInMemoryRuntimeStore(
   // memberId → when its token stops reclaiming the identity. Only disconnected
   // members appear here; `addMember` removes the entry again.
   const memberTokenExpiryByRoom = new Map<string, Map<string, number>>();
+  // code → the generation of the room instance currently using it.
+  const roomGenerations = new Map<string, string>();
 
   /** Drop identities whose retention has run out. Lazy: no timers. */
   function pruneExpiredMemberTokens(code: string, currentTime = now()): void {
@@ -439,7 +467,20 @@ export function createInMemoryRuntimeStore(
       revokeMemberIdentity(code, memberId);
     },
     revokeMemberToken: revokeMemberIdentity,
-    deleteRoom(code) {
+    getRoomGeneration(code) {
+      return roomGenerations.get(code) ?? null;
+    },
+    markRoomGeneration(code, generation) {
+      roomGenerations.set(code, generation);
+    },
+    deleteRoom(code, expectedGeneration) {
+      if (
+        expectedGeneration !== undefined &&
+        (roomGenerations.get(code) ?? null) !== expectedGeneration
+      ) {
+        return;
+      }
+      roomGenerations.delete(code);
       rooms.delete(code);
       memberTokenExpiryByRoom.delete(code);
       roomSessionIds.delete(code);

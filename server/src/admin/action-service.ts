@@ -29,10 +29,16 @@ export class AdminActionError extends Error {
 export function createAdminActionService(options: {
   instanceId: string;
   roomStore: RoomStore;
-  runtimeStore: Pick<
-    RuntimeStore,
-    "listSessionsByRoom" | "getSession" | "deleteRoom"
-  >;
+  runtimeStore: Pick<RuntimeStore, "listSessionsByRoom" | "getSession">;
+  /**
+   * Tears down a deleted room's runtime state, guarded and retried.
+   *
+   * Not `runtimeStore.deleteRoom`: both paths below delete the persisted room
+   * first and irrecoverably, so a teardown that fails has no way back — the code
+   * would never reach the reaper again. The room service owns the retry ledger
+   * and the generation check, so it has to be the one entry point (#237 review).
+   */
+  teardownRoomRuntime: (roomCode: string) => Promise<void>;
   listClusterSessions: () => Promise<
     Awaited<ReturnType<RuntimeStore["listClusterSessions"]>>
   >;
@@ -227,7 +233,7 @@ export function createAdminActionService(options: {
       }
 
       await options.roomStore.deleteRoom(roomCode);
-      await options.runtimeStore.deleteRoom(roomCode);
+      await options.teardownRoomRuntime(roomCode);
       await options.publishRoomDeleted(roomCode);
       const disconnectedSessionCount = disconnectResults.filter(
         ({ result }) => result.status === "ok",
@@ -260,7 +266,7 @@ export function createAdminActionService(options: {
       // left its runtime keys behind — including the tokens of members who had
       // disconnected but whose identity is deliberately retained (#234) — and a
       // recycled room code would inherit them (#237 review).
-      await options.runtimeStore.deleteRoom(roomCode);
+      await options.teardownRoomRuntime(roomCode);
 
       options.logEvent("admin_room_expired", {
         roomCode,
