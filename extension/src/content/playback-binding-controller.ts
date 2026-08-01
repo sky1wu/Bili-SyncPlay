@@ -151,8 +151,8 @@ export function createPlaybackBindingController(args: {
   const hasRecentUserGestureInPlayer = () =>
     monotonicNow() - args.runtimeState.lastUserGestureInPlayerAt <
     args.userGestureGraceMs;
-  // The user just operated the player's SPEED control (Shift+1 / Shift+2, or
-  // ArrowRight held for 3x).
+  // The user just PERSISTENTLY selected a playback speed (Shift+1 / Shift+2).
+  // Hold-to-fast-forward is deliberately not one — see `isRateControlGesture`.
   //
   // The `> 0` check is defensive, not load-bearing today: the field starts at 0
   // and `performance.now()` starts near it, so a bare freshness check would read

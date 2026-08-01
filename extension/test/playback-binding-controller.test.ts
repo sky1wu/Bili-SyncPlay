@@ -4287,7 +4287,7 @@ test("playback binding controller does not treat any recent gesture as a rate ta
 });
 
 test("playback binding controller ends the catch-up for a keyboard speed shortcut", () => {
-  // Shift+1 / Shift+2 / held ArrowRight are not in-player gestures
+  // Shift+1 / Shift+2 are not in-player gestures
   // (`isGestureInsidePlayer` counts only play-toggle keys), so before the
   // dedicated signal existed the session survived, the broadcast reported the
   // session's base rate and the restore timer put that base rate back — the

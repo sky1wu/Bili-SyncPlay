@@ -45,20 +45,24 @@ function isEditableTarget(target: EventTarget | null): boolean {
  * we wrote" does not work — the player resets the live rate by itself while
  * recovering from a stall — so the signal has to come from the input itself.
  *
- * The hold-to-fast-forward key is matched only while it REPEATS. A short
- * ArrowRight press is a 5s seek and leaves the rate alone; only holding it
- * engages 3x, and holding is exactly what produces auto-repeat keydowns. Without
- * that distinction every arrow-key seek would count as a speed change and a
- * stall-reset landing next to one would be misread as a user takeover.
+ * Only PERSISTENT rate selections count. Bilibili's hold-ArrowRight 3x is
+ * deliberately excluded even though it is a speed gesture: it lasts only while
+ * the key is held, and on release the player restores the rate it saved when the
+ * hold began — which, mid-catch-up, is our temporary rate. Ending the session for
+ * it would drop the restore, leave `getActiveCorrectionBaseRate` empty, and let
+ * both the transient 3x and that restored temporary rate go out tagged
+ * `explicit-ratechange` (which the server's timeline check does not reject),
+ * re-creating the very rate pollution #238 is about. That exact sequence is in
+ * the #238 logs: `3` twice, then `0.9223063476562674` twice, all explicit.
+ *
+ * A held ArrowRight during a catch-up therefore stays a purely local skim: the
+ * session survives, so broadcasts keep reporting the room's base rate.
  */
 export function isRateControlGesture(event: Event): boolean {
   if (event.type !== "keydown" || isEditableTarget(event.target)) {
     return false;
   }
   const keyboardEvent = event as KeyboardEvent;
-  if (keyboardEvent.key === "ArrowRight") {
-    return keyboardEvent.repeat;
-  }
   return (
     keyboardEvent.shiftKey && RATE_CONTROL_SHIFT_CODES.has(keyboardEvent.code)
   );

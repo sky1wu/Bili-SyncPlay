@@ -93,8 +93,9 @@ export interface ContentRuntimeState {
    */
   lastUserGestureInPlayerAt: number;
   /**
-   * Timestamp of the most recent gesture on the player's playback-SPEED control
-   * (Shift+1 / Shift+2, or ArrowRight held for 3x). Tracked separately from
+   * Timestamp of the most recent gesture that PERSISTENTLY selects a playback
+   * speed (Shift+1 / Shift+2). Hold-to-fast-forward is excluded — see
+   * `isRateControlGesture`. Tracked separately from
    * `lastUserGestureInPlayerAt` on purpose: that one authorizes playback on
    * "load paused" pages, so speed keys must not feed it.
    *

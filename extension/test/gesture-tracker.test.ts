@@ -293,18 +293,21 @@ test("isRateControlGesture matches Bilibili's Shift+1 / Shift+2 speed keys", () 
   });
 });
 
-test("isRateControlGesture counts a held ArrowRight but not a short press", () => {
+test("isRateControlGesture excludes ArrowRight entirely, held or not", () => {
   withElementStub(() => {
-    // Holding ArrowRight engages 3x, and holding is what produces auto-repeat.
+    // Holding ArrowRight engages 3x, but only while held: on release the player
+    // restores the rate it saved when the hold began, which mid-catch-up is our
+    // TEMPORARY rate. Treating the hold as a takeover would end the session,
+    // drop its restore, and let both the transient 3x and that temporary rate go
+    // out tagged `explicit-ratechange` — exactly the pollution #238 is about
+    // (its logs show `3`, `3`, `0.9223063476562674`, `0.9223063476562674`).
     assert.equal(
       isRateControlGesture(
         fakeRateKeyEvent({ key: "ArrowRight", repeat: true }),
       ),
-      true,
+      false,
     );
-    // A short press is a 5s SEEK and leaves the rate alone. Counting it would
-    // make every arrow-key seek look like a speed change, so a stall-reset
-    // landing next to one would be misread as a user takeover.
+    // A short press is a 5s seek and never touches the rate at all.
     assert.equal(
       isRateControlGesture(
         fakeRateKeyEvent({ key: "ArrowRight", repeat: false }),
@@ -330,8 +333,9 @@ test("isRateControlGesture ignores speed keys typed into an editable target", ()
     assert.equal(
       isRateControlGesture(
         fakeRateKeyEvent({
-          key: "ArrowRight",
-          repeat: true,
+          code: "Digit1",
+          key: "!",
+          shiftKey: true,
           target: new FakeElement({}, true),
         }),
       ),
@@ -344,7 +348,7 @@ test("isRateControlGesture ignores non-keydown events", () => {
   withElementStub(() => {
     assert.equal(
       isRateControlGesture(
-        fakeRateKeyEvent({ type: "click", key: "ArrowRight", repeat: true }),
+        fakeRateKeyEvent({ type: "click", code: "Digit2", shiftKey: true }),
       ),
       false,
     );
