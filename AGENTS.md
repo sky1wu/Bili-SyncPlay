@@ -148,11 +148,12 @@ advances the room. Two rules keep it working, neither enforced by a type:
   Protocol >= 2 clients get `room:member-joined` / `room:member-left`, which edit
   the recipient's member list and nothing else — their cached `sharedVideo` still
   names whoever the last full state named. `leaveRoom` publishes an extra
-  `room_state_updated` when `sharedOwnerChanged`, and the join path does the same
-  when the joiner is the stored sharer returning. That join check is only
-  sufficient because the successor rule is tenure-based: a later arrival can
-  never displace a sitting successor. Changing the rule to anything a join can
-  win means the join path has to re-derive the answer instead.
+  `room_state_updated` when `needsRoomStateResync`, and the join path does the
+  same when the joiner turns out to own the share in the bootstrap state it was
+  just sent. Neither check may be replaced by a shortcut that reasons about
+  `joinedAt` ordering: that value is stamped by whichever node handled the join,
+  so it is a cross-node clock comparison and can reorder members. The tenure
+  rule exists to keep ownership from reshuffling on every arrival, nothing more.
 
 ## Engineering Constraints
 

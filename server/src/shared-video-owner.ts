@@ -16,12 +16,17 @@
  * same id. Persisting a transfer would hand the room away permanently on a
  * two-second outage.
  *
- * The successor rule is "longest tenure wins", not "smallest id wins", because
- * it has to be stable under joins: a member arriving later always carries a
- * later `joinedAt`, so a new arrival can never displace a sitting successor.
- * That is what lets the publish side treat a join as ownership-neutral unless
- * the joiner *is* the stored owner returning. `memberId` breaks ties so the
- * result stays deterministic across nodes resolving the same room.
+ * The successor rule is "longest tenure wins", not "smallest id wins", so the
+ * answer is stable under joins: a member arriving later normally carries a later
+ * `joinedAt`, so a new arrival does not displace a sitting successor and the
+ * room is not reshuffled every time somebody walks in. `memberId` breaks ties so
+ * the result stays deterministic across nodes resolving the same room.
+ *
+ * That stability is a comfort, not a correctness argument, and nothing here may
+ * lean on it: `joinedAt` is stamped by whichever node handled the join, so two
+ * nodes' clocks disagreeing can reorder members. The publish side therefore asks
+ * whether a joiner *ended up* owning the share rather than assuming a join can
+ * never win it.
  */
 export type SharedVideoOwnerCandidate = {
   id: string;

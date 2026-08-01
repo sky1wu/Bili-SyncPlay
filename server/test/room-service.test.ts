@@ -665,6 +665,10 @@ test("room service still notifies remaining members when socket-detached leave h
 
   assert.equal(result.room, null);
   assert.equal(result.notifyRoom, true);
+  // The read failed before the election could run, so whether this member held
+  // the share is unknowable here. Ask for the full state rather than leave the
+  // rest of the room pointing at somebody who is gone (#235).
+  assert.equal(result.needsRoomStateResync, true);
   // Runtime reflects the leave; joiner is still in the room.
   assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
   assert.ok(activeRooms.getRoom(created.room.code)?.members.has("joiner"));
@@ -4598,7 +4602,7 @@ test("the room keeps exactly one sharer after the sharer leaves", async () => {
   // The remaining members only hear `room:member-left`, which edits their member
   // list and nothing else, so the leave has to announce that a full `room:state`
   // is owed.
-  assert.equal(leave.sharedOwnerChanged, true);
+  assert.equal(leave.needsRoomStateResync, true);
 
   const state = await service.getRoomStateByCode(created.room.code);
   assert.deepEqual(
@@ -4651,7 +4655,7 @@ test("a bystander leaving does not move the share", async () => {
   currentTime = 3_000;
   const leave = await service.leaveRoomForSession(guest, "client-request");
 
-  assert.equal(leave.sharedOwnerChanged, false);
+  assert.equal(leave.needsRoomStateResync, false);
   const state = await service.getRoomStateByCode(created.room.code);
   assert.equal(state?.sharedVideo?.sharedByMemberId, sharer.memberId);
 });

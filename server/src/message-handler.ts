@@ -56,17 +56,7 @@ export function createMessageHandler(options: {
       joinToken: string,
       displayName?: string,
       previousMemberToken?: string,
-    ) => Promise<{
-      // Only the share owner: a join hands the share back when the joiner IS the
-      // stored sharer returning, and that is decided here rather than in the room
-      // service so the publish stays next to the member delta it accompanies
-      // (#235).
-      room: {
-        code: string;
-        sharedVideo?: { sharedByMemberId?: string } | null;
-      };
-      memberToken: string;
-    }>;
+    ) => Promise<{ room: { code: string }; memberToken: string }>;
     leaveRoomForSession: (
       session: Session,
       reason?: LeaveRoomReason,
@@ -74,7 +64,7 @@ export function createMessageHandler(options: {
       room: { code: string } | null;
       notifyRoom?: boolean;
       memberRemoved?: boolean;
-      sharedOwnerChanged?: boolean;
+      needsRoomStateResync?: boolean;
     }>;
     shareVideoForSession: (
       session: Session,
@@ -186,13 +176,21 @@ export function createMessageHandler(options: {
     }
   }
 
+  /**
+   * Returns the share owner the sent state named, or `undefined` when no state
+   * went out. The join path needs it to decide whether the room owes everybody
+   * else a resync (#235): adding a member can only move the share if the new
+   * member wins it, so "did this joiner end up owning the share?" is the whole
+   * question — and this state has already been resolved against the live member
+   * list, so it answers it without a second read or a second copy of the rule.
+   */
   async function sendRoomStateToSession(
     session: Session,
     memberToken: string,
     messageType: ClientMessage["type"],
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     if (!hasAttachedSocket(session)) {
-      return;
+      return undefined;
     }
     try {
       const state = await roomService.getRoomStateForSession(
@@ -201,7 +199,7 @@ export function createMessageHandler(options: {
         messageType,
       );
       if (!hasAttachedSocket(session)) {
-        return;
+        return undefined;
       }
       // Aged at the send, not at the read: `getRoomStateForSession` awaits the
       // store, and the room kept playing through it.
@@ -209,6 +207,7 @@ export function createMessageHandler(options: {
         type: "room:state",
         payload: withPlaybackAge(state, now()),
       });
+      return state.sharedVideo?.sharedByMemberId;
     } catch (error) {
       logEvent("room_state_bootstrap_failed", {
         sessionId: session.id,
@@ -221,6 +220,7 @@ export function createMessageHandler(options: {
             ? error.reason
             : "room_state_bootstrap_failed",
       });
+      return undefined;
     }
   }
 
@@ -382,7 +382,7 @@ export function createMessageHandler(options: {
     const roomCode = session.roomCode;
     const memberId = session.memberId ?? session.id;
     const displayName = session.displayName;
-    const { room, notifyRoom, memberRemoved, sharedOwnerChanged } =
+    const { room, notifyRoom, memberRemoved, needsRoomStateResync } =
       await roomService.leaveRoomForSession(session, reason);
     if (!roomCode || (!room && !notifyRoom)) {
       return;
@@ -407,7 +407,7 @@ export function createMessageHandler(options: {
       },
     );
 
-    if (sharedOwnerChanged) {
+    if (needsRoomStateResync) {
       await publishSharedOwnerResync(session, roomCode);
     }
   }
@@ -639,7 +639,11 @@ export function createMessageHandler(options: {
                 serverProtocolVersion: CURRENT_PROTOCOL_VERSION,
               },
             });
-            await sendRoomStateToSession(session, memberToken, message.type);
+            const bootstrapSharedOwnerId = await sendRoomStateToSession(
+              session,
+              memberToken,
+              message.type,
+            );
             if (
               session.roomCode !== joinedRoomCode ||
               session.memberId !== joinedMemberId
@@ -669,12 +673,17 @@ export function createMessageHandler(options: {
                 origin: session.origin,
               },
             );
-            // The stored sharer is back, so the share returns to them from
-            // whoever was standing in (#235). Only this joiner can move
-            // ownership: the successor is the longest-tenured member and a join
-            // always carries the newest `joinedAt`, so nobody else's arrival
-            // changes the answer.
-            if (room.sharedVideo?.sharedByMemberId === joinedMemberId) {
+            // This joiner owns the share, so everyone else is still pointing at
+            // whoever owned it a moment ago (#235). Usually it means the stored
+            // sharer came back, but the test is deliberately "did the joiner end
+            // up owning it" rather than "is the joiner the stored sharer": a
+            // join can only move the share by winning it, and asking the state
+            // we just sent keeps that answer free of any assumption about how
+            // the election ranks members.
+            if (
+              bootstrapSharedOwnerId !== undefined &&
+              bootstrapSharedOwnerId === joinedMemberId
+            ) {
               await publishSharedOwnerResync(session, joinedRoomCode);
             }
             logEvent("room_joined", {

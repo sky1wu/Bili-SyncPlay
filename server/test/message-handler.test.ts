@@ -1932,8 +1932,8 @@ test("room:state is aged at the send, not at the room-store read", async () => {
  */
 function createSharedOwnerHandler(options: {
   published: string[];
-  leaveResult?: { sharedOwnerChanged?: boolean };
-  joinedRoom?: { code: string; sharedVideo?: { sharedByMemberId?: string } };
+  leaveResult?: { needsRoomStateResync?: boolean };
+  bootstrapSharedByMemberId?: string;
 }) {
   return createMessageHandler({
     config: CONFIG,
@@ -1946,7 +1946,7 @@ function createSharedOwnerHandler(options: {
         currentSession.memberId = "member-1";
         currentSession.memberToken = "member-token-1";
         return {
-          room: options.joinedRoom ?? { code: "ROOM01" },
+          room: { code: "ROOM01" },
           memberToken: "member-token-1",
         };
       },
@@ -1970,7 +1970,16 @@ function createSharedOwnerHandler(options: {
       async getRoomStateForSession() {
         return {
           roomCode: "ROOM01",
-          sharedVideo: null,
+          // The bootstrap state is already resolved against the live member
+          // list, which is exactly what the join path reads back.
+          sharedVideo: options.bootstrapSharedByMemberId
+            ? {
+                videoId: "BV1xx411c7mD",
+                url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+                title: "Test Episode",
+                sharedByMemberId: options.bootstrapSharedByMemberId,
+              }
+            : null,
           playback: null,
           members: [{ id: "member-1", name: "Alice" }],
         };
@@ -1995,7 +2004,7 @@ test("a leave that moves the share follows the delta with a full room state", as
   });
   const handler = createSharedOwnerHandler({
     published,
-    leaveResult: { sharedOwnerChanged: true },
+    leaveResult: { needsRoomStateResync: true },
   });
 
   await handler.handleClientMessage(session, {
@@ -2018,7 +2027,7 @@ test("a leave that leaves the share alone publishes only the delta", async () =>
   });
   const handler = createSharedOwnerHandler({
     published,
-    leaveResult: { sharedOwnerChanged: false },
+    leaveResult: { needsRoomStateResync: false },
   });
 
   await handler.handleClientMessage(session, {
@@ -2030,15 +2039,12 @@ test("a leave that leaves the share alone publishes only the delta", async () =>
   assert.deepEqual(published, ["room_member_left"]);
 });
 
-test("the stored sharer rejoining follows the delta with a full room state", async () => {
+test("a joiner who ends up owning the share triggers a full room state", async () => {
   const published: string[] = [];
   const session = createSession("member-1");
   const handler = createSharedOwnerHandler({
     published,
-    joinedRoom: {
-      code: "ROOM01",
-      sharedVideo: { sharedByMemberId: "member-1" },
-    },
+    bootstrapSharedByMemberId: "member-1",
   });
 
   await handler.handleClientMessage(session, {
@@ -2055,17 +2061,13 @@ test("the stored sharer rejoining follows the delta with a full room state", asy
 });
 
 test("somebody else joining leaves the share where it is", async () => {
-  // A join can only move ownership when the joiner is the stored sharer coming
-  // back: the successor is the longest-tenured member and a join always carries
-  // the newest join time.
+  // A join can only move the share by winning it, so a joiner who is not the
+  // owner in their own bootstrap state changed nothing for anybody.
   const published: string[] = [];
   const session = createSession("member-1");
   const handler = createSharedOwnerHandler({
     published,
-    joinedRoom: {
-      code: "ROOM01",
-      sharedVideo: { sharedByMemberId: "member-elsewhere" },
-    },
+    bootstrapSharedByMemberId: "member-elsewhere",
   });
 
   await handler.handleClientMessage(session, {

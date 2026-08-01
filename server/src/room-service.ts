@@ -171,12 +171,14 @@ export function createRoomService(options: {
     notifyRoom?: boolean;
     memberRemoved?: boolean;
     /**
-     * The leave moved the share to another member (#235). The caller has to
-     * follow the `room:member-left` delta with a full `room:state`, because a
-     * delta only edits the recipient's member list and leaves its cached
-     * `sharedVideo` naming somebody who is gone.
+     * The caller owes the room a full `room:state` on top of the
+     * `room:member-left` delta, because a delta only edits the recipient's
+     * member list and leaves its cached `sharedVideo` untouched (#235).
+     *
+     * Set when the leave moved the share to another member — and also when a
+     * persistence failure meant we could not work out whether it did.
      */
-    sharedOwnerChanged?: boolean;
+    needsRoomStateResync?: boolean;
   }>;
   shareVideoForSession: (
     session: Session,
@@ -926,7 +928,7 @@ export function createRoomService(options: {
     room: PersistedRoom | null;
     notifyRoom?: boolean;
     memberRemoved?: boolean;
-    sharedOwnerChanged?: boolean;
+    needsRoomStateResync?: boolean;
   }> {
     if (!session.roomCode) {
       return { room: null };
@@ -988,13 +990,13 @@ export function createRoomService(options: {
         : removal.roomEmpty;
 
       // Derived from the member list this leave already loaded, so it adds no
-      // store read. Without a shared view we cannot tell, and reporting "changed"
-      // on a guess would broadcast a room state built from that same unreadable
-      // view — so stay silent and let the next real room event resync (#235).
+      // store read. Without a shared view we cannot tell — but that case can
+      // only be an unreadable store, which the catch below turns into an
+      // unconditional resync request rather than silence (#235).
       // An emptied room has nobody left to hold a wrong owner, and the election
       // has no candidates to run over — it would report a change back to the
       // stored id that no client will ever see.
-      const sharedOwnerChanged =
+      const needsRoomStateResync =
         sharedRoom && !roomEmpty
           ? sharedVideoOwnerChangedOnLeave({
               sharedByMemberId: persistedRoom.sharedVideo?.sharedByMemberId,
@@ -1025,7 +1027,7 @@ export function createRoomService(options: {
         return {
           room: persistedRoom,
           memberRemoved: removal.removed,
-          sharedOwnerChanged,
+          needsRoomStateResync,
         };
       }
 
@@ -1154,7 +1156,17 @@ export function createRoomService(options: {
       });
 
       if (swallowWithNotifyRoom) {
-        return { room: null, notifyRoom: true, memberRemoved: removal.removed };
+        return {
+          room: null,
+          notifyRoom: true,
+          memberRemoved: removal.removed,
+          // We never got far enough to run the election, so whether this member
+          // held the share is unknowable here. Ask for the full state anyway:
+          // over-sending costs one broadcast, while staying silent leaves every
+          // remaining client pointing at a member who is gone until some
+          // unrelated event happens to resync them (#235).
+          needsRoomStateResync: true,
+        };
       }
 
       if (error instanceof RoomServiceError) {
