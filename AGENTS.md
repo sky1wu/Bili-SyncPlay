@@ -136,7 +136,7 @@ background path touches room state or playback timing.
 `sharedVideo.sharedByMemberId` is written once, at `video:share`, and is a
 durable reference to a volatile identity — the sharer's seat. #235 is what
 happens when it dangles: nobody computes `isLocalSharedSource()`, so nobody
-advances the room. Two rules keep it working, neither enforced by a type:
+advances the room. Three rules keep it working, none enforced by a type:
 
 - **Resolve at build, never rewrite the room.** `roomStateFromSessions` is the
   single place `sharedVideo` reaches a client, and the only place the stored id
@@ -154,6 +154,15 @@ advances the room. Two rules keep it working, neither enforced by a type:
   `joinedAt` ordering: that value is stamped by whichever node handled the join,
   so it is a cross-node clock comparison and can reorder members. The tenure
   rule exists to keep ownership from reshuffling on every arrival, nothing more.
+- **Nothing may be published for a leave until `onRoomLeft` has settled.** That
+  hook clears the session out of the room index, and `getRoomStateByCode` reads
+  the index, not the member map — so a `room:state` built while the write is
+  still queued contains the member who just left, and hands them the share
+  straight back. `runRoomLeftHook` is awaited for this reason, and the app's
+  implementation awaits `runtimeStore.flush`. The leave path is not the only one:
+  a member switching rooms leaves the old one inside `createRoomForSession` /
+  `joinRoomForSession`, which publish nothing of their own, so both branches
+  publish the old room a full `room:state` after that same hook.
 
 ## Engineering Constraints
 

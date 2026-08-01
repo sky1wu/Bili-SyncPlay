@@ -253,9 +253,14 @@ export async function createSyncServer(
       runtimeStore.markSessionJoinedRoom(session.id, roomCode);
       await runtimeStore.flush?.();
     },
-    onRoomLeft: (session, roomCode) => {
+    onRoomLeft: async (session, roomCode) => {
       runtimeStore.registerSession(session);
       runtimeStore.markSessionLeftRoom(session.id, roomCode);
+      // Flushed like the join hook, and for a sharper reason: everything the
+      // handler publishes next is read back off the room index this write
+      // clears. Leaving it queued lets a `room:state` be rebuilt with the
+      // leaver still in it (#235 review).
+      await runtimeStore.flush?.();
     },
     now,
   });

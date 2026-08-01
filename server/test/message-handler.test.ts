@@ -1373,7 +1373,10 @@ test("message handler keeps room:join successful when bootstrap state fails", as
 
   assert.deepEqual(sent, ["room:joined"]);
   assert.deepEqual(errors, []);
-  assert.deepEqual(published, ["room_member_joined"]);
+  // The failed read means we cannot tell whether this join took the share back,
+  // so the room gets a full state anyway rather than being left pointing at a
+  // stand-in with nothing scheduled to correct it (#235).
+  assert.deepEqual(published, ["room_member_joined", "room_state_updated"]);
   assert.ok(events.includes("room_state_bootstrap_failed"));
   assert.ok(events.includes("room_joined"));
 });
@@ -1934,19 +1937,32 @@ function createSharedOwnerHandler(options: {
   published: string[];
   leaveResult?: { needsRoomStateResync?: boolean };
   bootstrapSharedByMemberId?: string;
+  bootstrapFails?: boolean;
+  joinedRoomCode?: string;
+  hookOrder?: string[];
+  publishedRooms?: string[];
 }) {
   return createMessageHandler({
     config: CONFIG,
     roomService: {
-      async createRoomForSession() {
-        throw new Error("unreachable");
-      },
-      async joinRoomForSession(currentSession) {
-        currentSession.roomCode = "ROOM01";
+      async createRoomForSession(currentSession) {
+        currentSession.roomCode = options.joinedRoomCode ?? "ROOM01";
         currentSession.memberId = "member-1";
         currentSession.memberToken = "member-token-1";
         return {
-          room: { code: "ROOM01" },
+          room: {
+            code: options.joinedRoomCode ?? "ROOM01",
+            joinToken: "join-token-1",
+          },
+          memberToken: "member-token-1",
+        };
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = options.joinedRoomCode ?? "ROOM01";
+        currentSession.memberId = "member-1";
+        currentSession.memberToken = "member-token-1";
+        return {
+          room: { code: options.joinedRoomCode ?? "ROOM01" },
           memberToken: "member-token-1",
         };
       },
@@ -1968,8 +1984,11 @@ function createSharedOwnerHandler(options: {
         throw new Error("unreachable");
       },
       async getRoomStateForSession() {
+        if (options.bootstrapFails) {
+          throw new Error("transient room state read failure");
+        }
         return {
-          roomCode: "ROOM01",
+          roomCode: options.joinedRoomCode ?? "ROOM01",
           // The bootstrap state is already resolved against the live member
           // list, which is exactly what the join path reads back.
           sharedVideo: options.bootstrapSharedByMemberId
@@ -1990,8 +2009,15 @@ function createSharedOwnerHandler(options: {
     sendError() {},
     async publishRoomEvent(message) {
       options.published.push(message.type);
+      options.publishedRooms?.push(message.roomCode);
     },
     instanceId: "node-a",
+    onRoomLeft() {
+      options.hookOrder?.push("room-left-hook");
+    },
+    onRoomJoined() {
+      options.hookOrder?.push("room-joined-hook");
+    },
   });
 }
 
@@ -2081,4 +2107,172 @@ test("somebody else joining leaves the share where it is", async () => {
   await handler.flushPendingPublishes();
 
   assert.deepEqual(published, ["room_member_joined"]);
+});
+
+test("a failed bootstrap read still asks the room for a full state", async () => {
+  // `undefined` owner and "the read blew up" used to be the same answer, so a
+  // transient store error during the returning sharer's join skipped the resync
+  // and left everybody else on the stand-in (#235 review).
+  const published: string[] = [];
+  const session = createSession("member-1");
+  const handler = createSharedOwnerHandler({ published, bootstrapFails: true });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      displayName: "Alice",
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_joined", "room_state_updated"]);
+});
+
+test("switching rooms tells the room being left", async () => {
+  // `joinRoomForSession` leaves the previous room internally and publishes
+  // nothing, so the old room heard neither that the member left nor that the
+  // share left with them (#235 review). One full state covers both.
+  const published: string[] = [];
+  const publishedRooms: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM-OLD",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    joinedRoomCode: "ROOM-NEW",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM-NEW",
+      joinToken: "join-token-1",
+      displayName: "Alice",
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_state_updated", "room_member_joined"]);
+  assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-NEW"]);
+});
+
+test("creating a room tells the room being left", async () => {
+  const published: string[] = [];
+  const publishedRooms: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM-OLD",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    joinedRoomCode: "ROOM-NEW",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:create",
+    payload: { displayName: "Alice" },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_state_updated"]);
+  assert.deepEqual(publishedRooms, ["ROOM-OLD"]);
+});
+
+test("staying in the same room publishes no switch resync", async () => {
+  const published: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+  const handler = createSharedOwnerHandler({ published });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      displayName: "Alice",
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_joined"]);
+});
+
+test("nothing is published for a leave until the room-left hook has settled", async () => {
+  // The hook clears the session out of the room index. Publishing first lets a
+  // consumer rebuild `room:state` from an index that still lists the leaver,
+  // who then reappears in the snapshot and can win the share straight back
+  // (#235 review).
+  const hookOrder: string[] = [];
+  const published: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        return {
+          room: { code: "ROOM01" },
+          memberRemoved: true,
+          needsRoomStateResync: true,
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    async publishRoomEvent(message) {
+      hookOrder.push(`publish:${message.type}`);
+      published.push(message.type);
+    },
+    instanceId: "node-a",
+    async onRoomLeft() {
+      // Stands in for the queued index write the real hook flushes.
+      await Promise.resolve();
+      hookOrder.push("hook-settled");
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(hookOrder, [
+    "hook-settled",
+    "publish:room_member_left",
+    "publish:room_state_updated",
+  ]);
 });
