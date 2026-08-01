@@ -34,7 +34,14 @@ export type RoomStore = {
     patch: PersistedRoomPatch,
   ) => Promise<RoomUpdateResult>;
   deleteRoom: (code: string) => Promise<void>;
-  deleteExpiredRooms: (now: number) => Promise<number>;
+  /**
+   * Deletes every expired room and returns their codes.
+   *
+   * Codes, not a count: the runtime store keeps per-room state that outlives a
+   * disconnect (member tokens, since #234) and nothing else collects it once the
+   * room is gone, so the caller has to be told WHICH rooms died (#237 review).
+   */
+  deleteExpiredRooms: (now: number) => Promise<string[]>;
   listRooms: (
     query: Pick<
       RoomListQuery,
@@ -164,15 +171,15 @@ export function createInMemoryRoomStore(
     async deleteRoom(code): Promise<void> {
       rooms.delete(code);
     },
-    async deleteExpiredRooms(currentTime): Promise<number> {
-      let deletedCount = 0;
+    async deleteExpiredRooms(currentTime): Promise<string[]> {
+      const deletedCodes: string[] = [];
       for (const [code, room] of rooms.entries()) {
         if (room.expiresAt !== null && room.expiresAt <= currentTime) {
           rooms.delete(code);
-          deletedCount += 1;
+          deletedCodes.push(code);
         }
       }
-      return deletedCount;
+      return deletedCodes;
     },
     async listRooms(query) {
       const items = Array.from(rooms.values())

@@ -839,6 +839,226 @@ test("room service reuses member identity when reconnecting with the same member
   assert.deepEqual(state.members, [{ id: originalMemberId, name: "Alice" }]);
 });
 
+function createIdentityService(roomStore: RoomStore, roomCode: string) {
+  return createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => roomCode,
+  });
+}
+
+const IDENTITY_TEST_VIDEO: SharedVideo = {
+  videoId: "BV1Cx3q6gELa",
+  url: "https://www.bilibili.com/video/BV1Cx3q6gELa",
+  title: "Shared Video",
+};
+
+test("a disconnect keeps the identity that owns the shared video", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const service = createIdentityService(roomStore, "ROOMID");
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  const sharerMemberId = sharer.memberId;
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    IDENTITY_TEST_VIDEO,
+  );
+
+  // A server restart closes every socket at once. That is a disconnect, not a
+  // departure: the client still holds the memberToken it persisted.
+  await service.leaveRoomForSession(sharer, "disconnect");
+
+  const reconnected = createSession("sharer-reconnect");
+  await service.joinRoomForSession(
+    reconnected,
+    created.room.code,
+    created.room.joinToken,
+    "Alice",
+    created.memberToken,
+  );
+
+  assert.equal(reconnected.memberId, sharerMemberId);
+  // The whole point: `sharedVideo.sharedByMemberId` is written once at share
+  // time and never rewritten, so if the reconnect had been issued a new
+  // memberId nobody in the room would match it and the room could no longer
+  // advance to the next video (#234).
+  const persisted = await roomStore.getRoom(created.room.code);
+  assert.equal(persisted?.sharedVideo?.sharedByMemberId, reconnected.memberId);
+});
+
+test("an explicit leave revokes the identity", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const service = createIdentityService(roomStore, "ROOMLV");
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const originalMemberId = owner.memberId;
+
+  // The member said they were done, unlike the disconnect above.
+  await service.leaveRoomForSession(owner, "client-request");
+
+  const returning = createSession("owner-returns");
+  await service.joinRoomForSession(
+    returning,
+    created.room.code,
+    created.room.joinToken,
+    "Alice",
+    created.memberToken,
+  );
+
+  assert.notEqual(returning.memberId, originalMemberId);
+});
+
+test("a disconnected member does not get a free seat past the room limit", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 2 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMCP",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  // The owner drops. Their token survives (#234) — but a token is not a seat,
+  // and the seat they vacated is immediately taken by somebody else.
+  await service.leaveRoomForSession(owner, "disconnect");
+  const late = createSession("late");
+  await service.joinRoomForSession(
+    late,
+    created.room.code,
+    created.room.joinToken,
+    "Carol",
+  );
+
+  // Room is full again. The owner coming back with a still-valid token must
+  // queue behind the limit like anyone else, not be waved through as a
+  // "reconnect" — otherwise every disconnected member is an extra seat.
+  const returning = createSession("owner-returns");
+  await assert.rejects(
+    service.joinRoomForSession(
+      returning,
+      created.room.code,
+      created.room.joinToken,
+      "Alice",
+      created.memberToken,
+    ),
+    /room is full/i,
+  );
+});
+
+test("a reconnect that still holds its seat is admitted to a full room", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 2 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMSE",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  // Control for the test above: a session replacement (the old socket has not
+  // been cleaned up yet) still occupies its seat, so the capacity check must
+  // keep exempting it or every flapping connection would be locked out.
+  const replacement = createSession("owner-replacement");
+  const rejoined = await service.joinRoomForSession(
+    replacement,
+    created.room.code,
+    created.room.joinToken,
+    "Alice",
+    created.memberToken,
+  );
+
+  assert.equal(replacement.memberId, owner.memberId);
+  assert.equal(rejoined.room.code, created.room.code);
+});
+
+test("expiring a room collects the runtime state that outlives it", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMEX",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  // Captured before leaving: the leave clears it off the session.
+  const ownerMemberId = owner.memberId;
+  await service.leaveRoomForSession(owner, "disconnect");
+
+  // Survives the disconnect, as it must.
+  assert.equal(
+    activeRooms.findMemberIdByToken(created.room.code, created.memberToken),
+    ownerMemberId,
+  );
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  assert.equal(await service.deleteExpiredRooms(), 1);
+
+  // The reaper is the only path that ever deletes a room nobody touches again.
+  // If it leaves the runtime state behind, tokens pile up for every abandoned
+  // room and a recycled room code inherits the previous room's identities.
+  assert.equal(activeRooms.getRoom(created.room.code), null);
+  assert.equal(
+    activeRooms.findMemberIdByToken(created.room.code, created.memberToken),
+    null,
+  );
+});
+
 test("room service updates member display name after join", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const service = createRoomService({
@@ -987,9 +1207,24 @@ test("room service flushes pending runtime store writes before exposing updated 
     removeMember(code, memberId, session) {
       return activeRooms.removeMember(code, memberId, session);
     },
+    revokeMemberToken(code, memberId) {
+      activeRooms.revokeMemberToken(code, memberId);
+    },
+    evictMemberToken(code, memberId, memberToken, blockedUntil) {
+      activeRooms.evictMemberToken(code, memberId, memberToken, blockedUntil);
+    },
+    hasRoomResidue(code) {
+      return activeRooms.hasRoomResidue(code);
+    },
+    getRoomGeneration(code) {
+      return activeRooms.getRoomGeneration(code);
+    },
+    markRoomGeneration(code, generation) {
+      return activeRooms.markRoomGeneration(code, generation);
+    },
     deleteRoom(code) {
-      activeRooms.deleteRoom(code);
       clusterSessionsByRoom.delete(code);
+      return activeRooms.deleteRoom(code);
     },
     async heartbeatNode() {},
     async listNodeStatuses() {
@@ -1941,6 +2176,11 @@ test("room service consults shared kick blocks when rejoining through another no
 test("room service reuses shared member identity during reconnect checks", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   let resolveMemberIdCalls = 0;
+  // The shared-view fixture below stands in for another node's runtime state.
+  // It must not exist before the room does: a code is only handed out while no
+  // runtime state remains under it, so a fixture that answers unconditionally
+  // would block the room from ever being created.
+  let sharedRoomExists = false;
   const service = createRoomService({
     config: getDefaultSecurityConfig(),
     persistence: getDefaultPersistenceConfig(),
@@ -1953,11 +2193,14 @@ test("room service reuses shared member identity during reconnect checks", async
     logEvent: (() => undefined) satisfies LogEvent,
     now: () => 1_000,
     createRoomCode: () => "ROOM11",
-    resolveActiveRoom: async () => ({
-      code: "ROOM11",
-      members: new Map(),
-      memberTokens: new Map([["shared-member", "shared-token"]]),
-    }),
+    resolveActiveRoom: async () =>
+      sharedRoomExists
+        ? {
+            code: "ROOM11",
+            members: new Map(),
+            memberTokens: new Map([["shared-member", "shared-token"]]),
+          }
+        : null,
     resolveMemberIdByToken: async (_roomCode, memberToken) => {
       resolveMemberIdCalls += 1;
       return memberToken === "shared-token" ? "shared-member" : null;
@@ -1966,6 +2209,7 @@ test("room service reuses shared member identity during reconnect checks", async
 
   const owner = createSession("owner");
   const created = await service.createRoomForSession(owner, "Alice");
+  sharedRoomExists = true;
   const reconnecting = createSession("reconnect");
   const joined = await service.joinRoomForSession(
     reconnecting,
@@ -1986,6 +2230,9 @@ test("room service enforces room capacity from shared room membership", async ()
     maxMembersPerRoom: 1,
   };
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  // Same reason as the test above: the shared-view fixture only exists once the
+  // room does, or the allocation-time residue check would refuse the code.
+  let sharedRoomExists = false;
   const service = createRoomService({
     config,
     persistence: getDefaultPersistenceConfig(),
@@ -1998,15 +2245,19 @@ test("room service enforces room capacity from shared room membership", async ()
     logEvent: (() => undefined) satisfies LogEvent,
     now: () => 1_000,
     createRoomCode: () => "ROOM12",
-    resolveActiveRoom: async () => ({
-      code: "ROOM12",
-      members: new Map([["member-a", createSession("member-a")]]),
-      memberTokens: new Map([["member-a", "token-a"]]),
-    }),
+    resolveActiveRoom: async () =>
+      sharedRoomExists
+        ? {
+            code: "ROOM12",
+            members: new Map([["member-a", createSession("member-a")]]),
+            memberTokens: new Map([["member-a", "token-a"]]),
+          }
+        : null,
   });
 
   const owner = createSession("owner");
   const created = await service.createRoomForSession(owner, "Alice");
+  sharedRoomExists = true;
   const joiner = createSession("joiner");
 
   await assert.rejects(
@@ -2757,6 +3008,14 @@ test("join admission restores shared previous session when reconnect rollback ha
       shared.removeMember(code, memberId, session);
       return removal;
     },
+    revokeMemberToken: (code, memberId) => {
+      local.revokeMemberToken(code, memberId);
+      shared.revokeMemberToken(code, memberId);
+    },
+    evictMemberToken: (code, memberId, memberToken, blockedUntil) => {
+      local.evictMemberToken(code, memberId, memberToken, blockedUntil);
+      shared.evictMemberToken(code, memberId, memberToken, blockedUntil);
+    },
     flush: async () => {
       await local.flush?.();
       await shared.flush?.();
@@ -2845,6 +3104,14 @@ test("join admission does not restore stale reconnect session over newer shared 
       const removal = local.removeMember(code, memberId, session);
       shared.removeMember(code, memberId, session);
       return removal;
+    },
+    revokeMemberToken: (code, memberId) => {
+      local.revokeMemberToken(code, memberId);
+      shared.revokeMemberToken(code, memberId);
+    },
+    evictMemberToken: (code, memberId, memberToken, blockedUntil) => {
+      local.evictMemberToken(code, memberId, memberToken, blockedUntil);
+      shared.evictMemberToken(code, memberId, memberToken, blockedUntil);
     },
     flush: async () => {
       await local.flush?.();
@@ -3631,4 +3898,647 @@ test("room service sweeps expired playback authorities when recording new ones",
 
   assert.equal(service.getPlaybackAuthority(roomB.room.code)?.kind, "play");
   assert.equal(service.getPlaybackAuthority(roomA.room.code), null);
+});
+
+test("restores the member when revoking their identity fails on leave", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      // The durable revoke now rejects when the write does not land.
+      revokeMemberToken: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMRC",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  const guestMemberId = guest.memberId;
+
+  // Surfaced as the service's generic internal error, like every other failed
+  // leave — what matters is that the recovery path ran first.
+  await assert.rejects(
+    service.leaveRoomForSession(guest, "client-request"),
+    /internal server error/i,
+  );
+
+  // The failure must not leave the client holding a session that claims to be
+  // joined while the runtime has already dropped the membership behind it —
+  // every later request would then be rejected as "not in room".
+  assert.equal(guest.roomCode, created.room.code);
+  assert.equal(guest.memberId, guestMemberId);
+  assert.equal(
+    activeRooms.getRoom(created.room.code)?.members.has(guestMemberId!),
+    true,
+  );
+});
+
+test("reaper keeps collecting rooms when one runtime teardown fails", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const failedFor: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string) => {
+        if (code === "ROOMF1") {
+          failedFor.push(code);
+          throw new Error("redis unavailable");
+        }
+        return activeRooms.deleteRoom(code);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: (() => {
+      const codes = ["ROOMF1", "ROOMF2"];
+      return () => codes.shift() ?? "ROOMFX";
+    })(),
+  });
+
+  // Room creation now wipes any runtime state left under a recycled code, which
+  // also goes through the failing stub; only the reaping phase is under test.
+  for (const name of ["Alice", "Bob"]) {
+    const owner = createSession(`owner-${name}`);
+    const created = await service.createRoomForSession(owner, name);
+    await service.leaveRoomForSession(owner, "disconnect");
+    assert.ok(created.room.code);
+  }
+
+  failedFor.length = 0;
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  // Both rooms are collected even though the first teardown throws — one
+  // failure must not strand every room queued behind it.
+  assert.equal(await service.deleteExpiredRooms(), 2);
+  assert.deepEqual(failedFor, ["ROOMF1"]);
+  assert.equal(activeRooms.getRoom("ROOMF2"), null);
+});
+
+test("retries a failed runtime teardown on the next reaper pass", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let failTeardown = true;
+  const teardowns: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string) => {
+        if (failTeardown) {
+          throw new Error("redis unavailable");
+        }
+        teardowns.push(code);
+        return activeRooms.deleteRoom(code);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMRT",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const ownerMemberId = owner.memberId;
+  await service.leaveRoomForSession(owner, "disconnect");
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  assert.equal(await service.deleteExpiredRooms(), 1);
+  // The persisted room and its expiry index are already gone, so nothing else
+  // will ever name this code again — a swallowed failure strands it for good.
+  assert.equal(
+    activeRooms.findMemberIdByToken(created.room.code, created.memberToken),
+    ownerMemberId,
+  );
+
+  failTeardown = false;
+  teardowns.length = 0;
+  // A later pass finds nothing newly expired, but must still work through what
+  // it owes.
+  assert.equal(await service.deleteExpiredRooms(), 0);
+  assert.deepEqual(teardowns, ["ROOMRT"]);
+  assert.equal(activeRooms.getRoom("ROOMRT"), null);
+});
+
+test("does not hand out a room code that still has runtime state under it", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let failTeardown = true;
+  // Offers ROOMA1 again for the second room's FIRST attempt. A sequential list
+  // would hand out ROOMA2 either way, so the test could not tell whether the
+  // residue check ran at all.
+  const offeredCodes: string[] = [];
+  const codeSequence = ["ROOMA1", "ROOMA1", "ROOMA2"];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string) => {
+        if (failTeardown) {
+          throw new Error("redis unavailable");
+        }
+        return activeRooms.deleteRoom(code);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => {
+      const code = codeSequence.shift() ?? "ROOMAX";
+      offeredCodes.push(code);
+      return code;
+    },
+    resolveActiveRoom: async (code) => activeRooms.getRoom(code),
+  });
+
+  const first = createSession("first-owner");
+  const created = await service.createRoomForSession(first, "Alice");
+  assert.equal(created.room.code, "ROOMA1");
+  await service.leaveRoomForSession(first, "disconnect");
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  // The teardown fails, so ROOMA1 still carries the previous occupant's tokens.
+  await service.deleteExpiredRooms();
+  assert.equal(await roomStore.getRoom("ROOMA1"), null);
+  assert.ok(activeRooms.getRoom("ROOMA1"));
+
+  // A code is only safe to hand out once nothing is left under it. Reusing
+  // ROOMA1 here would let the previous occupant's token resolve to their old
+  // memberId inside the new room; enforcing it at allocation is what removes
+  // the need for a clean-slate wipe and a recycled-code guard downstream.
+  failTeardown = false;
+  const second = createSession("second-owner");
+  const recreated = await service.createRoomForSession(second, "Bob");
+  assert.equal(recreated.room.code, "ROOMA2");
+  // ROOMA1 was offered again and had to be refused before ROOMA2 was tried.
+  assert.deepEqual(offeredCodes, ["ROOMA1", "ROOMA1", "ROOMA2"]);
+  assert.equal(
+    activeRooms.findMemberIdByToken("ROOMA2", created.memberToken),
+    null,
+  );
+});
+
+test("keeps an owed teardown when the room store cannot be read", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let failTeardown = true;
+  let failRoomRead = false;
+  const teardowns: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      getRoom: async (code: string) => {
+        if (failRoomRead) {
+          throw new Error("redis unavailable");
+        }
+        return roomStore.getRoom(code);
+      },
+    },
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string) => {
+        if (failTeardown) {
+          throw new Error("redis unavailable");
+        }
+        teardowns.push(code);
+        return activeRooms.deleteRoom(code);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMRD",
+    resolveActiveRoom: async (code) => activeRooms.getRoom(code),
+  });
+
+  const owner = createSession("owner");
+  await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner, "disconnect");
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  await service.deleteExpiredRooms();
+
+  // The room store is unreadable on the retry pass. "Unknown" is not "absent":
+  // treating it as absent made the guard fail in exactly the conditions that
+  // queue teardowns in the first place, and it would then wipe whatever now
+  // owns the code.
+  failRoomRead = true;
+  failTeardown = false;
+  await service.deleteExpiredRooms();
+  assert.deepEqual(teardowns, []);
+  assert.ok(activeRooms.getRoom("ROOMRD"));
+
+  // Once it can be read again the debt is settled.
+  failRoomRead = false;
+  await service.deleteExpiredRooms();
+  assert.deepEqual(teardowns, ["ROOMRD"]);
+});
+
+test("an owed teardown does not wipe a room that took the code in the meantime", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  // Short identity retention so the residue can expire on its own, which is
+  // what frees the code — and, unlike a teardown, leaves the generation behind.
+  const runtime = createInMemoryRuntimeStore(() => currentTime, 5_000);
+  let releaseTeardown!: () => void;
+  const teardownGate = new Promise<void>((resolve) => {
+    releaseTeardown = resolve;
+  });
+  let gateTeardown = false;
+
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+        if (gateTeardown) {
+          await teardownGate;
+        }
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMGR",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  const first = createSession("first-owner");
+  await service.createRoomForSession(first, "Alice");
+  await service.leaveRoomForSession(first, "disconnect");
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  // The reaper clears the room-store guard and then stalls inside the delete —
+  // the exact gap the two check-then-act guards cannot cover.
+  gateTeardown = true;
+  const reaping = service.deleteExpiredRooms();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // The previous occupant's identity retention runs out, which frees the code.
+  currentTime += 5_001;
+  const second = createSession("second-owner");
+  const recreated = await service.createRoomForSession(second, "Bob");
+  assert.equal(recreated.room.code, "ROOMGR");
+
+  releaseTeardown();
+  await reaping;
+
+  // The stale teardown was decided against the previous room instance, so the
+  // delete itself has to refuse. No arrangement of the guards around it helps:
+  // both had already passed before this room existed.
+  assert.equal(
+    runtime.findMemberIdByToken("ROOMGR", recreated.memberToken),
+    second.memberId,
+  );
+});
+
+test("pins the teardown generation before checking whether the room is gone", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime, 5_000);
+  let releaseRoomRead!: () => void;
+  const roomReadGate = new Promise<void>((resolve) => {
+    releaseRoomRead = resolve;
+  });
+  let gateRoomRead = false;
+
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      // Stall the absence check itself. Reading the generation after this point
+      // hands the teardown the NEW room's value, which then matches.
+      getRoom: async (code: string) => {
+        const room = await roomStore.getRoom(code);
+        if (gateRoomRead) {
+          await roomReadGate;
+        }
+        return room;
+      },
+    },
+    activeRooms: runtime,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMPN",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  const first = createSession("first-owner");
+  await service.createRoomForSession(first, "Alice");
+  await service.leaveRoomForSession(first, "disconnect");
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  gateRoomRead = true;
+  const reaping = service.deleteExpiredRooms();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // The previous occupant's identity expires, freeing the code, and a new room
+  // claims it — all while the absence check is still in flight.
+  currentTime += 5_001;
+  gateRoomRead = false;
+  const second = createSession("second-owner");
+  const recreated = await service.createRoomForSession(second, "Bob");
+  assert.equal(recreated.room.code, "ROOMPN");
+
+  releaseRoomRead();
+  await reaping;
+
+  assert.equal(
+    runtime.findMemberIdByToken("ROOMPN", recreated.memberToken),
+    second.memberId,
+  );
+});
+
+test("rolls the room back when its generation cannot be stamped", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      markRoomGeneration: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMRB",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  await assert.rejects(
+    service.createRoomForSession(createSession("owner"), "Alice"),
+    /internal server error/i,
+  );
+
+  // Left behind, the room would have no members and no `expiresAt`, so the
+  // reaper never collects it: the code is held and the room counted forever.
+  // Expired rather than deleted, so the rollback can be conditional on the
+  // version we created — see the recycling test below.
+  assert.equal((await roomStore.getRoom("ROOMRB"))?.expiresAt, 1_000);
+  assert.equal(await roomStore.countRooms({ includeExpired: false }), 0);
+});
+
+test("a failed generation stamp does not roll back a room that recycled the code", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      markRoomGeneration: async () => {
+        // Concurrently: our memberless room is expired and reaped, and another
+        // request takes the freed code. Only then does our stamp fail.
+        await roomStore.deleteRoom("ROOMRC");
+        await roomStore.saveRoom({
+          code: "ROOMRC",
+          joinToken: "replacement-token",
+          ownerMemberId: "other-owner",
+          ownerDisplayName: "Bob",
+          createdAt: 2_000,
+          lastActiveAt: 2_000,
+          expiresAt: null,
+          version: 1,
+          sharedVideo: null,
+          playback: null,
+        });
+        await roomStore.updateRoom("ROOMRC", 1, { lastActiveAt: 2_500 });
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMRC",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  await assert.rejects(
+    service.createRoomForSession(createSession("owner"), "Alice"),
+    /internal server error/i,
+  );
+
+  // Rolling back by code deleted the replacement out from under an owner who
+  // had already been told their creation succeeded.
+  const replacement = await roomStore.getRoom("ROOMRC");
+  assert.equal(replacement?.joinToken, "replacement-token");
+  assert.equal(replacement?.expiresAt, null);
+});
+
+test("an admin teardown works through the retry backlog", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  let failTeardown = true;
+  const teardowns: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+        if (failTeardown) {
+          throw new Error("redis unavailable");
+        }
+        teardowns.push(code);
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: (() => {
+      const codes = ["ROOMB1", "ROOMB2"];
+      return () => codes.shift() ?? "ROOMBX";
+    })(),
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  const first = createSession("first-owner");
+  const owed = await service.createRoomForSession(first, "Alice");
+  await roomStore.deleteRoom(owed.room.code);
+  // An admin close whose teardown failed: the debt is queued.
+  await service.teardownRoomRuntime(owed.room.code);
+  assert.deepEqual(teardowns, []);
+
+  const second = createSession("second-owner");
+  const other = await service.createRoomForSession(second, "Bob");
+  await roomStore.deleteRoom(other.room.code);
+
+  // The standalone global-admin process never runs the reaper, so
+  // `deleteExpiredRooms` is not what drains this — every teardown has to.
+  failTeardown = false;
+  await service.teardownRoomRuntime(other.room.code);
+  assert.deepEqual(teardowns.sort(), ["ROOMB1", "ROOMB2"]);
+});
+
+test("does not hand out a code whose only leftover is a session index entry", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  const offeredCodes: string[] = [];
+  const codeSequence = ["ROOMSI", "ROOMSI", "ROOMS2"];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: runtime,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => {
+      const code = codeSequence.shift() ?? "ROOMSX";
+      offeredCodes.push(code);
+      return code;
+    },
+  });
+
+  // No members and no member tokens, so the members/tokens view reads as empty —
+  // but a stale session index entry is exactly the kind of leftover a new room
+  // would inherit as a ghost member.
+  const ghost = createSession("ghost-session");
+  runtime.registerSession(ghost);
+  runtime.markSessionJoinedRoom(ghost.id, "ROOMSI");
+  assert.equal(runtime.getRoom("ROOMSI"), null);
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  assert.equal(created.room.code, "ROOMS2");
+  assert.deepEqual(offeredCodes, ["ROOMSI", "ROOMSI", "ROOMS2"]);
+});
+
+test("leave does not schedule expiry when the shared room still has members", async () => {
+  const local = createInMemoryRuntimeStore();
+  const shared = createInMemoryRuntimeStore();
+  const runtimeStore: RuntimeStore = {
+    ...local,
+    addMember: (code, memberId, session, memberToken) => {
+      const room = local.addMember(code, memberId, session, memberToken);
+      shared.addMember(code, memberId, session, memberToken);
+      return room;
+    },
+    removeMember: (code, memberId, session) => {
+      const removal = local.removeMember(code, memberId, session);
+      shared.removeMember(code, memberId, session);
+      return removal;
+    },
+  };
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    runtimeStore,
+    resolveActiveRoom: async (code) => shared.getRoom(code),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMSE",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  // The same member reconnected onto another node: the shared binding is that
+  // node's session, while this node still holds the stale one it is about to
+  // clean up. Only this node's local view goes empty.
+  const reconnected = createSession("owner-elsewhere");
+  reconnected.roomCode = created.room.code;
+  reconnected.memberId = owner.memberId;
+  reconnected.memberToken = owner.memberToken;
+  shared.addMember(
+    created.room.code,
+    owner.memberId ?? "",
+    reconnected,
+    owner.memberToken ?? "",
+  );
+
+  const result = await service.leaveRoomForSession(owner, "disconnect");
+
+  assert.equal(local.getRoom(created.room.code)?.members.size, 0);
+  assert.equal(shared.getRoom(created.room.code)?.members.size, 1);
+  // Trusting this node's local emptiness wrote an `expiresAt` over the one the
+  // reconnect had just cleared, so the reaper deleted a room with members in it.
+  assert.equal(result.room?.expiresAt, null);
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt ?? null,
+    null,
+  );
 });

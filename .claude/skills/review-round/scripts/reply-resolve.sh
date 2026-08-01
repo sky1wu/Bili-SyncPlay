@@ -11,6 +11,15 @@ THREAD_ID=${1:?用法: reply-resolve.sh <线程id> <回复正文> <已见评论�
 BODY=${2:?缺少回复正文}
 SEEN=${3:?缺少「第 1 步看到的评论数」——用于检测扫描后是否有新评论}
 
+# 非整数会让下面的 `[ "$TOTAL" -ne "$SEEN" ]` 以「integer expression expected」失败，
+# 而失败的 test 只是让 if 不成立——新评论保护就此被静默跳过，线程照样被 resolve。
+# 实测触发方式：回复正文里含 ASCII 双引号，参数被提前截断、发生词拆分，$3 变成正文
+# 里的某个片段。多余的参数同样是这种截断的信号。
+[ "$#" -le 3 ] || die "参数多于 3 个（第 4 个是 '$4'）——回复正文很可能没有被完整引起来"
+case $SEEN in
+  '' | *[!0-9]*) die "「已见评论数」必须是整数，实际收到：'$SEEN'（回复正文里的引号可能截断了参数）" ;;
+esac
+
 ME=$(gh api user --jq .login) || die "无法确定当前登录用户"
 
 read_thread() {
@@ -39,6 +48,10 @@ read -r TOTAL RESOLVED MINE <<<"$(printf '%s' "$RESP" | BODY="$BODY" ME="$ME" no
     process.stdout.write(`${n.comments.totalCount} ${n.isResolved} ${mine}`);
   });
 ')"
+
+case $TOTAL in
+  '' | *[!0-9]*) die "无法读出线程评论数（收到：'$TOTAL'）" ;;
+esac
 
 if [ "$RESOLVED" = "true" ]; then
   echo "线程 ${THREAD_ID:0:20} 已是 resolved，跳过"

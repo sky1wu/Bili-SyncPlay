@@ -18,7 +18,7 @@ import {
   MIN_PROTOCOL_VERSION,
   CURRENT_PROTOCOL_VERSION,
 } from "./messages.js";
-import { RoomServiceError } from "./room-service.js";
+import { RoomServiceError, type LeaveRoomReason } from "./room-service.js";
 import { withPlaybackAge } from "./room-state-age.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
 import { hasAttachedSocket } from "./types.js";
@@ -57,7 +57,10 @@ export function createMessageHandler(options: {
       displayName?: string,
       previousMemberToken?: string,
     ) => Promise<{ room: { code: string }; memberToken: string }>;
-    leaveRoomForSession: (session: Session) => Promise<{
+    leaveRoomForSession: (
+      session: Session,
+      reason?: LeaveRoomReason,
+    ) => Promise<{
       room: { code: string } | null;
       notifyRoom?: boolean;
       memberRemoved?: boolean;
@@ -121,7 +124,12 @@ export function createMessageHandler(options: {
     session: Session,
     message: ClientMessage,
   ) => Promise<void>;
-  leaveRoom: (session: Session) => Promise<void>;
+  /**
+   * `reason` decides whether the member keeps their identity. A socket close
+   * must pass `"disconnect"`: the client still holds its `memberToken` and
+   * will present it on the next join to reclaim the same `memberId` (#234).
+   */
+  leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<void>;
   flushPendingPublishes: () => Promise<void>;
 } {
   const { config, roomService, logEvent, send, sendError } = options;
@@ -356,12 +364,15 @@ export function createMessageHandler(options: {
     }
   }
 
-  async function leaveRoom(session: Session): Promise<void> {
+  async function leaveRoom(
+    session: Session,
+    reason: LeaveRoomReason = "client-request",
+  ): Promise<void> {
     const roomCode = session.roomCode;
     const memberId = session.memberId ?? session.id;
     const displayName = session.displayName;
     const { room, notifyRoom, memberRemoved } =
-      await roomService.leaveRoomForSession(session);
+      await roomService.leaveRoomForSession(session, reason);
     if (!roomCode || (!room && !notifyRoom)) {
       return;
     }

@@ -74,6 +74,12 @@ export class RoomServiceError extends Error {
 export type RoomServiceRuntimeStore = ActiveRoomRegistry &
   Partial<Pick<RuntimeStore, "registerSession" | "flush">>;
 
+/**
+ * Why a session is leaving a room. Identity (`memberToken`) survives a
+ * `"disconnect"` and is revoked on a `"client-request"`; see `leaveCurrentRoom`.
+ */
+export type LeaveRoomReason = "client-request" | "disconnect";
+
 type JoinedRoomAccess = {
   session: Session;
   persistedRoom: PersistedRoom;
@@ -83,6 +89,17 @@ type JoinedRoomAccess = {
 type JoinTargetState = {
   activeRoom: ActiveRoom | null;
   reconnectMemberId: string | null;
+  /**
+   * Whether `reconnectMemberId` is still occupying a seat, i.e. this join
+   * replaces a live session rather than adding a member.
+   *
+   * Not the same thing as `reconnectMemberId !== null` any more. Member tokens
+   * now outlive a disconnect (#234), so a member who dropped hours ago still
+   * resolves one — and treating that as a seat-holder let them rejoin past
+   * `maxMembersPerRoom` once someone else had taken the last seat, once per
+   * disconnected member (#237 review).
+   */
+  reconnectHoldsSeat: boolean;
   activeMemberCount: number;
 };
 
@@ -132,6 +149,7 @@ export function createRoomService(options: {
     memberToken: string,
     currentTime: number,
   ) => Promise<boolean>;
+  resolveRoomResidue?: (roomCode: string) => Promise<boolean>;
 }): {
   createRoomForSession: (
     session: Session,
@@ -144,7 +162,10 @@ export function createRoomService(options: {
     displayName?: string,
     previousMemberToken?: string,
   ) => Promise<{ room: PersistedRoom; memberToken: string }>;
-  leaveRoomForSession: (session: Session) => Promise<{
+  leaveRoomForSession: (
+    session: Session,
+    reason?: LeaveRoomReason,
+  ) => Promise<{
     room: PersistedRoom | null;
     notifyRoom?: boolean;
     memberRemoved?: boolean;
@@ -176,6 +197,7 @@ export function createRoomService(options: {
     roomCode: string,
   ) => Promise<ReturnType<typeof roomStateOf> | null>;
   deleteExpiredRooms: (currentTime?: number) => Promise<number>;
+  teardownRoomRuntime: (code: string) => Promise<void>;
 } {
   const { config, persistence, roomStore, generateToken, logEvent } = options;
   const runtimeStoreOption = options.runtimeStore ?? options.activeRooms;
@@ -194,6 +216,10 @@ export function createRoomService(options: {
     options.resolveMemberIdByToken ??
     ((roomCode: string, memberToken: string) =>
       Promise.resolve(runtimeStore.findMemberIdByToken(roomCode, memberToken)));
+  const resolveRoomResidue =
+    options.resolveRoomResidue ??
+    ((roomCode: string) =>
+      Promise.resolve(runtimeStore.hasRoomResidue(roomCode)));
   const resolveBlockedMemberToken =
     options.resolveBlockedMemberToken ??
     ((roomCode: string, memberToken: string, currentTime: number) =>
@@ -395,6 +421,72 @@ export function createRoomService(options: {
     });
   }
 
+  /**
+   * Room codes whose runtime teardown failed, retried on every later reaper
+   * pass. Kept because a failed teardown is otherwise unrecoverable: the
+   * persisted room and its expiry index are already gone, so nothing else will
+   * ever produce this code again (#237 review).
+   */
+  const pendingRuntimeTeardowns = new Set<string>();
+
+  async function collectRuntimeStateForDeletedRooms(
+    codes: Iterable<string>,
+  ): Promise<void> {
+    for (const code of new Set(codes)) {
+      // Defence in depth behind the allocation-time check: a teardown queued
+      // for retry could otherwise fire after its code came back into use — the
+      // residue it was queued for may have expired on its own in the meantime,
+      // which frees the code for allocation.
+      //
+      // A read failure is "unknown", NOT "absent". Treating it as absent made
+      // this guard fail in exactly the conditions that queue teardowns in the
+      // first place, and it would then wipe the new room's members and tokens
+      // (#237 review). Keep the debt and try again later.
+      // Pinned BEFORE anything is checked, so it names the room instance this
+      // teardown is about. Reading it after the absence check below left a
+      // second window: a code recycled between the two reads handed us the NEW
+      // room's generation, which then matched and wiped it (#237 review).
+      let expectedGeneration: string | null;
+      try {
+        expectedGeneration = await runtimeStore.getRoomGeneration(code);
+      } catch {
+        pendingRuntimeTeardowns.add(code);
+        continue;
+      }
+
+      let currentRoom: PersistedRoom | null;
+      try {
+        currentRoom = await roomStore.getRoom(code);
+      } catch {
+        // A read failure is "unknown", NOT "absent". Treating it as absent made
+        // this guard fail in exactly the conditions that queue teardowns in the
+        // first place. Keep the debt and try again later.
+        pendingRuntimeTeardowns.add(code);
+        continue;
+      }
+      if (currentRoom) {
+        pendingRuntimeTeardowns.delete(code);
+        continue;
+      }
+      try {
+        // The delete only applies while that generation still holds. Both
+        // guards around it are check-then-act; no arrangement of them makes the
+        // delete itself conditional, which is what actually closes the race.
+        await runtimeStore.deleteRoom(code, expectedGeneration);
+        pendingRuntimeTeardowns.delete(code);
+      } catch (error) {
+        pendingRuntimeTeardowns.add(code);
+        logEvent("room_runtime_cleanup_failed", {
+          roomCode: code,
+          provider: persistence.provider,
+          result: "error",
+          pendingRetryCount: pendingRuntimeTeardowns.size,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   async function resolveRoom(code: string): Promise<PersistedRoom | null> {
     const room = await roomStore.getRoom(code);
     if (!room) {
@@ -402,7 +494,9 @@ export function createRoomService(options: {
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
       await roomStore.deleteRoom(code);
-      runtimeStore.deleteRoom(code);
+      // Same helper as the reaper: it refuses to tear down a code that has
+      // already been recycled, and queues a failed teardown for retry.
+      await collectRuntimeStateForDeletedRooms([code]);
       return null;
     }
     return room;
@@ -632,6 +726,9 @@ export function createRoomService(options: {
     return {
       activeRoom,
       reconnectMemberId,
+      reconnectHoldsSeat:
+        reconnectMemberId !== null &&
+        (activeRoom?.members.has(reconnectMemberId) ?? false),
       activeMemberCount: activeRoom?.members.size ?? 0,
     };
   }
@@ -696,7 +793,7 @@ export function createRoomService(options: {
     );
     if (
       joinTargetState.activeMemberCount >= config.maxMembersPerRoom &&
-      joinTargetState.reconnectMemberId === null
+      !joinTargetState.reconnectHoldsSeat
     ) {
       throw new RoomServiceError("room_full", ROOM_FULL_MESSAGE, "room_full");
     }
@@ -719,8 +816,9 @@ export function createRoomService(options: {
         joinToken: args.joinToken,
         previousMemberToken: args.previousMemberToken,
       });
-      const needsCapacitySerialization =
-        joinTargetState.reconnectMemberId === null;
+      // A reconnect that no longer holds a seat consumes one like any other
+      // join, so it has to serialize on the admission lock too.
+      const needsCapacitySerialization = !joinTargetState.reconnectHoldsSeat;
 
       if (
         room.expiresAt === null &&
@@ -801,7 +899,22 @@ export function createRoomService(options: {
     return readyState === OPEN;
   }
 
-  async function leaveCurrentRoom(session: Session): Promise<{
+  /**
+   * `reason` decides whether the member's identity survives.
+   *
+   * - `"client-request"` — an explicit `room:leave`. The member is done with the
+   *   room, so their `memberToken` is revoked and a later join is issued a fresh
+   *   `memberId`.
+   * - `"disconnect"` — the socket closed. The client still holds its token and
+   *   is expected to come back with it, so identity is KEPT. Revoking here is
+   *   what broke #234: every server restart closes every socket at once, so
+   *   every member returned with a new `memberId` and
+   *   `sharedVideo.sharedByMemberId` matched nobody.
+   */
+  async function leaveCurrentRoom(
+    session: Session,
+    reason: LeaveRoomReason = "client-request",
+  ): Promise<{
     room: PersistedRoom | null;
     notifyRoom?: boolean;
     memberRemoved?: boolean;
@@ -821,16 +934,50 @@ export function createRoomService(options: {
           roomEmpty: false,
           removed: false,
         };
-    await runtimeStore.flush?.();
-    clearSessionRoom(session);
+    // The session is passed so the STORE decides whether this leave still owns
+    // the identity, against the shared member binding. Gating on `removal.removed`
+    // instead only worked within one node: the mirrored store returns the local
+    // removal, so after a member reconnected onto another node the old node still
+    // considered its stale session the current member and would revoke the token
+    // the new node was using (#237 review).
+
+    // Recomputed from the shared view inside the try; the catch reads it too.
+    let roomEmpty = removal.roomEmpty;
 
     try {
+      // Inside the try: revoking is a durable write that now rejects when it
+      // fails, and outside the recovery path a failure left the member removed
+      // from the runtime while `clearSessionRoom` had not run — the client got
+      // an internal error still believing it was joined, with no runtime
+      // membership behind it (#237 review). `restoreLeaveState` in the catch
+      // re-adds the member with the snapshot token, undoing both.
+      if (reason === "client-request" && session.memberId) {
+        await runtimeStore.revokeMemberToken(
+          roomCode,
+          session.memberId,
+          session,
+        );
+      }
+      await runtimeStore.flush?.();
+      clearSessionRoom(session);
+
       const persistedRoom = await resolveRoom(roomCode);
       if (!persistedRoom) {
         return { room: null };
       }
 
-      if (!removal.roomEmpty) {
+      // Emptiness has to come from the SHARED member state. `removal.roomEmpty`
+      // is this node's local view: when an old node's socket cleanup interleaves
+      // with the same member reconnecting elsewhere, the old node removes its
+      // only local member and calls the room empty — then writes an `expiresAt`
+      // over the one the new node's join had just cleared, and the reaper
+      // eventually deletes a room that still has members (#237 review).
+      const sharedRoom = await resolveActiveRoom(roomCode).catch(() => null);
+      roomEmpty = sharedRoom
+        ? sharedRoom.members.size === 0
+        : removal.roomEmpty;
+
+      if (!roomEmpty) {
         logEvent("room_left", {
           sessionId: session.id,
           roomCode,
@@ -903,7 +1050,7 @@ export function createRoomService(options: {
             origin: session.origin,
             reason: "socket_detached",
           });
-          if (removal.roomEmpty) {
+          if (roomEmpty) {
             // Emptying-leave plus failed expiry write may leave the persisted
             // room without `expiresAt`, so the reaper won't collect it. We
             // can NOT force-delete here: the expiry write could have failed
@@ -985,6 +1132,23 @@ export function createRoomService(options: {
   }
 
   return {
+    /**
+     * Tear down a deleted room's runtime state, guarded and retried.
+     *
+     * Exposed so the admin paths use the same one entry point: they delete the
+     * persisted room irrecoverably first, so a teardown that fails there has no
+     * way back — the room code would never reach the reaper again (#237 review).
+     */
+    async teardownRoomRuntime(code: string) {
+      // The backlog rides along. `deleteExpiredRooms` is the only other thing
+      // that drains it, and the standalone global-admin process never runs the
+      // reaper — an admin close/expire whose teardown failed there would have
+      // queued a retry nothing ever performed (#237 review).
+      await collectRuntimeStateForDeletedRooms([
+        ...pendingRuntimeTeardowns,
+        code,
+      ]);
+    },
     async createRoomForSession(session, displayName) {
       setSessionDisplayName(session, displayName);
       await leaveCurrentRoom(session);
@@ -993,6 +1157,24 @@ export function createRoomService(options: {
       let room: PersistedRoom | null = null;
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const roomCode = nextRoomCode();
+        // Room codes are recycled, so a code is only safe to hand out once no
+        // runtime state remains under it. Enforcing that HERE — at the one point
+        // where a code becomes live — is what makes the rest of the lifecycle
+        // simple: a teardown can never collide with a new room, and a new room
+        // can never inherit the previous occupant's identities, so neither needs
+        // its own guard (#237 review).
+        //
+        // Every runtime key, not just the members/tokens view `getRoom` gives:
+        // a code carrying only leftover session index entries, blocked tokens,
+        // dedup slots or a generation would otherwise read as free and take the
+        // old room's ghosts into the new one (#237 review).
+        //
+        // An unreadable runtime store means "unknown", never "empty": try
+        // another code rather than risk handing out a dirty one.
+        const dirty = await resolveRoomResidue(roomCode).catch(() => true);
+        if (dirty) {
+          continue;
+        }
         try {
           room = await roomStore.createRoom({
             code: roomCode,
@@ -1011,6 +1193,44 @@ export function createRoomService(options: {
           sessionId: session.id,
           result: "error",
           reason: "room_create_conflict",
+        });
+        throw new RoomServiceError(
+          "internal_error",
+          INTERNAL_SERVER_ERROR_MESSAGE,
+          "internal_error",
+        );
+      }
+
+      // A fresh generation marks the start of this room instance. Any teardown
+      // still owed for the code's previous occupant was decided against the old
+      // one and will now decline.
+      //
+      // On failure the persisted room has to go with it: it would otherwise sit
+      // there with no members and no `expiresAt`, which the reaper never
+      // collects, holding its code and counting towards room totals forever
+      // (#237 review).
+      try {
+        await runtimeStore.markRoomGeneration(room.code, randomUUID());
+      } catch (error) {
+        // CAS on the version we just created, not a delete by code. Between the
+        // failure and this line an admin can expire the (still memberless) room
+        // and another request can take the code — deleting by code would then
+        // remove the replacement out from under its owner, who had already been
+        // told the creation succeeded (#237 review).
+        //
+        // Expiring rather than deleting: `updateRoom` is the only conditional
+        // primitive the store has, and a room marked expired is collected by the
+        // reaper and can never be mistaken for a live one.
+        await roomStore
+          .updateRoom(room.code, room.version, { expiresAt: now() })
+          .catch(() => undefined);
+        logEvent("room_persist_failed", {
+          sessionId: session.id,
+          roomCode: room.code,
+          provider: persistence.provider,
+          result: "error",
+          reason: "room_generation_mark_failed",
+          error: error instanceof Error ? error.message : String(error),
         });
         throw new RoomServiceError(
           "internal_error",
@@ -1104,6 +1324,12 @@ export function createRoomService(options: {
             joinIdentity.memberId,
             session,
           );
+          // Deliberately no `revokeMemberToken` here. `removeMember` already
+          // declines when a newer session owns this memberId, but a bare revoke
+          // has no such guard and would delete that live session's binding. The
+          // leftover binding is harmless either way: the client whose join failed
+          // reclaims the same memberId when it retries with the same token, which
+          // is what we want.
           await runtimeStore.flush?.();
 
           const currentRuntimeSession =
@@ -1556,7 +1782,17 @@ export function createRoomService(options: {
     },
 
     async deleteExpiredRooms(currentTime = now()) {
-      return await roomStore.deleteExpiredRooms(currentTime);
+      const deletedCodes = await roomStore.deleteExpiredRooms(currentTime);
+      // Retries first, then this pass's own codes. The reaper is the only path
+      // that deletes a room nobody touches again, so it is also the only chance
+      // to collect the runtime state that outlives it — member tokens survive a
+      // disconnect on purpose (#234) — and once the persisted room is gone
+      // nothing will ever name that code again (#237 review).
+      await collectRuntimeStateForDeletedRooms([
+        ...pendingRuntimeTeardowns,
+        ...deletedCodes,
+      ]);
+      return deletedCodes.length;
     },
   };
 }

@@ -161,6 +161,8 @@ export async function createSyncServer(
       Promise.resolve(
         sharedRuntimeStore.findMemberIdByToken(roomCode, memberToken),
       ),
+    resolveRoomResidue: (roomCode) =>
+      Promise.resolve(sharedRuntimeStore.hasRoomResidue(roomCode)),
     resolveBlockedMemberToken: (roomCode, memberToken, currentTime) =>
       Promise.resolve(
         sharedRuntimeStore.isMemberTokenBlocked(
@@ -216,8 +218,13 @@ export async function createSyncServer(
     getLocalSession: (sessionId) => localRuntimeStore.getSession(sessionId),
     listLocalSessionsByRoom: (roomCode) =>
       localRuntimeStore.listSessionsByRoom(roomCode),
-    blockMemberToken: (roomCode, memberToken, expiresAt) =>
-      runtimeStore.blockMemberToken(roomCode, memberToken, expiresAt),
+    evictMemberToken: (roomCode, memberId, memberToken, blockedUntil) =>
+      runtimeStore.evictMemberToken(
+        roomCode,
+        memberId,
+        memberToken,
+        blockedUntil,
+      ),
     disconnectSessionSocket: (session, reason) => {
       if (!hasAttachedSocket(session)) {
         return;

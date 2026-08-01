@@ -112,7 +112,15 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
 
     assert.equal(remainingSessions, 0);
     assert.equal(remainingRooms, 0);
-    assert.equal(await runtimeStore.getRoom("ROOM01"), null);
+    // The offline node's members are gone, but their identity is not: those
+    // clients are alive and reconnecting to a surviving node, and they must
+    // come back as the same members (#234). The token is what lets them.
+    const reapedRoom = await runtimeStore.getRoom("ROOM01");
+    assert.equal(reapedRoom?.members.size ?? 0, 0);
+    assert.equal(
+      await runtimeStore.findMemberIdByToken("ROOM01", "token-offline"),
+      "member-offline",
+    );
 
     let remainingStatuses: Awaited<
       ReturnType<typeof runtimeStore.listNodeStatuses>

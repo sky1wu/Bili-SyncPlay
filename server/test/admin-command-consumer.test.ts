@@ -53,7 +53,7 @@ test("admin command consumer disconnects a local session", async () => {
     listLocalSessionsByRoom() {
       return [];
     },
-    blockMemberToken() {},
+    evictMemberToken() {},
     disconnectSessionSocket(_session, reason) {
       disconnectedReason = reason;
     },
@@ -79,6 +79,7 @@ test("admin command consumer disconnects a local session", async () => {
 test("admin command consumer blocks token and disconnects a kicked member", async () => {
   const bus = createInMemoryAdminCommandBus(() => 3_000);
   const session = createSession("session-b", "ROOM02", "member-b");
+  const revoked: Array<{ roomCode: string; memberId: string }> = [];
   const blocked: Array<{ roomCode: string; token: string; expiresAt: number }> =
     [];
 
@@ -91,8 +92,9 @@ test("admin command consumer blocks token and disconnects a kicked member", asyn
     listLocalSessionsByRoom(roomCode) {
       return roomCode === "ROOM02" ? [session] : [];
     },
-    blockMemberToken(roomCode, token, expiresAt) {
-      blocked.push({ roomCode, token, expiresAt });
+    evictMemberToken(roomCode, memberId, token, blockedUntil) {
+      blocked.push({ roomCode, token, expiresAt: blockedUntil });
+      revoked.push({ roomCode, memberId });
     },
     disconnectSessionSocket() {},
     now: () => 3_000,
@@ -116,6 +118,10 @@ test("admin command consumer blocks token and disconnects a kicked member", asyn
         expiresAt: 63_000,
       },
     ]);
+    // The block only holds them out for its TTL. Since #234 the disconnect below
+    // no longer revokes identity, so the kick has to do it explicitly — without
+    // this the member would come back as themselves once the block lapsed.
+    assert.deepEqual(revoked, [{ roomCode: "ROOM02", memberId: "member-b" }]);
   } finally {
     await consumer.close();
   }
@@ -135,7 +141,7 @@ test("admin command consumer does not disconnect a member when token blocking fa
     listLocalSessionsByRoom(roomCode) {
       return roomCode === "ROOM03" ? [session] : [];
     },
-    blockMemberToken() {
+    evictMemberToken() {
       throw new Error("block failed");
     },
     disconnectSessionSocket() {
@@ -176,7 +182,7 @@ test("admin command consumer keeps a kick block when disconnect fails", async ()
     listLocalSessionsByRoom(roomCode) {
       return roomCode === "ROOM04" ? [session] : [];
     },
-    blockMemberToken(_roomCode, token) {
+    evictMemberToken(_roomCode, _memberId, token) {
       blocked.push(token);
     },
     disconnectSessionSocket() {
@@ -198,6 +204,48 @@ test("admin command consumer keeps a kick block when disconnect fails", async ()
     assert.equal(result.status, "error");
     assert.equal(result.code, "disconnect_failed");
     assert.deepEqual(blocked, ["token-member-d"]);
+  } finally {
+    await consumer.close();
+  }
+});
+
+test("admin command consumer fails the kick when revoking the token does not land", async () => {
+  const bus = createInMemoryAdminCommandBus(() => 6_000);
+  const session = createSession("session-e", "ROOM05", "member-e");
+  let disconnected = false;
+
+  const consumer = await createAdminCommandConsumer({
+    instanceId: "node-a",
+    adminCommandBus: bus,
+    getLocalSession() {
+      return null;
+    },
+    listLocalSessionsByRoom(roomCode) {
+      return roomCode === "ROOM05" ? [session] : [];
+    },
+    // The store reports the eviction failed. Reporting the kick as done here
+    // would claim an eviction while the old token still resolved everywhere.
+    async evictMemberToken() {
+      throw new Error("evict failed");
+    },
+    disconnectSessionSocket() {
+      disconnected = true;
+    },
+    now: () => 6_000,
+  });
+
+  try {
+    const result = await bus.request({
+      kind: "kick_member",
+      requestId: "req-5",
+      targetInstanceId: "node-a",
+      roomCode: "ROOM05",
+      memberId: "member-e",
+      requestedAt: 5_000,
+    });
+
+    assert.notEqual(result.status, "ok");
+    assert.equal(disconnected, false);
   } finally {
     await consumer.close();
   }

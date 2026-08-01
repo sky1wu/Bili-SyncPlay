@@ -304,6 +304,10 @@ export async function createServerBootstrapContext(
       ? await createRedisRuntimeStore(persistenceConfig.redisUrl, {
           now,
           keyPrefix: getRedisRuntimeKeyPrefix(persistenceConfig.redisNamespace),
+          // How long a disconnected member can still reclaim their identity.
+          // Twice the empty-room lifetime, so it comfortably covers a restart
+          // or a node failover without outliving the room by much.
+          memberTokenRetentionMs: persistenceConfig.emptyRoomTtlMs * 2,
           metricsCollector,
           ...(runtimeStorePendingOperationLogger
             ? {

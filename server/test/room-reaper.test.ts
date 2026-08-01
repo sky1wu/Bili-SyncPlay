@@ -19,7 +19,10 @@ test("room reaper deletes expired rooms through the store interface", async () =
 
   const reaper = createRoomReaper({
     intervalMs: 60_000,
-    deleteExpiredRooms: store.deleteExpiredRooms,
+    // The reaper counts; the store reports which rooms died so the caller can
+    // collect their runtime state. `room-service` adapts the two in production.
+    deleteExpiredRooms: async (currentTime) =>
+      (await store.deleteExpiredRooms(currentTime)).length,
     logEvent: () => undefined,
     now: () => 10,
   });

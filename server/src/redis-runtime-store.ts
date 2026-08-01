@@ -5,13 +5,13 @@ import type { MetricsCollector } from "./admin/metrics.js";
 import type { ActiveRoom, ClusterNodeStatus, Session } from "./types.js";
 import {
   createInMemoryRuntimeStore,
+  DEFAULT_MEMBER_TOKEN_RETENTION_MS,
   type RuntimeStore,
 } from "./runtime-store.js";
 import {
   findMemberIdByTokenEntries,
   getPreviousRoomToLeave,
   resolveRoomCodeToLeave,
-  shouldRemoveMemberBinding,
 } from "./runtime-store-state.js";
 
 type RedisMulti = {
@@ -20,6 +20,8 @@ type RedisMulti = {
   del: (...keys: string[]) => RedisMulti;
   hset: (key: string, ...args: unknown[]) => RedisMulti;
   hdel: (key: string, ...fields: string[]) => RedisMulti;
+  zadd: (key: string, score: string, member: string) => RedisMulti;
+  zrem: (key: string, ...members: string[]) => RedisMulti;
   exec: () => Promise<unknown>;
 };
 
@@ -51,6 +53,7 @@ type RedisClient = {
     ...args: Array<string | number>
   ) => Promise<unknown>;
   del: (...keys: string[]) => Promise<unknown>;
+  get: (key: string) => Promise<string | null>;
 };
 
 type PendingOperationLogContext = {
@@ -74,6 +77,12 @@ type RedisRuntimeSession = {
 
 type RuntimeStoreOptions = {
   keyPrefix?: string;
+  /**
+   * How long a DISCONNECTED member's identity survives before their token stops
+   * reclaiming it. Per identity, not per room — see
+   * `DEFAULT_MEMBER_TOKEN_RETENTION_MS`.
+   */
+  memberTokenRetentionMs?: number;
   now?: () => number;
   maxPendingOperations?: number;
   pendingOperationTimeoutMs?: number;
@@ -115,6 +124,11 @@ const RUNTIME_STORE_METHOD_NAMES = [
   "acquireRoomLock",
   "releaseRoomLock",
   "removeMember",
+  "revokeMemberToken",
+  "evictMemberToken",
+  "hasRoomResidue",
+  "getRoomGeneration",
+  "markRoomGeneration",
   "deleteRoom",
   "heartbeatNode",
   "listNodeStatuses",
@@ -160,6 +174,14 @@ function roomMembersKey(prefix: string, roomCode: string): string {
 
 function roomMemberTokensKey(prefix: string, roomCode: string): string {
   return `${prefix}room:${roomCode}:member-tokens`;
+}
+
+function roomMemberTokenExpiryKey(prefix: string, roomCode: string): string {
+  return `${prefix}room:${roomCode}:member-token-expiry`;
+}
+
+function roomGenerationKey(prefix: string, roomCode: string): string {
+  return `${prefix}room:${roomCode}:generation`;
 }
 
 function blockedTokensKey(prefix: string, roomCode: string): string {
@@ -247,6 +269,109 @@ function deserializeSession(fields: Record<string, string>): Session | null {
   };
 }
 
+/**
+ * Revoke a member token, optionally only while the memberId is still bound to
+ * the caller's session (or bound to nobody).
+ *
+ * The guard has to read the SHARED binding, not a node-local one: after a member
+ * reconnects onto another node, the old node's local map still lists the old
+ * session as the member, so a node-local check would let that node's explicit
+ * leave revoke the identity the new node is actively using (#237 review).
+ */
+const REVOKE_MEMBER_TOKEN_LUA = `
+local bound = redis.call("HGET", KEYS[1], ARGV[1])
+if ARGV[2] ~= "" and bound and bound ~= ARGV[2] then
+  return 0
+end
+redis.call("HDEL", KEYS[2], ARGV[1])
+redis.call("ZREM", KEYS[3], ARGV[1])
+return 1
+`;
+
+/**
+ * Evict a member in one commit: block the token and end the identity together.
+ *
+ * Two independent writes could not be made consistent by ordering alone — once
+ * the block landed there was nothing to roll it back with if the revoke then
+ * failed (#237 review). One script either does both or neither.
+ */
+const EVICT_MEMBER_LUA = `
+redis.call("ZADD", KEYS[1], ARGV[3], ARGV[2])
+redis.call("HDEL", KEYS[2], ARGV[1])
+redis.call("ZREM", KEYS[3], ARGV[1])
+return 1
+`;
+
+/**
+ * Delete a room's runtime keys only while its generation is the one the caller
+ * decided against. `ARGV[1]` is `""` for "no generation", which matches only an
+ * absent key — a room that predates generations is still collected, one that has
+ * since been stamped by a new occupant is left alone.
+ */
+const DELETE_ROOM_LUA = `
+if ARGV[1] ~= "*" then
+  local stored = redis.call("GET", KEYS[1])
+  if (stored or "") ~= ARGV[1] then
+    return 0
+  end
+end
+for index = 3, #KEYS do
+  redis.call("DEL", KEYS[index])
+end
+redis.call("DEL", KEYS[1])
+redis.call("SREM", KEYS[2], ARGV[2])
+return 1
+`;
+
+/**
+ * Drop a member's presence and start their identity's retention clock — but
+ * only if they still HAVE an identity.
+ *
+ * A kick deletes the token and its expiry entry, and the socket close that
+ * follows still runs this path. Registering an expiry unconditionally then left
+ * a `member-token-expiry` entry with no token behind it, which nothing collects
+ * once the room goes quiet (the prune is lazy). The binding check has to be in
+ * the same script as both writes, or the same interleaving reappears between
+ * them (#237 review).
+ */
+const REMOVE_MEMBER_LUA = `
+local bound = redis.call("HGET", KEYS[1], ARGV[1])
+if ARGV[2] ~= "" and bound and bound ~= ARGV[2] then
+  return 0
+end
+redis.call("HDEL", KEYS[1], ARGV[1])
+if redis.call("HEXISTS", KEYS[2], ARGV[1]) == 1 then
+  redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1])
+end
+return 1
+`;
+
+/**
+ * Any key still present means the code is not free to hand out.
+ *
+ * The two score-indexed sets are trimmed by the current time first. Redis does
+ * not drop zset members when their score passes, and the lazy sweeps that
+ * normally do it (`isMemberTokenBlocked`, `tryClaimMessageSlot`) are only
+ * reached through a room that no longer exists — so a long-lapsed block or a
+ * dedup slot whose TTL ran out years ago would keep the code reserved forever
+ * (#237 review).
+ */
+const ROOM_RESIDUE_LUA = `
+redis.call("ZREMRANGEBYSCORE", KEYS[4], "-inf", ARGV[1])
+redis.call("ZREMRANGEBYSCORE", KEYS[6], "-inf", ARGV[1])
+for index = 1, #KEYS do
+  if redis.call("EXISTS", KEYS[index]) == 1 then
+    return 1
+  end
+end
+return 0
+`;
+
+const MARK_ROOM_GENERATION_LUA = `
+redis.call("SET", KEYS[1], ARGV[1])
+return 1
+`;
+
 async function loadSession(
   redis: RedisClient,
   prefix: string,
@@ -259,14 +384,81 @@ async function loadSession(
   return deserializeSession(fields);
 }
 
+/**
+ * Drop an emptied room from the index.
+ *
+ * Emptiness needs BOTH indexes, and the check plus the write are one script. A
+ * join writes the member binding (`addMember`) before the session index
+ * (`onRoomJoined` → `markSessionJoinedRoom`), so between those two the session
+ * set is still empty while the room is already in use; a read-then-write from
+ * the client could also let a whole reconnect land between the check and the
+ * write (#237 review).
+ *
+ * Member tokens are NOT touched here. Their retention is per identity — see
+ * `PRUNE_MEMBER_TOKENS_LUA` — because hanging it off "the room emptied" never
+ * released anything while the room stayed busy, and in a cluster only the node
+ * that happened to observe the emptying ever acted on it.
+ */
+const CLEANUP_EMPTY_ROOM_LUA = `
+if redis.call("SCARD", KEYS[1]) ~= 0 then
+  return 0
+end
+if redis.call("HLEN", KEYS[3]) ~= 0 then
+  return 0
+end
+redis.call("SREM", KEYS[2], ARGV[1])
+return 1
+`;
+
+/**
+ * Collect identities whose retention has run out.
+ *
+ * A zset scored by expiry, pruned lazily on read/write — the same shape this
+ * store already uses for blocked tokens. Redis hash fields cannot carry their
+ * own TTL, and a per-member key would make token lookup a scan.
+ *
+ * Deleted in batches. Handing an unbounded result set to `unpack` overflows
+ * Lua's stack once enough identities expire between two token accesses, and the
+ * error aborts the script BEFORE the zset is trimmed — so every later access
+ * re-ran the same doomed script and the room could never be joined again (#237
+ * review). `ZREM` on exactly the batch just deleted (not `ZREMRANGEBYSCORE`
+ * over the whole range) is what makes stopping early safe.
+ *
+ * Stopping early only softens the boundary: an identity may stay resolvable a
+ * little past its retention until a later access finishes the sweep. Retention
+ * is "at least this long", never "at most".
+ */
+const PRUNE_MEMBER_TOKENS_BATCH = 500;
+const PRUNE_MEMBER_TOKENS_MAX_BATCHES = 20;
+const PRUNE_MEMBER_TOKENS_LUA = `
+local removed = 0
+for _ = 1, tonumber(ARGV[3]) do
+  local expired = redis.call(
+    "ZRANGEBYSCORE", KEYS[1], "-inf", ARGV[1], "LIMIT", 0, tonumber(ARGV[2])
+  )
+  if #expired == 0 then
+    return removed
+  end
+  redis.call("HDEL", KEYS[2], unpack(expired))
+  redis.call("ZREM", KEYS[1], unpack(expired))
+  removed = removed + #expired
+end
+return removed
+`;
+
 async function cleanupEmptyRoomIndex(
   redis: RedisClient,
   prefix: string,
   roomCode: string,
 ): Promise<void> {
-  if ((await redis.scard(roomSessionsKey(prefix, roomCode))) === 0) {
-    await redis.srem(`${prefix}rooms`, roomCode);
-  }
+  await redis.eval(
+    CLEANUP_EMPTY_ROOM_LUA,
+    3,
+    roomSessionsKey(prefix, roomCode),
+    `${prefix}rooms`,
+    roomMembersKey(prefix, roomCode),
+    roomCode,
+  );
 }
 
 export async function createRedisRuntimeStore(
@@ -280,6 +472,8 @@ export async function createRedisRuntimeStore(
     })) as RedisClient;
   const keyPrefix = options.keyPrefix ?? "bsp:runtime:";
   const now = options.now ?? Date.now;
+  const memberTokenRetentionMs =
+    options.memberTokenRetentionMs ?? DEFAULT_MEMBER_TOKEN_RETENTION_MS;
   const maxPendingOperations =
     options.maxPendingOperations ?? DEFAULT_MAX_PENDING_OPERATIONS;
   const pendingOperationTimeoutMs =
@@ -392,6 +586,60 @@ export async function createRedisRuntimeStore(
     return handledOperation;
   }
 
+  /**
+   * `trackOperation`, but the returned promise reports the write's REAL outcome:
+   * it rejects when the write fails, and it never resolves early.
+   *
+   * Deliberately outside the pending-operation timeout. That timeout rejects
+   * without cancelling the underlying command, so an operation that merely ran
+   * slow still landed in Redis afterwards — and the caller had already been told
+   * it failed. For a kick that meant the admin saw `block_failed` and the
+   * session stayed connected while the shared store went on to block and revoke
+   * it anyway (#237 review). Callers of this helper act on the answer, so an
+   * answer that can be wrong is worse than a slow one; the operation is still
+   * registered below for backpressure accounting.
+   */
+  function trackAwaitedOperation<T>(
+    operationName: string,
+    operation: Promise<T>,
+  ): Promise<T> {
+    const startedAt = performance.now();
+    const settled = operation.catch(() => undefined);
+    pendingOperations.add(settled);
+    void settled.finally(() => {
+      pendingOperations.delete(settled);
+      metricsCollector?.observeRedisRuntimeStoreDuration(
+        operationName,
+        performance.now() - startedAt,
+      );
+    });
+    return operation.catch((error: unknown) => {
+      metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
+      logPendingOperationError(
+        {
+          operationName,
+          pendingCount: pendingOperations.size,
+          reason: "failed",
+        },
+        error,
+      );
+      throw error;
+    });
+  }
+
+  /** Collect identities past their retention. Lazy — called on token reads/writes. */
+  async function pruneExpiredMemberTokens(code: string): Promise<void> {
+    await redis.eval(
+      PRUNE_MEMBER_TOKENS_LUA,
+      2,
+      roomMemberTokenExpiryKey(keyPrefix, code),
+      roomMemberTokensKey(keyPrefix, code),
+      String(now()),
+      String(PRUNE_MEMBER_TOKENS_BATCH),
+      String(PRUNE_MEMBER_TOKENS_MAX_BATCHES),
+    );
+  }
+
   function queueSessionOperation(
     sessionId: string,
     operationName: string,
@@ -468,14 +716,38 @@ export async function createRedisRuntimeStore(
             session.memberId,
           );
           if (currentSessionId === session.id) {
+            // Clears the stale session→member binding left by the previous run
+            // of this instance. It must NOT delete the member token: this runs
+            // at startup, right before those very clients reconnect, and
+            // dropping their tokens is what handed everybody a new `memberId`
+            // after each restart (#234).
+            //
+            // It does start the identity's retention clock, in the same
+            // transaction. This is a disconnect like any other — it just took a
+            // process crash to notice — and without it a member who never comes
+            // back would keep their token forever, since `removeMember` is the
+            // only other place that arms it (#237 review).
             transaction.hdel(
               roomMembersKey(keyPrefix, session.roomCode),
               session.memberId,
             );
-            transaction.hdel(
-              roomMemberTokensKey(keyPrefix, session.roomCode),
-              session.memberId,
-            );
+            // Only while the identity still exists. A kick deletes the token and
+            // its expiry entry; if the process died before the socket close ran,
+            // this path picks the binding up at startup and would otherwise
+            // register an expiry for a token that is not there — the same defect
+            // `REMOVE_MEMBER_LUA` fixed on the ordinary path (#237 review).
+            if (
+              (await redis.hget(
+                roomMemberTokensKey(keyPrefix, session.roomCode),
+                session.memberId,
+              )) !== null
+            ) {
+              transaction.zadd(
+                roomMemberTokenExpiryKey(keyPrefix, session.roomCode),
+                String(now() + memberTokenRetentionMs),
+                session.memberId,
+              );
+            }
           }
         }
 
@@ -587,6 +859,7 @@ export async function createRedisRuntimeStore(
       return localRuntimeStore.getActiveRoomCodes();
     },
     async getRoom(code: string) {
+      await pruneExpiredMemberTokens(code);
       const memberTokens = await redis.hgetall(
         roomMemberTokensKey(keyPrefix, code),
       );
@@ -638,34 +911,50 @@ export async function createRedisRuntimeStore(
           .multi()
           .hset(roomMembersKey(keyPrefix, code), memberId, session.id)
           .hset(roomMemberTokensKey(keyPrefix, code), memberId, memberToken)
+          // Back in use: take this identity off the clock. Per member, not the
+          // whole hash — `PERSIST`ing the hash kept every departed visitor of a
+          // busy room alive forever (#237 review).
+          .zrem(roomMemberTokenExpiryKey(keyPrefix, code), memberId)
           .exec(),
       );
       return room;
     },
     async findMemberIdByToken(code: string, memberToken: string) {
+      // Redis is the ONLY authority here. Falling back to the local mirror on a
+      // miss let a node that had once hosted this member keep answering from its
+      // own cache: a revoke performed on another node updates Redis and that
+      // node, never this one, so a later join landing here would re-accept a
+      // token an explicit leave or a kick had already ended (#237 review).
+      //
+      // Draining first is what the fallback used to cover — this store's writes
+      // are asynchronous, so a join reading immediately after `addMember` could
+      // otherwise miss its own write.
+      await store.flush();
+      await pruneExpiredMemberTokens(code);
       const memberTokens = await redis.hgetall(
         roomMemberTokensKey(keyPrefix, code),
       );
-      const matchedMemberId = findMemberIdByTokenEntries(
+      return findMemberIdByTokenEntries(
         Object.entries(memberTokens),
         memberToken,
       );
-      if (matchedMemberId) {
-        return matchedMemberId;
-      }
-      return localRuntimeStore.findMemberIdByToken(code, memberToken);
     },
     blockMemberToken(code: string, memberToken: string, expiresAt: number) {
       ensurePendingCapacity("block_member_token");
-      localRuntimeStore.blockMemberToken(code, memberToken, expiresAt);
-      void trackOperation(
+      // Durable-first, same as `revokeMemberToken`: the kick awaits this and
+      // then reports the member evicted, so an unconfirmed write would report an
+      // eviction that had not happened on any other node yet, and mirroring
+      // before it landed would leave this node blocking a token nobody else does.
+      return trackAwaitedOperation(
         "block_member_token",
         redis.zadd(
           blockedTokensKey(keyPrefix, code),
           String(expiresAt),
           memberToken,
         ),
-      );
+      ).then(() => {
+        localRuntimeStore.blockMemberToken(code, memberToken, expiresAt);
+      });
     },
     async isMemberTokenBlocked(
       code: string,
@@ -767,46 +1056,151 @@ export async function createRedisRuntimeStore(
     removeMember(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("remove_member");
       const removal = localRuntimeStore.removeMember(code, memberId, session);
+      // Presence only. The member token itself is deliberately kept so a
+      // reconnect can reclaim this `memberId` (#234) — but it goes on its own
+      // clock, so a room that never empties still releases the people who left
+      // it. The script starts that clock only while a token is actually there.
       void trackOperation(
         "remove_member",
-        (async () => {
-          const currentSessionId = await redis.hget(
-            roomMembersKey(keyPrefix, code),
-            memberId,
-          );
-          if (shouldRemoveMemberBinding(currentSessionId, session?.id)) {
-            await redis
-              .multi()
-              .hdel(roomMembersKey(keyPrefix, code), memberId)
-              .hdel(roomMemberTokensKey(keyPrefix, code), memberId)
-              .exec();
-          }
-        })(),
+        redis.eval(
+          REMOVE_MEMBER_LUA,
+          3,
+          roomMembersKey(keyPrefix, code),
+          roomMemberTokensKey(keyPrefix, code),
+          roomMemberTokenExpiryKey(keyPrefix, code),
+          memberId,
+          session?.id ?? "",
+          String(now() + memberTokenRetentionMs),
+        ),
       );
       return removal;
     },
-    deleteRoom(code: string) {
+    evictMemberToken(
+      code: string,
+      memberId: string,
+      memberToken: string,
+      blockedUntil: number,
+    ) {
+      ensurePendingCapacity("evict_member_token");
+      return trackAwaitedOperation(
+        "evict_member_token",
+        redis.eval(
+          EVICT_MEMBER_LUA,
+          3,
+          blockedTokensKey(keyPrefix, code),
+          roomMemberTokensKey(keyPrefix, code),
+          roomMemberTokenExpiryKey(keyPrefix, code),
+          memberId,
+          memberToken,
+          String(blockedUntil),
+        ),
+      ).then(() => {
+        localRuntimeStore.evictMemberToken(
+          code,
+          memberId,
+          memberToken,
+          blockedUntil,
+        );
+      });
+    },
+    revokeMemberToken(code: string, memberId: string, session?: Session) {
+      ensurePendingCapacity("revoke_member_token");
+      // Durable-first: the local mirror is only updated once Redis accepted the
+      // revocation. Mirroring first left a partial apply behind when the write
+      // failed — the caller saw a rejection while this node had already dropped
+      // the token (#237 review).
+      //
+      // Awaited, and rejecting: the kick disconnects the socket and reports
+      // success as soon as this resolves, so resolving before the write landed
+      // would report an eviction while the old token still resolved.
+      return trackAwaitedOperation(
+        "revoke_member_token",
+        redis.eval(
+          REVOKE_MEMBER_TOKEN_LUA,
+          3,
+          roomMembersKey(keyPrefix, code),
+          roomMemberTokensKey(keyPrefix, code),
+          roomMemberTokenExpiryKey(keyPrefix, code),
+          memberId,
+          session?.id ?? "",
+        ),
+      ).then(() => {
+        localRuntimeStore.revokeMemberToken(code, memberId, session);
+      });
+    },
+    async hasRoomResidue(code: string) {
+      // Pruned first, so identities that have merely aged out do not keep the
+      // code reserved.
+      await pruneExpiredMemberTokens(code);
+      // Deliberately without the generation key: it is not state a new room can
+      // inherit (its own stamp overwrites it), and counting it would mean a code
+      // is only ever freed by a successful teardown — losing the path where the
+      // residue simply ages out.
+      const found = await redis.eval(
+        ROOM_RESIDUE_LUA,
+        6,
+        roomMembersKey(keyPrefix, code),
+        roomMemberTokensKey(keyPrefix, code),
+        roomMemberTokenExpiryKey(keyPrefix, code),
+        blockedTokensKey(keyPrefix, code),
+        roomSessionsKey(keyPrefix, code),
+        dedupTrackingZsetKey(keyPrefix, code),
+        String(now()),
+      );
+      return Number(found) === 1;
+    },
+    async getRoomGeneration(code: string) {
+      return await redis.get(roomGenerationKey(keyPrefix, code));
+    },
+    markRoomGeneration(code: string, generation: string) {
+      ensurePendingCapacity("mark_room_generation");
+      return trackAwaitedOperation(
+        "mark_room_generation",
+        redis.eval(
+          MARK_ROOM_GENERATION_LUA,
+          1,
+          roomGenerationKey(keyPrefix, code),
+          generation,
+        ),
+      ).then(() => undefined);
+    },
+    deleteRoom(code: string, expectedGeneration?: string | null) {
       ensurePendingCapacity("delete_room");
-      localRuntimeStore.deleteRoom(code);
-      void trackOperation(
+      // Shared first here, unlike the other teardowns: whether this delete may
+      // proceed at all is decided by the script, against the generation every
+      // node agrees on. Dropping the local copy before knowing the answer would
+      // be exactly the wipe the generation exists to prevent (#237 review).
+      return trackAwaitedOperation(
         "delete_room",
         (async () => {
           const trackingKey = dedupTrackingZsetKey(keyPrefix, code);
           const dedupKeys = await redis.zrange(trackingKey, 0, -1);
-          const multi = redis
-            .multi()
-            .del(roomMembersKey(keyPrefix, code))
-            .del(roomMemberTokensKey(keyPrefix, code))
-            .del(blockedTokensKey(keyPrefix, code))
-            .del(roomSessionsKey(keyPrefix, code))
-            .del(trackingKey)
-            .srem(`${keyPrefix}rooms`, code);
-          if (dedupKeys.length > 0) {
-            multi.del(...dedupKeys);
-          }
-          return multi.exec();
+          const keys = [
+            roomGenerationKey(keyPrefix, code),
+            `${keyPrefix}rooms`,
+            roomMembersKey(keyPrefix, code),
+            roomMemberTokensKey(keyPrefix, code),
+            roomMemberTokenExpiryKey(keyPrefix, code),
+            blockedTokensKey(keyPrefix, code),
+            roomSessionsKey(keyPrefix, code),
+            trackingKey,
+            ...dedupKeys,
+          ];
+          return await redis.eval(
+            DELETE_ROOM_LUA,
+            keys.length,
+            ...keys,
+            expectedGeneration === undefined ? "*" : (expectedGeneration ?? ""),
+            code,
+          );
         })(),
-      );
+      ).then((applied) => {
+        if (Number(applied) !== 1) {
+          return false;
+        }
+        localRuntimeStore.deleteRoom(code);
+        return true;
+      });
     },
     async close() {
       await Promise.allSettled(Array.from(pendingOperations));

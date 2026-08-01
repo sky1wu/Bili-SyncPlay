@@ -42,8 +42,8 @@ test("room store persists create, update, delete, and expiry behaviors", async (
   );
   assert.deepEqual(conflict, { ok: false, reason: "version_conflict" });
 
-  assert.equal(await store.deleteExpiredRooms(500), 0);
-  assert.equal(await store.deleteExpiredRooms(999), 1);
+  assert.equal((await store.deleteExpiredRooms(500)).length, 0);
+  assert.equal((await store.deleteExpiredRooms(999)).length, 1);
   assert.equal(await store.getRoom(createdRoom.code), null);
 });
 

@@ -89,7 +89,7 @@ function createService(options: {
       saveRoom: async () => {
         throw new Error("saveRoom should not be called in this test");
       },
-      deleteExpiredRooms: async () => 0,
+      deleteExpiredRooms: async () => [],
       createRoom: async () => {
         throw new Error("createRoom should not be called in this test");
       },
@@ -97,7 +97,9 @@ function createService(options: {
     runtimeStore: {
       listSessionsByRoom: () => options.sessionsByRoom ?? [],
       getSession: () => options.session ?? null,
-      deleteRoom: options.deleteRuntimeRoom ?? (() => {}),
+    },
+    teardownRoomRuntime: async (roomCode) => {
+      options.deleteRuntimeRoom?.(roomCode);
     },
     listClusterSessions: async () => (options.session ? [options.session] : []),
     listClusterSessionsByRoom: async () => options.sessionsByRoom ?? [],
@@ -244,4 +246,27 @@ test("admin action service keeps room state when closeRoom cannot disconnect eve
   assert.equal(auditLogs.total, 1);
   assert.equal(auditLogs.items[0]?.result, "rejected");
   assert.equal(auditLogs.items[0]?.reason, "command_failed");
+});
+
+test("admin expireRoom tears down the room's runtime state", async () => {
+  const runtimeDeletes: string[] = [];
+  const service = createService({
+    requestAdminCommand: async () => {
+      throw new Error("no command expected");
+    },
+    deleteRuntimeRoom: (roomCode) => {
+      runtimeDeletes.push(roomCode);
+    },
+  });
+
+  await service.expireRoom(
+    { username: "admin" } as Parameters<typeof service.expireRoom>[0],
+    "ROOMXP",
+  );
+
+  // `closeRoom` has always done this; `expireRoom` did not, so an expired room
+  // left its runtime keys behind — including the tokens of members who had
+  // disconnected but whose identity is deliberately retained (#234) — and a
+  // recycled room code would inherit them.
+  assert.deepEqual(runtimeDeletes, ["ROOMXP"]);
 });
