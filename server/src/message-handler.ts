@@ -168,12 +168,21 @@ export function createMessageHandler(options: {
     }
   }
 
+  /**
+   * Returns whether the hook actually completed. Callers need it because the
+   * failure it swallows is the room-index write not landing, and a `room:state`
+   * rebuilt from an uncleaned index contains the member who just left — who then
+   * wins the share straight back (#235 review). Publishing that state is worse
+   * than publishing nothing: it corrupts the roster too, and nothing is
+   * scheduled to correct it afterwards.
+   */
   async function runRoomLeftHook(
     session: Session,
     roomCode: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await options.onRoomLeft?.(session, roomCode);
+      return true;
     } catch (error) {
       logEvent("room_left_hook_failed", {
         sessionId: session.id,
@@ -183,6 +192,7 @@ export function createMessageHandler(options: {
         result: "error",
         error: error instanceof Error ? error.message : String(error),
       });
+      return false;
     }
   }
 
@@ -408,7 +418,7 @@ export function createMessageHandler(options: {
     if (!roomCode || (!room && !notifyRoom)) {
       return;
     }
-    await runRoomLeftHook(session, roomCode);
+    const roomIndexCleaned = await runRoomLeftHook(session, roomCode);
     if (!memberRemoved && !notifyRoom) {
       return;
     }
@@ -428,7 +438,11 @@ export function createMessageHandler(options: {
       },
     );
 
-    if (needsRoomStateResync) {
+    // `room_member_left` goes out either way: it carries no state read, so an
+    // uncleaned index cannot corrupt it, and it still drops the member from
+    // every roster. The full state is the one that must not be built on an
+    // index we failed to clean (#235 review).
+    if (needsRoomStateResync && roomIndexCleaned) {
       await publishSharedOwnerResync(session, roomCode);
     }
   }
@@ -473,10 +487,40 @@ export function createMessageHandler(options: {
    * reaches here, and a switch is rare enough that one broadcast is cheaper
    * than plumbing it out.
    */
-  async function publishRoomSwitchResync(
+  /**
+   * Runs a create/join and makes sure the room being left is released even when
+   * it fails.
+   *
+   * Both service calls leave the current room FIRST and can throw afterwards —
+   * room full, bad join token, admission lock timeout, code collision. The
+   * caller's release then never ran, so the old room kept a ghost session in its
+   * index: it still listed the member, and that ghost could win the share
+   * election (#235 review). The session's own `roomCode` is the evidence that
+   * the leave happened, since the service clears it as part of leaving.
+   */
+  async function enterRoom<T>(
+    session: Session,
+    previousRoomCode: string | null,
+    enter: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await enter();
+    } catch (error) {
+      if (previousRoomCode && session.roomCode !== previousRoomCode) {
+        await releasePreviousRoom(session, previousRoomCode);
+      }
+      throw error;
+    }
+  }
+
+  async function releasePreviousRoom(
     session: Session,
     previousRoomCode: string,
   ): Promise<void> {
+    const roomIndexCleaned = await runRoomLeftHook(session, previousRoomCode);
+    if (!roomIndexCleaned) {
+      return;
+    }
     await publishSharedOwnerResync(
       session,
       previousRoomCode,
@@ -605,13 +649,17 @@ export function createMessageHandler(options: {
             return;
           }
 
-          const { room, memberToken } = await roomService.createRoomForSession(
+          const { room, memberToken } = await enterRoom(
             session,
-            message.payload?.displayName,
+            previousRoomCode,
+            () =>
+              roomService.createRoomForSession(
+                session,
+                message.payload?.displayName,
+              ),
           );
           if (previousRoomCode && previousRoomCode !== room.code) {
-            await runRoomLeftHook(session, previousRoomCode);
-            await publishRoomSwitchResync(session, previousRoomCode);
+            await releasePreviousRoom(session, previousRoomCode);
           }
           await runRoomJoinedHook(session, room.code, previousRoomCode);
           send(socket, {
@@ -661,16 +709,20 @@ export function createMessageHandler(options: {
           }
 
           await measureMessageHandling("room:join", async () => {
-            const { room, memberToken } = await roomService.joinRoomForSession(
+            const { room, memberToken } = await enterRoom(
               session,
-              message.payload.roomCode,
-              message.payload.joinToken,
-              message.payload.displayName,
-              message.payload.memberToken,
+              previousRoomCode,
+              () =>
+                roomService.joinRoomForSession(
+                  session,
+                  message.payload.roomCode,
+                  message.payload.joinToken,
+                  message.payload.displayName,
+                  message.payload.memberToken,
+                ),
             );
             if (previousRoomCode && previousRoomCode !== room.code) {
-              await runRoomLeftHook(session, previousRoomCode);
-              await publishRoomSwitchResync(session, previousRoomCode);
+              await releasePreviousRoom(session, previousRoomCode);
             }
             await runRoomJoinedHook(session, room.code, previousRoomCode);
             const joinedRoomCode = room.code;
