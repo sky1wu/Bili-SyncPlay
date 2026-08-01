@@ -127,6 +127,15 @@ export type RuntimeStore = {
     code: string,
     expectedGeneration?: string | null,
   ) => void | Promise<void>;
+  /**
+   * Whether ANY runtime state remains under this code.
+   *
+   * Not `getRoom() !== null`: that answers "are there members or member tokens",
+   * which is a strict subset. A code carrying only leftover session index
+   * entries, blocked tokens, dedup slots or a generation would read as free, be
+   * handed to a new room, and take the old room's ghosts with it (#237 review).
+   */
+  hasRoomResidue: (code: string) => boolean | Promise<boolean>;
   /** The generation stamped on this code's runtime state, or null. */
   getRoomGeneration: (code: string) => string | null | Promise<string | null>;
   /**
@@ -467,6 +476,21 @@ export function createInMemoryRuntimeStore(
       revokeMemberIdentity(code, memberId);
     },
     revokeMemberToken: revokeMemberIdentity,
+    hasRoomResidue(code) {
+      pruneExpiredMemberTokens(code);
+      // Deliberately NOT the generation or a held room lock. Neither is state a
+      // new room could inherit — the generation is overwritten by the new room's
+      // own stamp, and a lock is transient — and counting them would mean a code
+      // is freed only by a successful teardown, losing the self-healing path
+      // where the residue simply ages out.
+      return (
+        rooms.has(code) ||
+        roomSessionIds.has(code) ||
+        blockedMemberTokensByRoom.has(code) ||
+        memberTokenExpiryByRoom.has(code) ||
+        claimedSlotsByRoom.has(code)
+      );
+    },
     getRoomGeneration(code) {
       return roomGenerations.get(code) ?? null;
     },

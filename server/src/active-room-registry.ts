@@ -18,6 +18,7 @@ export type ActiveRoomRegistry = {
   removeMember: RuntimeStore["removeMember"];
   revokeMemberToken: RuntimeStore["revokeMemberToken"];
   evictMemberToken: RuntimeStore["evictMemberToken"];
+  hasRoomResidue: RuntimeStore["hasRoomResidue"];
   getRoomGeneration: RuntimeStore["getRoomGeneration"];
   markRoomGeneration: RuntimeStore["markRoomGeneration"];
   deleteRoom: RuntimeStore["deleteRoom"];
@@ -44,6 +45,7 @@ export function createActiveRoomRegistry(
     removeMember: store.removeMember,
     revokeMemberToken: store.revokeMemberToken,
     evictMemberToken: store.evictMemberToken,
+    hasRoomResidue: store.hasRoomResidue,
     getRoomGeneration: store.getRoomGeneration,
     markRoomGeneration: store.markRoomGeneration,
     deleteRoom: store.deleteRoom,

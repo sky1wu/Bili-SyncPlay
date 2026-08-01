@@ -1213,6 +1213,9 @@ test("room service flushes pending runtime store writes before exposing updated 
     evictMemberToken(code, memberId, memberToken, blockedUntil) {
       activeRooms.evictMemberToken(code, memberId, memberToken, blockedUntil);
     },
+    hasRoomResidue(code) {
+      return activeRooms.hasRoomResidue(code);
+    },
     getRoomGeneration(code) {
       return activeRooms.getRoomGeneration(code);
     },
@@ -4384,4 +4387,43 @@ test("an admin teardown works through the retry backlog", async () => {
   failTeardown = false;
   await service.teardownRoomRuntime(other.room.code);
   assert.deepEqual(teardowns.sort(), ["ROOMB1", "ROOMB2"]);
+});
+
+test("does not hand out a code whose only leftover is a session index entry", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  const offeredCodes: string[] = [];
+  const codeSequence = ["ROOMSI", "ROOMSI", "ROOMS2"];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: runtime,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => {
+      const code = codeSequence.shift() ?? "ROOMSX";
+      offeredCodes.push(code);
+      return code;
+    },
+  });
+
+  // No members and no member tokens, so the members/tokens view reads as empty —
+  // but a stale session index entry is exactly the kind of leftover a new room
+  // would inherit as a ghost member.
+  const ghost = createSession("ghost-session");
+  runtime.registerSession(ghost);
+  runtime.markSessionJoinedRoom(ghost.id, "ROOMSI");
+  assert.equal(runtime.getRoom("ROOMSI"), null);
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  assert.equal(created.room.code, "ROOMS2");
+  assert.deepEqual(offeredCodes, ["ROOMSI", "ROOMSI", "ROOMS2"]);
 });

@@ -143,11 +143,15 @@ export function createMirroredRuntimeStore(
     ),
     // Read from the shared view: the generation has to be the one every node
     // agrees on, or a teardown decided here would compare against a local copy.
+    hasRoomResidue: readShared(sharedRuntimeStore.hasRoomResidue),
     getRoomGeneration: readShared(sharedRuntimeStore.getRoomGeneration),
-    markRoomGeneration: mirrorAwaitedTeardown(
-      localRuntimeStore.markRoomGeneration,
-      sharedRuntimeStore.markRoomGeneration,
-    ),
+    // Shared only, in both directions. A local copy would be written by whichever
+    // node created the room and cleared by whichever node tore it down — rarely
+    // the same one — so every node accumulated generations for rooms it merely
+    // happened to create, with nothing to expire them (#237 review). Nothing
+    // reads the local copy here anyway: the reads above go to the shared store,
+    // and the shared store's own teardown clears its local mirror unconditionally.
+    markRoomGeneration: readShared(sharedRuntimeStore.markRoomGeneration),
     deleteRoom: mirrorAwaitedTeardown(
       localRuntimeStore.deleteRoom,
       sharedRuntimeStore.deleteRoom,

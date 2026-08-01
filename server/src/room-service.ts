@@ -149,6 +149,7 @@ export function createRoomService(options: {
     memberToken: string,
     currentTime: number,
   ) => Promise<boolean>;
+  resolveRoomResidue?: (roomCode: string) => Promise<boolean>;
 }): {
   createRoomForSession: (
     session: Session,
@@ -215,6 +216,10 @@ export function createRoomService(options: {
     options.resolveMemberIdByToken ??
     ((roomCode: string, memberToken: string) =>
       Promise.resolve(runtimeStore.findMemberIdByToken(roomCode, memberToken)));
+  const resolveRoomResidue =
+    options.resolveRoomResidue ??
+    ((roomCode: string) =>
+      Promise.resolve(runtimeStore.hasRoomResidue(roomCode)));
   const resolveBlockedMemberToken =
     options.resolveBlockedMemberToken ??
     ((roomCode: string, memberToken: string, currentTime: number) =>
@@ -1145,12 +1150,15 @@ export function createRoomService(options: {
         // can never inherit the previous occupant's identities, so neither needs
         // its own guard (#237 review).
         //
+        // Every runtime key, not just the members/tokens view `getRoom` gives:
+        // a code carrying only leftover session index entries, blocked tokens,
+        // dedup slots or a generation would otherwise read as free and take the
+        // old room's ghosts into the new one (#237 review).
+        //
         // An unreadable runtime store means "unknown", never "empty": try
         // another code rather than risk handing out a dirty one.
-        const runtimeResidue = await resolveActiveRoom(roomCode).catch(
-          () => "unknown" as const,
-        );
-        if (runtimeResidue !== null) {
+        const dirty = await resolveRoomResidue(roomCode).catch(() => true);
+        if (dirty) {
           continue;
         }
         try {

@@ -1416,3 +1416,92 @@ test("redis runtime store waits for the real result of an awaited write", async 
     await store.close();
   }
 });
+
+test("redis runtime store does not register a retention entry during startup purge without a token", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const redis = new Redis(REDIS_URL);
+  const session = createSession("session-crash-kicked");
+  session.instanceId = "crashed-node";
+  session.memberId = "member-crash-kicked";
+  session.memberToken = "token-crash-kicked";
+
+  try {
+    store.registerSession(session);
+    store.markSessionJoinedRoom(session.id, "ROOMCK");
+    store.addMember("ROOMCK", session.memberId, session, session.memberToken);
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // Kicked, then the process died before the socket close ran — so the member
+    // binding is still there for the startup purge to find.
+    await store.evictMemberToken(
+      "ROOMCK",
+      "member-crash-kicked",
+      "token-crash-kicked",
+      Date.now() + 60_000,
+    );
+    await store.flush?.();
+
+    assert.equal(await store.purgeSessionsByInstance?.("crashed-node"), 1);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // The identity is gone, so there is nothing to put on a clock. Registering
+    // one anyway leaves an entry the lazy prune never reaches once the room goes
+    // quiet — the same defect the ordinary remove path had.
+    assert.equal(
+      await redis.zscore(
+        `${keyPrefix}room:ROOMCK:member-token-expiry`,
+        "member-crash-kicked",
+      ),
+      null,
+    );
+  } finally {
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis runtime store treats leftover session keys as residue on a room code", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const session = createSession("session-residue");
+
+  try {
+    assert.equal(await store.hasRoomResidue("ROOMRS"), false);
+
+    store.registerSession(session);
+    store.markSessionJoinedRoom(session.id, "ROOMRS");
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // No members and no member tokens: the members/tokens view `getRoom` offers
+    // reads as empty, which is what used to gate room code allocation.
+    assert.equal((await store.getRoom("ROOMRS"))?.members.size ?? 0, 0);
+    assert.equal(await store.hasRoomResidue("ROOMRS"), true);
+
+    // A generation on its own is not residue: a new room overwrites it, and
+    // counting it would mean only a successful teardown ever frees a code.
+    const clean = await createRedisRuntimeStore(REDIS_URL, {
+      keyPrefix: `${keyPrefix}gen:`,
+    });
+    try {
+      await clean.markRoomGeneration("ROOMGO", "generation-1");
+      assert.equal(await clean.hasRoomResidue("ROOMGO"), false);
+    } finally {
+      await clean.close();
+    }
+  } finally {
+    await store.close();
+  }
+});

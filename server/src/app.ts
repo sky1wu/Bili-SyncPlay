@@ -161,6 +161,8 @@ export async function createSyncServer(
       Promise.resolve(
         sharedRuntimeStore.findMemberIdByToken(roomCode, memberToken),
       ),
+    resolveRoomResidue: (roomCode) =>
+      Promise.resolve(sharedRuntimeStore.hasRoomResidue(roomCode)),
     resolveBlockedMemberToken: (roomCode, memberToken, currentTime) =>
       Promise.resolve(
         sharedRuntimeStore.isMemberTokenBlocked(

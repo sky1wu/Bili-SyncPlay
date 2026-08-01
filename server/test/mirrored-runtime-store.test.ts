@@ -80,3 +80,20 @@ test("mirrored runtime store applies the local revoke once the shared one lands"
   assert.equal(local.findMemberIdByToken("ROOMMK", "token-mirror-ok"), null);
   assert.equal(shared.findMemberIdByToken("ROOMMK", "token-mirror-ok"), null);
 });
+
+test("mirrored runtime store keeps room generations out of the local mirror", async () => {
+  const local = createInMemoryRuntimeStore();
+  const shared = createInMemoryRuntimeStore();
+  const store = createMirroredRuntimeStore(local, shared);
+
+  await store.markRoomGeneration("ROOMMG", "generation-1");
+
+  // Mirroring it locally leaked: the node that CREATES a room writes the
+  // generation, but the node that tears it down clears it — rarely the same one,
+  // and nothing expires generations. Every node accumulated entries for rooms it
+  // merely happened to create.
+  assert.equal(local.getRoomGeneration("ROOMMG"), null);
+  assert.equal(shared.getRoomGeneration("ROOMMG"), "generation-1");
+  // Reads go to the shared view, so nothing is lost by not keeping a copy.
+  assert.equal(await store.getRoomGeneration("ROOMMG"), "generation-1");
+});

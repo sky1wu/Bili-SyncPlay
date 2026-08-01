@@ -126,6 +126,7 @@ const RUNTIME_STORE_METHOD_NAMES = [
   "removeMember",
   "revokeMemberToken",
   "evictMemberToken",
+  "hasRoomResidue",
   "getRoomGeneration",
   "markRoomGeneration",
   "deleteRoom",
@@ -343,6 +344,16 @@ if redis.call("HEXISTS", KEYS[2], ARGV[1]) == 1 then
   redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1])
 end
 return 1
+`;
+
+/** Any key still present means the code is not free to hand out. */
+const ROOM_RESIDUE_LUA = `
+for index = 1, #KEYS do
+  if redis.call("EXISTS", KEYS[index]) == 1 then
+    return 1
+  end
+end
+return 0
 `;
 
 const MARK_ROOM_GENERATION_LUA = `
@@ -709,11 +720,23 @@ export async function createRedisRuntimeStore(
               roomMembersKey(keyPrefix, session.roomCode),
               session.memberId,
             );
-            transaction.zadd(
-              roomMemberTokenExpiryKey(keyPrefix, session.roomCode),
-              String(now() + memberTokenRetentionMs),
-              session.memberId,
-            );
+            // Only while the identity still exists. A kick deletes the token and
+            // its expiry entry; if the process died before the socket close ran,
+            // this path picks the binding up at startup and would otherwise
+            // register an expiry for a token that is not there — the same defect
+            // `REMOVE_MEMBER_LUA` fixed on the ordinary path (#237 review).
+            if (
+              (await redis.hget(
+                roomMemberTokensKey(keyPrefix, session.roomCode),
+                session.memberId,
+              )) !== null
+            ) {
+              transaction.zadd(
+                roomMemberTokenExpiryKey(keyPrefix, session.roomCode),
+                String(now() + memberTokenRetentionMs),
+                session.memberId,
+              );
+            }
           }
         }
 
@@ -1094,6 +1117,26 @@ export async function createRedisRuntimeStore(
         localRuntimeStore.revokeMemberToken(code, memberId, session);
       });
     },
+    async hasRoomResidue(code: string) {
+      // Pruned first, so identities that have merely aged out do not keep the
+      // code reserved.
+      await pruneExpiredMemberTokens(code);
+      // Deliberately without the generation key: it is not state a new room can
+      // inherit (its own stamp overwrites it), and counting it would mean a code
+      // is only ever freed by a successful teardown — losing the path where the
+      // residue simply ages out.
+      const found = await redis.eval(
+        ROOM_RESIDUE_LUA,
+        6,
+        roomMembersKey(keyPrefix, code),
+        roomMemberTokensKey(keyPrefix, code),
+        roomMemberTokenExpiryKey(keyPrefix, code),
+        blockedTokensKey(keyPrefix, code),
+        roomSessionsKey(keyPrefix, code),
+        dedupTrackingZsetKey(keyPrefix, code),
+      );
+      return Number(found) === 1;
+    },
     async getRoomGeneration(code: string) {
       return await redis.get(roomGenerationKey(keyPrefix, code));
     },
@@ -1107,9 +1150,7 @@ export async function createRedisRuntimeStore(
           roomGenerationKey(keyPrefix, code),
           generation,
         ),
-      ).then(() => {
-        localRuntimeStore.markRoomGeneration(code, generation);
-      });
+      ).then(() => undefined);
     },
     deleteRoom(code: string, expectedGeneration?: string | null) {
       ensurePendingCapacity("delete_room");
