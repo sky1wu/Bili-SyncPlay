@@ -71,7 +71,6 @@ test("playback binding controller forwards ratechange event source", async () =>
   const events: string[] = [];
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -120,7 +119,6 @@ test("playback binding controller cancels active soft apply on pause and seek", 
   const reasons: string[] = [];
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -162,7 +160,6 @@ test("playback binding controller does not cancel active soft apply for programm
   const reasons: string[] = [];
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -204,7 +201,6 @@ test("playback binding controller preserves explicit seek intent across immediat
   let now = 1_100;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -255,7 +251,6 @@ test("playback binding controller does not mark programmatic ratechange as expli
   const events: string[] = [];
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -307,7 +302,6 @@ test("playback binding controller re-pauses seek-triggered autoplay when intende
   const originalSetTimeout = globalThis.window.setTimeout;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -372,7 +366,6 @@ test("playback binding controller keeps hydration pause guard when shared url is
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -461,7 +454,6 @@ test("playback binding controller keeps hydration guard after direct room switch
   });
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -540,7 +532,6 @@ test("playback binding controller keeps hydration pause guard for unstable festi
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -609,7 +600,6 @@ test("playback binding controller reapplies pause hold for unstable identity aft
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -680,7 +670,6 @@ test("playback binding controller reapplies pause hold for unstable room shared 
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -745,7 +734,6 @@ test("playback binding controller clears explicit seek intent after seek-trigger
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -808,7 +796,6 @@ test("playback binding controller allows manual play after a newer gesture follo
   const events: string[] = [];
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -876,7 +863,6 @@ test("playback binding controller holds a page-load autoplay authorized only by 
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -973,7 +959,6 @@ test("playback binding controller still holds the delayed autoplay when the only
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1052,7 +1037,6 @@ test("playback binding controller holds a seek-triggered non-shared autoplay, th
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1138,7 +1122,6 @@ test("playback binding controller allows explicit play on a non-shared page", as
   const events: string[] = [];
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1199,7 +1182,6 @@ test("playback binding controller suppresses auto-resumed non-shared broadcast a
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1281,7 +1263,6 @@ test("playback binding controller pauses delayed non-sharer autoplay into a non-
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1356,7 +1337,6 @@ test("playback binding controller pauses delayed non-sharer autoplay even after 
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1430,7 +1410,6 @@ test("playback binding controller lets the user watch an explicitly opened local
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1501,7 +1480,6 @@ test("playback binding controller pauses an unmarked non-shared page reached by 
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1579,7 +1557,6 @@ test("playback binding controller pauses a non-shared video even when room inten
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1645,7 +1622,6 @@ test("playback binding controller periodic tick pauses a non-shared video alread
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1739,7 +1715,6 @@ test("playback binding controller holds a play while the page bridge is resolvin
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1836,7 +1811,6 @@ test("playback binding controller stops force-pausing an unresolved non-shared p
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -1915,7 +1889,6 @@ test("playback binding controller does not re-pause an authorized non-shared pla
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2005,7 +1978,6 @@ test("playback binding controller preserves the explicit non-shared authorizatio
   const originalSetTimeout = globalThis.window.setTimeout;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2077,7 +2049,6 @@ test("playback binding controller re-pauses a pre-pause stale gesture while the 
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2145,7 +2116,6 @@ test("playback binding controller still holds an unsolicited autoplay while the 
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2208,7 +2178,6 @@ test("playback binding controller allows manual play on non-shared page after au
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2299,7 +2268,6 @@ test("playback binding controller suppresses non-shared autoplay replayed after 
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2372,7 +2340,6 @@ test("playback binding controller holds a non-sharer at the shared video natural
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2449,7 +2416,6 @@ test("playback binding controller does not pause the sharer at the shared video 
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2515,7 +2481,6 @@ test("playback binding controller does not pause a non-sharer before the shared 
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2583,7 +2548,6 @@ test("playback binding controller re-pauses non-sharer multi-part autoplay after
   const originalSetTimeout = globalThis.window.setTimeout;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2653,7 +2617,6 @@ test("playback binding controller classifies pause as buffer when waiting fired 
   let now = 5_000;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2698,7 +2661,6 @@ test("playback binding controller treats pause as user-initiated when fresh gest
   runtimeState.lastForcedPauseAt = 0;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2742,7 +2704,6 @@ test("playback binding controller clears buffer-pause classification on resume",
   let now = 5_000;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2809,7 +2770,6 @@ test("playback binding controller does not classify pause as buffer-induced insi
   }) as typeof globalThis.window.setTimeout;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2870,7 +2830,6 @@ test("playback binding controller still classifies pause as buffer-induced when 
   let now = 5_000;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2924,7 +2883,6 @@ test("playback binding controller re-broadcasts paused after buffer-pause upgrad
   }) as typeof globalThis.window.setTimeout;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -2992,7 +2950,6 @@ test("playback binding controller suppresses the natural-end pause for a non-sha
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3068,7 +3025,6 @@ test("playback binding controller suppresses the natural-end pause broadcast for
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3156,7 +3112,6 @@ test("playback binding controller records the seek-to-end flag when a seek prece
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3222,7 +3177,6 @@ test("playback binding controller flushes the sharer's terminal paused state whe
   }) as unknown as typeof globalThis.window.setTimeout;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3302,7 +3256,6 @@ test("playback binding controller does not flush a sharer end state once autopla
   }) as unknown as typeof globalThis.window.setTimeout;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3367,7 +3320,6 @@ test("playback binding controller does not arm sharer end suppression for a non-
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3422,7 +3374,6 @@ test("playback binding controller classifies a stall on a rebuilt element as buf
   let now = 5_000;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3468,7 +3419,6 @@ test("playback binding controller does not reclassify a user pause when transpor
   let now = 5_000;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3517,7 +3467,6 @@ test("playback binding controller leaves an unobserved pause alone when the room
   let now = 5_000;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3559,7 +3508,6 @@ test("playback binding controller classifies a pause right after a video rebind 
   let now = 5_000;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3620,7 +3568,6 @@ test("playback binding controller upgrades an unobserved stall to paused after t
   }) as typeof globalThis.window.setTimeout;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3673,7 +3620,6 @@ function createEchoHarness(
   getMonotonicNow: () => number,
 ) {
   return createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3834,7 +3780,6 @@ test("a user seek that cancels an active rate catch-up is still recorded", async
   const events: string[] = [];
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3896,7 +3841,6 @@ test("a user pause that cancels an active rate catch-up is still recorded", () =
   runtimeState.lastUserGestureInPlayerAt = 1_000;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3957,7 +3901,6 @@ test("a ratechange is enough to classify an unobserved pause as buffering", () =
   runtimeState.lastUserGestureAt = 0;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3999,7 +3942,6 @@ test("a real user pause is not reclassified by the shared broadcast path", () =>
   runtimeState.lastUserGestureInPlayerAt = 9_900;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -4039,7 +3981,6 @@ test("playback binding controller keeps the seek origin across seeking and seeke
   let now = 1_100;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -4090,7 +4031,6 @@ test("playback binding controller re-snapshots the origin for a new seek gesture
   let now = 1_100;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -4139,7 +4079,6 @@ test("playback binding controller re-samples the seek origin after a forced paus
   let now = 1_100;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -4195,7 +4134,6 @@ test("playback binding controller reports a newly bound video element once", () 
   let bindings = 0;
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -4247,7 +4185,6 @@ test("records explicit user actions on the monotonic clock by default", async ()
   const events: string[] = [];
 
   const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -4290,26 +4227,23 @@ test("records explicit user actions on the monotonic clock by default", async ()
   }
 });
 
-test("playback binding controller ends the catch-up for a keyboard speed shortcut", () => {
-  // `isGestureInsidePlayer` deliberately counts only play-toggle keys, so a
-  // keyboard SPEED shortcut leaves `lastUserGestureInPlayerAt` untouched and the
-  // in-player predicate cannot see the takeover. The rate on the element is the
-  // evidence: it is not the one our catch-up wrote. Without acting on it the
-  // user's choice is lost twice — the broadcast reports the session's base rate,
-  // and the session timer then restores that base rate locally too (#238).
+test("playback binding controller does not treat any recent gesture as a rate takeover", () => {
+  // The player resets the live rate by itself while recovering from a stall. If
+  // an unrelated page click happened to land inside the gesture grace window,
+  // `rememberExplicitUserAction` still records kind=`ratechange` — it reads the
+  // EVENT type, not what the user actually operated. Cancelling on that
+  // combination would skip the restore and strand the elevated
+  // `defaultPlaybackRate`, resurrecting the temporary rate on the next media
+  // load (#239). Only a real in-player gesture may end the session.
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
+  // Recent document-level gesture (a click on blank space)…
   runtimeState.lastUserGestureAt = 4_500;
-  // Document-level gesture only; the in-player one is far enough in the past
-  // that `hasRecentUserGestureInPlayer()` is false. Leaving it at the default 0
-  // would sit INSIDE the grace window at these clock values and cancel via the
-  // old in-player branch, making this test pass for the wrong reason.
+  // …but nothing in-player for far longer than the grace window.
   runtimeState.lastUserGestureInPlayerAt = 1_000;
   const reasons: string[] = [];
 
   const controller = createPlaybackBindingController({
-    // The catch-up wrote 0.84; the element now reads 1.5.
-    isRateUnexplainedByActiveCatchUp: () => true,
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -4340,106 +4274,12 @@ test("playback binding controller ends the catch-up for a keyboard speed shortcu
     controller.attachPlaybackListeners();
     dom.listeners.get("ratechange")!(new Event("ratechange"));
 
-    assert.deepEqual(reasons, ["user-ratechange"]);
-  } finally {
-    dom.restore();
-  }
-});
-
-test("playback binding controller keeps the catch-up alive for its own rate echo", () => {
-  // The other half of the same ambiguity: the element still carries exactly the
-  // rate our catch-up wrote, so this `ratechange` is our own echo however recent
-  // an unrelated page click was. Cancelling here would strand the temporary rate
-  // and drop the self-restore.
-  const dom = installDomStub();
-  const runtimeState = createContentRuntimeState();
-  runtimeState.lastUserGestureAt = 4_500;
-  runtimeState.lastUserGestureInPlayerAt = 1_000;
-  const reasons: string[] = [];
-
-  const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => false,
-    runtimeState,
-    videoBindIntervalMs: 250,
-    userGestureGraceMs: 1_200,
-    initialRoomStatePauseHoldMs: 3_000,
-    bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
-    videoRebindBufferSignalMs: 1_000,
-    getSharedVideo: () => ({
-      videoId: "BV1xx411c7mD",
-      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
-      title: "Video",
-    }),
-    hasRecentRemoteStopIntent: () => false,
-    normalizeUrl: (url) => url ?? null,
-    getLastBroadcastAt: () => 0,
-    broadcastPlayback: async () => {},
-    cancelActiveSoftApply: (_video, reason) => {
-      reasons.push(reason);
-    },
-    maintainActiveSoftApply: () => {},
-    applyPendingPlaybackApplication: () => {},
-    activatePauseHold: () => {},
-    debugLog: () => {},
-    getMonotonicNow: () => 5_000,
-  });
-
-  try {
-    controller.attachPlaybackListeners();
-    dom.listeners.get("ratechange")!(new Event("ratechange"));
-
-    assert.deepEqual(reasons, []);
-  } finally {
-    dom.restore();
-  }
-});
-
-test("playback binding controller keeps the catch-up alive when the player resets the rate itself", () => {
-  // The player resets the live rate on its own while recovering from a stall.
-  // That rate does not match what the catch-up wrote either, but no user did
-  // anything — and cancelling as `user-ratechange` SKIPS the restore, stranding
-  // the elevated `defaultPlaybackRate` (the bug that restore exists to prevent).
-  const dom = installDomStub();
-  const runtimeState = createContentRuntimeState();
-  // No recent gesture at all, so `rememberExplicitUserAction` records nothing.
-  runtimeState.lastUserGestureAt = 1_000;
-  runtimeState.lastUserGestureInPlayerAt = 1_000;
-  const reasons: string[] = [];
-
-  const controller = createPlaybackBindingController({
-    isRateUnexplainedByActiveCatchUp: () => true,
-    runtimeState,
-    videoBindIntervalMs: 250,
-    userGestureGraceMs: 1_200,
-    initialRoomStatePauseHoldMs: 3_000,
-    bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
-    videoRebindBufferSignalMs: 1_000,
-    getSharedVideo: () => ({
-      videoId: "BV1xx411c7mD",
-      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
-      title: "Video",
-    }),
-    hasRecentRemoteStopIntent: () => false,
-    normalizeUrl: (url) => url ?? null,
-    getLastBroadcastAt: () => 0,
-    broadcastPlayback: async () => {},
-    cancelActiveSoftApply: (_video, reason) => {
-      reasons.push(reason);
-    },
-    maintainActiveSoftApply: () => {},
-    applyPendingPlaybackApplication: () => {},
-    activatePauseHold: () => {},
-    debugLog: () => {},
-    getMonotonicNow: () => 5_000,
-  });
-
-  try {
-    controller.attachPlaybackListeners();
-    dom.listeners.get("ratechange")!(new Event("ratechange"));
-
-    assert.deepEqual(runtimeState.lastExplicitUserAction, null);
+    // The ambiguous state really was reached: the action got recorded off the
+    // event type alone. That is precisely why it must not authorize a cancel.
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "ratechange",
+      at: 5_000,
+    });
     assert.deepEqual(reasons, []);
   } finally {
     dom.restore();

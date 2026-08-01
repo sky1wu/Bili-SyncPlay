@@ -52,10 +52,6 @@ export interface SyncController {
   hasRecentRemoteStopIntent(currentVideoUrl: string): boolean;
   cancelActiveSoftApply(video: HTMLVideoElement | null, reason: string): void;
   maintainActiveSoftApply(video: HTMLVideoElement): void;
-  isRateUnexplainedByActiveCatchUp(
-    normalizedUrl: string | null,
-    playbackRate: number,
-  ): boolean;
   applyPendingPlaybackApplication(video: HTMLVideoElement): void;
   broadcastPlayback(
     video: HTMLVideoElement,
@@ -432,10 +428,6 @@ export function createSyncController(args: {
                   rateOffsetSeconds:
                     adjustment.playbackRate - adjustment.restorePlaybackRate,
                 },
-            // What this apply just wrote to the element. Recorded so a later
-            // `ratechange` carrying a DIFFERENT rate can be attributed to the
-            // user by evidence rather than by gesture guessing.
-            appliedPlaybackRate: adjustment.playbackRate,
           });
           return;
         }
@@ -1699,8 +1691,6 @@ export function createSyncController(args: {
     hasRecentRemoteStopIntent,
     cancelActiveSoftApply: softApply.cancelActiveSoftApply,
     maintainActiveSoftApply: softApply.maintainActiveSoftApply,
-    isRateUnexplainedByActiveCatchUp:
-      softApply.isRateUnexplainedByActiveCatchUp,
     applyPendingPlaybackApplication,
     broadcastPlayback,
     applyRoomState: recordRoomConfirmedBroadcast,

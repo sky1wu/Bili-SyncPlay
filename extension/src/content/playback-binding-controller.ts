@@ -65,10 +65,6 @@ export function createPlaybackBindingController(args: {
     reason: string,
   ) => void;
   maintainActiveSoftApply: (video: HTMLVideoElement) => void;
-  isRateUnexplainedByActiveCatchUp: (
-    normalizedUrl: string | null,
-    playbackRate: number,
-  ) => boolean;
   applyPendingPlaybackApplication: (video: HTMLVideoElement) => void;
   activatePauseHold: (durationMs?: number) => void;
   debugLog: (message: string) => void;
@@ -1160,37 +1156,24 @@ export function createPlaybackBindingController(args: {
           // This prevents a stray page click near our own catch-up ratechange
           // from cancelling the self-restore and leaving the temporary rate stuck.
           //
-          // Gesture attribution alone cannot cover the whole input surface
-          // though: `isGestureInsidePlayer` deliberately counts only
-          // play-toggle keys, so a keyboard SPEED shortcut is never recognised
-          // as an in-player takeover. The second branch closes that hole with
-          // evidence rather than attribution — the rate on the element is not
-          // the one our own catch-up wrote, so someone else put it there.
-          // Without it the user's change is lost twice over: the broadcast
-          // reports the session's base rate, and the session timer then restores
-          // that base rate locally too.
+          // Known limitation, deliberately not "fixed" (#238/#239): a KEYBOARD
+          // speed shortcut is not an in-player gesture (`isGestureInsidePlayer`
+          // counts only play-toggle keys), so changing speed that way during a
+          // catch-up does not end the session and the change is undone when the
+          // session restores. The speed MENU is a pointer inside the player, so
+          // the common path is covered.
           //
-          // A rate mismatch alone is NOT enough, because the player resets the
-          // live rate by itself while recovering from a stall (see
-          // `cancelActiveSoftApply`). That reset also fails to match what the
-          // catch-up wrote, and cancelling it as `user-ratechange` would SKIP the
-          // restore and strand the elevated `defaultPlaybackRate` — the exact
-          // bug that restore exists to prevent. Requiring a recorded explicit
-          // ratechange keeps the branch to changes something outside this code
-          // deliberately made: `rememberExplicitUserAction` above only records
-          // one when a real gesture backs it.
-          const hasRecordedUserRateChange =
-            args.runtimeState.lastExplicitUserAction?.kind === "ratechange" &&
-            monotonicNow() - args.runtimeState.lastExplicitUserAction.at <
-              args.userGestureGraceMs;
-          if (
-            hasRecentUserGestureInPlayer() ||
-            (hasRecordedUserRateChange &&
-              args.isRateUnexplainedByActiveCatchUp(
-                args.normalizeUrl(args.getSharedVideo()?.url),
-                video.playbackRate,
-              ))
-          ) {
+          // Do not close it by inferring the takeover from "the element's rate is
+          // not the one the catch-up wrote". The player resets the live rate by
+          // itself while recovering from a stall, and `rememberExplicitUserAction`
+          // above records kind=`ratechange` off the EVENT type plus ANY recent
+          // document-level gesture — so that inference cannot separate the two,
+          // and a false positive cancels as `user-ratechange`, skipping the
+          // restore and stranding the elevated `defaultPlaybackRate` (see
+          // `cancelActiveSoftApply`). Closing it properly needs a real signal for
+          // "the user operated the speed control", which the document-level
+          // gesture tracker does not currently produce.
+          if (hasRecentUserGestureInPlayer()) {
             args.cancelActiveSoftApply(video, "user-ratechange");
           }
         }
