@@ -53,6 +53,17 @@ export function createShareController(args: {
     pageUrl: string;
     maxAgeMs: number;
   }) => Promise<SharedVideo | null>;
+  /**
+   * The room's base playback rate while a rate catch-up is running for this url,
+   * or `null` when none is. A share payload must report it for the same reason a
+   * `playback:update` must: during a catch-up `video.playbackRate` is a temporary
+   * offset this client added to close its own drift, and the server persists
+   * whatever a `video:share` carries — so re-sharing mid-catch-up would write the
+   * temporary rate straight into room state (#238).
+   */
+  getActiveCorrectionBaseRate: (
+    url: string | undefined | null,
+  ) => number | null;
   debugLog: (message: string) => void;
 }): ShareController {
   function canUsePageSnapshot(pathname: string): boolean {
@@ -163,7 +174,9 @@ export function createShareController(args: {
       playback: video
         ? {
             currentTime: video.currentTime,
-            playbackRate: video.playbackRate,
+            playbackRate:
+              args.getActiveCorrectionBaseRate(sharedVideo.url) ??
+              video.playbackRate,
             playState: getPlayState(video, args.runtimeState.intendedPlayState),
           }
         : null,

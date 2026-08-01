@@ -151,6 +151,19 @@ export function createPlaybackBindingController(args: {
   const hasRecentUserGestureInPlayer = () =>
     monotonicNow() - args.runtimeState.lastUserGestureInPlayerAt <
     args.userGestureGraceMs;
+  // The user just PERSISTENTLY selected a playback speed (Shift+1 / Shift+2).
+  // Hold-to-fast-forward is deliberately not one — see `isRateControlGesture`.
+  //
+  // The `> 0` check is defensive, not load-bearing today: the field starts at 0
+  // and `performance.now()` starts near it, so a bare freshness check would read
+  // as true for the first `userGestureGraceMs` of the page — but
+  // `hasRecentUserGestureInPlayer` has the same 0 default and the same window,
+  // so that span is already covered by it and the difference is unobservable.
+  // Kept so the two cannot drift apart if either default or window changes.
+  const hasRecentRateControlGesture = () =>
+    args.runtimeState.lastRateControlGestureAt > 0 &&
+    monotonicNow() - args.runtimeState.lastRateControlGestureAt <
+      args.userGestureGraceMs;
   // A FRESH in-player play intent: an in-player gesture that also postdates the
   // last forced pause. While the page bridge resolves, the unconfirmed-context
   // hold force-pauses (updating `lastForcedPauseAt`); the SAME click that
@@ -1155,7 +1168,24 @@ export function createPlaybackBindingController(args: {
           // (pointer in the player / play-toggle key, as the speed menu is) does.
           // This prevents a stray page click near our own catch-up ratechange
           // from cancelling the self-restore and leaving the temporary rate stuck.
-          if (hasRecentUserGestureInPlayer()) {
+          //
+          // The speed MENU is a pointer inside the player, so the predicate above
+          // already covers it. A KEYBOARD speed shortcut is not an in-player
+          // gesture (`isGestureInsidePlayer` counts only play-toggle keys), which
+          // is what `isRateControlGesture` is for — a signal kept deliberately
+          // separate so speed keys never authorize playback on a "load paused"
+          // page.
+          //
+          // Both branches are POSITIVE evidence about the input. Do NOT replace
+          // them by inferring the takeover from "the element's rate is not the one
+          // the catch-up wrote": the player resets the live rate by itself while
+          // recovering from a stall, and `rememberExplicitUserAction` above
+          // records kind=`ratechange` off the EVENT type plus ANY recent
+          // document-level gesture, so neither separates the two. A false
+          // positive cancels as `user-ratechange`, which SKIPS the restore and
+          // strands the elevated `defaultPlaybackRate` (see
+          // `cancelActiveSoftApply`).
+          if (hasRecentUserGestureInPlayer() || hasRecentRateControlGesture()) {
             args.cancelActiveSoftApply(video, "user-ratechange");
           }
         }

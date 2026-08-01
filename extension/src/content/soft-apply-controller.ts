@@ -53,6 +53,23 @@ export interface SoftApplyController {
    * that rate protected from being written back to the room's base value.
    */
   hasActiveCorrectionSession(normalizedUrl: string | null): boolean;
+  /**
+   * The room's base playback rate while a correction session is in flight for
+   * this url, or `null` when none is.
+   *
+   * This is what a broadcast must report, because `video.playbackRate` is NOT
+   * the room's rate during a session — it is a temporary offset this client is
+   * applying to close its own drift, and the room never asked for it. Publishing
+   * it makes peers adopt the offset as their base, correct against *that*, and
+   * publish a lower one still (#238: 1x ratcheted down to 0.53x). The temporary
+   * rate is a local implementation detail and must not reach the wire.
+   *
+   * Deliberately NOT gated on `deadlineAt`: past the deadline the session is
+   * still unrestored (the timer that restores it has not run yet), so the base
+   * rate is still the only correct thing to send. That gap is exactly one of the
+   * windows the leak escaped through.
+   */
+  getActiveCorrectionBaseRate(normalizedUrl: string | null): number | null;
   shouldSuppressByCooldown(
     video: HTMLVideoElement,
     playback: PlaybackState,
@@ -410,11 +427,12 @@ export function createSoftApplyController(args: {
     eventSource: LocalPlaybackEventSource;
     now: number;
   }): boolean {
+    // `normalizedCurrentUrl` is the LOCAL page's url, so it needs the alias-aware
+    // match — see `matchesActiveSession`.
     if (
       !activeSoftApply ||
       input.now >= activeSoftApply.deadlineAt ||
-      !input.normalizedCurrentUrl ||
-      input.normalizedCurrentUrl !== activeSoftApply.normalizedUrl
+      !matchesActiveSession(input.normalizedCurrentUrl)
     ) {
       return false;
     }
@@ -437,22 +455,57 @@ export function createSoftApplyController(args: {
   // suppress / pollute the authoritative state. A session that ran a real
   // soft-apply (sticky armCooldownOnConverge=true) is excluded: its delayed
   // seek echoes must still be suppressed.
+  // Callers pass urls from BOTH spaces — the room's (`pending.url`) and the local
+  // page's (`normalizedCurrentVideoUrl`) — so this needs the alias-aware match
+  // too; see `matchesActiveSession`.
   function isActiveRateOnlyCatchUp(normalizedUrl: string | null): boolean {
     return (
       activeSoftApply !== null &&
       activeSoftApply.convergeByRelativeDrift &&
       !activeSoftApply.armCooldownOnConverge &&
-      normalizedUrl !== null &&
-      normalizedUrl === activeSoftApply.normalizedUrl
+      matchesActiveSession(normalizedUrl)
     );
   }
 
-  function hasActiveCorrectionSession(normalizedUrl: string | null): boolean {
+  /**
+   * Whether `normalizedUrl` names the video the active session is correcting.
+   *
+   * A session is keyed on the url the ROOM carries (`playback.url`). On an
+   * address-bar-opaque festival page that can be the bare `/festival/<id>` route
+   * the share was made with, which stays the room's identity until the room
+   * confirms a concrete video (see `resolvedSharedVideoUrl` and
+   * `navigation-controller`'s discovery branch). Meanwhile every local caller —
+   * the broadcast path's `currentVideo.url`, the share payload's
+   * `sharedVideo.url` — has the resolved `/video/...`. Two spellings of one
+   * video: comparing them raw makes the getter report "no session" for the very
+   * page the session is running on, and the temporary catch-up rate goes out.
+   *
+   * The alias is only honoured when the session is keyed on the room's CURRENT
+   * shared url, so a stale session for some other video cannot borrow it.
+   */
+  function matchesActiveSession(normalizedUrl: string | null): boolean {
+    if (activeSoftApply === null || normalizedUrl === null) {
+      return false;
+    }
+    if (normalizedUrl === activeSoftApply.normalizedUrl) {
+      return true;
+    }
     return (
-      activeSoftApply !== null &&
-      normalizedUrl !== null &&
-      normalizedUrl === activeSoftApply.normalizedUrl
+      normalizedUrl === args.runtimeState.resolvedSharedVideoUrl &&
+      activeSoftApply.normalizedUrl === args.runtimeState.activeSharedUrl
     );
+  }
+
+  function getActiveCorrectionBaseRate(
+    normalizedUrl: string | null,
+  ): number | null {
+    return matchesActiveSession(normalizedUrl) && activeSoftApply !== null
+      ? activeSoftApply.restorePlaybackRate
+      : null;
+  }
+
+  function hasActiveCorrectionSession(normalizedUrl: string | null): boolean {
+    return getActiveCorrectionBaseRate(normalizedUrl) !== null;
   }
 
   function shouldSuppressByCooldown(
@@ -507,6 +560,7 @@ export function createSoftApplyController(args: {
     shouldSuppressActiveSoftApplyBroadcast,
     isActiveRateOnlyCatchUp,
     hasActiveCorrectionSession,
+    getActiveCorrectionBaseRate,
     shouldSuppressByCooldown,
     clearSoftApplyCooldown,
     destroy,

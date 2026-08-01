@@ -2715,3 +2715,133 @@ test("sync controller does not reuse a pre-apply seek intent for programmatic ec
   // with `playing` and restart the room.
   assert.notEqual(lastBroadcastPlayState(harness), "playing");
 });
+
+/**
+ * A client mid-catch-up: the room is at 1x, this client is 0.7s ahead, so the
+ * rate-only reconcile lowers `video.playbackRate` to close the gap.
+ *
+ * The returned harness is positioned at the moment the leak happened in
+ * production (#238): the programmatic-apply window has expired, an unrelated
+ * explicit user action is inside the gesture grace window (which opens both the
+ * soft-apply and the unexpected-rate gate), and the correction session is still
+ * running.
+ */
+async function createActiveCatchUpHarness() {
+  const windowStub = installWindowStub();
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setNow(20_000);
+  const video = createVideo({ paused: false, currentTime: 24.7 });
+  harness.setVideoElement(video);
+
+  await harness.controller.applyRoomState(
+    createRoomState({
+      actorId: "remote-member",
+      seq: 1,
+      serverTime: 19_900,
+      currentTime: 24,
+      playState: "playing",
+      playbackRate: 1,
+    }),
+  );
+
+  // Precondition, not the assertion under test: the catch-up must actually have
+  // elevated the local rate, otherwise the regression below proves nothing.
+  assert.ok(
+    Math.abs(video.playbackRate - 1) > 0.01,
+    `expected an active catch-up rate, got ${video.playbackRate}`,
+  );
+
+  // Past programmaticApplyWindowMs (700) so the programmatic gate is shut, and
+  // well inside the session's relative-drift restore window.
+  harness.setNow(20_800);
+  return { harness, video, sharedVideo, windowStub };
+}
+
+function lastBroadcastPayload(harness: { runtimeMessages: Array<unknown> }) {
+  const message = harness.runtimeMessages.at(-1) as {
+    payload: PlaybackState;
+  };
+  return message.payload;
+}
+
+test("sync controller broadcasts the room's base rate, not the temporary catch-up rate", async () => {
+  const { harness, video, windowStub } = await createActiveCatchUpHarness();
+  try {
+    // An unrelated gesture (a seek moments ago) — this is what opened both the
+    // soft-apply and the unexpected-rate gate in production.
+    harness.runtimeState.lastExplicitUserAction = { kind: "seek", at: 20_800 };
+
+    await harness.controller.broadcastPlayback(video, "playing");
+
+    assert.equal(harness.runtimeMessages.length, 1);
+    assert.equal(lastBroadcastPayload(harness).playbackRate, 1);
+    // The other half of the bug: writing the temporary rate here taught
+    // `shouldSuppressUnexpectedPlaybackRateBroadcast` to accept it, disarming
+    // the guard for every later leak.
+    assert.equal(harness.runtimeState.intendedPlaybackRate, 1);
+  } finally {
+    windowStub.restore();
+  }
+});
+
+test("sync controller broadcasts a user's rate change once their gesture ends the catch-up", async () => {
+  const { harness, video, windowStub } = await createActiveCatchUpHarness();
+  try {
+    // How a real rate change arrives: the user opens the player's speed menu,
+    // which is an in-player gesture, so `onRateChange` tears the session down
+    // before any broadcast runs. With no session left there is no base rate to
+    // report and the user's own rate goes out.
+    harness.controller.cancelActiveSoftApply(video, "user-ratechange");
+    video.playbackRate = 1.5;
+    harness.runtimeState.lastExplicitUserAction = {
+      kind: "ratechange",
+      at: 20_800,
+    };
+
+    await harness.controller.broadcastPlayback(video, "ratechange");
+
+    assert.equal(harness.runtimeMessages.length, 1);
+    const payload = lastBroadcastPayload(harness);
+    assert.equal(payload.syncIntent, "explicit-ratechange");
+    assert.equal(payload.playbackRate, 1.5);
+  } finally {
+    windowStub.restore();
+  }
+});
+
+test("sync controller keeps the temporary rate off the wire even when a ratechange looks explicit", async () => {
+  const { harness, video, windowStub } = await createActiveCatchUpHarness();
+  try {
+    // The dangerous half of the same ambiguity: our own catch-up `ratechange`,
+    // reclassified as a user action because an unrelated page click landed
+    // inside the gesture grace window. There was no in-player gesture, so the
+    // session is still alive — and the rate on the element is still ours, not a
+    // user's choice. Honouring the tag here is exactly what ratcheted a room
+    // from 1x down to 0.53x (#238).
+    const temporaryRate = video.playbackRate;
+    harness.runtimeState.lastExplicitUserAction = {
+      kind: "ratechange",
+      at: 20_800,
+    };
+
+    await harness.controller.broadcastPlayback(video, "ratechange");
+
+    assert.equal(harness.runtimeMessages.length, 1);
+    assert.equal(lastBroadcastPayload(harness).playbackRate, 1);
+    assert.notEqual(lastBroadcastPayload(harness).playbackRate, temporaryRate);
+    assert.equal(harness.runtimeState.intendedPlaybackRate, 1);
+  } finally {
+    windowStub.restore();
+  }
+});

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   isGestureInsidePlayer,
+  isRateControlGesture,
   startUserGestureTracking,
 } from "../src/content/gesture-tracker";
 
@@ -238,5 +239,168 @@ test("startUserGestureTracking treats browser history popstate as a user gesture
     assert.equal(gestures, 1);
   } finally {
     stubs.restore();
+  }
+});
+
+function fakeRateKeyEvent(
+  options: {
+    key?: string;
+    code?: string;
+    shiftKey?: boolean;
+    repeat?: boolean;
+    target?: unknown;
+    type?: string;
+  } = {},
+): Event {
+  return {
+    type: options.type ?? "keydown",
+    target: options.target ?? new FakeElement({}),
+    key: options.key,
+    code: options.code,
+    shiftKey: options.shiftKey ?? false,
+    repeat: options.repeat ?? false,
+  } as unknown as Event;
+}
+
+test("isRateControlGesture matches Bilibili's Shift+1 / Shift+2 speed keys", () => {
+  withElementStub(() => {
+    // Matched on `code`: with Shift held, `key` is the SHIFTED character ("!"
+    // on a US layout), so a `key` comparison would never fire.
+    assert.equal(
+      isRateControlGesture(
+        fakeRateKeyEvent({ code: "Digit1", key: "!", shiftKey: true }),
+      ),
+      true,
+    );
+    assert.equal(
+      isRateControlGesture(
+        fakeRateKeyEvent({ code: "Digit2", key: "@", shiftKey: true }),
+      ),
+      true,
+    );
+    // Without Shift the same physical keys do nothing to the rate.
+    assert.equal(
+      isRateControlGesture(fakeRateKeyEvent({ code: "Digit1", key: "1" })),
+      false,
+    );
+    // Unrelated shifted key.
+    assert.equal(
+      isRateControlGesture(
+        fakeRateKeyEvent({ code: "Digit3", key: "#", shiftKey: true }),
+      ),
+      false,
+    );
+  });
+});
+
+test("isRateControlGesture excludes ArrowRight entirely, held or not", () => {
+  withElementStub(() => {
+    // Holding ArrowRight engages 3x, but only while held: on release the player
+    // restores the rate it saved when the hold began, which mid-catch-up is our
+    // TEMPORARY rate. Treating the hold as a takeover would end the session,
+    // drop its restore, and let both the transient 3x and that temporary rate go
+    // out tagged `explicit-ratechange` — exactly the pollution #238 is about
+    // (its logs show `3`, `3`, `0.9223063476562674`, `0.9223063476562674`).
+    assert.equal(
+      isRateControlGesture(
+        fakeRateKeyEvent({ key: "ArrowRight", repeat: true }),
+      ),
+      false,
+    );
+    // A short press is a 5s seek and never touches the rate at all.
+    assert.equal(
+      isRateControlGesture(
+        fakeRateKeyEvent({ key: "ArrowRight", repeat: false }),
+      ),
+      false,
+    );
+  });
+});
+
+test("isRateControlGesture ignores speed keys typed into an editable target", () => {
+  withElementStub(() => {
+    assert.equal(
+      isRateControlGesture(
+        fakeRateKeyEvent({
+          code: "Digit2",
+          key: "@",
+          shiftKey: true,
+          target: new FakeElement({ [EDITABLE_SELECTOR]: true }),
+        }),
+      ),
+      false,
+    );
+    assert.equal(
+      isRateControlGesture(
+        fakeRateKeyEvent({
+          code: "Digit1",
+          key: "!",
+          shiftKey: true,
+          target: new FakeElement({}, true),
+        }),
+      ),
+      false,
+    );
+  });
+});
+
+test("isRateControlGesture ignores non-keydown events", () => {
+  withElementStub(() => {
+    assert.equal(
+      isRateControlGesture(
+        fakeRateKeyEvent({ type: "click", code: "Digit2", shiftKey: true }),
+      ),
+      false,
+    );
+  });
+});
+
+test("startUserGestureTracking reports the rate-control flag separately", () => {
+  const originalDocument = globalThis.document;
+  const originalWindow = globalThis.window;
+  const listeners: Array<{ type: string; handler: (event: Event) => void }> =
+    [];
+  Object.assign(globalThis, {
+    document: {
+      addEventListener(type: string, handler: (event: Event) => void) {
+        listeners.push({ type, handler });
+      },
+    },
+    window: {
+      addEventListener(type: string, handler: (event: Event) => void) {
+        listeners.push({ type, handler });
+      },
+    },
+  });
+  const reports: Array<{ insidePlayer: boolean; rateControl: boolean }> = [];
+
+  try {
+    withElementStub(() => {
+      startUserGestureTracking((insidePlayer, rateControl) => {
+        reports.push({ insidePlayer, rateControl });
+      });
+      const keydownHandler = listeners.find(
+        (entry) => entry.type === "keydown",
+      )?.handler;
+      assert.ok(keydownHandler);
+
+      // A speed key is a rate-control gesture but NOT an in-player play intent:
+      // feeding it into that predicate would authorize the page-load autoplay.
+      keydownHandler?.(
+        fakeRateKeyEvent({ code: "Digit2", key: "@", shiftKey: true }),
+      );
+      // A play-toggle key is the opposite.
+      keydownHandler?.(fakeRateKeyEvent({ key: "k" }));
+
+      assert.deepEqual(reports, [
+        { insidePlayer: false, rateControl: true },
+        { insidePlayer: true, rateControl: false },
+      ]);
+    });
+  } finally {
+    Object.assign(globalThis, {
+      document: originalDocument,
+      window: originalWindow,
+    });
   }
 });

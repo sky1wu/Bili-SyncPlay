@@ -4226,3 +4226,113 @@ test("records explicit user actions on the monotonic clock by default", async ()
     dom.restore();
   }
 });
+
+test("playback binding controller does not treat any recent gesture as a rate takeover", () => {
+  // The player resets the live rate by itself while recovering from a stall. If
+  // an unrelated page click happened to land inside the gesture grace window,
+  // `rememberExplicitUserAction` still records kind=`ratechange` — it reads the
+  // EVENT type, not what the user actually operated. Cancelling on that
+  // combination would skip the restore and strand the elevated
+  // `defaultPlaybackRate`, resurrecting the temporary rate on the next media
+  // load (#239). Only a real in-player gesture may end the session.
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  // Recent document-level gesture (a click on blank space)…
+  runtimeState.lastUserGestureAt = 4_500;
+  // …but nothing in-player for far longer than the grace window.
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
+  const reasons: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BV1xx411c7mD",
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      title: "Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: (_video, reason) => {
+      reasons.push(reason);
+    },
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("ratechange")!(new Event("ratechange"));
+
+    // The ambiguous state really was reached: the action got recorded off the
+    // event type alone. That is precisely why it must not authorize a cancel.
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "ratechange",
+      at: 5_000,
+    });
+    assert.deepEqual(reasons, []);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller ends the catch-up for a keyboard speed shortcut", () => {
+  // Shift+1 / Shift+2 are not in-player gestures
+  // (`isGestureInsidePlayer` counts only play-toggle keys), so before the
+  // dedicated signal existed the session survived, the broadcast reported the
+  // session's base rate and the restore timer put that base rate back — the
+  // user's choice was lost both locally and in the room (#238/#239).
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 4_500;
+  // Nothing in-player: a speed key must never feed that predicate.
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
+  runtimeState.lastRateControlGestureAt = 4_500;
+  const reasons: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BV1xx411c7mD",
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      title: "Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: (_video, reason) => {
+      reasons.push(reason);
+    },
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("ratechange")!(new Event("ratechange"));
+
+    assert.deepEqual(reasons, ["user-ratechange"]);
+  } finally {
+    dom.restore();
+  }
+});

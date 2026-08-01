@@ -64,6 +64,8 @@ const shareController = createShareController({
   nextSeq: () => seq++,
   getFestivalSnapshot: () => festivalBridge.getSnapshot(),
   refreshFestivalBridge: (input) => festivalBridge.refreshSnapshot(input),
+  getActiveCorrectionBaseRate: (url) =>
+    syncController.getActiveCorrectionBaseRate(normalizeUrl(url)),
   debugLog,
 });
 const autoShareNextController = createAutoShareNextController({
@@ -246,11 +248,14 @@ function activatePauseHold(durationMs = PAUSE_HOLD_MS): void {
 }
 
 async function init(): Promise<void> {
-  startUserGestureTracking((insidePlayer) => {
+  startUserGestureTracking((insidePlayer, rateControl) => {
     const now = performance.now();
     runtimeState.lastUserGestureAt = now;
     if (insidePlayer) {
       runtimeState.lastUserGestureInPlayerAt = now;
+    }
+    if (rateControl) {
+      runtimeState.lastRateControlGestureAt = now;
     }
   });
   pageShareButtonController.start();

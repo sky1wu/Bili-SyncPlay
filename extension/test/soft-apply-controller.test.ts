@@ -638,3 +638,151 @@ test("arms the soft-apply cooldown on the monotonic clock by default", () => {
     windowStub.restore();
   }
 });
+
+test("getActiveCorrectionBaseRate reports the room's base rate for the whole life of a session", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    // The element already carries the temporary catch-up rate the session is
+    // about to manage; the room's rate is 1.
+    const video = createVideo({
+      currentTime: 24.7,
+      defaultPlaybackRate: 0.84,
+      playbackRate: 0.84,
+    });
+    let now = 10_000;
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getMonotonicNow: () => now,
+      armProgrammaticApplyWindow: () => {},
+    });
+    const url = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+
+    controller.upsertActiveSoftApply(createPlayback({ playbackRate: 1 }), 0.7, {
+      armCooldownOnConverge: false,
+      relativeDriftClose: { driftSeconds: 0.7, rateOffsetSeconds: -0.16 },
+    });
+
+    assert.equal(controller.getActiveCorrectionBaseRate(url), 1);
+    assert.equal(
+      controller.getActiveCorrectionBaseRate("https://example.com/other"),
+      null,
+    );
+    assert.equal(controller.getActiveCorrectionBaseRate(null), null);
+
+    // Past the deadline but before the restore timer has run: the element is
+    // still on the temporary rate, so the base rate is still what a broadcast
+    // must report. This gap is one of the windows the leak escaped through.
+    now = 20_000;
+    assert.equal(controller.getActiveCorrectionBaseRate(url), 1);
+
+    windowStub.flushTimers();
+    assert.equal(controller.getActiveCorrectionBaseRate(url), null);
+  } finally {
+    windowStub.restore();
+  }
+});
+
+test("the correction session is found through a festival bare-route alias", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const bareRoute = "https://www.bilibili.com/festival/2024ns";
+    const resolved = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+    // The room was shared before the page bridge could resolve a bvid/cid, so
+    // its identity is the unstable route; the bridge has since resolved the
+    // concrete video locally.
+    runtimeState.activeSharedUrl = bareRoute;
+    runtimeState.resolvedSharedVideoUrl = resolved;
+
+    const video = createVideo({
+      currentTime: 24.7,
+      defaultPlaybackRate: 0.84,
+      playbackRate: 0.84,
+    });
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getMonotonicNow: () => 10_000,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    // The session is keyed on what the ROOM carries — the bare route.
+    controller.upsertActiveSoftApply(
+      createPlayback({ url: bareRoute, playbackRate: 1 }),
+      0.7,
+      {
+        armCooldownOnConverge: false,
+        relativeDriftClose: { driftSeconds: 0.7, rateOffsetSeconds: -0.16 },
+      },
+    );
+
+    // Local callers (broadcast payload, share payload) hold the resolved url.
+    // Without the alias they read "no session" and publish the element's
+    // temporary 0.84 as the room's rate (#238).
+    assert.equal(controller.getActiveCorrectionBaseRate(resolved), 1);
+    assert.equal(controller.hasActiveCorrectionSession(resolved), true);
+    assert.equal(controller.isActiveRateOnlyCatchUp(resolved), true);
+    // The room-space url still matches directly.
+    assert.equal(controller.getActiveCorrectionBaseRate(bareRoute), 1);
+
+    // An unrelated video must not borrow the alias.
+    assert.equal(
+      controller.getActiveCorrectionBaseRate(
+        "https://www.bilibili.com/video/BV1other",
+      ),
+      null,
+    );
+  } finally {
+    windowStub.restore();
+  }
+});
+
+test("a stale session cannot borrow the festival alias of another share", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    const resolved = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+    // The room has since moved on to a different bare route, so the session's
+    // url is no longer the room's identity — the alias must not apply.
+    runtimeState.activeSharedUrl = "https://www.bilibili.com/festival/other";
+    runtimeState.resolvedSharedVideoUrl = resolved;
+
+    const video = createVideo({ currentTime: 24.7, playbackRate: 0.84 });
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getMonotonicNow: () => 10_000,
+      armProgrammaticApplyWindow: () => {},
+    });
+
+    controller.upsertActiveSoftApply(
+      createPlayback({
+        url: "https://www.bilibili.com/festival/2024ns",
+        playbackRate: 1,
+      }),
+      0.7,
+      {
+        armCooldownOnConverge: false,
+        relativeDriftClose: { driftSeconds: 0.7, rateOffsetSeconds: -0.16 },
+      },
+    );
+
+    assert.equal(controller.getActiveCorrectionBaseRate(resolved), null);
+  } finally {
+    windowStub.restore();
+  }
+});
