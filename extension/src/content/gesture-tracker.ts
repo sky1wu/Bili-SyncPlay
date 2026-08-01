@@ -15,6 +15,55 @@ const EDITABLE_SELECTOR =
 // play intent for these (so Esc/Tab/typing do not authorize playback).
 const PLAY_TOGGLE_KEYS = new Set([" ", "Spacebar", "k", "K"]);
 
+// Physical keys that set a playback SPEED on Bilibili when combined with Shift
+// (Shift+1 → 1x, Shift+2 → 2x). Matched on `code` rather than `key` because
+// `key` carries the SHIFTED character — Shift+1 reports "!" on a US layout — so
+// a `key` comparison would silently never match. `code` is the physical key and
+// is layout-independent.
+const RATE_CONTROL_SHIFT_CODES = new Set(["Digit1", "Digit2"]);
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  return (
+    target.closest(EDITABLE_SELECTOR) !== null ||
+    (target as HTMLElement).isContentEditable
+  );
+}
+
+/**
+ * Whether a gesture is the user operating the player's playback-SPEED control.
+ *
+ * Deliberately separate from {@link isGestureInsidePlayer}: that predicate
+ * authorizes PLAYBACK on "load paused" pages, so widening it with speed keys
+ * would wave the page-load autoplay through. This one only ever ends a rate
+ * catch-up session, so the two must not share a key set.
+ *
+ * Its whole purpose is to be POSITIVE evidence that something other than our own
+ * catch-up moved the rate. Inferring that from "the element's rate is not the one
+ * we wrote" does not work — the player resets the live rate by itself while
+ * recovering from a stall — so the signal has to come from the input itself.
+ *
+ * The hold-to-fast-forward key is matched only while it REPEATS. A short
+ * ArrowRight press is a 5s seek and leaves the rate alone; only holding it
+ * engages 3x, and holding is exactly what produces auto-repeat keydowns. Without
+ * that distinction every arrow-key seek would count as a speed change and a
+ * stall-reset landing next to one would be misread as a user takeover.
+ */
+export function isRateControlGesture(event: Event): boolean {
+  if (event.type !== "keydown" || isEditableTarget(event.target)) {
+    return false;
+  }
+  const keyboardEvent = event as KeyboardEvent;
+  if (keyboardEvent.key === "ArrowRight") {
+    return keyboardEvent.repeat;
+  }
+  return (
+    keyboardEvent.shiftKey && RATE_CONTROL_SHIFT_CODES.has(keyboardEvent.code)
+  );
+}
+
 /**
  * Whether a user gesture event represents an intent to control the player
  * itself — a pointer/touch gesture inside the player container, or a play-toggle
@@ -48,7 +97,7 @@ export function isGestureInsidePlayer(event: Event): boolean {
 }
 
 export function startUserGestureTracking(
-  onGesture: (insidePlayer: boolean) => void,
+  onGesture: (insidePlayer: boolean, rateControl: boolean) => void,
 ): void {
   const gestureEvents: Array<keyof DocumentEventMap> = [
     "pointerdown",
@@ -59,7 +108,7 @@ export function startUserGestureTracking(
   ];
 
   const handleGesture = (event: Event) => {
-    onGesture(isGestureInsidePlayer(event));
+    onGesture(isGestureInsidePlayer(event), isRateControlGesture(event));
   };
 
   for (const eventName of gestureEvents) {
@@ -74,5 +123,5 @@ export function startUserGestureTracking(
   // emits `popstate`); otherwise a sharer using the browser back/forward
   // controls would auto-share the destination without the manual share step.
   // It is never an in-player play intent.
-  window.addEventListener("popstate", () => onGesture(false), true);
+  window.addEventListener("popstate", () => onGesture(false, false), true);
 }

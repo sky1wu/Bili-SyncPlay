@@ -92,6 +92,16 @@ export interface ContentRuntimeState {
    * stray gesture cannot wave the page-load autoplay through.
    */
   lastUserGestureInPlayerAt: number;
+  /**
+   * Timestamp of the most recent gesture on the player's playback-SPEED control
+   * (Shift+1 / Shift+2, or ArrowRight held for 3x). Tracked separately from
+   * `lastUserGestureInPlayerAt` on purpose: that one authorizes playback on
+   * "load paused" pages, so speed keys must not feed it.
+   *
+   * This is the only positive evidence that something other than our own rate
+   * catch-up moved `playbackRate`; see `isRateControlGesture`. `0` means never.
+   */
+  lastRateControlGestureAt: number;
   lastExplicitPlaybackAction: ExplicitPlaybackAction | null;
   explicitNonSharedPlaybackUrl: string | null;
   suppressedLocalEndPauseUrl: string | null;
@@ -298,6 +308,7 @@ export interface ContentRuntimeState {
 export function resetUserGestureState(state: ContentRuntimeState): void {
   state.lastUserGestureAt = 0;
   state.lastUserGestureInPlayerAt = 0;
+  state.lastRateControlGestureAt = 0;
   state.lastExplicitPlaybackAction = null;
   state.lastExplicitUserAction = null;
   state.explicitSeekOriginPlayState = null;
@@ -326,6 +337,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     lastLocalIntentPlayState: null,
     lastUserGestureAt: 0,
     lastUserGestureInPlayerAt: 0,
+    lastRateControlGestureAt: 0,
     lastExplicitPlaybackAction: null,
     explicitNonSharedPlaybackUrl: null,
     suppressedLocalEndPauseUrl: null,

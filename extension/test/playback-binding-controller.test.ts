@@ -4285,3 +4285,54 @@ test("playback binding controller does not treat any recent gesture as a rate ta
     dom.restore();
   }
 });
+
+test("playback binding controller ends the catch-up for a keyboard speed shortcut", () => {
+  // Shift+1 / Shift+2 / held ArrowRight are not in-player gestures
+  // (`isGestureInsidePlayer` counts only play-toggle keys), so before the
+  // dedicated signal existed the session survived, the broadcast reported the
+  // session's base rate and the restore timer put that base rate back — the
+  // user's choice was lost both locally and in the room (#238/#239).
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 4_500;
+  // Nothing in-player: a speed key must never feed that predicate.
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
+  runtimeState.lastRateControlGestureAt = 4_500;
+  const reasons: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BV1xx411c7mD",
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      title: "Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: (_video, reason) => {
+      reasons.push(reason);
+    },
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("ratechange")!(new Event("ratechange"));
+
+    assert.deepEqual(reasons, ["user-ratechange"]);
+  } finally {
+    dom.restore();
+  }
+});
