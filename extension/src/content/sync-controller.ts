@@ -1301,9 +1301,33 @@ export function createSyncController(args: {
       );
       return;
     }
+    // `video.playbackRate` is NOT the room's rate while a correction session is
+    // in flight — it carries a temporary offset this client added to close its
+    // own drift, which the room never asked for. Every value derived from the
+    // rate below (this guard, the duplicate collapse, `intendedPlaybackRate` and
+    // the payload) has to judge the base rate instead; see
+    // `getActiveCorrectionBaseRate` for what publishing the offset does to a
+    // room (#238).
+    const correctionBaseRate = softApply.getActiveCorrectionBaseRate(
+      normalizedCurrentVideoUrl,
+    );
+    // No `explicit-ratechange` exemption, deliberately. A real user rate change
+    // reaches the room through the session being GONE: an in-player gesture (the
+    // speed menu is one) makes `onRateChange` cancel the session before this
+    // runs, so there is no base rate to report and the user's own rate goes out.
+    //
+    // What is left over — a `ratechange` tagged explicit while a session is
+    // still alive — is the ambiguous case `playback-binding-controller` already
+    // refuses to act on: our own catch-up echo, reclassified as a user action
+    // because some unrelated page click landed inside the gesture grace window.
+    // Honouring it here would publish the temporary rate, which is exactly #238.
+    // Reporting the base rate instead costs nothing even when the rate change
+    // was genuine: the session restores that same base rate when it converges,
+    // so the element is headed there regardless.
+    const broadcastPlaybackRate = correctionBaseRate ?? video.playbackRate;
     if (
       shouldSuppressUnexpectedPlaybackRateBroadcast({
-        playbackRate: video.playbackRate,
+        playbackRate: broadcastPlaybackRate,
         currentVideoUrl: currentVideo.url,
         eventSource,
         now,
@@ -1497,10 +1521,11 @@ export function createSyncController(args: {
       duplicate.naturalEnd === (naturalEnd === true) &&
       Math.abs(duplicate.currentTime - video.currentTime) <=
         DUPLICATE_BROADCAST_TIME_EPSILON_SECONDS &&
-      Math.abs(duplicate.playbackRate - video.playbackRate) <= 0.01 &&
+      Math.abs(duplicate.playbackRate - broadcastPlaybackRate) <= 0.01 &&
       args.runtimeState.intendedPlayState === playState &&
-      Math.abs(args.runtimeState.intendedPlaybackRate - video.playbackRate) <=
-        0.01
+      Math.abs(
+        args.runtimeState.intendedPlaybackRate - broadcastPlaybackRate,
+      ) <= 0.01
     ) {
       // Skipping the *message* must not skip the local-intent guard. That
       // window (playback-apply's `ignore-local-guard`) is what stops a stale
@@ -1520,7 +1545,11 @@ export function createSyncController(args: {
 
     args.markBroadcastAt(now);
     args.runtimeState.intendedPlayState = playState;
-    args.runtimeState.intendedPlaybackRate = video.playbackRate;
+    // Must be the broadcast rate, not the live one. This is what
+    // `shouldSuppressUnexpectedPlaybackRateBroadcast` later treats as "expected",
+    // so writing the temporary catch-up rate here taught the guard to accept it
+    // and disarmed it for every subsequent leak (#238).
+    args.runtimeState.intendedPlaybackRate = broadcastPlaybackRate;
     args.runtimeState.lastLocalIntentAt = now;
     args.runtimeState.lastLocalIntentPlayState = playState;
     const payload = createPlaybackBroadcastPayload({
@@ -1530,7 +1559,7 @@ export function createSyncController(args: {
       syncIntent,
       naturalEnd,
       userInitiated,
-      playbackRate: video.playbackRate,
+      playbackRate: broadcastPlaybackRate,
       actorId: args.runtimeState.localMemberId ?? "local",
       seq: args.nextSeq(),
       // NOT `now`. `now` is this machine's monotonic reading, which every local

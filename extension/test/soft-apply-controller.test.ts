@@ -638,3 +638,52 @@ test("arms the soft-apply cooldown on the monotonic clock by default", () => {
     windowStub.restore();
   }
 });
+
+test("getActiveCorrectionBaseRate reports the room's base rate for the whole life of a session", () => {
+  const windowStub = installWindowStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    // The element already carries the temporary catch-up rate the session is
+    // about to manage; the room's rate is 1.
+    const video = createVideo({
+      currentTime: 24.7,
+      defaultPlaybackRate: 0.84,
+      playbackRate: 0.84,
+    });
+    let now = 10_000;
+    const controller = createSoftApplyController({
+      runtimeState,
+      normalizeUrl: (url) => url?.trim() ?? null,
+      getVideoElement: () => video,
+      debugLog: () => {},
+      userGestureGraceMs: 300,
+      programmaticApplyWindowMs: 700,
+      getMonotonicNow: () => now,
+      armProgrammaticApplyWindow: () => {},
+    });
+    const url = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
+
+    controller.upsertActiveSoftApply(createPlayback({ playbackRate: 1 }), 0.7, {
+      armCooldownOnConverge: false,
+      relativeDriftClose: { driftSeconds: 0.7, rateOffsetSeconds: -0.16 },
+    });
+
+    assert.equal(controller.getActiveCorrectionBaseRate(url), 1);
+    assert.equal(
+      controller.getActiveCorrectionBaseRate("https://example.com/other"),
+      null,
+    );
+    assert.equal(controller.getActiveCorrectionBaseRate(null), null);
+
+    // Past the deadline but before the restore timer has run: the element is
+    // still on the temporary rate, so the base rate is still what a broadcast
+    // must report. This gap is one of the windows the leak escaped through.
+    now = 20_000;
+    assert.equal(controller.getActiveCorrectionBaseRate(url), 1);
+
+    windowStub.flushTimers();
+    assert.equal(controller.getActiveCorrectionBaseRate(url), null);
+  } finally {
+    windowStub.restore();
+  }
+});

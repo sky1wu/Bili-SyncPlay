@@ -53,6 +53,23 @@ export interface SoftApplyController {
    * that rate protected from being written back to the room's base value.
    */
   hasActiveCorrectionSession(normalizedUrl: string | null): boolean;
+  /**
+   * The room's base playback rate while a correction session is in flight for
+   * this url, or `null` when none is.
+   *
+   * This is what a broadcast must report, because `video.playbackRate` is NOT
+   * the room's rate during a session — it is a temporary offset this client is
+   * applying to close its own drift, and the room never asked for it. Publishing
+   * it makes peers adopt the offset as their base, correct against *that*, and
+   * publish a lower one still (#238: 1x ratcheted down to 0.53x). The temporary
+   * rate is a local implementation detail and must not reach the wire.
+   *
+   * Deliberately NOT gated on `deadlineAt`: past the deadline the session is
+   * still unrestored (the timer that restores it has not run yet), so the base
+   * rate is still the only correct thing to send. That gap is exactly one of the
+   * windows the leak escaped through.
+   */
+  getActiveCorrectionBaseRate(normalizedUrl: string | null): number | null;
   shouldSuppressByCooldown(
     video: HTMLVideoElement,
     playback: PlaybackState,
@@ -447,12 +464,21 @@ export function createSoftApplyController(args: {
     );
   }
 
+  function getActiveCorrectionBaseRate(
+    normalizedUrl: string | null,
+  ): number | null {
+    if (
+      activeSoftApply === null ||
+      normalizedUrl === null ||
+      normalizedUrl !== activeSoftApply.normalizedUrl
+    ) {
+      return null;
+    }
+    return activeSoftApply.restorePlaybackRate;
+  }
+
   function hasActiveCorrectionSession(normalizedUrl: string | null): boolean {
-    return (
-      activeSoftApply !== null &&
-      normalizedUrl !== null &&
-      normalizedUrl === activeSoftApply.normalizedUrl
-    );
+    return getActiveCorrectionBaseRate(normalizedUrl) !== null;
   }
 
   function shouldSuppressByCooldown(
@@ -507,6 +533,7 @@ export function createSoftApplyController(args: {
     shouldSuppressActiveSoftApplyBroadcast,
     isActiveRateOnlyCatchUp,
     hasActiveCorrectionSession,
+    getActiveCorrectionBaseRate,
     shouldSuppressByCooldown,
     clearSoftApplyCooldown,
     destroy,
