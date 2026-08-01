@@ -427,11 +427,12 @@ export function createSoftApplyController(args: {
     eventSource: LocalPlaybackEventSource;
     now: number;
   }): boolean {
+    // `normalizedCurrentUrl` is the LOCAL page's url, so it needs the alias-aware
+    // match — see `matchesActiveSession`.
     if (
       !activeSoftApply ||
       input.now >= activeSoftApply.deadlineAt ||
-      !input.normalizedCurrentUrl ||
-      input.normalizedCurrentUrl !== activeSoftApply.normalizedUrl
+      !matchesActiveSession(input.normalizedCurrentUrl)
     ) {
       return false;
     }
@@ -454,27 +455,53 @@ export function createSoftApplyController(args: {
   // suppress / pollute the authoritative state. A session that ran a real
   // soft-apply (sticky armCooldownOnConverge=true) is excluded: its delayed
   // seek echoes must still be suppressed.
+  // Callers pass urls from BOTH spaces — the room's (`pending.url`) and the local
+  // page's (`normalizedCurrentVideoUrl`) — so this needs the alias-aware match
+  // too; see `matchesActiveSession`.
   function isActiveRateOnlyCatchUp(normalizedUrl: string | null): boolean {
     return (
       activeSoftApply !== null &&
       activeSoftApply.convergeByRelativeDrift &&
       !activeSoftApply.armCooldownOnConverge &&
-      normalizedUrl !== null &&
-      normalizedUrl === activeSoftApply.normalizedUrl
+      matchesActiveSession(normalizedUrl)
+    );
+  }
+
+  /**
+   * Whether `normalizedUrl` names the video the active session is correcting.
+   *
+   * A session is keyed on the url the ROOM carries (`playback.url`). On an
+   * address-bar-opaque festival page that can be the bare `/festival/<id>` route
+   * the share was made with, which stays the room's identity until the room
+   * confirms a concrete video (see `resolvedSharedVideoUrl` and
+   * `navigation-controller`'s discovery branch). Meanwhile every local caller —
+   * the broadcast path's `currentVideo.url`, the share payload's
+   * `sharedVideo.url` — has the resolved `/video/...`. Two spellings of one
+   * video: comparing them raw makes the getter report "no session" for the very
+   * page the session is running on, and the temporary catch-up rate goes out.
+   *
+   * The alias is only honoured when the session is keyed on the room's CURRENT
+   * shared url, so a stale session for some other video cannot borrow it.
+   */
+  function matchesActiveSession(normalizedUrl: string | null): boolean {
+    if (activeSoftApply === null || normalizedUrl === null) {
+      return false;
+    }
+    if (normalizedUrl === activeSoftApply.normalizedUrl) {
+      return true;
+    }
+    return (
+      normalizedUrl === args.runtimeState.resolvedSharedVideoUrl &&
+      activeSoftApply.normalizedUrl === args.runtimeState.activeSharedUrl
     );
   }
 
   function getActiveCorrectionBaseRate(
     normalizedUrl: string | null,
   ): number | null {
-    if (
-      activeSoftApply === null ||
-      normalizedUrl === null ||
-      normalizedUrl !== activeSoftApply.normalizedUrl
-    ) {
-      return null;
-    }
-    return activeSoftApply.restorePlaybackRate;
+    return matchesActiveSession(normalizedUrl) && activeSoftApply !== null
+      ? activeSoftApply.restorePlaybackRate
+      : null;
   }
 
   function hasActiveCorrectionSession(normalizedUrl: string | null): boolean {
