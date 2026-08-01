@@ -12,7 +12,6 @@ import {
   findMemberIdByTokenEntries,
   getPreviousRoomToLeave,
   resolveRoomCodeToLeave,
-  shouldRemoveMemberBinding,
 } from "./runtime-store-state.js";
 
 type RedisMulti = {
@@ -323,6 +322,29 @@ redis.call("SREM", KEYS[2], ARGV[2])
 return 1
 `;
 
+/**
+ * Drop a member's presence and start their identity's retention clock — but
+ * only if they still HAVE an identity.
+ *
+ * A kick deletes the token and its expiry entry, and the socket close that
+ * follows still runs this path. Registering an expiry unconditionally then left
+ * a `member-token-expiry` entry with no token behind it, which nothing collects
+ * once the room goes quiet (the prune is lazy). The binding check has to be in
+ * the same script as both writes, or the same interleaving reappears between
+ * them (#237 review).
+ */
+const REMOVE_MEMBER_LUA = `
+local bound = redis.call("HGET", KEYS[1], ARGV[1])
+if ARGV[2] ~= "" and bound and bound ~= ARGV[2] then
+  return 0
+end
+redis.call("HDEL", KEYS[1], ARGV[1])
+if redis.call("HEXISTS", KEYS[2], ARGV[1]) == 1 then
+  redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1])
+end
+return 1
+`;
+
 const MARK_ROOM_GENERATION_LUA = `
 redis.call("SET", KEYS[1], ARGV[1])
 return 1
@@ -483,7 +505,6 @@ export async function createRedisRuntimeStore(
   function trackOperation<T>(
     operationName: string,
     operation: Promise<T>,
-    awaitFailures = false,
   ): Promise<T | undefined> {
     const startedAt = performance.now();
     let failureRecorded = false;
@@ -540,20 +561,48 @@ export async function createRedisRuntimeStore(
         performance.now() - startedAt,
       );
     });
-    return awaitFailures ? trackedOperation : handledOperation;
+    return handledOperation;
   }
 
   /**
-   * `trackOperation`, but the returned promise rejects when the write fails
-   * instead of resolving to `undefined`. For writes whose caller must not
-   * proceed on an unconfirmed result — revoking an identity, where the kick
-   * disconnects the socket and reports success right afterwards.
+   * `trackOperation`, but the returned promise reports the write's REAL outcome:
+   * it rejects when the write fails, and it never resolves early.
+   *
+   * Deliberately outside the pending-operation timeout. That timeout rejects
+   * without cancelling the underlying command, so an operation that merely ran
+   * slow still landed in Redis afterwards — and the caller had already been told
+   * it failed. For a kick that meant the admin saw `block_failed` and the
+   * session stayed connected while the shared store went on to block and revoke
+   * it anyway (#237 review). Callers of this helper act on the answer, so an
+   * answer that can be wrong is worse than a slow one; the operation is still
+   * registered below for backpressure accounting.
    */
   function trackAwaitedOperation<T>(
     operationName: string,
     operation: Promise<T>,
   ): Promise<T> {
-    return trackOperation(operationName, operation, true) as Promise<T>;
+    const startedAt = performance.now();
+    const settled = operation.catch(() => undefined);
+    pendingOperations.add(settled);
+    void settled.finally(() => {
+      pendingOperations.delete(settled);
+      metricsCollector?.observeRedisRuntimeStoreDuration(
+        operationName,
+        performance.now() - startedAt,
+      );
+    });
+    return operation.catch((error: unknown) => {
+      metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
+      logPendingOperationError(
+        {
+          operationName,
+          pendingCount: pendingOperations.size,
+          reason: "failed",
+        },
+        error,
+      );
+      throw error;
+    });
   }
 
   /** Collect identities past their retention. Lazy — called on token reads/writes. */
@@ -973,29 +1022,22 @@ export async function createRedisRuntimeStore(
     removeMember(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("remove_member");
       const removal = localRuntimeStore.removeMember(code, memberId, session);
+      // Presence only. The member token itself is deliberately kept so a
+      // reconnect can reclaim this `memberId` (#234) — but it goes on its own
+      // clock, so a room that never empties still releases the people who left
+      // it. The script starts that clock only while a token is actually there.
       void trackOperation(
         "remove_member",
-        (async () => {
-          const currentSessionId = await redis.hget(
-            roomMembersKey(keyPrefix, code),
-            memberId,
-          );
-          if (shouldRemoveMemberBinding(currentSessionId, session?.id)) {
-            // Presence only. The member token itself is deliberately kept so a
-            // reconnect can reclaim this `memberId` (#234) — but it now goes on
-            // its own clock, so a room that never empties still releases the
-            // people who left it.
-            await redis
-              .multi()
-              .hdel(roomMembersKey(keyPrefix, code), memberId)
-              .zadd(
-                roomMemberTokenExpiryKey(keyPrefix, code),
-                String(now() + memberTokenRetentionMs),
-                memberId,
-              )
-              .exec();
-          }
-        })(),
+        redis.eval(
+          REMOVE_MEMBER_LUA,
+          3,
+          roomMembersKey(keyPrefix, code),
+          roomMemberTokensKey(keyPrefix, code),
+          roomMemberTokenExpiryKey(keyPrefix, code),
+          memberId,
+          session?.id ?? "",
+          String(now() + memberTokenRetentionMs),
+        ),
       );
       return removal;
     },

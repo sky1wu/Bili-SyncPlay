@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Redis } from "ioredis";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
 import type { AttachedSession, Session } from "../src/types.js";
 
@@ -1305,6 +1306,112 @@ test("redis runtime store declines a teardown decided against an older room gene
       await store.findMemberIdByToken("ROOMGN", "token-gen-new"),
       null,
     );
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store does not register a retention entry for a member with no token", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const observer = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const redis = new Redis(REDIS_URL);
+  const session = createSession("session-kicked");
+  session.memberId = "member-kicked";
+  session.memberToken = "token-kicked";
+
+  try {
+    store.addMember("ROOMKX", session.memberId, session, session.memberToken);
+    await store.flush?.();
+
+    // The kick takes the token and its retention entry away...
+    await store.evictMemberToken(
+      "ROOMKX",
+      "member-kicked",
+      "token-kicked",
+      Date.now() + 60_000,
+    );
+    await store.flush?.();
+
+    // ...and the socket close arrives afterwards, as it always does.
+    store.removeMember("ROOMKX", session.memberId, session);
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // Registering a retention entry here would leave one with no token behind
+    // it, and the prune is lazy — nothing collects it once the room goes quiet.
+    assert.equal(
+      await redis.zscore(
+        `${keyPrefix}room:ROOMKX:member-token-expiry`,
+        "member-kicked",
+      ),
+      null,
+    );
+    assert.equal(
+      await observer.findMemberIdByToken("ROOMKX", "token-kicked"),
+      null,
+    );
+  } finally {
+    await redis.quit();
+    await store.close();
+    await observer.close();
+  }
+});
+
+test("redis runtime store waits for the real result of an awaited write", async () => {
+  // The pending-operation timeout rejects without cancelling the command, so a
+  // write that merely ran slow still landed — after its caller had been told it
+  // failed. A kick reported `block_failed` while the shared store went on to
+  // block and revoke the member anyway.
+  let settleEval!: () => void;
+  const evalGate = new Promise<void>((resolve) => {
+    settleEval = resolve;
+  });
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async eval() {
+      await evalGate;
+      return 1;
+    },
+  };
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:slow-evict:",
+    redisClient: fakeRedis,
+    pendingOperationTimeoutMs: 20,
+  });
+
+  try {
+    const eviction = store.evictMemberToken(
+      "ROOMSL",
+      "member-slow",
+      "token-slow",
+      Date.now() + 60_000,
+    );
+    let settledEarly = false;
+    void Promise.resolve(eviction).then(
+      () => {
+        settledEarly = true;
+      },
+      () => {
+        settledEarly = true;
+      },
+    );
+
+    // Well past the timeout the wrapper used to reject on.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(
+      settledEarly,
+      false,
+      "an awaited write must not report an outcome the store does not have yet",
+    );
+
+    settleEval();
+    await eviction;
   } finally {
     await store.close();
   }

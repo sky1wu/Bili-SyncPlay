@@ -4238,3 +4238,150 @@ test("an owed teardown does not wipe a room that took the code in the meantime",
     second.memberId,
   );
 });
+
+test("pins the teardown generation before checking whether the room is gone", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime, 5_000);
+  let releaseRoomRead!: () => void;
+  const roomReadGate = new Promise<void>((resolve) => {
+    releaseRoomRead = resolve;
+  });
+  let gateRoomRead = false;
+
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      // Stall the absence check itself. Reading the generation after this point
+      // hands the teardown the NEW room's value, which then matches.
+      getRoom: async (code: string) => {
+        const room = await roomStore.getRoom(code);
+        if (gateRoomRead) {
+          await roomReadGate;
+        }
+        return room;
+      },
+    },
+    activeRooms: runtime,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMPN",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  const first = createSession("first-owner");
+  await service.createRoomForSession(first, "Alice");
+  await service.leaveRoomForSession(first, "disconnect");
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  gateRoomRead = true;
+  const reaping = service.deleteExpiredRooms();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // The previous occupant's identity expires, freeing the code, and a new room
+  // claims it — all while the absence check is still in flight.
+  currentTime += 5_001;
+  gateRoomRead = false;
+  const second = createSession("second-owner");
+  const recreated = await service.createRoomForSession(second, "Bob");
+  assert.equal(recreated.room.code, "ROOMPN");
+
+  releaseRoomRead();
+  await reaping;
+
+  assert.equal(
+    runtime.findMemberIdByToken("ROOMPN", recreated.memberToken),
+    second.memberId,
+  );
+});
+
+test("rolls the room back when its generation cannot be stamped", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      markRoomGeneration: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMRB",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  await assert.rejects(
+    service.createRoomForSession(createSession("owner"), "Alice"),
+    /internal server error/i,
+  );
+
+  // Left behind, the room would have no members and no `expiresAt`, so the
+  // reaper never collects it: the code is held and the room counted forever.
+  assert.equal(await roomStore.getRoom("ROOMRB"), null);
+  assert.equal(await roomStore.countRooms({ includeExpired: true }), 0);
+});
+
+test("an admin teardown works through the retry backlog", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  let failTeardown = true;
+  const teardowns: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+        if (failTeardown) {
+          throw new Error("redis unavailable");
+        }
+        teardowns.push(code);
+        runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: (() => {
+      const codes = ["ROOMB1", "ROOMB2"];
+      return () => codes.shift() ?? "ROOMBX";
+    })(),
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  const first = createSession("first-owner");
+  const owed = await service.createRoomForSession(first, "Alice");
+  await roomStore.deleteRoom(owed.room.code);
+  // An admin close whose teardown failed: the debt is queued.
+  await service.teardownRoomRuntime(owed.room.code);
+  assert.deepEqual(teardowns, []);
+
+  const second = createSession("second-owner");
+  const other = await service.createRoomForSession(second, "Bob");
+  await roomStore.deleteRoom(other.room.code);
+
+  // The standalone global-admin process never runs the reaper, so
+  // `deleteExpiredRooms` is not what drains this — every teardown has to.
+  failTeardown = false;
+  await service.teardownRoomRuntime(other.room.code);
+  assert.deepEqual(teardowns.sort(), ["ROOMB1", "ROOMB2"]);
+});

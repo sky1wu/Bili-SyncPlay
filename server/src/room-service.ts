@@ -437,10 +437,25 @@ export function createRoomService(options: {
       // this guard fail in exactly the conditions that queue teardowns in the
       // first place, and it would then wipe the new room's members and tokens
       // (#237 review). Keep the debt and try again later.
+      // Pinned BEFORE anything is checked, so it names the room instance this
+      // teardown is about. Reading it after the absence check below left a
+      // second window: a code recycled between the two reads handed us the NEW
+      // room's generation, which then matched and wiped it (#237 review).
+      let expectedGeneration: string | null;
+      try {
+        expectedGeneration = await runtimeStore.getRoomGeneration(code);
+      } catch {
+        pendingRuntimeTeardowns.add(code);
+        continue;
+      }
+
       let currentRoom: PersistedRoom | null;
       try {
         currentRoom = await roomStore.getRoom(code);
       } catch {
+        // A read failure is "unknown", NOT "absent". Treating it as absent made
+        // this guard fail in exactly the conditions that queue teardowns in the
+        // first place. Keep the debt and try again later.
         pendingRuntimeTeardowns.add(code);
         continue;
       }
@@ -449,15 +464,10 @@ export function createRoomService(options: {
         continue;
       }
       try {
-        // The generation is read HERE, where the teardown is decided, and the
-        // delete only applies while it still holds. That is what finally closes
-        // the recycled-code race: the two guards around this are both
-        // check-then-act, and no arrangement of them makes the delete itself
-        // conditional (#237 review).
-        await runtimeStore.deleteRoom(
-          code,
-          await runtimeStore.getRoomGeneration(code),
-        );
+        // The delete only applies while that generation still holds. Both
+        // guards around it are check-then-act; no arrangement of them makes the
+        // delete itself conditional, which is what actually closes the race.
+        await runtimeStore.deleteRoom(code, expectedGeneration);
         pendingRuntimeTeardowns.delete(code);
       } catch (error) {
         pendingRuntimeTeardowns.add(code);
@@ -1111,7 +1121,14 @@ export function createRoomService(options: {
      * way back — the room code would never reach the reaper again (#237 review).
      */
     async teardownRoomRuntime(code: string) {
-      await collectRuntimeStateForDeletedRooms([code]);
+      // The backlog rides along. `deleteExpiredRooms` is the only other thing
+      // that drains it, and the standalone global-admin process never runs the
+      // reaper — an admin close/expire whose teardown failed there would have
+      // queued a retry nothing ever performed (#237 review).
+      await collectRuntimeStateForDeletedRooms([
+        ...pendingRuntimeTeardowns,
+        code,
+      ]);
     },
     async createRoomForSession(session, displayName) {
       setSessionDisplayName(session, displayName);
@@ -1165,7 +1182,29 @@ export function createRoomService(options: {
       // A fresh generation marks the start of this room instance. Any teardown
       // still owed for the code's previous occupant was decided against the old
       // one and will now decline.
-      await runtimeStore.markRoomGeneration(room.code, randomUUID());
+      //
+      // On failure the persisted room has to go with it: it would otherwise sit
+      // there with no members and no `expiresAt`, which the reaper never
+      // collects, holding its code and counting towards room totals forever
+      // (#237 review).
+      try {
+        await runtimeStore.markRoomGeneration(room.code, randomUUID());
+      } catch (error) {
+        await roomStore.deleteRoom(room.code).catch(() => undefined);
+        logEvent("room_persist_failed", {
+          sessionId: session.id,
+          roomCode: room.code,
+          provider: persistence.provider,
+          result: "error",
+          reason: "room_generation_mark_failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new RoomServiceError(
+          "internal_error",
+          INTERNAL_SERVER_ERROR_MESSAGE,
+          "internal_error",
+        );
+      }
 
       const memberToken = generateToken();
       session.memberId = session.id;
