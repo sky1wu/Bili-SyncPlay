@@ -53,8 +53,7 @@ test("admin command consumer disconnects a local session", async () => {
     listLocalSessionsByRoom() {
       return [];
     },
-    blockMemberToken() {},
-    revokeMemberToken() {},
+    evictMemberToken() {},
     disconnectSessionSocket(_session, reason) {
       disconnectedReason = reason;
     },
@@ -93,10 +92,8 @@ test("admin command consumer blocks token and disconnects a kicked member", asyn
     listLocalSessionsByRoom(roomCode) {
       return roomCode === "ROOM02" ? [session] : [];
     },
-    blockMemberToken(roomCode, token, expiresAt) {
-      blocked.push({ roomCode, token, expiresAt });
-    },
-    revokeMemberToken(roomCode, memberId) {
+    evictMemberToken(roomCode, memberId, token, blockedUntil) {
+      blocked.push({ roomCode, token, expiresAt: blockedUntil });
       revoked.push({ roomCode, memberId });
     },
     disconnectSessionSocket() {},
@@ -144,10 +141,9 @@ test("admin command consumer does not disconnect a member when token blocking fa
     listLocalSessionsByRoom(roomCode) {
       return roomCode === "ROOM03" ? [session] : [];
     },
-    blockMemberToken() {
+    evictMemberToken() {
       throw new Error("block failed");
     },
-    revokeMemberToken() {},
     disconnectSessionSocket() {
       disconnected = true;
     },
@@ -186,10 +182,9 @@ test("admin command consumer keeps a kick block when disconnect fails", async ()
     listLocalSessionsByRoom(roomCode) {
       return roomCode === "ROOM04" ? [session] : [];
     },
-    blockMemberToken(_roomCode, token) {
+    evictMemberToken(_roomCode, _memberId, token) {
       blocked.push(token);
     },
-    revokeMemberToken() {},
     disconnectSessionSocket() {
       throw new Error("disconnect failed");
     },
@@ -228,11 +223,10 @@ test("admin command consumer fails the kick when revoking the token does not lan
     listLocalSessionsByRoom(roomCode) {
       return roomCode === "ROOM05" ? [session] : [];
     },
-    blockMemberToken() {},
-    // The store reports the revocation failed. Reporting the kick as done here
+    // The store reports the eviction failed. Reporting the kick as done here
     // would claim an eviction while the old token still resolved everywhere.
-    async revokeMemberToken() {
-      throw new Error("revoke failed");
+    async evictMemberToken() {
+      throw new Error("evict failed");
     },
     disconnectSessionSocket() {
       disconnected = true;

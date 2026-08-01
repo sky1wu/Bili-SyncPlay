@@ -17,6 +17,7 @@ export type ActiveRoomRegistry = {
   releaseRoomLock: RuntimeStore["releaseRoomLock"];
   removeMember: RuntimeStore["removeMember"];
   revokeMemberToken: RuntimeStore["revokeMemberToken"];
+  evictMemberToken: RuntimeStore["evictMemberToken"];
   deleteRoom: RuntimeStore["deleteRoom"];
 };
 
@@ -40,6 +41,7 @@ export function createActiveRoomRegistry(
     releaseRoomLock: store.releaseRoomLock,
     removeMember: store.removeMember,
     revokeMemberToken: store.revokeMemberToken,
+    evictMemberToken: store.evictMemberToken,
     deleteRoom: store.deleteRoom,
   };
 }

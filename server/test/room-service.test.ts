@@ -1210,6 +1210,9 @@ test("room service flushes pending runtime store writes before exposing updated 
     revokeMemberToken(code, memberId) {
       activeRooms.revokeMemberToken(code, memberId);
     },
+    evictMemberToken(code, memberId, memberToken, blockedUntil) {
+      activeRooms.evictMemberToken(code, memberId, memberToken, blockedUntil);
+    },
     deleteRoom(code) {
       activeRooms.deleteRoom(code);
       clusterSessionsByRoom.delete(code);
@@ -2984,6 +2987,10 @@ test("join admission restores shared previous session when reconnect rollback ha
       local.revokeMemberToken(code, memberId);
       shared.revokeMemberToken(code, memberId);
     },
+    evictMemberToken: (code, memberId, memberToken, blockedUntil) => {
+      local.evictMemberToken(code, memberId, memberToken, blockedUntil);
+      shared.evictMemberToken(code, memberId, memberToken, blockedUntil);
+    },
     flush: async () => {
       await local.flush?.();
       await shared.flush?.();
@@ -3076,6 +3083,10 @@ test("join admission does not restore stale reconnect session over newer shared 
     revokeMemberToken: (code, memberId) => {
       local.revokeMemberToken(code, memberId);
       shared.revokeMemberToken(code, memberId);
+    },
+    evictMemberToken: (code, memberId, memberToken, blockedUntil) => {
+      local.evictMemberToken(code, memberId, memberToken, blockedUntil);
+      shared.evictMemberToken(code, memberId, memberToken, blockedUntil);
     },
     flush: async () => {
       await local.flush?.();
@@ -3947,6 +3958,8 @@ test("reaper keeps collecting rooms when one runtime teardown fails", async () =
     })(),
   });
 
+  // Room creation now wipes any runtime state left under a recycled code, which
+  // also goes through the failing stub; only the reaping phase is under test.
   for (const name of ["Alice", "Bob"]) {
     const owner = createSession(`owner-${name}`);
     const created = await service.createRoomForSession(owner, name);
@@ -3954,10 +3967,172 @@ test("reaper keeps collecting rooms when one runtime teardown fails", async () =
     assert.ok(created.room.code);
   }
 
+  failedFor.length = 0;
   currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
   // Both rooms are collected even though the first teardown throws — one
   // failure must not strand every room queued behind it.
   assert.equal(await service.deleteExpiredRooms(), 2);
   assert.deepEqual(failedFor, ["ROOMF1"]);
   assert.equal(activeRooms.getRoom("ROOMF2"), null);
+});
+
+test("retries a failed runtime teardown on the next reaper pass", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let failTeardown = true;
+  const teardowns: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string) => {
+        if (failTeardown) {
+          throw new Error("redis unavailable");
+        }
+        teardowns.push(code);
+        activeRooms.deleteRoom(code);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMRT",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const ownerMemberId = owner.memberId;
+  await service.leaveRoomForSession(owner, "disconnect");
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  assert.equal(await service.deleteExpiredRooms(), 1);
+  // The persisted room and its expiry index are already gone, so nothing else
+  // will ever name this code again — a swallowed failure strands it for good.
+  assert.equal(
+    activeRooms.findMemberIdByToken(created.room.code, created.memberToken),
+    ownerMemberId,
+  );
+
+  failTeardown = false;
+  teardowns.length = 0;
+  // A later pass finds nothing newly expired, but must still work through what
+  // it owes.
+  assert.equal(await service.deleteExpiredRooms(), 0);
+  assert.deepEqual(teardowns, ["ROOMRT"]);
+  assert.equal(activeRooms.getRoom("ROOMRT"), null);
+});
+
+test("does not tear down runtime state for a room code already recycled", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const teardowns: string[] = [];
+  let blockTeardown = true;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string) => {
+        if (blockTeardown) {
+          throw new Error("redis unavailable");
+        }
+        teardowns.push(code);
+        activeRooms.deleteRoom(code);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMRU",
+  });
+
+  const first = createSession("first-owner");
+  const created = await service.createRoomForSession(first, "Alice");
+  await service.leaveRoomForSession(first, "disconnect");
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  // Teardown fails, so the code is owed a retry.
+  assert.equal(await service.deleteExpiredRooms(), 1);
+  assert.equal(await roomStore.getRoom(created.room.code), null);
+
+  // The code is handed straight back out to a new room, which registers its own
+  // member state under it.
+  blockTeardown = false;
+  const second = createSession("second-owner");
+  const recreated = await service.createRoomForSession(second, "Bob");
+  assert.equal(recreated.room.code, created.room.code);
+  teardowns.length = 0;
+
+  await service.deleteExpiredRooms();
+
+  // The owed teardown must NOT fire now: it would delete the new room's member
+  // and token state, leaving its owner with a session that says joined and a
+  // runtime that disagrees.
+  assert.deepEqual(teardowns, []);
+  assert.equal(
+    activeRooms.findMemberIdByToken(recreated.room.code, recreated.memberToken),
+    second.memberId,
+  );
+});
+
+test("a recreated room starts with no runtime state from the previous occupant", async () => {
+  let currentTime = 1_000;
+  let failReapTeardown = true;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string) => {
+        // The reaping teardown fails, so the previous occupant's state is still
+        // there when the code comes back around.
+        if (failReapTeardown) {
+          throw new Error("redis unavailable");
+        }
+        activeRooms.deleteRoom(code);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMRS",
+  });
+
+  const first = createSession("first-owner");
+  const created = await service.createRoomForSession(first, "Alice");
+  await service.leaveRoomForSession(first, "disconnect");
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  await service.deleteExpiredRooms();
+  // Redis recovers before the code is handed back out.
+  failReapTeardown = false;
+
+  const second = createSession("second-owner");
+  const recreated = await service.createRoomForSession(second, "Bob");
+
+  // Creation clears the code first, so a member of the OLD room cannot have
+  // their token resolve to their old memberId inside the new one.
+  assert.equal(
+    activeRooms.findMemberIdByToken(recreated.room.code, created.memberToken),
+    null,
+  );
+  assert.equal(
+    activeRooms.findMemberIdByToken(recreated.room.code, recreated.memberToken),
+    second.memberId,
+  );
 });

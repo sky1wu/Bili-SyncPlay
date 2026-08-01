@@ -10,20 +10,21 @@ export async function createAdminCommandConsumer(options: {
   adminCommandBus: AdminCommandBus;
   getLocalSession: (sessionId: string) => Session | null;
   listLocalSessionsByRoom: (roomCode: string) => Session[];
-  blockMemberToken: (
-    roomCode: string,
-    memberToken: string,
-    expiresAt: number,
-  ) => void | Promise<void>;
   /**
-   * Ends the kicked member's identity so their `memberToken` can no longer
-   * reclaim their `memberId`. Required explicitly since #234: the disconnect
-   * below no longer revokes it, and without this the block would only hold them
-   * out for its TTL before they returned as the same member.
+   * Blocks the token AND ends the identity as one commit.
+   *
+   * Both halves are needed — the block only holds them out for its TTL, and
+   * without the revoke they would come back as the same member once it lapsed —
+   * but they must not be two writes. When the block landed and the revoke then
+   * failed there was nothing to roll the block back with: the admin was told the
+   * kick failed while the member kept working until their next reconnect, which
+   * was then refused with `member_kicked` (#237 review).
    */
-  revokeMemberToken: (
+  evictMemberToken: (
     roomCode: string,
     memberId: string,
+    memberToken: string,
+    blockedUntil: number,
   ) => void | Promise<void>;
   disconnectSessionSocket: (
     session: Session,
@@ -123,13 +124,13 @@ export async function createAdminCommandConsumer(options: {
 
         try {
           if (session.memberToken) {
-            await options.blockMemberToken(
+            await options.evictMemberToken(
               command.roomCode,
+              command.memberId,
               session.memberToken,
               now() + 60_000,
             );
           }
-          await options.revokeMemberToken(command.roomCode, command.memberId);
         } catch (error) {
           options.logEvent?.("admin_command_executed", {
             commandType: command.kind,

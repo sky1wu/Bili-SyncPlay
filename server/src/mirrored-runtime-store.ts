@@ -133,6 +133,10 @@ export function createMirroredRuntimeStore(
       localRuntimeStore.removeMember,
       sharedRuntimeStore.removeMember,
     ),
+    evictMemberToken: mirrorAwaitedWrite(
+      localRuntimeStore.evictMemberToken,
+      sharedRuntimeStore.evictMemberToken,
+    ),
     revokeMemberToken: mirrorAwaitedWrite(
       localRuntimeStore.revokeMemberToken,
       sharedRuntimeStore.revokeMemberToken,

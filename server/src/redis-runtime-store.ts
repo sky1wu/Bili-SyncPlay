@@ -125,6 +125,7 @@ const RUNTIME_STORE_METHOD_NAMES = [
   "releaseRoomLock",
   "removeMember",
   "revokeMemberToken",
+  "evictMemberToken",
   "deleteRoom",
   "heartbeatNode",
   "listNodeStatuses",
@@ -275,6 +276,20 @@ local bound = redis.call("HGET", KEYS[1], ARGV[1])
 if ARGV[2] ~= "" and bound and bound ~= ARGV[2] then
   return 0
 end
+redis.call("HDEL", KEYS[2], ARGV[1])
+redis.call("ZREM", KEYS[3], ARGV[1])
+return 1
+`;
+
+/**
+ * Evict a member in one commit: block the token and end the identity together.
+ *
+ * Two independent writes could not be made consistent by ordering alone — once
+ * the block landed there was nothing to roll it back with if the revoke then
+ * failed (#237 review). One script either does both or neither.
+ */
+const EVICT_MEMBER_LUA = `
+redis.call("ZADD", KEYS[1], ARGV[3], ARGV[2])
 redis.call("HDEL", KEYS[2], ARGV[1])
 redis.call("ZREM", KEYS[3], ARGV[1])
 return 1
@@ -950,6 +965,34 @@ export async function createRedisRuntimeStore(
         })(),
       );
       return removal;
+    },
+    evictMemberToken(
+      code: string,
+      memberId: string,
+      memberToken: string,
+      blockedUntil: number,
+    ) {
+      ensurePendingCapacity("evict_member_token");
+      return trackAwaitedOperation(
+        "evict_member_token",
+        redis.eval(
+          EVICT_MEMBER_LUA,
+          3,
+          blockedTokensKey(keyPrefix, code),
+          roomMemberTokensKey(keyPrefix, code),
+          roomMemberTokenExpiryKey(keyPrefix, code),
+          memberId,
+          memberToken,
+          String(blockedUntil),
+        ),
+      ).then(() => {
+        localRuntimeStore.evictMemberToken(
+          code,
+          memberId,
+          memberToken,
+          blockedUntil,
+        );
+      });
     },
     revokeMemberToken(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("revoke_member_token");

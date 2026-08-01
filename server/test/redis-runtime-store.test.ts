@@ -1152,3 +1152,98 @@ test("redis runtime store surfaces a failed room teardown to the caller", async 
     await store.close();
   }
 });
+
+test("redis runtime store commits the block and the revoke of a kick together", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const currentTime = 1_000;
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+  });
+  const observer = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+  });
+  const session = createSession("session-evict");
+  session.memberId = "member-evict";
+  session.memberToken = "token-evict";
+
+  try {
+    store.addMember("ROOMEV", session.memberId, session, session.memberToken);
+    await store.flush?.();
+
+    // One commit. As two independent writes, a block that landed could not be
+    // rolled back when the revoke then failed: the admin saw the kick fail while
+    // the member kept working until their next reconnect, which was refused.
+    await store.evictMemberToken(
+      "ROOMEV",
+      "member-evict",
+      "token-evict",
+      currentTime + 60_000,
+    );
+    await store.flush?.();
+
+    assert.equal(
+      await observer.isMemberTokenBlocked("ROOMEV", "token-evict", currentTime),
+      true,
+    );
+    assert.equal(
+      await observer.findMemberIdByToken("ROOMEV", "token-evict"),
+      null,
+    );
+  } finally {
+    await store.close();
+    await observer.close();
+  }
+});
+
+test("redis runtime store leaves a kick entirely unapplied when it fails", async () => {
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async eval() {
+      throw new Error("redis unavailable");
+    },
+  };
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:evict-fail:",
+    redisClient: fakeRedis,
+  });
+  const session = createSession("session-evict-fail");
+  session.memberId = "member-evict-fail";
+  session.memberToken = "token-evict-fail";
+
+  try {
+    store.addMember("ROOMEF", session.memberId, session, session.memberToken);
+    await store.flush?.();
+
+    await assert.rejects(
+      Promise.resolve(
+        store.evictMemberToken(
+          "ROOMEF",
+          "member-evict-fail",
+          "token-evict-fail",
+          // A real future instant: the local block store prunes by wall clock,
+          // so a small absolute number would read as already expired and the
+          // assertion below could not tell a stray block from none.
+          Date.now() + 60_000,
+        ),
+      ),
+      /redis unavailable/,
+    );
+
+    // Neither half applied locally either — no block left behind for a kick the
+    // admin was told had failed.
+    assert.equal(
+      await store.isMemberTokenBlocked("ROOMEF", "token-evict-fail"),
+      false,
+    );
+  } finally {
+    await store.flush?.();
+    await store.close();
+  }
+});

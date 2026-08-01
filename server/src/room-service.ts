@@ -415,6 +415,44 @@ export function createRoomService(options: {
     });
   }
 
+  /**
+   * Room codes whose runtime teardown failed, retried on every later reaper
+   * pass. Kept because a failed teardown is otherwise unrecoverable: the
+   * persisted room and its expiry index are already gone, so nothing else will
+   * ever produce this code again (#237 review).
+   */
+  const pendingRuntimeTeardowns = new Set<string>();
+
+  async function collectRuntimeStateForDeletedRooms(
+    codes: Iterable<string>,
+  ): Promise<void> {
+    for (const code of new Set(codes)) {
+      // Room codes are recycled. Between the persisted delete and this line a
+      // brand-new room can already have claimed the code and written member
+      // state, and tearing down "the old room" would wipe it — leaving the new
+      // owner with a session that says joined and a runtime that disagrees. A
+      // live room under this code means the old one is already gone.
+      const currentRoom = await roomStore.getRoom(code).catch(() => null);
+      if (currentRoom) {
+        pendingRuntimeTeardowns.delete(code);
+        continue;
+      }
+      try {
+        await runtimeStore.deleteRoom(code);
+        pendingRuntimeTeardowns.delete(code);
+      } catch (error) {
+        pendingRuntimeTeardowns.add(code);
+        logEvent("room_runtime_cleanup_failed", {
+          roomCode: code,
+          provider: persistence.provider,
+          result: "error",
+          pendingRetryCount: pendingRuntimeTeardowns.size,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   async function resolveRoom(code: string): Promise<PersistedRoom | null> {
     const room = await roomStore.getRoom(code);
     if (!room) {
@@ -422,10 +460,9 @@ export function createRoomService(options: {
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
       await roomStore.deleteRoom(code);
-      // Awaited for the same reason as the reaper's teardown below: the
-      // persisted room is already gone, so a silent failure here strands the
-      // runtime keys with nothing left to name them.
-      await runtimeStore.deleteRoom(code);
+      // Same helper as the reaper: it refuses to tear down a code that has
+      // already been recycled, and queues a failed teardown for retry.
+      await collectRuntimeStateForDeletedRooms([code]);
       return null;
     }
     return room;
@@ -1081,6 +1118,23 @@ export function createRoomService(options: {
         );
       }
 
+      // Room codes are recycled, and a teardown that failed earlier may have
+      // left the previous occupant's runtime state under this one. A brand-new
+      // room must start clean, or a returning member of the OLD room would have
+      // their token resolve to their old `memberId` inside the new one (#237
+      // review). Best-effort: hygiene, not a reason to fail the creation.
+      try {
+        await runtimeStore.deleteRoom(room.code);
+      } catch (error) {
+        logEvent("room_runtime_cleanup_failed", {
+          roomCode: room.code,
+          provider: persistence.provider,
+          result: "error",
+          reason: "room_create_clean_slate",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
       const memberToken = generateToken();
       session.memberId = session.id;
       runtimeStore.addMember(room.code, session.memberId, session, memberToken);
@@ -1625,28 +1679,15 @@ export function createRoomService(options: {
 
     async deleteExpiredRooms(currentTime = now()) {
       const deletedCodes = await roomStore.deleteExpiredRooms(currentTime);
-      // The reaper is the only path that deletes a room nobody touches again,
-      // so it is also the only chance to collect the runtime state that outlives
-      // it. Member tokens survive a disconnect on purpose (#234); without this
-      // they would accumulate for every abandoned room, and a recycled room code
-      // would inherit the previous room's identities (#237 review).
-      //
-      // Awaited, and failures are surfaced rather than swallowed: the persisted
-      // room and its expiry index are already gone, so this code will never come
-      // back from the reaper and a silent failure strands those keys for good.
-      // One failure must not skip the remaining rooms.
-      for (const code of deletedCodes) {
-        try {
-          await runtimeStore.deleteRoom(code);
-        } catch (error) {
-          logEvent("room_runtime_cleanup_failed", {
-            roomCode: code,
-            provider: persistence.provider,
-            result: "error",
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
+      // Retries first, then this pass's own codes. The reaper is the only path
+      // that deletes a room nobody touches again, so it is also the only chance
+      // to collect the runtime state that outlives it — member tokens survive a
+      // disconnect on purpose (#234) — and once the persisted room is gone
+      // nothing will ever name that code again (#237 review).
+      await collectRuntimeStateForDeletedRooms([
+        ...pendingRuntimeTeardowns,
+        ...deletedCodes,
+      ]);
       return deletedCodes.length;
     },
   };

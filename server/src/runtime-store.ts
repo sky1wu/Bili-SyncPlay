@@ -54,6 +54,22 @@ export type RuntimeStore = {
     memberToken: string,
     expiresAt: number,
   ) => void | Promise<void>;
+  /**
+   * Evict a member: block their token AND end their identity, as ONE commit.
+   *
+   * A kick is a single act, but it used to be two independent durable writes.
+   * When the block landed and the revoke then failed, nothing could roll the
+   * block back: the admin was told the kick failed while the member kept working
+   * until their next reconnect, which was refused with `member_kicked` (#237
+   * review). Durable-first only protects each write's own local mirror; it
+   * cannot undo a write that already succeeded.
+   */
+  evictMemberToken: (
+    code: string,
+    memberId: string,
+    memberToken: string,
+    blockedUntil: number,
+  ) => void | Promise<void>;
   isMemberTokenBlocked: (
     code: string,
     memberToken: string,
@@ -199,6 +215,20 @@ export function createInMemoryRuntimeStore(
 
   const getOrCreateRoom = (code: string): ActiveRoom =>
     getOrCreateActiveRoom(rooms, code);
+
+  function revokeMemberIdentity(
+    code: string,
+    memberId: string,
+    session?: Session,
+  ): void {
+    if (revokeMemberTokenInRoom(rooms, code, memberId, session)) {
+      const expiryByMember = memberTokenExpiryByRoom.get(code);
+      expiryByMember?.delete(memberId);
+      if (expiryByMember?.size === 0) {
+        memberTokenExpiryByRoom.delete(code);
+      }
+    }
+  }
 
   return {
     registerSession(session) {
@@ -399,15 +429,16 @@ export function createInMemoryRuntimeStore(
       }
       return removal;
     },
-    revokeMemberToken(code, memberId, session) {
-      if (revokeMemberTokenInRoom(rooms, code, memberId, session)) {
-        const expiryByMember = memberTokenExpiryByRoom.get(code);
-        expiryByMember?.delete(memberId);
-        if (expiryByMember?.size === 0) {
-          memberTokenExpiryByRoom.delete(code);
-        }
-      }
+    evictMemberToken(code, memberId, memberToken, blockedUntil) {
+      const activeEntries = pruneBlockedMemberTokens(code, now());
+      activeEntries.push({ memberToken, expiresAt: blockedUntil });
+      blockedMemberTokensByRoom.set(code, activeEntries);
+      // Not `this.revokeMemberToken`: every consumer takes these off the object
+      // as bare references (`active-room-registry`, the mirrored store), so
+      // `this` is gone by the time they call it.
+      revokeMemberIdentity(code, memberId);
     },
+    revokeMemberToken: revokeMemberIdentity,
     deleteRoom(code) {
       rooms.delete(code);
       memberTokenExpiryByRoom.delete(code);

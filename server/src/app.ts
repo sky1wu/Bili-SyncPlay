@@ -216,10 +216,13 @@ export async function createSyncServer(
     getLocalSession: (sessionId) => localRuntimeStore.getSession(sessionId),
     listLocalSessionsByRoom: (roomCode) =>
       localRuntimeStore.listSessionsByRoom(roomCode),
-    blockMemberToken: (roomCode, memberToken, expiresAt) =>
-      runtimeStore.blockMemberToken(roomCode, memberToken, expiresAt),
-    revokeMemberToken: (roomCode, memberId) =>
-      runtimeStore.revokeMemberToken(roomCode, memberId),
+    evictMemberToken: (roomCode, memberId, memberToken, blockedUntil) =>
+      runtimeStore.evictMemberToken(
+        roomCode,
+        memberId,
+        memberToken,
+        blockedUntil,
+      ),
     disconnectSessionSocket: (session, reason) => {
       if (!hasAttachedSocket(session)) {
         return;
