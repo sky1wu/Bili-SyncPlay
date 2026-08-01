@@ -32,6 +32,24 @@ function mirrorAwaitedWrite<TArgs extends unknown[]>(
   };
 }
 
+/**
+ * Mirrors a teardown and hands back the SHARED store's promise.
+ *
+ * Local first, unlike {@link mirrorAwaitedWrite}: a teardown that half-fails
+ * should still drop the local copy, because keeping runtime state for a room
+ * that no longer exists is worse than losing it. The promise is still returned
+ * so the caller can see the shared side fail.
+ */
+function mirrorAwaitedTeardown<TArgs extends unknown[]>(
+  localMethod: (...args: TArgs) => unknown,
+  sharedMethod: (...args: TArgs) => void | Promise<void>,
+): (...args: TArgs) => Promise<void> {
+  return async (...args: TArgs) => {
+    localMethod(...args);
+    await sharedMethod(...args);
+  };
+}
+
 function mirrorLocalResult<TArgs extends unknown[], TResult>(
   localMethod: (...args: TArgs) => TResult,
   sharedMethod: (...args: TArgs) => unknown,
@@ -119,7 +137,7 @@ export function createMirroredRuntimeStore(
       localRuntimeStore.revokeMemberToken,
       sharedRuntimeStore.revokeMemberToken,
     ),
-    deleteRoom: mirrorVoidWrite(
+    deleteRoom: mirrorAwaitedTeardown(
       localRuntimeStore.deleteRoom,
       sharedRuntimeStore.deleteRoom,
     ),

@@ -324,15 +324,34 @@ return 1
  * A zset scored by expiry, pruned lazily on read/write — the same shape this
  * store already uses for blocked tokens. Redis hash fields cannot carry their
  * own TTL, and a per-member key would make token lookup a scan.
+ *
+ * Deleted in batches. Handing an unbounded result set to `unpack` overflows
+ * Lua's stack once enough identities expire between two token accesses, and the
+ * error aborts the script BEFORE the zset is trimmed — so every later access
+ * re-ran the same doomed script and the room could never be joined again (#237
+ * review). `ZREM` on exactly the batch just deleted (not `ZREMRANGEBYSCORE`
+ * over the whole range) is what makes stopping early safe.
+ *
+ * Stopping early only softens the boundary: an identity may stay resolvable a
+ * little past its retention until a later access finishes the sweep. Retention
+ * is "at least this long", never "at most".
  */
+const PRUNE_MEMBER_TOKENS_BATCH = 500;
+const PRUNE_MEMBER_TOKENS_MAX_BATCHES = 20;
 const PRUNE_MEMBER_TOKENS_LUA = `
-local expired = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", ARGV[1])
-if #expired == 0 then
-  return 0
+local removed = 0
+for _ = 1, tonumber(ARGV[3]) do
+  local expired = redis.call(
+    "ZRANGEBYSCORE", KEYS[1], "-inf", ARGV[1], "LIMIT", 0, tonumber(ARGV[2])
+  )
+  if #expired == 0 then
+    return removed
+  end
+  redis.call("HDEL", KEYS[2], unpack(expired))
+  redis.call("ZREM", KEYS[1], unpack(expired))
+  removed = removed + #expired
 end
-redis.call("HDEL", KEYS[2], unpack(expired))
-redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", ARGV[1])
-return #expired
+return removed
 `;
 
 async function cleanupEmptyRoomIndex(
@@ -497,6 +516,8 @@ export async function createRedisRuntimeStore(
       roomMemberTokenExpiryKey(keyPrefix, code),
       roomMemberTokensKey(keyPrefix, code),
       String(now()),
+      String(PRUNE_MEMBER_TOKENS_BATCH),
+      String(PRUNE_MEMBER_TOKENS_MAX_BATCHES),
     );
   }
 
@@ -957,8 +978,13 @@ export async function createRedisRuntimeStore(
     },
     deleteRoom(code: string) {
       ensurePendingCapacity("delete_room");
+      // Local first: this is a teardown, so leaving a copy of a room that no
+      // longer exists behind is worse than a partial apply. The shared promise
+      // is returned so the caller can tell whether the runtime keys actually
+      // went — the persisted room and its expiry index are already gone by
+      // then, so nothing will ever hand out this room code again (#237 review).
       localRuntimeStore.deleteRoom(code);
-      void trackOperation(
+      return trackAwaitedOperation(
         "delete_room",
         (async () => {
           const trackingKey = dedupTrackingZsetKey(keyPrefix, code);

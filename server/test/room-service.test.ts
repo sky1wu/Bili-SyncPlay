@@ -3915,3 +3915,49 @@ test("restores the member when revoking their identity fails on leave", async ()
     true,
   );
 });
+
+test("reaper keeps collecting rooms when one runtime teardown fails", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const failedFor: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string) => {
+        if (code === "ROOMF1") {
+          failedFor.push(code);
+          throw new Error("redis unavailable");
+        }
+        activeRooms.deleteRoom(code);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: (() => {
+      const codes = ["ROOMF1", "ROOMF2"];
+      return () => codes.shift() ?? "ROOMFX";
+    })(),
+  });
+
+  for (const name of ["Alice", "Bob"]) {
+    const owner = createSession(`owner-${name}`);
+    const created = await service.createRoomForSession(owner, name);
+    await service.leaveRoomForSession(owner, "disconnect");
+    assert.ok(created.room.code);
+  }
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  // Both rooms are collected even though the first teardown throws — one
+  // failure must not strand every room queued behind it.
+  assert.equal(await service.deleteExpiredRooms(), 2);
+  assert.deepEqual(failedFor, ["ROOMF1"]);
+  assert.equal(activeRooms.getRoom("ROOMF2"), null);
+});

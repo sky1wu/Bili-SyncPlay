@@ -227,7 +227,7 @@ export function createAdminActionService(options: {
       }
 
       await options.roomStore.deleteRoom(roomCode);
-      options.runtimeStore.deleteRoom(roomCode);
+      await options.runtimeStore.deleteRoom(roomCode);
       await options.publishRoomDeleted(roomCode);
       const disconnectedSessionCount = disconnectResults.filter(
         ({ result }) => result.status === "ok",
@@ -256,6 +256,11 @@ export function createAdminActionService(options: {
 
       await getRoomOrThrow(roomCode);
       await options.roomStore.deleteRoom(roomCode);
+      // Same teardown `closeRoom` above performs. Without it an expired room
+      // left its runtime keys behind — including the tokens of members who had
+      // disconnected but whose identity is deliberately retained (#234) — and a
+      // recycled room code would inherit them (#237 review).
+      await options.runtimeStore.deleteRoom(roomCode);
 
       options.logEvent("admin_room_expired", {
         roomCode,

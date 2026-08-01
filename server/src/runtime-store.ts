@@ -88,7 +88,13 @@ export type RuntimeStore = {
     memberId: string,
     session?: Session,
   ) => void | Promise<void>;
-  deleteRoom: (code: string) => void;
+  /**
+   * Tear down every runtime key for a room. Returns a promise that settles once
+   * the teardown is durable and rejects if it failed — the caller is usually
+   * deleting the persisted room in the same breath, after which nothing will
+   * ever name this room code again, so a silent failure strands the keys.
+   */
+  deleteRoom: (code: string) => void | Promise<void>;
   heartbeatNode: (status: ClusterNodeStatus) => Promise<void>;
   listNodeStatuses: (currentTime?: number) => Promise<ClusterNodeStatus[]>;
   purgeNodeStatus: (instanceId: string) => Promise<void>;

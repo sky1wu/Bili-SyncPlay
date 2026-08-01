@@ -1065,3 +1065,90 @@ test("redis runtime store starts the retention clock for bindings cleared at sta
     await observer.close();
   }
 });
+
+test("redis runtime store prunes a large expired identity set without wedging the room", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  let currentTime = 1_000;
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+    memberTokenRetentionMs: 1,
+  });
+
+  try {
+    // Past what `unpack` tolerates in one go — measured against this Redis, the
+    // unbounded form starts failing with "too many results to unpack" somewhere
+    // between 7500 and 8000. The error aborted the script before the zset was
+    // trimmed, so every later access re-ran the same doomed script and the room
+    // could never be joined again.
+    const memberCount = 8_500;
+    for (let index = 0; index < memberCount; index += 1) {
+      const session = createSession(`session-bulk-${index}`);
+      session.memberId = `member-bulk-${index}`;
+      session.memberToken = `token-bulk-${index}`;
+      store.addMember("ROOMBK", session.memberId, session, session.memberToken);
+      store.removeMember("ROOMBK", session.memberId, session);
+      // Drain periodically: this store caps how many writes may be in flight.
+      if (index % 100 === 99) {
+        await store.flush?.();
+      }
+    }
+    await store.flush?.();
+
+    currentTime += 1_000;
+    // Must not throw, and must actually resolve — a wedged script fails here.
+    assert.equal(
+      await store.findMemberIdByToken("ROOMBK", "token-bulk-0"),
+      null,
+    );
+    assert.equal(
+      await store.findMemberIdByToken(
+        "ROOMBK",
+        `token-bulk-${memberCount - 1}`,
+      ),
+      null,
+    );
+
+    // A fresh member can still join the room afterwards.
+    const rejoin = createSession("session-bulk-after");
+    rejoin.memberId = "member-bulk-after";
+    rejoin.memberToken = "token-bulk-after";
+    store.addMember("ROOMBK", rejoin.memberId, rejoin, rejoin.memberToken);
+    await store.flush?.();
+    assert.equal(
+      await store.findMemberIdByToken("ROOMBK", "token-bulk-after"),
+      "member-bulk-after",
+    );
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store surfaces a failed room teardown to the caller", async () => {
+  // The persisted room is deleted in the same breath, after which nothing will
+  // ever name this room code again — a silent failure strands the runtime keys.
+  const fakeRedis = {
+    ...createFakeRedisClient([Promise.reject(new Error("redis unavailable"))]),
+    async zrange() {
+      return [];
+    },
+  };
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:teardown:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    await assert.rejects(
+      Promise.resolve(store.deleteRoom("ROOMTD")),
+      /redis unavailable/,
+    );
+  } finally {
+    await store.close();
+  }
+});

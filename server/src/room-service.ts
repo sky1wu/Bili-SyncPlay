@@ -422,7 +422,10 @@ export function createRoomService(options: {
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
       await roomStore.deleteRoom(code);
-      runtimeStore.deleteRoom(code);
+      // Awaited for the same reason as the reaper's teardown below: the
+      // persisted room is already gone, so a silent failure here strands the
+      // runtime keys with nothing left to name them.
+      await runtimeStore.deleteRoom(code);
       return null;
     }
     return room;
@@ -1627,8 +1630,22 @@ export function createRoomService(options: {
       // it. Member tokens survive a disconnect on purpose (#234); without this
       // they would accumulate for every abandoned room, and a recycled room code
       // would inherit the previous room's identities (#237 review).
+      //
+      // Awaited, and failures are surfaced rather than swallowed: the persisted
+      // room and its expiry index are already gone, so this code will never come
+      // back from the reaper and a silent failure strands those keys for good.
+      // One failure must not skip the remaining rooms.
       for (const code of deletedCodes) {
-        runtimeStore.deleteRoom(code);
+        try {
+          await runtimeStore.deleteRoom(code);
+        } catch (error) {
+          logEvent("room_runtime_cleanup_failed", {
+            roomCode: code,
+            provider: persistence.provider,
+            result: "error",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
       return deletedCodes.length;
     },
