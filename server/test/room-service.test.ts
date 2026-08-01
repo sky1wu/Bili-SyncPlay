@@ -2167,6 +2167,11 @@ test("room service consults shared kick blocks when rejoining through another no
 test("room service reuses shared member identity during reconnect checks", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   let resolveMemberIdCalls = 0;
+  // The shared-view fixture below stands in for another node's runtime state.
+  // It must not exist before the room does: a code is only handed out while no
+  // runtime state remains under it, so a fixture that answers unconditionally
+  // would block the room from ever being created.
+  let sharedRoomExists = false;
   const service = createRoomService({
     config: getDefaultSecurityConfig(),
     persistence: getDefaultPersistenceConfig(),
@@ -2179,11 +2184,14 @@ test("room service reuses shared member identity during reconnect checks", async
     logEvent: (() => undefined) satisfies LogEvent,
     now: () => 1_000,
     createRoomCode: () => "ROOM11",
-    resolveActiveRoom: async () => ({
-      code: "ROOM11",
-      members: new Map(),
-      memberTokens: new Map([["shared-member", "shared-token"]]),
-    }),
+    resolveActiveRoom: async () =>
+      sharedRoomExists
+        ? {
+            code: "ROOM11",
+            members: new Map(),
+            memberTokens: new Map([["shared-member", "shared-token"]]),
+          }
+        : null,
     resolveMemberIdByToken: async (_roomCode, memberToken) => {
       resolveMemberIdCalls += 1;
       return memberToken === "shared-token" ? "shared-member" : null;
@@ -2192,6 +2200,7 @@ test("room service reuses shared member identity during reconnect checks", async
 
   const owner = createSession("owner");
   const created = await service.createRoomForSession(owner, "Alice");
+  sharedRoomExists = true;
   const reconnecting = createSession("reconnect");
   const joined = await service.joinRoomForSession(
     reconnecting,
@@ -2212,6 +2221,9 @@ test("room service enforces room capacity from shared room membership", async ()
     maxMembersPerRoom: 1,
   };
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  // Same reason as the test above: the shared-view fixture only exists once the
+  // room does, or the allocation-time residue check would refuse the code.
+  let sharedRoomExists = false;
   const service = createRoomService({
     config,
     persistence: getDefaultPersistenceConfig(),
@@ -2224,15 +2236,19 @@ test("room service enforces room capacity from shared room membership", async ()
     logEvent: (() => undefined) satisfies LogEvent,
     now: () => 1_000,
     createRoomCode: () => "ROOM12",
-    resolveActiveRoom: async () => ({
-      code: "ROOM12",
-      members: new Map([["member-a", createSession("member-a")]]),
-      memberTokens: new Map([["member-a", "token-a"]]),
-    }),
+    resolveActiveRoom: async () =>
+      sharedRoomExists
+        ? {
+            code: "ROOM12",
+            members: new Map([["member-a", createSession("member-a")]]),
+            memberTokens: new Map([["member-a", "token-a"]]),
+          }
+        : null,
   });
 
   const owner = createSession("owner");
   const created = await service.createRoomForSession(owner, "Alice");
+  sharedRoomExists = true;
   const joiner = createSession("joiner");
 
   await assert.rejects(
@@ -4028,12 +4044,16 @@ test("retries a failed runtime teardown on the next reaper pass", async () => {
   assert.equal(activeRooms.getRoom("ROOMRT"), null);
 });
 
-test("does not tear down runtime state for a room code already recycled", async () => {
+test("does not hand out a room code that still has runtime state under it", async () => {
   let currentTime = 1_000;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });
   const activeRooms = createActiveRoomRegistry();
-  const teardowns: string[] = [];
-  let blockTeardown = true;
+  let failTeardown = true;
+  // Offers ROOMA1 again for the second room's FIRST attempt. A sequential list
+  // would hand out ROOMA2 either way, so the test could not tell whether the
+  // residue check ran at all.
+  const offeredCodes: string[] = [];
+  const codeSequence = ["ROOMA1", "ROOMA1", "ROOMA2"];
   const service = createRoomService({
     config: getDefaultSecurityConfig(),
     persistence: getDefaultPersistenceConfig(),
@@ -4041,7 +4061,76 @@ test("does not tear down runtime state for a room code already recycled", async 
     activeRooms: {
       ...activeRooms,
       deleteRoom: async (code: string) => {
-        if (blockTeardown) {
+        if (failTeardown) {
+          throw new Error("redis unavailable");
+        }
+        activeRooms.deleteRoom(code);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => {
+      const code = codeSequence.shift() ?? "ROOMAX";
+      offeredCodes.push(code);
+      return code;
+    },
+    resolveActiveRoom: async (code) => activeRooms.getRoom(code),
+  });
+
+  const first = createSession("first-owner");
+  const created = await service.createRoomForSession(first, "Alice");
+  assert.equal(created.room.code, "ROOMA1");
+  await service.leaveRoomForSession(first, "disconnect");
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  // The teardown fails, so ROOMA1 still carries the previous occupant's tokens.
+  await service.deleteExpiredRooms();
+  assert.equal(await roomStore.getRoom("ROOMA1"), null);
+  assert.ok(activeRooms.getRoom("ROOMA1"));
+
+  // A code is only safe to hand out once nothing is left under it. Reusing
+  // ROOMA1 here would let the previous occupant's token resolve to their old
+  // memberId inside the new room; enforcing it at allocation is what removes
+  // the need for a clean-slate wipe and a recycled-code guard downstream.
+  failTeardown = false;
+  const second = createSession("second-owner");
+  const recreated = await service.createRoomForSession(second, "Bob");
+  assert.equal(recreated.room.code, "ROOMA2");
+  // ROOMA1 was offered again and had to be refused before ROOMA2 was tried.
+  assert.deepEqual(offeredCodes, ["ROOMA1", "ROOMA1", "ROOMA2"]);
+  assert.equal(
+    activeRooms.findMemberIdByToken("ROOMA2", created.memberToken),
+    null,
+  );
+});
+
+test("keeps an owed teardown when the room store cannot be read", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let failTeardown = true;
+  let failRoomRead = false;
+  const teardowns: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      getRoom: async (code: string) => {
+        if (failRoomRead) {
+          throw new Error("redis unavailable");
+        }
+        return roomStore.getRoom(code);
+      },
+    },
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string) => {
+        if (failTeardown) {
           throw new Error("redis unavailable");
         }
         teardowns.push(code);
@@ -4054,85 +4143,28 @@ test("does not tear down runtime state for a room code already recycled", async 
     })(),
     logEvent: (() => undefined) satisfies LogEvent,
     now: () => currentTime,
-    createRoomCode: () => "ROOMRU",
+    createRoomCode: () => "ROOMRD",
+    resolveActiveRoom: async (code) => activeRooms.getRoom(code),
   });
 
-  const first = createSession("first-owner");
-  const created = await service.createRoomForSession(first, "Alice");
-  await service.leaveRoomForSession(first, "disconnect");
+  const owner = createSession("owner");
+  await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner, "disconnect");
   currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
-  // Teardown fails, so the code is owed a retry.
-  assert.equal(await service.deleteExpiredRooms(), 1);
-  assert.equal(await roomStore.getRoom(created.room.code), null);
-
-  // The code is handed straight back out to a new room, which registers its own
-  // member state under it.
-  blockTeardown = false;
-  const second = createSession("second-owner");
-  const recreated = await service.createRoomForSession(second, "Bob");
-  assert.equal(recreated.room.code, created.room.code);
-  teardowns.length = 0;
-
   await service.deleteExpiredRooms();
 
-  // The owed teardown must NOT fire now: it would delete the new room's member
-  // and token state, leaving its owner with a session that says joined and a
-  // runtime that disagrees.
+  // The room store is unreadable on the retry pass. "Unknown" is not "absent":
+  // treating it as absent made the guard fail in exactly the conditions that
+  // queue teardowns in the first place, and it would then wipe whatever now
+  // owns the code.
+  failRoomRead = true;
+  failTeardown = false;
+  await service.deleteExpiredRooms();
   assert.deepEqual(teardowns, []);
-  assert.equal(
-    activeRooms.findMemberIdByToken(recreated.room.code, recreated.memberToken),
-    second.memberId,
-  );
-});
+  assert.ok(activeRooms.getRoom("ROOMRD"));
 
-test("a recreated room starts with no runtime state from the previous occupant", async () => {
-  let currentTime = 1_000;
-  let failReapTeardown = true;
-  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
-  const activeRooms = createActiveRoomRegistry();
-  const service = createRoomService({
-    config: getDefaultSecurityConfig(),
-    persistence: getDefaultPersistenceConfig(),
-    roomStore,
-    activeRooms: {
-      ...activeRooms,
-      deleteRoom: async (code: string) => {
-        // The reaping teardown fails, so the previous occupant's state is still
-        // there when the code comes back around.
-        if (failReapTeardown) {
-          throw new Error("redis unavailable");
-        }
-        activeRooms.deleteRoom(code);
-      },
-    },
-    generateToken: (() => {
-      let id = 0;
-      return () => `token-${++id}`.padEnd(16, "x");
-    })(),
-    logEvent: (() => undefined) satisfies LogEvent,
-    now: () => currentTime,
-    createRoomCode: () => "ROOMRS",
-  });
-
-  const first = createSession("first-owner");
-  const created = await service.createRoomForSession(first, "Alice");
-  await service.leaveRoomForSession(first, "disconnect");
-  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  // Once it can be read again the debt is settled.
+  failRoomRead = false;
   await service.deleteExpiredRooms();
-  // Redis recovers before the code is handed back out.
-  failReapTeardown = false;
-
-  const second = createSession("second-owner");
-  const recreated = await service.createRoomForSession(second, "Bob");
-
-  // Creation clears the code first, so a member of the OLD room cannot have
-  // their token resolve to their old memberId inside the new one.
-  assert.equal(
-    activeRooms.findMemberIdByToken(recreated.room.code, created.memberToken),
-    null,
-  );
-  assert.equal(
-    activeRooms.findMemberIdByToken(recreated.room.code, recreated.memberToken),
-    second.memberId,
-  );
+  assert.deepEqual(teardowns, ["ROOMRD"]);
 });

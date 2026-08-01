@@ -427,12 +427,22 @@ export function createRoomService(options: {
     codes: Iterable<string>,
   ): Promise<void> {
     for (const code of new Set(codes)) {
-      // Room codes are recycled. Between the persisted delete and this line a
-      // brand-new room can already have claimed the code and written member
-      // state, and tearing down "the old room" would wipe it — leaving the new
-      // owner with a session that says joined and a runtime that disagrees. A
-      // live room under this code means the old one is already gone.
-      const currentRoom = await roomStore.getRoom(code).catch(() => null);
+      // Defence in depth behind the allocation-time check: a teardown queued
+      // for retry could otherwise fire after its code came back into use — the
+      // residue it was queued for may have expired on its own in the meantime,
+      // which frees the code for allocation.
+      //
+      // A read failure is "unknown", NOT "absent". Treating it as absent made
+      // this guard fail in exactly the conditions that queue teardowns in the
+      // first place, and it would then wipe the new room's members and tokens
+      // (#237 review). Keep the debt and try again later.
+      let currentRoom: PersistedRoom | null;
+      try {
+        currentRoom = await roomStore.getRoom(code);
+      } catch {
+        pendingRuntimeTeardowns.add(code);
+        continue;
+      }
       if (currentRoom) {
         pendingRuntimeTeardowns.delete(code);
         continue;
@@ -1092,6 +1102,21 @@ export function createRoomService(options: {
       let room: PersistedRoom | null = null;
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const roomCode = nextRoomCode();
+        // Room codes are recycled, so a code is only safe to hand out once no
+        // runtime state remains under it. Enforcing that HERE — at the one point
+        // where a code becomes live — is what makes the rest of the lifecycle
+        // simple: a teardown can never collide with a new room, and a new room
+        // can never inherit the previous occupant's identities, so neither needs
+        // its own guard (#237 review).
+        //
+        // An unreadable runtime store means "unknown", never "empty": try
+        // another code rather than risk handing out a dirty one.
+        const runtimeResidue = await resolveActiveRoom(roomCode).catch(
+          () => "unknown" as const,
+        );
+        if (runtimeResidue !== null) {
+          continue;
+        }
         try {
           room = await roomStore.createRoom({
             code: roomCode,
@@ -1116,23 +1141,6 @@ export function createRoomService(options: {
           INTERNAL_SERVER_ERROR_MESSAGE,
           "internal_error",
         );
-      }
-
-      // Room codes are recycled, and a teardown that failed earlier may have
-      // left the previous occupant's runtime state under this one. A brand-new
-      // room must start clean, or a returning member of the OLD room would have
-      // their token resolve to their old `memberId` inside the new one (#237
-      // review). Best-effort: hygiene, not a reason to fail the creation.
-      try {
-        await runtimeStore.deleteRoom(room.code);
-      } catch (error) {
-        logEvent("room_runtime_cleanup_failed", {
-          roomCode: room.code,
-          provider: persistence.provider,
-          result: "error",
-          reason: "room_create_clean_slate",
-          error: error instanceof Error ? error.message : String(error),
-        });
       }
 
       const memberToken = generateToken();
