@@ -35,6 +35,8 @@ export interface SoftApplyController {
     options?: {
       armCooldownOnConverge?: boolean;
       relativeDriftClose?: { driftSeconds: number; rateOffsetSeconds: number };
+      /** See the implementation — the rate this apply wrote to the element. */
+      appliedPlaybackRate?: number;
     },
   ): void;
   shouldCancelActiveSoftApplyForPlayback(
@@ -70,6 +72,25 @@ export interface SoftApplyController {
    * windows the leak escaped through.
    */
   getActiveCorrectionBaseRate(normalizedUrl: string | null): number | null;
+  /**
+   * Whether `playbackRate` is a rate this client's own catch-up did not put on
+   * the element — i.e. positive evidence that something else (the user) changed
+   * it while a session was running.
+   *
+   * This exists because attributing a `ratechange` by GESTURE cannot cover the
+   * whole input surface: `isGestureInsidePlayer` deliberately counts only
+   * play-toggle keys, so a keyboard speed shortcut is never recognised as an
+   * in-player takeover, and the programmatic-apply window has usually expired by
+   * the time a late event arrives. Comparing against the rate the catch-up
+   * itself wrote answers the question directly instead of guessing at it.
+   *
+   * `false` when no session is running for this url: with no catch-up in flight
+   * there is nothing for a rate to be unexplained by.
+   */
+  isRateUnexplainedByActiveCatchUp(
+    normalizedUrl: string | null,
+    playbackRate: number,
+  ): boolean;
   shouldSuppressByCooldown(
     video: HTMLVideoElement,
     playback: PlaybackState,
@@ -119,6 +140,12 @@ export function createSoftApplyController(args: {
     // so any comparison against a *live* remote position has to age the
     // snapshot by the elapsed time first.
     startedAt: number;
+    // The rate this catch-up itself last wrote to the element. Kept so a later
+    // `ratechange` can be attributed by EVIDENCE rather than guessed at: a rate
+    // that is not this one was put there by someone else (the user), whatever
+    // the gesture tracker managed to observe. See
+    // `isRateUnexplainedByActiveCatchUp`.
+    appliedPlaybackRate: number;
   } | null = null;
   let activeSoftApplyTimer: number | null = null;
 
@@ -282,6 +309,12 @@ export function createSoftApplyController(args: {
     options: {
       armCooldownOnConverge?: boolean;
       relativeDriftClose?: { driftSeconds: number; rateOffsetSeconds: number };
+      /**
+       * The rate the apply that opened this session wrote to the element.
+       * Defaults to the base rate, which is what an apply that did not touch the
+       * rate leaves behind.
+       */
+      appliedPlaybackRate?: number;
     } = {},
   ): void {
     const armCooldownOnConverge = options.armCooldownOnConverge ?? true;
@@ -314,10 +347,11 @@ export function createSoftApplyController(args: {
       armCooldownOnConverge: nextArmCooldownOnConverge,
       convergeByRelativeDrift,
       startedAt: monotonicNow(),
+      appliedPlaybackRate: options.appliedPlaybackRate ?? playback.playbackRate,
     };
     scheduleActiveSoftApplyTimeout();
     args.debugLog(
-      `Started soft apply url=${normalizedUrl} target=${playback.currentTime.toFixed(2)} rate=${restorePlaybackRate.toFixed(2)} timeout=${timeoutMs} cooldown=${nextArmCooldownOnConverge} relativeDrift=${convergeByRelativeDrift}`,
+      `Started soft apply url=${normalizedUrl} target=${playback.currentTime.toFixed(2)} rate=${restorePlaybackRate.toFixed(2)} applied=${activeSoftApply.appliedPlaybackRate.toFixed(2)} timeout=${timeoutMs} cooldown=${nextArmCooldownOnConverge} relativeDrift=${convergeByRelativeDrift}`,
     );
   }
 
@@ -481,6 +515,20 @@ export function createSoftApplyController(args: {
     return getActiveCorrectionBaseRate(normalizedUrl) !== null;
   }
 
+  function isRateUnexplainedByActiveCatchUp(
+    normalizedUrl: string | null,
+    playbackRate: number,
+  ): boolean {
+    if (
+      activeSoftApply === null ||
+      normalizedUrl === null ||
+      normalizedUrl !== activeSoftApply.normalizedUrl
+    ) {
+      return false;
+    }
+    return Math.abs(playbackRate - activeSoftApply.appliedPlaybackRate) > 0.01;
+  }
+
   function shouldSuppressByCooldown(
     video: HTMLVideoElement,
     playback: PlaybackState,
@@ -534,6 +582,7 @@ export function createSoftApplyController(args: {
     isActiveRateOnlyCatchUp,
     hasActiveCorrectionSession,
     getActiveCorrectionBaseRate,
+    isRateUnexplainedByActiveCatchUp,
     shouldSuppressByCooldown,
     clearSoftApplyCooldown,
     destroy,

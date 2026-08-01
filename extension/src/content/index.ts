@@ -164,6 +164,11 @@ const playbackBindingController = createPlaybackBindingController({
     syncController.cancelActiveSoftApply(video, reason),
   maintainActiveSoftApply: (video) =>
     syncController.maintainActiveSoftApply(video),
+  isRateUnexplainedByActiveCatchUp: (normalizedUrl, playbackRate) =>
+    syncController.isRateUnexplainedByActiveCatchUp(
+      normalizedUrl,
+      playbackRate,
+    ),
   applyPendingPlaybackApplication: (video) =>
     syncController.applyPendingPlaybackApplication(video),
   activatePauseHold,
