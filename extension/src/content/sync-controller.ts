@@ -52,6 +52,14 @@ export interface SyncController {
   hasRecentRemoteStopIntent(currentVideoUrl: string): boolean;
   cancelActiveSoftApply(video: HTMLVideoElement | null, reason: string): void;
   maintainActiveSoftApply(video: HTMLVideoElement): void;
+  /**
+   * The room's base rate while a catch-up is running for this url, else `null`.
+   * Exposed because `playback:update` is not the only wire path that carries a
+   * playback rate — `video:share` does too, and the server persists it — so every
+   * payload builder has to be able to report the base rate instead of the
+   * element's temporary one (#238).
+   */
+  getActiveCorrectionBaseRate(normalizedUrl: string | null): number | null;
   applyPendingPlaybackApplication(video: HTMLVideoElement): void;
   broadcastPlayback(
     video: HTMLVideoElement,
@@ -1691,6 +1699,7 @@ export function createSyncController(args: {
     hasRecentRemoteStopIntent,
     cancelActiveSoftApply: softApply.cancelActiveSoftApply,
     maintainActiveSoftApply: softApply.maintainActiveSoftApply,
+    getActiveCorrectionBaseRate: softApply.getActiveCorrectionBaseRate,
     applyPendingPlaybackApplication,
     broadcastPlayback,
     applyRoomState: recordRoomConfirmedBroadcast,

@@ -118,6 +118,7 @@ test("share controller keeps playback snapshot while switching to another shared
 
   const debugLogs: string[] = [];
   const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
     runtimeState,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
@@ -162,6 +163,7 @@ test("share controller resolves bangumi season pages through page snapshot", asy
   runtimeState.intendedPlayState = "paused";
 
   const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
     runtimeState,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 3,
@@ -205,6 +207,7 @@ test("share controller does not reuse cached bangumi snapshot synchronously", ()
 
   const runtimeState = createContentRuntimeState();
   const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
     runtimeState,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 4,
@@ -248,6 +251,7 @@ test("share controller reuses matching cached bangumi snapshot for current page 
 
   const runtimeState = createContentRuntimeState();
   const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
     runtimeState,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 5,
@@ -295,6 +299,7 @@ test("share controller reuses cached bangumi snapshot by active episode id witho
 
   const runtimeState = createContentRuntimeState();
   const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
     runtimeState,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 6,
@@ -341,6 +346,7 @@ test("share controller reuses cached bangumi snapshot by active cid without titl
 
   const runtimeState = createContentRuntimeState();
   const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
     runtimeState,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
@@ -387,6 +393,7 @@ test("share controller rejects same-title cached bangumi snapshot from another p
 
   const runtimeState = createContentRuntimeState();
   const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
     runtimeState,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 6,
@@ -431,6 +438,7 @@ test("share controller rejects cached bangumi snapshot on festival page", () => 
 
   const runtimeState = createContentRuntimeState();
   const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
     runtimeState,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 8,
@@ -473,6 +481,7 @@ test("share controller reuses cached festival snapshot across trailing slash pat
 
   const runtimeState = createContentRuntimeState();
   const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
     runtimeState,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 9,
@@ -497,6 +506,98 @@ test("share controller reuses cached festival snapshot across trailing slash pat
     assert.equal(
       payload.video.url,
       "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller reports the room's base rate while a catch-up is running", () => {
+  // `video:share` is a second wire path that carries a playback rate, and the
+  // server persists whatever it carries. During a catch-up `video.playbackRate`
+  // is a temporary offset this client added to close its own drift, so
+  // re-sharing mid-catch-up would write that temporary rate straight into room
+  // state — the same pollution `playback:update` was fixed for (#238).
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/video/BV199W9zEEcH",
+    pathname: "/video/BV199W9zEEcH",
+    title: "New Video_哔哩哔哩",
+    video: {
+      currentTime: 95.03,
+      // The catch-up lowered the element to 0.84; the room is at 1.
+      playbackRate: 0.84,
+      paused: false,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1xx411c7mD";
+  runtimeState.intendedPlayState = "playing";
+
+  const requestedUrls: Array<string | undefined | null> = [];
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: (url) => {
+      requestedUrls.push(url);
+      return 1;
+    },
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 7,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.ok(payload);
+    assert.equal(payload?.playback?.playbackRate, 1);
+    assert.notEqual(payload?.playback?.playbackRate, 0.84);
+    // Asked about the video being shared, not some other url.
+    assert.deepEqual(requestedUrls, [
+      "https://www.bilibili.com/video/BV199W9zEEcH",
+    ]);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller falls back to the element rate with no catch-up running", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/video/BV199W9zEEcH",
+    pathname: "/video/BV199W9zEEcH",
+    title: "New Video_哔哩哔哩",
+    video: {
+      currentTime: 95.03,
+      playbackRate: 1.5,
+      paused: false,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BV1xx411c7mD";
+  runtimeState.intendedPlayState = "playing";
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 7,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    // The user's own 1.5x must still reach the room when nothing is correcting.
+    assert.equal(
+      controller.getCurrentSharePayload()?.playback?.playbackRate,
+      1.5,
     );
   } finally {
     dom.restore();

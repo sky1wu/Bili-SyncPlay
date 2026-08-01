@@ -55,8 +55,17 @@ function isEditableTarget(target: EventTarget | null): boolean {
  * re-creating the very rate pollution #238 is about. That exact sequence is in
  * the #238 logs: `3` twice, then `0.9223063476562674` twice, all explicit.
  *
- * A held ArrowRight during a catch-up therefore stays a purely local skim: the
- * session survives, so broadcasts keep reporting the room's base rate.
+ * What this buys is confined to the RATE: the session survives, so broadcasts
+ * keep reporting the room's base rate instead of 3x or the value restored on
+ * release. It is NOT a local-only skim. Each keydown still refreshes
+ * `lastUserGestureAt`, so the ratechange entering/leaving 3x is recorded as an
+ * explicit action, `shouldSuppressActiveSoftApplyBroadcast` lets the broadcast
+ * through, and its `currentTime` is the local playhead — by then seconds ahead.
+ * Peers follow that jump. They do so for any forward jump, with or without the
+ * `explicit-ratechange` tag: `playback-authority`'s timeline check only rejects
+ * updates that drift BACK behind the room (`driftsBackBehindCurrent`). Whether a
+ * fast-forward should move the room is a product question this fix does not
+ * touch — it behaves identically when no catch-up is running.
  */
 export function isRateControlGesture(event: Event): boolean {
   if (event.type !== "keydown" || isEditableTarget(event.target)) {

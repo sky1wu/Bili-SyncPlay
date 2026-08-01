@@ -64,6 +64,8 @@ const shareController = createShareController({
   nextSeq: () => seq++,
   getFestivalSnapshot: () => festivalBridge.getSnapshot(),
   refreshFestivalBridge: (input) => festivalBridge.refreshSnapshot(input),
+  getActiveCorrectionBaseRate: (url) =>
+    syncController.getActiveCorrectionBaseRate(normalizeUrl(url)),
   debugLog,
 });
 const autoShareNextController = createAutoShareNextController({
