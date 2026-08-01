@@ -44,11 +44,16 @@ export type RuntimeStore = {
     memberToken: string,
   ) => ActiveRoom;
   findMemberIdByToken: (code: string, memberToken: string) => string | null;
+  /**
+   * Block a token until `expiresAt`. Like {@link RuntimeStore.revokeMemberToken},
+   * the returned promise settles once the block is durable and rejects if the
+   * write failed — the kick acts on it immediately.
+   */
   blockMemberToken: (
     code: string,
     memberToken: string,
     expiresAt: number,
-  ) => void;
+  ) => void | Promise<void>;
   isMemberTokenBlocked: (
     code: string,
     memberToken: string,
@@ -66,10 +71,23 @@ export type RuntimeStore = {
   ) => { room: ActiveRoom | null; roomEmpty: boolean; removed: boolean };
   /**
    * Revoke a member's identity so their `memberToken` can no longer reclaim
-   * their `memberId`. Only for deliberate departures: an explicit `room:leave`,
-   * an admin kick, or unwinding a join that failed partway.
+   * their `memberId`. Only for deliberate departures: an explicit `room:leave`
+   * or an admin kick.
+   *
+   * Pass `session` to make it conditional on that session still owning the
+   * memberId (see `revokeMemberTokenInRoom`); omit it only where the caller
+   * means "this identity is over regardless of who holds it now" — the kick.
+   *
+   * The returned promise settles once the revocation is durable and REJECTS if
+   * the write failed. A caller that acts on the revocation (the kick disconnects
+   * the socket right after) must await it: resolving early would report success
+   * while the old token still resolved (#237 review).
    */
-  revokeMemberToken: (code: string, memberId: string) => void;
+  revokeMemberToken: (
+    code: string,
+    memberId: string,
+    session?: Session,
+  ) => void | Promise<void>;
   deleteRoom: (code: string) => void;
   heartbeatNode: (status: ClusterNodeStatus) => Promise<void>;
   listNodeStatuses: (currentTime?: number) => Promise<ClusterNodeStatus[]>;
@@ -328,8 +346,8 @@ export function createInMemoryRuntimeStore(
     removeMember(code, memberId, session) {
       return removeMemberFromRoom(rooms, code, memberId, session);
     },
-    revokeMemberToken(code, memberId) {
-      revokeMemberTokenInRoom(rooms, code, memberId);
+    revokeMemberToken(code, memberId, session) {
+      revokeMemberTokenInRoom(rooms, code, memberId, session);
     },
     deleteRoom(code) {
       rooms.delete(code);

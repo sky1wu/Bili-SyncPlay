@@ -213,3 +213,46 @@ test("admin command consumer keeps a kick block when disconnect fails", async ()
     await consumer.close();
   }
 });
+
+test("admin command consumer fails the kick when revoking the token does not land", async () => {
+  const bus = createInMemoryAdminCommandBus(() => 6_000);
+  const session = createSession("session-e", "ROOM05", "member-e");
+  let disconnected = false;
+
+  const consumer = await createAdminCommandConsumer({
+    instanceId: "node-a",
+    adminCommandBus: bus,
+    getLocalSession() {
+      return null;
+    },
+    listLocalSessionsByRoom(roomCode) {
+      return roomCode === "ROOM05" ? [session] : [];
+    },
+    blockMemberToken() {},
+    // The store reports the revocation failed. Reporting the kick as done here
+    // would claim an eviction while the old token still resolved everywhere.
+    async revokeMemberToken() {
+      throw new Error("revoke failed");
+    },
+    disconnectSessionSocket() {
+      disconnected = true;
+    },
+    now: () => 6_000,
+  });
+
+  try {
+    const result = await bus.request({
+      kind: "kick_member",
+      requestId: "req-5",
+      targetInstanceId: "node-a",
+      roomCode: "ROOM05",
+      memberId: "member-e",
+      requestedAt: 5_000,
+    });
+
+    assert.notEqual(result.status, "ok");
+    assert.equal(disconnected, false);
+  } finally {
+    await consumer.close();
+  }
+});

@@ -262,6 +262,24 @@ function deserializeSession(fields: Record<string, string>): Session | null {
   };
 }
 
+/**
+ * Revoke a member token, optionally only while the memberId is still bound to
+ * the caller's session (or bound to nobody).
+ *
+ * The guard has to read the SHARED binding, not a node-local one: after a member
+ * reconnects onto another node, the old node's local map still lists the old
+ * session as the member, so a node-local check would let that node's explicit
+ * leave revoke the identity the new node is actively using (#237 review).
+ */
+const REVOKE_MEMBER_TOKEN_LUA = `
+local bound = redis.call("HGET", KEYS[1], ARGV[1])
+if ARGV[2] ~= "" and bound and bound ~= ARGV[2] then
+  return 0
+end
+redis.call("HDEL", KEYS[2], ARGV[1])
+return 1
+`;
+
 async function loadSession(
   redis: RedisClient,
   prefix: string,
@@ -289,9 +307,18 @@ async function loadSession(
  * `markSessionJoinedRoom` + `addMember` (including its `PERSIST`) ran, and then
  * this pass removed a now-active room from the index and re-armed a TTL on the
  * tokens of members who were back — which would expire them mid-session.
+ *
+ * Emptiness needs BOTH indexes. A join writes the member binding
+ * (`addMember`) before the session index (`onRoomJoined` →
+ * `markSessionJoinedRoom`), so between those two the session set is still empty
+ * while the room is already in use; checking only the sessions would re-arm the
+ * TTL on a hash a live member had just written (#237 review).
  */
 const CLEANUP_EMPTY_ROOM_LUA = `
 if redis.call("SCARD", KEYS[1]) ~= 0 then
+  return 0
+end
+if redis.call("HLEN", KEYS[4]) ~= 0 then
   return 0
 end
 redis.call("SREM", KEYS[2], ARGV[1])
@@ -308,10 +335,11 @@ async function cleanupEmptyRoomIndex(
 ): Promise<void> {
   const cleaned = await redis.eval(
     CLEANUP_EMPTY_ROOM_LUA,
-    3,
+    4,
     roomSessionsKey(prefix, roomCode),
     `${prefix}rooms`,
     roomMemberTokensKey(prefix, roomCode),
+    roomMembersKey(prefix, roomCode),
     roomCode,
     String(memberTokenRetentionMs),
   );
@@ -398,6 +426,7 @@ export async function createRedisRuntimeStore(
   function trackOperation<T>(
     operationName: string,
     operation: Promise<T>,
+    awaitFailures = false,
   ): Promise<T | undefined> {
     const startedAt = performance.now();
     let failureRecorded = false;
@@ -454,7 +483,20 @@ export async function createRedisRuntimeStore(
         performance.now() - startedAt,
       );
     });
-    return handledOperation;
+    return awaitFailures ? trackedOperation : handledOperation;
+  }
+
+  /**
+   * `trackOperation`, but the returned promise rejects when the write fails
+   * instead of resolving to `undefined`. For writes whose caller must not
+   * proceed on an unconfirmed result — revoking an identity, where the kick
+   * disconnects the socket and reports success right afterwards.
+   */
+  function trackAwaitedOperation<T>(
+    operationName: string,
+    operation: Promise<T>,
+  ): Promise<T> {
+    return trackOperation(operationName, operation, true) as Promise<T>;
   }
 
   function queueSessionOperation(
@@ -735,29 +777,38 @@ export async function createRedisRuntimeStore(
       return room;
     },
     async findMemberIdByToken(code: string, memberToken: string) {
+      // Redis is the ONLY authority here. Falling back to the local mirror on a
+      // miss let a node that had once hosted this member keep answering from its
+      // own cache: a revoke performed on another node updates Redis and that
+      // node, never this one, so a later join landing here would re-accept a
+      // token an explicit leave or a kick had already ended (#237 review).
+      //
+      // Draining first is what the fallback used to cover — this store's writes
+      // are asynchronous, so a join reading immediately after `addMember` could
+      // otherwise miss its own write.
+      await store.flush();
       const memberTokens = await redis.hgetall(
         roomMemberTokensKey(keyPrefix, code),
       );
-      const matchedMemberId = findMemberIdByTokenEntries(
+      return findMemberIdByTokenEntries(
         Object.entries(memberTokens),
         memberToken,
       );
-      if (matchedMemberId) {
-        return matchedMemberId;
-      }
-      return localRuntimeStore.findMemberIdByToken(code, memberToken);
     },
     blockMemberToken(code: string, memberToken: string, expiresAt: number) {
       ensurePendingCapacity("block_member_token");
       localRuntimeStore.blockMemberToken(code, memberToken, expiresAt);
-      void trackOperation(
+      // Same reason as `revokeMemberToken`: the kick already awaits this and
+      // then reports the member evicted, so an unconfirmed write would report
+      // an eviction that had not happened on any other node yet.
+      return trackAwaitedOperation(
         "block_member_token",
         redis.zadd(
           blockedTokensKey(keyPrefix, code),
           String(expiresAt),
           memberToken,
         ),
-      );
+      ).then(() => undefined);
     },
     async isMemberTokenBlocked(
       code: string,
@@ -879,16 +930,23 @@ export async function createRedisRuntimeStore(
       );
       return removal;
     },
-    revokeMemberToken(code: string, memberId: string) {
+    revokeMemberToken(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("revoke_member_token");
-      localRuntimeStore.revokeMemberToken(code, memberId);
-      void trackOperation(
+      localRuntimeStore.revokeMemberToken(code, memberId, session);
+      // Awaited, and rejecting: the kick disconnects the socket and reports
+      // success as soon as this resolves, so resolving before the write landed
+      // would report an eviction while the old token still resolved.
+      return trackAwaitedOperation(
         "revoke_member_token",
-        redis
-          .multi()
-          .hdel(roomMemberTokensKey(keyPrefix, code), memberId)
-          .exec(),
-      );
+        redis.eval(
+          REVOKE_MEMBER_TOKEN_LUA,
+          2,
+          roomMembersKey(keyPrefix, code),
+          roomMemberTokensKey(keyPrefix, code),
+          memberId,
+          session?.id ?? "",
+        ),
+      ).then(() => undefined);
     },
     deleteRoom(code: string) {
       ensurePendingCapacity("delete_room");

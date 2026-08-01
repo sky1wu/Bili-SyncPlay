@@ -10,6 +10,22 @@ function mirrorVoidWrite<TArgs extends unknown[]>(
   };
 }
 
+/**
+ * Mirrors the write and hands back the SHARED store's promise, so the caller can
+ * wait for durability. `mirrorVoidWrite` drops it, which would leave the kick
+ * awaiting nothing in a mirrored deployment — exactly the gap the awaitable
+ * revoke exists to close (#237 review).
+ */
+function mirrorAwaitedWrite<TArgs extends unknown[]>(
+  localMethod: (...args: TArgs) => unknown,
+  sharedMethod: (...args: TArgs) => void | Promise<void>,
+): (...args: TArgs) => void | Promise<void> {
+  return (...args: TArgs) => {
+    localMethod(...args);
+    return sharedMethod(...args);
+  };
+}
+
 function mirrorLocalResult<TArgs extends unknown[], TResult>(
   localMethod: (...args: TArgs) => TResult,
   sharedMethod: (...args: TArgs) => unknown,
@@ -80,7 +96,7 @@ export function createMirroredRuntimeStore(
       sharedRuntimeStore.addMember,
     ),
     findMemberIdByToken: readLocal(localRuntimeStore.findMemberIdByToken),
-    blockMemberToken: mirrorVoidWrite(
+    blockMemberToken: mirrorAwaitedWrite(
       localRuntimeStore.blockMemberToken,
       sharedRuntimeStore.blockMemberToken,
     ),
@@ -93,7 +109,7 @@ export function createMirroredRuntimeStore(
       localRuntimeStore.removeMember,
       sharedRuntimeStore.removeMember,
     ),
-    revokeMemberToken: mirrorVoidWrite(
+    revokeMemberToken: mirrorAwaitedWrite(
       localRuntimeStore.revokeMemberToken,
       sharedRuntimeStore.revokeMemberToken,
     ),

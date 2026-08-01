@@ -770,3 +770,151 @@ test("redis runtime store empties a room in a single atomic step", async () => {
     await store.close();
   }
 });
+
+test("redis runtime store keeps tokens while a member binding exists but the session index has not caught up", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    memberTokenRetentionMs: 120,
+  });
+  const observer = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const session = createSession("session-window");
+  session.memberId = "member-window";
+  session.memberToken = "token-window";
+
+  try {
+    // A join writes the member binding first and the session index only after
+    // (`onRoomJoined` → `markSessionJoinedRoom`). Reproduce exactly that window.
+    store.addMember("ROOMWD", session.memberId, session, session.memberToken);
+    await store.flush?.();
+
+    // An old connection's cleanup lands right here. The room looks session-less
+    // but is very much in use, so nothing may be put on a clock.
+    store.markSessionLeftRoom("session-window", "ROOMWD");
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    assert.equal(
+      await observer.findMemberIdByToken("ROOMWD", "token-window"),
+      "member-window",
+    );
+  } finally {
+    await store.close();
+    await observer.close();
+  }
+});
+
+test("redis runtime store stops resolving a token revoked on another node", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const nodeA = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const nodeB = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const onA = createSession("session-node-a");
+  onA.memberId = "member-roaming";
+  onA.memberToken = "token-roaming";
+
+  try {
+    // The member was hosted by A, so A's local mirror holds the mapping.
+    nodeA.addMember("ROOMND", onA.memberId, onA, onA.memberToken);
+    await nodeA.flush?.();
+    assert.equal(
+      await nodeA.findMemberIdByToken("ROOMND", "token-roaming"),
+      "member-roaming",
+    );
+
+    // They reconnect onto B and then leave / are kicked there. Only B and Redis
+    // learn about it — A is never told.
+    await nodeB.revokeMemberToken("ROOMND", "member-roaming");
+    await nodeB.flush?.();
+
+    // A must not re-accept it from its own cache: that would undo an explicit
+    // leave or a kick for anyone whose next join happens to land on A.
+    assert.equal(
+      await nodeA.findMemberIdByToken("ROOMND", "token-roaming"),
+      null,
+    );
+  } finally {
+    await nodeA.close();
+    await nodeB.close();
+  }
+});
+
+test("redis runtime store declines a revoke from a session that no longer owns the member", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const oldSession = createSession("session-old");
+  oldSession.memberId = "member-shared";
+  oldSession.memberToken = "token-shared";
+  const newSession = createSession("session-new");
+  newSession.memberId = "member-shared";
+  newSession.memberToken = "token-shared";
+
+  try {
+    store.addMember("ROOMOW", "member-shared", oldSession, "token-shared");
+    await store.flush?.();
+    // The member reconnected — possibly onto another node — and the shared
+    // binding now names the new session.
+    store.addMember("ROOMOW", "member-shared", newSession, "token-shared");
+    await store.flush?.();
+
+    // The stale session leaves. It must not revoke the identity its successor
+    // is using; the old node's local view still thinks it is the member, so the
+    // decision has to be made against the shared binding.
+    await store.revokeMemberToken("ROOMOW", "member-shared", oldSession);
+    await store.flush?.();
+
+    assert.equal(
+      await store.findMemberIdByToken("ROOMOW", "token-shared"),
+      "member-shared",
+    );
+
+    // The session that does own it still can.
+    await store.revokeMemberToken("ROOMOW", "member-shared", newSession);
+    await store.flush?.();
+    assert.equal(
+      await store.findMemberIdByToken("ROOMOW", "token-shared"),
+      null,
+    );
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store surfaces a failed member token revocation to the caller", async () => {
+  // The kick awaits this and then disconnects the socket and reports success.
+  // A revoke that resolves before the write landed — or swallows its failure —
+  // reports an eviction while the old token still resolves everywhere else.
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async eval() {
+      throw new Error("redis unavailable");
+    },
+  };
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:revoke-fail:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    await assert.rejects(
+      Promise.resolve(store.revokeMemberToken("ROOMRV", "member-rv")),
+      /redis unavailable/,
+    );
+  } finally {
+    await store.close();
+  }
+});

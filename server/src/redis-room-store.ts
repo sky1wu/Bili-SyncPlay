@@ -194,7 +194,7 @@ local roomsKey = KEYS[1]
 local roomKeyPrefix = ARGV[1]
 local now = tonumber(ARGV[2])
 local candidates = redis.call("ZRANGEBYSCORE", roomsKey, "-inf", now)
-local deletedCount = 0
+local deletedCodes = {}
 
 for _, code in ipairs(candidates) do
   local key = roomKeyPrefix .. code
@@ -221,13 +221,13 @@ for _, code in ipairs(candidates) do
       elseif tonumber(expiresAt) ~= nil and tonumber(expiresAt) <= now then
         redis.call("DEL", key)
         redis.call("ZREM", roomsKey, code)
-        deletedCount = deletedCount + 1
+        deletedCodes[#deletedCodes + 1] = code
       end
     end
   end
 end
 
-return deletedCount
+return deletedCodes
 `;
 
 // Chunk the repair passes: a first run against a database that has never been
@@ -723,14 +723,14 @@ export async function createRedisRoomStore(
       // keyspace walk inside one reaper tick per interval, which is what made
       // this operation's histogram bimodal.
       await ensureBootstrapReconciled();
-      const deletedCount = await redis.eval(
+      const deletedCodes = await redis.eval(
         DELETE_EXPIRED_ROOMS_LUA,
         1,
         roomsByExpiryKey,
         roomKeyPrefix,
         String(currentTime),
       );
-      return Number(deletedCount);
+      return Array.isArray(deletedCodes) ? (deletedCodes as string[]) : [];
     },
     async listRooms(
       query: Pick<

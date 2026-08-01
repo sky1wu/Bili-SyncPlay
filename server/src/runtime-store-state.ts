@@ -158,15 +158,29 @@ export function removeMemberFromRoom(
  * Revoke a member's identity: after this, their `memberToken` no longer reclaims
  * their `memberId` and a rejoin is issued a new one. The counterpart to
  * {@link removeMemberFromRoom}, which only drops presence.
+ *
+ * `session` makes it conditional, under the same rule as
+ * {@link shouldRemoveMemberBinding}: revoke only while the memberId is unbound
+ * or still bound to that session. A session that has already been replaced —
+ * the member reconnected, possibly onto another node — must not be able to
+ * revoke the identity its successor is now using, which is what an
+ * unconditional revoke on an explicit leave would do.
  */
 export function revokeMemberTokenInRoom(
   rooms: Map<string, ActiveRoom>,
   code: string,
   memberId: string,
+  session?: Session,
 ): boolean {
   const room = rooms.get(code) ?? null;
   if (!room) {
     return false;
+  }
+  if (session) {
+    const currentSession = room.members.get(memberId);
+    if (currentSession && currentSession !== session) {
+      return false;
+    }
   }
   const revoked = room.memberTokens.delete(memberId);
   if (room.members.size === 0 && room.memberTokens.size === 0) {

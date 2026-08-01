@@ -919,6 +919,146 @@ test("an explicit leave revokes the identity", async () => {
   assert.notEqual(returning.memberId, originalMemberId);
 });
 
+test("a disconnected member does not get a free seat past the room limit", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 2 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMCP",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  // The owner drops. Their token survives (#234) — but a token is not a seat,
+  // and the seat they vacated is immediately taken by somebody else.
+  await service.leaveRoomForSession(owner, "disconnect");
+  const late = createSession("late");
+  await service.joinRoomForSession(
+    late,
+    created.room.code,
+    created.room.joinToken,
+    "Carol",
+  );
+
+  // Room is full again. The owner coming back with a still-valid token must
+  // queue behind the limit like anyone else, not be waved through as a
+  // "reconnect" — otherwise every disconnected member is an extra seat.
+  const returning = createSession("owner-returns");
+  await assert.rejects(
+    service.joinRoomForSession(
+      returning,
+      created.room.code,
+      created.room.joinToken,
+      "Alice",
+      created.memberToken,
+    ),
+    /room is full/i,
+  );
+});
+
+test("a reconnect that still holds its seat is admitted to a full room", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const service = createRoomService({
+    config: { ...getDefaultSecurityConfig(), maxMembersPerRoom: 2 },
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMSE",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  // Control for the test above: a session replacement (the old socket has not
+  // been cleaned up yet) still occupies its seat, so the capacity check must
+  // keep exempting it or every flapping connection would be locked out.
+  const replacement = createSession("owner-replacement");
+  const rejoined = await service.joinRoomForSession(
+    replacement,
+    created.room.code,
+    created.room.joinToken,
+    "Alice",
+    created.memberToken,
+  );
+
+  assert.equal(replacement.memberId, owner.memberId);
+  assert.equal(rejoined.room.code, created.room.code);
+});
+
+test("expiring a room collects the runtime state that outlives it", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMEX",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  // Captured before leaving: the leave clears it off the session.
+  const ownerMemberId = owner.memberId;
+  await service.leaveRoomForSession(owner, "disconnect");
+
+  // Survives the disconnect, as it must.
+  assert.equal(
+    activeRooms.findMemberIdByToken(created.room.code, created.memberToken),
+    ownerMemberId,
+  );
+
+  currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
+  assert.equal(await service.deleteExpiredRooms(), 1);
+
+  // The reaper is the only path that ever deletes a room nobody touches again.
+  // If it leaves the runtime state behind, tokens pile up for every abandoned
+  // room and a recycled room code inherits the previous room's identities.
+  assert.equal(activeRooms.getRoom(created.room.code), null);
+  assert.equal(
+    activeRooms.findMemberIdByToken(created.room.code, created.memberToken),
+    null,
+  );
+});
+
 test("room service updates member display name after join", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const service = createRoomService({

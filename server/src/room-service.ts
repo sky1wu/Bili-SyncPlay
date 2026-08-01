@@ -89,6 +89,17 @@ type JoinedRoomAccess = {
 type JoinTargetState = {
   activeRoom: ActiveRoom | null;
   reconnectMemberId: string | null;
+  /**
+   * Whether `reconnectMemberId` is still occupying a seat, i.e. this join
+   * replaces a live session rather than adding a member.
+   *
+   * Not the same thing as `reconnectMemberId !== null` any more. Member tokens
+   * now outlive a disconnect (#234), so a member who dropped hours ago still
+   * resolves one — and treating that as a seat-holder let them rejoin past
+   * `maxMembersPerRoom` once someone else had taken the last seat, once per
+   * disconnected member (#237 review).
+   */
+  reconnectHoldsSeat: boolean;
   activeMemberCount: number;
 };
 
@@ -641,6 +652,9 @@ export function createRoomService(options: {
     return {
       activeRoom,
       reconnectMemberId,
+      reconnectHoldsSeat:
+        reconnectMemberId !== null &&
+        (activeRoom?.members.has(reconnectMemberId) ?? false),
       activeMemberCount: activeRoom?.members.size ?? 0,
     };
   }
@@ -705,7 +719,7 @@ export function createRoomService(options: {
     );
     if (
       joinTargetState.activeMemberCount >= config.maxMembersPerRoom &&
-      joinTargetState.reconnectMemberId === null
+      !joinTargetState.reconnectHoldsSeat
     ) {
       throw new RoomServiceError("room_full", ROOM_FULL_MESSAGE, "room_full");
     }
@@ -728,8 +742,9 @@ export function createRoomService(options: {
         joinToken: args.joinToken,
         previousMemberToken: args.previousMemberToken,
       });
-      const needsCapacitySerialization =
-        joinTargetState.reconnectMemberId === null;
+      // A reconnect that no longer holds a seat consumes one like any other
+      // join, so it has to serialize on the admission lock too.
+      const needsCapacitySerialization = !joinTargetState.reconnectHoldsSeat;
 
       if (
         room.expiresAt === null &&
@@ -845,13 +860,14 @@ export function createRoomService(options: {
           roomEmpty: false,
           removed: false,
         };
-    // Gated on `removal.removed`, exactly like the removal itself: a superseded
-    // session leaving must not revoke the identity a NEWER session already
-    // reclaimed. `removeMemberFromRoom` returns `removed: false` in that case
-    // (the memberId now maps to a different session), and revoking anyway would
-    // invalidate the live member's token.
-    if (reason === "client-request" && session.memberId && removal.removed) {
-      runtimeStore.revokeMemberToken(roomCode, session.memberId);
+    // The session is passed so the STORE decides whether this leave still owns
+    // the identity, against the shared member binding. Gating on `removal.removed`
+    // instead only worked within one node: the mirrored store returns the local
+    // removal, so after a member reconnected onto another node the old node still
+    // considered its stale session the current member and would revoke the token
+    // the new node was using (#237 review).
+    if (reason === "client-request" && session.memberId) {
+      await runtimeStore.revokeMemberToken(roomCode, session.memberId, session);
     }
     await runtimeStore.flush?.();
     clearSessionRoom(session);
@@ -1594,7 +1610,16 @@ export function createRoomService(options: {
     },
 
     async deleteExpiredRooms(currentTime = now()) {
-      return await roomStore.deleteExpiredRooms(currentTime);
+      const deletedCodes = await roomStore.deleteExpiredRooms(currentTime);
+      // The reaper is the only path that deletes a room nobody touches again,
+      // so it is also the only chance to collect the runtime state that outlives
+      // it. Member tokens survive a disconnect on purpose (#234); without this
+      // they would accumulate for every abandoned room, and a recycled room code
+      // would inherit the previous room's identities (#237 review).
+      for (const code of deletedCodes) {
+        runtimeStore.deleteRoom(code);
+      }
+      return deletedCodes.length;
     },
   };
 }
