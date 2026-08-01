@@ -115,8 +115,20 @@ export type RuntimeStore = {
   ) => Promise<boolean>;
 };
 
+/**
+ * How long a member's identity survives their disconnect.
+ *
+ * Retention is per IDENTITY, not per room. Hanging it off "the room emptied"
+ * never released anything while the room stayed busy — a public room with a
+ * steady trickle of visitors kept every departed visitor's token forever — and
+ * in a cluster only the one node that observed the emptying ever acted on it
+ * (#237 review).
+ */
+export const DEFAULT_MEMBER_TOKEN_RETENTION_MS = 30 * 60_000;
+
 export function createInMemoryRuntimeStore(
   now: () => number = Date.now,
+  memberTokenRetentionMs: number = DEFAULT_MEMBER_TOKEN_RETENTION_MS,
 ): RuntimeStore {
   const startedAt = now();
   const sessionsById = new Map<string, Session>();
@@ -132,6 +144,26 @@ export function createInMemoryRuntimeStore(
     Map<string, { token: string; expiresAt: number }>
   >();
   const nodeStatuses = new Map<string, ClusterNodeStatus>();
+  // memberId → when its token stops reclaiming the identity. Only disconnected
+  // members appear here; `addMember` removes the entry again.
+  const memberTokenExpiryByRoom = new Map<string, Map<string, number>>();
+
+  /** Drop identities whose retention has run out. Lazy: no timers. */
+  function pruneExpiredMemberTokens(code: string, currentTime = now()): void {
+    const expiryByMember = memberTokenExpiryByRoom.get(code);
+    if (!expiryByMember) {
+      return;
+    }
+    for (const [memberId, expiresAt] of Array.from(expiryByMember.entries())) {
+      if (expiresAt <= currentTime) {
+        expiryByMember.delete(memberId);
+        revokeMemberTokenInRoom(rooms, code, memberId);
+      }
+    }
+    if (expiryByMember.size === 0) {
+      memberTokenExpiryByRoom.delete(code);
+    }
+  }
 
   function pruneEvents(currentTime: number): void {
     while (
@@ -270,13 +302,18 @@ export function createInMemoryRuntimeStore(
       return new Set(roomSessionIds.keys());
     },
     getRoom(code) {
+      pruneExpiredMemberTokens(code);
       return rooms.get(code) ?? null;
     },
     getOrCreateRoom,
     addMember(code, memberId, session, memberToken) {
+      pruneExpiredMemberTokens(code);
+      // Back in use: the identity is no longer on the clock.
+      memberTokenExpiryByRoom.get(code)?.delete(memberId);
       return addMemberToRoom(rooms, code, memberId, session, memberToken);
     },
     findMemberIdByToken(code, memberToken) {
+      pruneExpiredMemberTokens(code);
       const room = rooms.get(code) ?? null;
       if (!room) {
         return null;
@@ -344,13 +381,30 @@ export function createInMemoryRuntimeStore(
       return Promise.resolve(true);
     },
     removeMember(code, memberId, session) {
-      return removeMemberFromRoom(rooms, code, memberId, session);
+      pruneExpiredMemberTokens(code);
+      const removal = removeMemberFromRoom(rooms, code, memberId, session);
+      // Presence is gone but the identity survives (#234) — start its clock, so
+      // a room that never empties still releases the people who left it.
+      if (removal.removed && rooms.get(code)?.memberTokens.has(memberId)) {
+        const expiryByMember =
+          memberTokenExpiryByRoom.get(code) ?? new Map<string, number>();
+        expiryByMember.set(memberId, now() + memberTokenRetentionMs);
+        memberTokenExpiryByRoom.set(code, expiryByMember);
+      }
+      return removal;
     },
     revokeMemberToken(code, memberId, session) {
-      revokeMemberTokenInRoom(rooms, code, memberId, session);
+      if (revokeMemberTokenInRoom(rooms, code, memberId, session)) {
+        const expiryByMember = memberTokenExpiryByRoom.get(code);
+        expiryByMember?.delete(memberId);
+        if (expiryByMember?.size === 0) {
+          memberTokenExpiryByRoom.delete(code);
+        }
+      }
     },
     deleteRoom(code) {
       rooms.delete(code);
+      memberTokenExpiryByRoom.delete(code);
       roomSessionIds.delete(code);
       blockedMemberTokensByRoom.delete(code);
       claimedSlotsByRoom.delete(code);

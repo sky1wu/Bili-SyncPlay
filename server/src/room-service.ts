@@ -866,13 +866,24 @@ export function createRoomService(options: {
     // removal, so after a member reconnected onto another node the old node still
     // considered its stale session the current member and would revoke the token
     // the new node was using (#237 review).
-    if (reason === "client-request" && session.memberId) {
-      await runtimeStore.revokeMemberToken(roomCode, session.memberId, session);
-    }
-    await runtimeStore.flush?.();
-    clearSessionRoom(session);
 
     try {
+      // Inside the try: revoking is a durable write that now rejects when it
+      // fails, and outside the recovery path a failure left the member removed
+      // from the runtime while `clearSessionRoom` had not run — the client got
+      // an internal error still believing it was joined, with no runtime
+      // membership behind it (#237 review). `restoreLeaveState` in the catch
+      // re-adds the member with the snapshot token, undoing both.
+      if (reason === "client-request" && session.memberId) {
+        await runtimeStore.revokeMemberToken(
+          roomCode,
+          session.memberId,
+          session,
+        );
+      }
+      await runtimeStore.flush?.();
+      clearSessionRoom(session);
+
       const persistedRoom = await resolveRoom(roomCode);
       if (!persistedRoom) {
         return { room: null };

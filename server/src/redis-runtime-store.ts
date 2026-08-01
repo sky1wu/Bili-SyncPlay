@@ -5,6 +5,7 @@ import type { MetricsCollector } from "./admin/metrics.js";
 import type { ActiveRoom, ClusterNodeStatus, Session } from "./types.js";
 import {
   createInMemoryRuntimeStore,
+  DEFAULT_MEMBER_TOKEN_RETENTION_MS,
   type RuntimeStore,
 } from "./runtime-store.js";
 import {
@@ -20,7 +21,8 @@ type RedisMulti = {
   del: (...keys: string[]) => RedisMulti;
   hset: (key: string, ...args: unknown[]) => RedisMulti;
   hdel: (key: string, ...fields: string[]) => RedisMulti;
-  persist: (key: string) => RedisMulti;
+  zadd: (key: string, score: string, member: string) => RedisMulti;
+  zrem: (key: string, ...members: string[]) => RedisMulti;
   exec: () => Promise<unknown>;
 };
 
@@ -52,8 +54,6 @@ type RedisClient = {
     ...args: Array<string | number>
   ) => Promise<unknown>;
   del: (...keys: string[]) => Promise<unknown>;
-  pexpire: (key: string, milliseconds: number) => Promise<unknown>;
-  persist: (key: string) => Promise<unknown>;
 };
 
 type PendingOperationLogContext = {
@@ -78,11 +78,9 @@ type RedisRuntimeSession = {
 type RuntimeStoreOptions = {
   keyPrefix?: string;
   /**
-   * How long a room with no sessions left keeps its member tokens. Identity has
-   * to outlive a disconnect (#234) but not the room itself, so the moment a room
-   * empties its tokens are put on a clock; a reconnect before it fires clears
-   * the clock again. Default comfortably exceeds `persistence.emptyRoomTtlMs`,
-   * so tokens outlive the room rather than the other way round.
+   * How long a DISCONNECTED member's identity survives before their token stops
+   * reclaiming it. Per identity, not per room — see
+   * `DEFAULT_MEMBER_TOKEN_RETENTION_MS`.
    */
   memberTokenRetentionMs?: number;
   now?: () => number;
@@ -174,6 +172,10 @@ function roomMemberTokensKey(prefix: string, roomCode: string): string {
   return `${prefix}room:${roomCode}:member-tokens`;
 }
 
+function roomMemberTokenExpiryKey(prefix: string, roomCode: string): string {
+  return `${prefix}room:${roomCode}:member-token-expiry`;
+}
+
 function blockedTokensKey(prefix: string, roomCode: string): string {
   return `${prefix}room:${roomCode}:blocked-member-tokens`;
 }
@@ -205,9 +207,6 @@ function nodeStatusKey(prefix: string, instanceId: string): string {
   return `${prefix}node:${instanceId}`;
 }
 
-// Twice the default `emptyRoomTtlMs` (15 min), so an emptied room's tokens
-// outlive the room they identify members of rather than the other way round.
-const DEFAULT_MEMBER_TOKEN_RETENTION_MS = 30 * 60_000;
 const DEFAULT_MAX_PENDING_OPERATIONS = 256;
 const DEFAULT_PENDING_OPERATION_TIMEOUT_MS = 5_000;
 // Floor TTL applied only when the caller's expiresAt is already non-positive
@@ -277,6 +276,7 @@ if ARGV[2] ~= "" and bound and bound ~= ARGV[2] then
   return 0
 end
 redis.call("HDEL", KEYS[2], ARGV[1])
+redis.call("ZREM", KEYS[3], ARGV[1])
 return 1
 `;
 
@@ -293,71 +293,61 @@ async function loadSession(
 }
 
 /**
- * Drop an emptied room from the index and put its member tokens on a clock.
+ * Drop an emptied room from the index.
  *
- * Member tokens outlive a disconnect on purpose (#234), which means nothing
- * else deletes them once the last session goes and the room is left to expire —
- * `resolveRoom`'s lazy cleanup only fires if somebody touches the code again.
- * Arming the clock exactly here bounds that: while anyone is still connected the
- * key carries no TTL at all, so a long-lived room never loses the identities of
- * the people in it, and `addMember` lifts the clock again on reconnect.
+ * Emptiness needs BOTH indexes, and the check plus the write are one script. A
+ * join writes the member binding (`addMember`) before the session index
+ * (`onRoomJoined` → `markSessionJoinedRoom`), so between those two the session
+ * set is still empty while the room is already in use; a read-then-write from
+ * the client could also let a whole reconnect land between the check and the
+ * write (#237 review).
  *
- * The emptiness check and the two writes run as ONE script. Read-then-write from
- * the client let a reconnect land in between: `SCARD` saw zero, the client's
- * `markSessionJoinedRoom` + `addMember` (including its `PERSIST`) ran, and then
- * this pass removed a now-active room from the index and re-armed a TTL on the
- * tokens of members who were back — which would expire them mid-session.
- *
- * Emptiness needs BOTH indexes. A join writes the member binding
- * (`addMember`) before the session index (`onRoomJoined` →
- * `markSessionJoinedRoom`), so between those two the session set is still empty
- * while the room is already in use; checking only the sessions would re-arm the
- * TTL on a hash a live member had just written (#237 review).
+ * Member tokens are NOT touched here. Their retention is per identity — see
+ * `PRUNE_MEMBER_TOKENS_LUA` — because hanging it off "the room emptied" never
+ * released anything while the room stayed busy, and in a cluster only the node
+ * that happened to observe the emptying ever acted on it.
  */
 const CLEANUP_EMPTY_ROOM_LUA = `
 if redis.call("SCARD", KEYS[1]) ~= 0 then
   return 0
 end
-if redis.call("HLEN", KEYS[4]) ~= 0 then
+if redis.call("HLEN", KEYS[3]) ~= 0 then
   return 0
 end
 redis.call("SREM", KEYS[2], ARGV[1])
-redis.call("PEXPIRE", KEYS[3], ARGV[2])
 return 1
+`;
+
+/**
+ * Collect identities whose retention has run out.
+ *
+ * A zset scored by expiry, pruned lazily on read/write — the same shape this
+ * store already uses for blocked tokens. Redis hash fields cannot carry their
+ * own TTL, and a per-member key would make token lookup a scan.
+ */
+const PRUNE_MEMBER_TOKENS_LUA = `
+local expired = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", ARGV[1])
+if #expired == 0 then
+  return 0
+end
+redis.call("HDEL", KEYS[2], unpack(expired))
+redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", ARGV[1])
+return #expired
 `;
 
 async function cleanupEmptyRoomIndex(
   redis: RedisClient,
   prefix: string,
   roomCode: string,
-  memberTokenRetentionMs: number,
-  localRuntimeStore: RuntimeStore,
 ): Promise<void> {
-  const cleaned = await redis.eval(
+  await redis.eval(
     CLEANUP_EMPTY_ROOM_LUA,
-    4,
+    3,
     roomSessionsKey(prefix, roomCode),
     `${prefix}rooms`,
-    roomMemberTokensKey(prefix, roomCode),
     roomMembersKey(prefix, roomCode),
     roomCode,
-    String(memberTokenRetentionMs),
   );
-  if (Number(cleaned) !== 1) {
-    return;
-  }
-  // Only once the script reports it acted. The local map is a cache with no
-  // clock of its own, so keeping a copy would both leak in memory and answer
-  // `findMemberIdByToken` from it long after Redis let the tokens go. A
-  // reconnect that beats this line still recovers: its `addMember` wrote to
-  // Redis, which `findMemberIdByToken` consults first.
-  const localRoom = localRuntimeStore.getRoom(roomCode);
-  if (!localRoom) {
-    return;
-  }
-  for (const memberId of Array.from(localRoom.memberTokens.keys())) {
-    localRuntimeStore.revokeMemberToken(roomCode, memberId);
-  }
 }
 
 export async function createRedisRuntimeStore(
@@ -499,6 +489,17 @@ export async function createRedisRuntimeStore(
     return trackOperation(operationName, operation, true) as Promise<T>;
   }
 
+  /** Collect identities past their retention. Lazy — called on token reads/writes. */
+  async function pruneExpiredMemberTokens(code: string): Promise<void> {
+    await redis.eval(
+      PRUNE_MEMBER_TOKENS_LUA,
+      2,
+      roomMemberTokenExpiryKey(keyPrefix, code),
+      roomMemberTokensKey(keyPrefix, code),
+      String(now()),
+    );
+  }
+
   function queueSessionOperation(
     sessionId: string,
     operationName: string,
@@ -590,13 +591,7 @@ export async function createRedisRuntimeStore(
 
         await transaction.exec();
         if (session.roomCode) {
-          await cleanupEmptyRoomIndex(
-            redis,
-            keyPrefix,
-            session.roomCode,
-            memberTokenRetentionMs,
-            localRuntimeStore,
-          );
+          await cleanupEmptyRoomIndex(redis, keyPrefix, session.roomCode);
         }
         purgedCount += 1;
       }
@@ -618,13 +613,7 @@ export async function createRedisRuntimeStore(
         }
         await transaction.exec();
         if (roomCode) {
-          await cleanupEmptyRoomIndex(
-            redis,
-            keyPrefix,
-            roomCode,
-            memberTokenRetentionMs,
-            localRuntimeStore,
-          );
+          await cleanupEmptyRoomIndex(redis, keyPrefix, roomCode);
         }
       });
     },
@@ -654,13 +643,7 @@ export async function createRedisRuntimeStore(
         transaction.sadd(`${keyPrefix}rooms`, roomCode);
         await transaction.exec();
         if (roomCodeToLeave) {
-          await cleanupEmptyRoomIndex(
-            redis,
-            keyPrefix,
-            roomCodeToLeave,
-            memberTokenRetentionMs,
-            localRuntimeStore,
-          );
+          await cleanupEmptyRoomIndex(redis, keyPrefix, roomCodeToLeave);
         }
       });
     },
@@ -680,13 +663,7 @@ export async function createRedisRuntimeStore(
           .hset(sessionKey(keyPrefix, sessionId), "roomCode", "")
           .srem(roomSessionsKey(keyPrefix, targetRoomCode), sessionId)
           .exec();
-        await cleanupEmptyRoomIndex(
-          redis,
-          keyPrefix,
-          targetRoomCode,
-          memberTokenRetentionMs,
-          localRuntimeStore,
-        );
+        await cleanupEmptyRoomIndex(redis, keyPrefix, targetRoomCode);
       });
     },
     recordEvent(event: string, timestamp?: number) {
@@ -720,6 +697,7 @@ export async function createRedisRuntimeStore(
       return localRuntimeStore.getActiveRoomCodes();
     },
     async getRoom(code: string) {
+      await pruneExpiredMemberTokens(code);
       const memberTokens = await redis.hgetall(
         roomMemberTokensKey(keyPrefix, code),
       );
@@ -771,7 +749,10 @@ export async function createRedisRuntimeStore(
           .multi()
           .hset(roomMembersKey(keyPrefix, code), memberId, session.id)
           .hset(roomMemberTokensKey(keyPrefix, code), memberId, memberToken)
-          .persist(roomMemberTokensKey(keyPrefix, code))
+          // Back in use: take this identity off the clock. Per member, not the
+          // whole hash — `PERSIST`ing the hash kept every departed visitor of a
+          // busy room alive forever (#237 review).
+          .zrem(roomMemberTokenExpiryKey(keyPrefix, code), memberId)
           .exec(),
       );
       return room;
@@ -787,6 +768,7 @@ export async function createRedisRuntimeStore(
       // are asynchronous, so a join reading immediately after `addMember` could
       // otherwise miss its own write.
       await store.flush();
+      await pruneExpiredMemberTokens(code);
       const memberTokens = await redis.hgetall(
         roomMemberTokensKey(keyPrefix, code),
       );
@@ -918,12 +900,18 @@ export async function createRedisRuntimeStore(
             memberId,
           );
           if (shouldRemoveMemberBinding(currentSessionId, session?.id)) {
-            // Presence only. The member-token hash is deliberately untouched so
-            // a reconnect can reclaim this `memberId`; `revokeMemberToken` is
-            // the one that ends it. See `removeMemberFromRoom` (#234).
+            // Presence only. The member token itself is deliberately kept so a
+            // reconnect can reclaim this `memberId` (#234) — but it now goes on
+            // its own clock, so a room that never empties still releases the
+            // people who left it.
             await redis
               .multi()
               .hdel(roomMembersKey(keyPrefix, code), memberId)
+              .zadd(
+                roomMemberTokenExpiryKey(keyPrefix, code),
+                String(now() + memberTokenRetentionMs),
+                memberId,
+              )
               .exec();
           }
         })(),
@@ -940,9 +928,10 @@ export async function createRedisRuntimeStore(
         "revoke_member_token",
         redis.eval(
           REVOKE_MEMBER_TOKEN_LUA,
-          2,
+          3,
           roomMembersKey(keyPrefix, code),
           roomMemberTokensKey(keyPrefix, code),
+          roomMemberTokenExpiryKey(keyPrefix, code),
           memberId,
           session?.id ?? "",
         ),
@@ -960,6 +949,7 @@ export async function createRedisRuntimeStore(
             .multi()
             .del(roomMembersKey(keyPrefix, code))
             .del(roomMemberTokensKey(keyPrefix, code))
+            .del(roomMemberTokenExpiryKey(keyPrefix, code))
             .del(blockedTokensKey(keyPrefix, code))
             .del(roomSessionsKey(keyPrefix, code))
             .del(trackingKey)

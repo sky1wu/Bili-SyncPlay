@@ -3863,3 +3863,55 @@ test("room service sweeps expired playback authorities when recording new ones",
   assert.equal(service.getPlaybackAuthority(roomB.room.code)?.kind, "play");
   assert.equal(service.getPlaybackAuthority(roomA.room.code), null);
 });
+
+test("restores the member when revoking their identity fails on leave", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      // The durable revoke now rejects when the write does not land.
+      revokeMemberToken: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMRC",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  const guestMemberId = guest.memberId;
+
+  // Surfaced as the service's generic internal error, like every other failed
+  // leave — what matters is that the recovery path ran first.
+  await assert.rejects(
+    service.leaveRoomForSession(guest, "client-request"),
+    /internal server error/i,
+  );
+
+  // The failure must not leave the client holding a session that claims to be
+  // joined while the runtime has already dropped the membership behind it —
+  // every later request would then be rejected as "not in room".
+  assert.equal(guest.roomCode, created.room.code);
+  assert.equal(guest.memberId, guestMemberId);
+  assert.equal(
+    activeRooms.getRoom(created.room.code)?.members.has(guestMemberId!),
+    true,
+  );
+});

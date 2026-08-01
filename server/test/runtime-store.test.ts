@@ -97,3 +97,50 @@ test("runtime store tracks node heartbeat state and derives health", async () =>
   statuses = await store.listNodeStatuses(currentTime);
   assert.equal(statuses[0]?.health, "offline");
 });
+
+test("in-memory runtime store bounds a disconnected identity without waiting for the room to empty", () => {
+  let currentTime = 1_000;
+  const store = createInMemoryRuntimeStore(() => currentTime, 5_000);
+  const host = createSession("session-host");
+  const visitor = createSession("session-visitor");
+
+  store.addMember("ROOMIM", "member-host", host, "token-host");
+  store.addMember("ROOMIM", "member-visitor", visitor, "token-visitor");
+
+  store.removeMember("ROOMIM", "member-visitor", visitor);
+  // Identity outlives the disconnect (#234) — that is the whole point.
+  assert.equal(
+    store.findMemberIdByToken("ROOMIM", "token-visitor"),
+    "member-visitor",
+  );
+
+  currentTime += 5_001;
+  // ...but it is bounded per identity, so a room that never empties — the host
+  // is still here — still releases the people who left it. Hanging retention off
+  // the room emptying leaked one token per visitor, forever (#237 review).
+  assert.equal(store.findMemberIdByToken("ROOMIM", "token-visitor"), null);
+  assert.equal(
+    store.findMemberIdByToken("ROOMIM", "token-host"),
+    "member-host",
+  );
+});
+
+test("in-memory runtime store lifts the retention clock when a member reconnects", () => {
+  let currentTime = 1_000;
+  const store = createInMemoryRuntimeStore(() => currentTime, 5_000);
+  const first = createSession("session-first");
+  const second = createSession("session-second");
+
+  store.addMember("ROOMIL", "member-back", first, "token-back");
+  store.removeMember("ROOMIL", "member-back", first);
+  currentTime += 2_000;
+  store.addMember("ROOMIL", "member-back", second, "token-back");
+
+  currentTime += 5_001;
+  // Lifted, not merely restarted: a member who is back must not lose their
+  // identity because of a clock started before they returned.
+  assert.equal(
+    store.findMemberIdByToken("ROOMIL", "token-back"),
+    "member-back",
+  );
+});

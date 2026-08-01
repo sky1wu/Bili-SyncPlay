@@ -77,7 +77,10 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
         hdel() {
           return this;
         },
-        persist() {
+        zadd() {
+          return this;
+        },
+        zrem() {
           return this;
         },
         exec() {
@@ -96,12 +99,6 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
     },
     async scard() {
       return 0;
-    },
-    async pexpire() {
-      return 1;
-    },
-    async persist() {
-      return 1;
     },
     async sadd() {
       return null;
@@ -609,7 +606,7 @@ test("redis runtime store counts a timed-out operation failure only once", async
   }
 });
 
-test("redis runtime store bounds member token retention to the emptied room", async (t) => {
+test("redis runtime store bounds how long a disconnected identity survives", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
@@ -632,8 +629,8 @@ test("redis runtime store bounds member token retention to the emptied room", as
     store.addMember("ROOMRT", session.memberId, session, session.memberToken);
     await store.flush?.();
 
-    // Still connected: no clock at all, so a room that stays busy for days
-    // never loses the identities of the people in it.
+    // Still connected: no clock at all, so someone who never leaves keeps their
+    // identity however long the session lasts.
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(
       await store.findMemberIdByToken("ROOMRT", "token-retention"),
@@ -650,8 +647,8 @@ test("redis runtime store bounds member token retention to the emptied room", as
       "member-retention",
     );
 
-    // ...but not indefinitely: nothing else would ever collect it once the room
-    // is left to expire untouched.
+    // ...but not indefinitely, and this no longer waits on the room emptying:
+    // retention is per identity, so it runs out even in a room that stays busy.
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(
       await store.findMemberIdByToken("ROOMRT", "token-retention"),
@@ -662,7 +659,7 @@ test("redis runtime store bounds member token retention to the emptied room", as
   }
 });
 
-test("redis runtime store lifts member token retention when someone reconnects", async (t) => {
+test("redis runtime store lifts the retention clock when someone reconnects", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
@@ -716,11 +713,10 @@ test("redis runtime store lifts member token retention when someone reconnects",
 });
 
 test("redis runtime store empties a room in a single atomic step", async () => {
-  // The emptiness check and the two writes it authorises must be ONE command.
-  // Read-then-write from the client let a reconnect land in between: `SCARD`
-  // saw zero, the returning client's join + `addMember` (including its
-  // `PERSIST`) ran, and only then did the cleanup drop a now-active room from
-  // the index and re-arm a TTL on the tokens of members who were back.
+  // The emptiness check and the write it authorises must be ONE command. Read-
+  // then-write from the client let a whole reconnect land in between: `SCARD`
+  // saw zero, the returning client's join + `addMember` ran, and only then did
+  // the cleanup drop a now-active room from the index.
   const evalCalls: Array<{ script: string; args: Array<string | number> }> = [];
   const forbidden: string[] = [];
   const fakeRedis = {
@@ -761,10 +757,11 @@ test("redis runtime store empties a room in a single atomic step", async () => {
 
     const cleanup = evalCalls.find((call) => call.script.includes("SCARD"));
     assert.ok(cleanup, "the empty-room cleanup must run as a script");
-    // Same script also does the two writes, so nothing can interleave with the
-    // decision it just made.
+    // Same script also does the write, so nothing can interleave with the
+    // decision it just made, and it consults BOTH indexes: a join writes the
+    // member binding before the session index.
+    assert.ok(cleanup.script.includes("HLEN"));
     assert.ok(cleanup.script.includes("SREM"));
-    assert.ok(cleanup.script.includes("PEXPIRE"));
     assert.deepEqual(forbidden, []);
   } finally {
     await store.close();
@@ -913,6 +910,56 @@ test("redis runtime store surfaces a failed member token revocation to the calle
     await assert.rejects(
       Promise.resolve(store.revokeMemberToken("ROOMRV", "member-rv")),
       /redis unavailable/,
+    );
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store releases a departed visitor from a room that never empties", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    memberTokenRetentionMs: 120,
+  });
+  const host = createSession("session-host");
+  host.memberId = "member-host";
+  host.memberToken = "token-host";
+  const visitor = createSession("session-visitor");
+  visitor.memberId = "member-visitor";
+  visitor.memberToken = "token-visitor";
+
+  try {
+    // The host never leaves, so the room is never empty and a room-scoped clock
+    // would never start. A public room with a steady trickle of visitors then
+    // accumulates one token per visitor, forever.
+    store.registerSession(host);
+    store.markSessionJoinedRoom(host.id, "ROOMBZ");
+    store.addMember("ROOMBZ", host.memberId, host, host.memberToken);
+    store.registerSession(visitor);
+    store.markSessionJoinedRoom(visitor.id, "ROOMBZ");
+    store.addMember("ROOMBZ", visitor.memberId, visitor, visitor.memberToken);
+    await store.flush?.();
+
+    store.removeMember("ROOMBZ", visitor.memberId, visitor);
+    store.markSessionLeftRoom(visitor.id, "ROOMBZ");
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    assert.equal(
+      await store.findMemberIdByToken("ROOMBZ", "token-visitor"),
+      null,
+      "the visitor's identity must be released even though the room stayed busy",
+    );
+    // The host is still connected, so their identity is untouched.
+    assert.equal(
+      await store.findMemberIdByToken("ROOMBZ", "token-host"),
+      "member-host",
     );
   } finally {
     await store.close();
