@@ -11,18 +11,24 @@ function mirrorVoidWrite<TArgs extends unknown[]>(
 }
 
 /**
- * Mirrors the write and hands back the SHARED store's promise, so the caller can
- * wait for durability. `mirrorVoidWrite` drops it, which would leave the kick
- * awaiting nothing in a mirrored deployment — exactly the gap the awaitable
- * revoke exists to close (#237 review).
+ * Durable-first write: the SHARED store goes first and the local mirror is only
+ * updated once it succeeded, so the caller can both wait for durability and
+ * trust that a rejection changed nothing.
+ *
+ * Order matters. Writing locally first left a partial apply behind on failure —
+ * the kick's revoke rejected after the local token was already gone, so the
+ * admin was told the kick failed while the member stayed connected with a
+ * member token nothing would accept, failing every later request (#237 review).
+ * `mirrorVoidWrite` additionally drops the promise, which would leave the kick
+ * awaiting nothing at all.
  */
 function mirrorAwaitedWrite<TArgs extends unknown[]>(
   localMethod: (...args: TArgs) => unknown,
   sharedMethod: (...args: TArgs) => void | Promise<void>,
-): (...args: TArgs) => void | Promise<void> {
-  return (...args: TArgs) => {
+): (...args: TArgs) => Promise<void> {
+  return async (...args: TArgs) => {
+    await sharedMethod(...args);
     localMethod(...args);
-    return sharedMethod(...args);
   };
 }
 

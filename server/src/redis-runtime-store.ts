@@ -577,13 +577,23 @@ export async function createRedisRuntimeStore(
           );
           if (currentSessionId === session.id) {
             // Clears the stale session→member binding left by the previous run
-            // of this instance. It must NOT touch the member-token hash: this
-            // runs at startup, right before those very clients reconnect, and
+            // of this instance. It must NOT delete the member token: this runs
+            // at startup, right before those very clients reconnect, and
             // dropping their tokens is what handed everybody a new `memberId`
-            // after each restart (#234). The tokens are cleaned up by an
-            // explicit leave, an admin kick, or `deleteRoom`.
+            // after each restart (#234).
+            //
+            // It does start the identity's retention clock, in the same
+            // transaction. This is a disconnect like any other — it just took a
+            // process crash to notice — and without it a member who never comes
+            // back would keep their token forever, since `removeMember` is the
+            // only other place that arms it (#237 review).
             transaction.hdel(
               roomMembersKey(keyPrefix, session.roomCode),
+              session.memberId,
+            );
+            transaction.zadd(
+              roomMemberTokenExpiryKey(keyPrefix, session.roomCode),
+              String(now() + memberTokenRetentionMs),
               session.memberId,
             );
           }
@@ -779,10 +789,10 @@ export async function createRedisRuntimeStore(
     },
     blockMemberToken(code: string, memberToken: string, expiresAt: number) {
       ensurePendingCapacity("block_member_token");
-      localRuntimeStore.blockMemberToken(code, memberToken, expiresAt);
-      // Same reason as `revokeMemberToken`: the kick already awaits this and
-      // then reports the member evicted, so an unconfirmed write would report
-      // an eviction that had not happened on any other node yet.
+      // Durable-first, same as `revokeMemberToken`: the kick awaits this and
+      // then reports the member evicted, so an unconfirmed write would report an
+      // eviction that had not happened on any other node yet, and mirroring
+      // before it landed would leave this node blocking a token nobody else does.
       return trackAwaitedOperation(
         "block_member_token",
         redis.zadd(
@@ -790,7 +800,9 @@ export async function createRedisRuntimeStore(
           String(expiresAt),
           memberToken,
         ),
-      ).then(() => undefined);
+      ).then(() => {
+        localRuntimeStore.blockMemberToken(code, memberToken, expiresAt);
+      });
     },
     async isMemberTokenBlocked(
       code: string,
@@ -920,7 +932,11 @@ export async function createRedisRuntimeStore(
     },
     revokeMemberToken(code: string, memberId: string, session?: Session) {
       ensurePendingCapacity("revoke_member_token");
-      localRuntimeStore.revokeMemberToken(code, memberId, session);
+      // Durable-first: the local mirror is only updated once Redis accepted the
+      // revocation. Mirroring first left a partial apply behind when the write
+      // failed — the caller saw a rejection while this node had already dropped
+      // the token (#237 review).
+      //
       // Awaited, and rejecting: the kick disconnects the socket and reports
       // success as soon as this resolves, so resolving before the write landed
       // would report an eviction while the old token still resolved.
@@ -935,7 +951,9 @@ export async function createRedisRuntimeStore(
           memberId,
           session?.id ?? "",
         ),
-      ).then(() => undefined);
+      ).then(() => {
+        localRuntimeStore.revokeMemberToken(code, memberId, session);
+      });
     },
     deleteRoom(code: string) {
       ensurePendingCapacity("delete_room");

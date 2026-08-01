@@ -965,3 +965,103 @@ test("redis runtime store releases a departed visitor from a room that never emp
     await store.close();
   }
 });
+
+test("redis runtime store leaves the local mirror untouched when a revoke fails", async () => {
+  // Durable-first. Mirroring before the shared write landed left a partial
+  // apply: the caller saw a rejection while this node had already dropped the
+  // token, so the member stayed connected holding one nothing would accept.
+  let failEval = false;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async eval() {
+      if (failEval) {
+        throw new Error("redis unavailable");
+      }
+      return 0;
+    },
+    async hgetall() {
+      return {};
+    },
+  };
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:partial:",
+    redisClient: fakeRedis,
+  });
+  const session = createSession("session-partial");
+  session.memberId = "member-partial";
+  session.memberToken = "token-partial";
+
+  try {
+    store.addMember("ROOMPT", "member-partial", session, "token-partial");
+    await store.flush?.();
+
+    failEval = true;
+    await assert.rejects(
+      Promise.resolve(store.revokeMemberToken("ROOMPT", "member-partial")),
+      /redis unavailable/,
+    );
+
+    // Nothing changed on this node either: no half-revoked identity to clean up.
+    // (Redis is empty in this fake, so `getRoom` falls back to the local mirror,
+    // which is exactly the state under test.)
+    failEval = false;
+    const room = await store.getRoom("ROOMPT");
+    assert.equal(room?.memberTokens.get("member-partial"), "token-partial");
+  } finally {
+    await store.flush?.();
+    await store.close();
+  }
+});
+
+test("redis runtime store starts the retention clock for bindings cleared at startup", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  let currentTime = 1_000;
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+    memberTokenRetentionMs: 5_000,
+  });
+  const observer = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+  });
+  const session = createSession("session-crashed");
+  session.instanceId = "crashed-node";
+  session.memberId = "member-crashed";
+  session.memberToken = "token-crashed";
+
+  try {
+    store.registerSession(session);
+    store.markSessionJoinedRoom(session.id, "ROOMCR");
+    store.addMember("ROOMCR", session.memberId, session, session.memberToken);
+    await store.flush?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // The process crashed and came back under the same instanceId.
+    assert.equal(await store.purgeSessionsByInstance?.("crashed-node"), 1);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // The identity survives, so the client that is about to reconnect keeps it.
+    assert.equal(
+      await observer.findMemberIdByToken("ROOMCR", "token-crashed"),
+      "member-crashed",
+    );
+
+    // But it is on the clock like any other disconnect. `removeMember` never ran
+    // for this member, so without arming it here they would keep their token
+    // forever — the room can stay alive on another node indefinitely.
+    currentTime += 5_001;
+    assert.equal(
+      await observer.findMemberIdByToken("ROOMCR", "token-crashed"),
+      null,
+    );
+  } finally {
+    await store.close();
+    await observer.close();
+  }
+});
