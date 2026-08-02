@@ -274,13 +274,15 @@ export function createRuntimeIndexReaper(options: {
   }
 
   /**
-   * Re-check the writes that earlier sweeps could not confirm.
+   * Re-check the writes an earlier sweep could not confirm.
    *
-   * `confirmWrites` alone is not the whole answer: the flag is also set by a
-   * member removal, whose `durable` promise the store's confirmation never
-   * sees. Clearing on `confirmWrites` alone therefore dropped records while
-   * `REMOVE_MEMBER_LUA` was still pending — or had already failed (#242
-   * review).
+   * Deliberately does NOT call `confirmWrites` again. That API reports "since
+   * you last asked" and CLEARS what it reports, so a second call cannot
+   * re-answer for writes an earlier call already consumed — and while the
+   * earlier call was still running, the two raced: one took the failure, the
+   * other returned success and the record was dropped (#242 review). What can
+   * honestly be re-checked is what this sweep kept a handle on: the member
+   * removals.
    */
   async function reconfirmEarlierSweepWrites(): Promise<void> {
     if (resyncAwaitingWrites.size === 0) {
@@ -289,14 +291,11 @@ export function createRuntimeIndexReaper(options: {
     const entries = Array.from(resyncAwaitingWrites);
     const settled = await pacer
       .capAttempt(
-        Promise.allSettled([
-          options.runtimeStore.confirmWrites?.() ?? Promise.resolve(),
-          ...entries.map(([, removal]) => removal),
-        ]),
+        Promise.allSettled(entries.map(([, confirmation]) => confirmation)),
         WRITE_CONFIRMATION_TIMEOUT_MS,
         () =>
           new Error(
-            "Runtime index reaper gave up re-confirming earlier sweeps' writes.",
+            "Runtime index reaper gave up re-checking an earlier sweep's confirmation.",
           ),
       )
       .catch(() => null);
@@ -304,20 +303,18 @@ export function createRuntimeIndexReaper(options: {
       // Still unanswered: every record stays gated.
       return;
     }
-    const [storeWrites, ...removals] = settled;
-    if (storeWrites?.status === "rejected") {
-      return;
-    }
     entries.forEach(([roomCode], index) => {
-      if (removals[index]?.status === "rejected") {
-        // The removal will never land, so holding the record cannot fix it —
-        // only the member token's retention will. The announcement it gated
-        // has gone out on every sweep since; what is still wrong is the stale
-        // binding, and that needs saying rather than an endless republish.
+      if (settled[index]?.status === "rejected") {
+        // Held: the member binding is still in Redis with no retention clock
+        // armed, so `hasRoomResidue` keeps the code reserved and a state built
+        // now would still name the dead seat. Releasing the latch here dropped
+        // the record while all of that was true (#242 review). The removal is
+        // re-issued below, on the next sweep that can see the room.
         options.logEvent?.("runtime_index_member_removal_failed", {
           roomCode,
           result: "error",
         });
+        return;
       }
       resyncAwaitingWrites.delete(roomCode);
     });
@@ -348,8 +345,6 @@ export function createRuntimeIndexReaper(options: {
     const roomsToResync = new Set<string>();
     /** Durable results of this sweep's member removals; see the push below. */
     const memberRemovals: Array<Promise<void>> = [];
-    /** The same promises, kept per room so a retained record can re-check them. */
-    const removalsByRoom = new Map<string, Array<Promise<void>>>();
     for (const session of sessions) {
       if (!session.instanceId || !offlineInstanceIds.has(session.instanceId)) {
         continue;
@@ -379,9 +374,6 @@ export function createRuntimeIndexReaper(options: {
           // separately so a rejection before `Promise.all` reads it stays quiet.
           void removal.durable.catch(() => undefined);
           memberRemovals.push(removal.durable);
-          const forRoom = removalsByRoom.get(session.roomCode) ?? [];
-          forRoom.push(removal.durable);
-          removalsByRoom.set(session.roomCode, forRoom);
         }
       }
       if (session.roomCode) {
@@ -432,12 +424,18 @@ export function createRuntimeIndexReaper(options: {
     // announcing is still better than silence — but an unconfirmed sweep is
     // worth saying out loud.
     let writesConfirmed = true;
+    // Kept, not just awaited. When the wait below times out the underlying
+    // confirmation is still running, and a later sweep must re-check THIS
+    // promise rather than call the store again: `confirmWrites` reports "since
+    // you last asked" and clears what it reports, so a second call cannot
+    // re-answer for it and the two race over the same failure (#242 review).
     const confirmation = options.runtimeStore.confirmWrites
       ? Promise.all([
           options.runtimeStore.confirmWrites(),
           ...memberRemovals,
         ]).then(() => undefined)
       : (options.runtimeStore.flush?.() ?? Promise.resolve());
+    void confirmation.catch(() => undefined);
     await pacer
       .capAttempt(confirmation, WRITE_CONFIRMATION_TIMEOUT_MS, () => {
         return new Error(
@@ -467,13 +465,10 @@ export function createRuntimeIndexReaper(options: {
       }
     } else {
       for (const roomCode of roomsToResync) {
-        // The room carries the removals it is waiting on, so the next sweep
-        // re-checks THOSE and not just the store's own write queue.
-        const removals = removalsByRoom.get(roomCode) ?? [];
-        resyncAwaitingWrites.set(
-          roomCode,
-          Promise.all(removals).then(() => undefined),
-        );
+        // The room carries THIS sweep's confirmation — the store's write queue
+        // and its member removals together — so the next sweep re-checks the
+        // very promise that has not answered yet.
+        resyncAwaitingWrites.set(roomCode, confirmation);
       }
     }
     await flushPendingResyncs();

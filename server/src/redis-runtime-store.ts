@@ -976,6 +976,27 @@ export async function createRedisRuntimeStore(
     },
     async flush() {
       await Promise.allSettled(Array.from(pendingOperations));
+      // The key releases too, bounded. `pendingOperations` holds the CALLERS'
+      // answers, and an attempt that timed out answered long before its command
+      // did — so `flush` could return while the session's key was still held
+      // and the very next read or broadcast saw stale data. A profile update
+      // publishes `room_state_updated` immediately, and a `registerSession`
+      // landing after it has no second event to correct the display name (#242
+      // review).
+      //
+      // Bounded because the command cannot be cancelled: this is an ordering
+      // barrier, not a durability one, and hanging it on a dead Redis would
+      // block every caller that only wanted its own writes visible.
+      let barrier: ReturnType<typeof setTimeout> | null = null;
+      await Promise.race([
+        sessionWriteQueue.drain(),
+        new Promise<void>((resolve) => {
+          barrier = setTimeout(resolve, pendingOperationTimeoutMs);
+        }),
+      ]);
+      if (barrier !== null) {
+        clearTimeout(barrier);
+      }
     },
     /**
      * Unlike `flush`, this REPORTS. `flush` waits on error-swallowed copies, so
@@ -1150,12 +1171,15 @@ export async function createRedisRuntimeStore(
         sessionId,
         "mark_session_joined_room",
         async () => {
-          // Concurrent with the session read, so the guard costs no extra
-          // round trip on the path a join actually waits for.
-          const [storedSession, expectedGeneration] = await Promise.all([
-            loadSession(redis, keyPrefix, sessionId),
-            pinnedGeneration,
-          ]);
+          // Sequential, not `Promise.all`. Starting the session read in
+          // parallel meant that when the pin rejected first — a tombstone, a
+          // failed read, a timeout — the outer operation rejected while that
+          // `HGETALL` was still running, in no tracking set and waited for by
+          // nobody: repeated failing joins could accumulate Redis commands past
+          // the backpressure cap and `close()` would quit under them (#242
+          // review). Costs one round trip on a path that is not hot.
+          const expectedGeneration = await pinnedGeneration;
+          const storedSession = await loadSession(redis, keyPrefix, sessionId);
           const localSession = localRuntimeStore.getSession(sessionId);
           const roomCodeToLeave = getPreviousRoomToLeave(
             storedSession?.roomCode ?? null,
@@ -1490,28 +1514,34 @@ export async function createRedisRuntimeStore(
       // reconnect can reclaim this `memberId` (#234) — but it goes on its own
       // clock, so a room that never empties still releases the people who left
       // it. The script starts that clock only while a token is actually there.
-      // `trackAwaitedOperation` rather than `trackOperation`: it registers the
-      // write for backpressure exactly the same way, but hands back the REAL
-      // outcome instead of the error-swallowed copy, so `durable` can reject
-      // (#235 review).
-      const durable = trackAwaitedOperation(
+      // Through the write queue, like every other durable write. It used to get
+      // ONE attempt: a transient error made `durable` reject for good, the
+      // member binding stayed in Redis with no retention clock armed, and the
+      // reaper grew a latch to compensate for a failure a retry would have
+      // healed (#242 review). Keyed by the MEMBER, not the session — two
+      // removals of the same seat must serialize, and a session's own writes
+      // must not queue behind them.
+      //
+      // `durable` still reports the REAL outcome, so a caller that acts on it
+      // (`leaveCurrentRoom` elects the next share owner) sees a rejection, and
+      // `queueSessionOperation` already marks it handled for the callers that
+      // decide nothing from it.
+      const durable = queueSessionOperation(
+        `member:${code}:${memberId}`,
         "remove_member",
-        redis.eval(
-          REMOVE_MEMBER_LUA,
-          3,
-          roomMembersKey(keyPrefix, code),
-          roomMemberTokensKey(keyPrefix, code),
-          roomMemberTokenExpiryKey(keyPrefix, code),
-          memberId,
-          session?.id ?? "",
-          String(now() + memberTokenRetentionMs),
-        ),
-      ).then(() => undefined);
-      // Marks `durable` handled without consuming it: callers that DO await it
-      // still see the rejection, while the reaper and the join-rollback — which
-      // decide nothing from this write — no longer turn a Redis hiccup into an
-      // unhandled rejection.
-      void durable.catch(() => undefined);
+        async () => {
+          await redis.eval(
+            REMOVE_MEMBER_LUA,
+            3,
+            roomMembersKey(keyPrefix, code),
+            roomMemberTokensKey(keyPrefix, code),
+            roomMemberTokenExpiryKey(keyPrefix, code),
+            memberId,
+            session?.id ?? "",
+            String(now() + memberTokenRetentionMs),
+          );
+        },
+      );
       return { ...removal, durable };
     },
     evictMemberToken(

@@ -1120,7 +1120,7 @@ test("runtime index reaper keeps the resync record when its writes were not conf
   // the cleanup has not reached; dropping the record there leaves nothing to
   // announce the real state once the writes land (#242 review).
   const published: string[] = [];
-  let confirmed = false;
+  let releaseConfirmation: (() => void) | null = null;
   let sweeps = 0;
   const deadSession = createSession("session-unconf", "offline-node");
   deadSession.roomCode = "ROOM50";
@@ -1155,8 +1155,12 @@ test("runtime index reaper keeps the resync record when its writes were not conf
     async markSessionLeftRoom() {},
     unregisterSession() {},
     async purgeNodeStatus() {},
+    // Called ONCE, by the sweep that creates the record; later sweeps re-check
+    // that same promise rather than asking the store again.
     confirmWrites: () =>
-      confirmed ? Promise.resolve() : new Promise<void>(() => {}),
+      new Promise<void>((resolve) => {
+        releaseConfirmation = resolve;
+      }),
     flush: async () => {},
   };
 
@@ -1176,9 +1180,9 @@ test("runtime index reaper keeps the resync record when its writes were not conf
     await reaper.sweep();
     assert.deepEqual(published, ["ROOM50"]);
 
-    // Sweep two, with the writes now confirmable: the retained record is
-    // announced again, this time on a state built from confirmed writes.
-    confirmed = true;
+    // Sweep two, once the confirmation the first sweep started answers: the
+    // retained record is announced again, on a state built from those writes.
+    (releaseConfirmation as (() => void) | null)?.();
     await reaper.sweep();
     assert.deepEqual(published, ["ROOM50", "ROOM50"]);
 
@@ -1255,6 +1259,13 @@ test("runtime index reaper treats a refused member removal as unconfirmed", asyn
     assert.deepEqual(published, ["ROOM51"]);
     await reaper.sweep();
     assert.deepEqual(published, ["ROOM51", "ROOM51"], "the record survived");
+
+    // And it stays held. The binding is still in Redis with no retention clock
+    // armed, so `hasRoomResidue` keeps the code reserved and a state built now
+    // would still name the dead seat — releasing the latch here dropped the
+    // record while all of that was true (#242 review).
+    await reaper.sweep();
+    assert.deepEqual(published, ["ROOM51", "ROOM51", "ROOM51"]);
   } finally {
     await reaper.stop();
   }
@@ -1267,7 +1278,7 @@ test("runtime index reaper keeps an unconfirmed record across the next sweep's o
   // sweep found no offline session to rebuild the record from either (#242
   // review).
   const published: string[] = [];
-  let confirmable = false;
+  let releaseConfirmation: (() => void) | null = null;
   let sessionsVisible = true;
   const deadSession = createSession("session-crossflush", "offline-node");
   deadSession.roomCode = "ROOM52";
@@ -1301,8 +1312,12 @@ test("runtime index reaper keeps an unconfirmed record across the next sweep's o
     async markSessionLeftRoom() {},
     unregisterSession() {},
     async purgeNodeStatus() {},
+    // Slow, then it answers — the shape the retained promise exists for. It is
+    // called ONCE; later sweeps re-check this same promise.
     confirmWrites: () =>
-      confirmable ? Promise.resolve() : new Promise<void>(() => {}),
+      new Promise<void>((resolve) => {
+        releaseConfirmation = resolve;
+      }),
   };
 
   const reaper = createRuntimeIndexReaper({
@@ -1327,9 +1342,9 @@ test("runtime index reaper keeps an unconfirmed record across the next sweep's o
     await reaper.sweep();
     assert.deepEqual(published, ["ROOM52", "ROOM52"]);
 
-    // Once the writes confirm, the record is published on a state built from
-    // them and finally dropped.
-    confirmable = true;
+    // The confirmation the first sweep started finally answers; the record is
+    // published on a state built from it and only then dropped.
+    (releaseConfirmation as (() => void) | null)?.();
     await reaper.sweep();
     assert.deepEqual(published, ["ROOM52", "ROOM52", "ROOM52"]);
     await reaper.sweep();

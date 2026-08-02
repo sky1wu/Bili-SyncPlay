@@ -2658,3 +2658,132 @@ test("redis runtime store keeps the full session record when a leave supersedes 
     await store.close();
   }
 });
+
+test("redis runtime store starts no session read when the generation pin is refused", async () => {
+  // Started in parallel, that read outlived an operation that rejected on the
+  // pin: in no tracking set, counted by no capacity check, and waited for by
+  // nobody at close (#242 review).
+  let sessionReads = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async hgetall() {
+      sessionReads += 1;
+      return {};
+    },
+    async get() {
+      return "deleted";
+    },
+    async eval() {
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:no-parallel-read:",
+    redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    await assert.rejects(
+      store.markSessionJoinedRoom("session-noread", "ROOMNR"),
+      (error: unknown) =>
+        error instanceof NonRetryableWriteError &&
+        error.reason === "room_deleted",
+    );
+    assert.equal(sessionReads, 0, "the read must not have been started");
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store retries a member removal instead of giving up on one attempt", async () => {
+  // It used to get a single attempt, so a transient error made `durable` reject
+  // for good: the member binding stayed in Redis with no retention clock armed,
+  // and the reaper grew a latch to compensate for a failure a retry would have
+  // healed (#242 review).
+  let attempts = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async eval() {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error("remove member write failed");
+      }
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:remove-retry:",
+    redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 3, initialRetryDelayMs: 1 },
+  });
+
+  try {
+    const removal = store.removeMember("ROOMRM", "member-rm");
+    assert.ok(removal.durable, "the removal reports a durable outcome");
+    await removal.durable;
+    assert.equal(attempts, 2, "the transient failure was retried");
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store flush waits for the session key to be released", async () => {
+  // `pendingOperations` holds the CALLERS' answers, and an attempt that timed
+  // out answered long before its command did — so `flush` returned while the
+  // key was still held and the next broadcast saw stale data (#242 review).
+  const order: string[] = [];
+  let releaseCommand: (() => void) | null = null;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    multi() {
+      const commands = {
+        sadd: () => commands,
+        srem: () => commands,
+        del: () => commands,
+        hset: () => commands,
+        hdel: () => commands,
+        zadd: () => commands,
+        zrem: () => commands,
+        exec: () =>
+          new Promise((resolve) => {
+            releaseCommand = () => {
+              order.push("command-landed");
+              resolve(null);
+            };
+          }),
+      };
+      return commands;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:flush-barrier:",
+    redisClient: fakeRedis,
+    pendingOperationTimeoutMs: 200,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    store.registerSession(createSession("session-barrier"));
+    // Past the attempt cap: the CALLER has been answered and the entry is out
+    // of `pendingOperations`, while the command is still running. That is the
+    // exact window `flush` used to slip through.
+    await new Promise((resolve) => setTimeout(resolve, 260));
+
+    const flushed = store.flush?.().then(() => {
+      order.push("flush-returned");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.deepEqual(order, [], "flush must not return under a live command");
+
+    (releaseCommand as (() => void) | null)?.();
+    await flushed;
+    assert.deepEqual(order, ["command-landed", "flush-returned"]);
+  } finally {
+    (releaseCommand as (() => void) | null)?.();
+    await store.close();
+  }
+});

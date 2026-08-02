@@ -346,3 +346,49 @@ test("pending resync queue does not publish the backlog when it is stopping", as
   await queue.drain();
   assert.equal(published, 2);
 });
+
+test("pending resync queue hands a freed slot straight to the waiter", async () => {
+  // Decrementing first and waking afterwards left the slot unowned for a
+  // continuation. A `request` arriving in that gap took it while the woken
+  // waiter incremented anyway — two publishes at once with the cap set to one
+  // (#242 review).
+  let active = 0;
+  let peak = 0;
+  const releases: Array<() => void> = [];
+  const queue = createPendingResyncQueue({
+    sleep: instantSleep,
+    maxConcurrentPublishes: 1,
+    publish: () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      return new Promise<void>((resolve) => {
+        releases.push(() => {
+          active -= 1;
+          resolve();
+        });
+      });
+    },
+  });
+
+  queue.request("ROOM01");
+  queue.request("ROOM02");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(peak, 1);
+  assert.equal(releases.length, 1, "only one publish may be in flight");
+
+  // Free the slot, then let exactly ONE microtask run: enough for the release
+  // handler, not enough for the woken waiter to resume. That is the gap the
+  // arriving request used to slip into.
+  releases.shift()?.();
+  await null;
+  queue.request("ROOM03");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(peak, 1, `the cap must hold across a handover, saw ${peak}`);
+
+  queue.stopRetrying();
+  while (releases.length > 0) {
+    releases.shift()?.();
+  }
+  await queue.drain();
+});

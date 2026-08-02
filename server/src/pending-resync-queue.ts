@@ -161,14 +161,20 @@ export function createPendingResyncQueue(
    * never parked behind a slot that a hung bus will not give back.
    */
   let activePublishes = 0;
-  const slotWaiters: Array<() => void> = [];
+  /** `true` hands the slot over; `false` means the queue is stopping. */
+  const slotWaiters: Array<(granted: boolean) => void> = [];
 
   function releaseSlot(): void {
-    activePublishes -= 1;
     const next = slotWaiters.shift();
     if (next) {
-      next();
+      // Handed over, so the count does NOT drop. Decrementing first and waking
+      // afterwards left the slot unowned for a continuation, and a `request`
+      // arriving in that gap took it while the woken waiter incremented
+      // anyway — two publishes at once with the cap set to one (#242 review).
+      next(true);
+      return;
     }
+    activePublishes -= 1;
   }
 
   /**
@@ -194,13 +200,18 @@ export function createPendingResyncQueue(
     // by `releaseSlot` could not take it off again — so every wait the server
     // ever performed stayed retained for its whole lifetime (#242 review).
     // `stopRetrying` releases these waiters directly instead.
-    await new Promise<void>((resolve) => {
+    const granted = await new Promise<boolean>((resolve) => {
       slotWaiters.push(resolve);
     });
-    if (pacer.stopped()) {
+    if (!granted) {
       return false;
     }
-    activePublishes += 1;
+    if (pacer.stopped()) {
+      // The slot was handed to us but the queue is stopping; give it back so
+      // the count does not strand.
+      releaseSlot();
+      return false;
+    }
     return true;
   }
 
@@ -324,7 +335,7 @@ export function createPendingResyncQueue(
       // Wake everything parked on a slot: the bus may never hand one back, and
       // they answer `false` now that the queue is stopping.
       while (slotWaiters.length > 0) {
-        slotWaiters.shift()?.();
+        slotWaiters.shift()?.(false);
       }
     },
     async drain() {
