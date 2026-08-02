@@ -247,12 +247,17 @@ function nodeStatusKey(prefix: string, instanceId: string): string {
  * a room whose persisted record was gone, stranding the code with them (#242
  * review). Generations are UUIDs, so this value can never be mistaken for one.
  *
- * It expires rather than lingering: it only has to outlive an in-flight write,
- * and a new occupant's `markRoomGeneration` overwrites it anyway. Deliberately
- * NOT counted by `hasRoomResidue`, so a tombstone never keeps a code reserved.
+ * It does NOT expire. A TTL would have to outlive every write that could still
+ * be holding the old pin, and nothing bounds those: a session chain waits on a
+ * command that was never cancelled, and that command ends when Redis answers,
+ * not when a timer says so. A tombstone that lapsed first would let the join's
+ * `""` pin match an absent key all over again, which is the whole hazard (#242
+ * review). What reclaims it instead is the next occupant: `markRoomGeneration`
+ * overwrites the key, so the cost is one short string per room code that has
+ * been deleted and not yet reused. Deliberately NOT counted by
+ * `hasRoomResidue`, so a tombstone never keeps a code reserved.
  */
 const ROOM_GENERATION_TOMBSTONE = "deleted";
-const ROOM_GENERATION_TOMBSTONE_TTL_MS = 10 * 60_000;
 
 const DEFAULT_MAX_PENDING_OPERATIONS = 256;
 const DEFAULT_PENDING_OPERATION_TIMEOUT_MS = 5_000;
@@ -387,7 +392,7 @@ end
 for index = 3, #KEYS do
   redis.call("DEL", KEYS[index])
 end
-redis.call("SET", KEYS[1], ARGV[3], "PX", ARGV[4])
+redis.call("SET", KEYS[1], ARGV[3])
 redis.call("SREM", KEYS[2], ARGV[2])
 return 1
 `;
@@ -620,6 +625,13 @@ export async function createRedisRuntimeStore(
   const metricsCollector = options.metricsCollector;
   const localRuntimeStore = createInMemoryRuntimeStore(now);
   const pendingOperations = new Set<Promise<unknown>>();
+  /**
+   * One entry per queued write, released only once every command it started has
+   * really finished. Checked alongside `pendingOperations` rather than merged
+   * into it: `flush` must keep meaning "the queue drained" and must not start
+   * waiting on a command nobody can cancel.
+   */
+  const heldCommandCapacity = new Set<Promise<void>>();
 
   await redis.connect();
 
@@ -677,7 +689,10 @@ export async function createRedisRuntimeStore(
   }
 
   function ensurePendingCapacity(operationName: string): void {
-    if (pendingOperations.size < maxPendingOperations) {
+    if (
+      pendingOperations.size < maxPendingOperations &&
+      heldCommandCapacity.size < maxPendingOperations
+    ) {
       return;
     }
     const error = new Error(
@@ -849,7 +864,7 @@ export async function createRedisRuntimeStore(
   function withAttemptTimeout(
     operationName: string,
     operation: () => Promise<void>,
-  ): Pick<DurableWriteRequest, "run" | "settle"> {
+  ): Required<Pick<DurableWriteRequest, "run" | "settle">> {
     // Every command this write ever started, error-swallowed. The timeout races
     // a command, it cannot abort one, so a "failed" attempt may still be on its
     // way to Redis — and the queue must not hand this session's key to the
@@ -857,12 +872,21 @@ export async function createRedisRuntimeStore(
     const started: Array<Promise<void>> = [];
     const run = async () => {
       const command = operation();
-      started.push(
-        command.then(
-          () => undefined,
-          () => undefined,
-        ),
+      const answered = command.then(
+        () => undefined,
+        () => undefined,
       );
+      started.push(answered);
+      // Capacity is held per COMMAND, released as each one answers — not when
+      // the caller was answered. A write whose attempts all timed out rejects
+      // long before its commands stop running, and freeing the slot there let
+      // the next session's write take it and leave one more uncancellable
+      // command behind, so the configured cap stopped bounding anything (#242
+      // review).
+      heldCommandCapacity.add(answered);
+      void answered.finally(() => {
+        heldCommandCapacity.delete(answered);
+      });
       await commandPacer.capAttempt(command, pendingOperationTimeoutMs, () => {
         const error = new Error(
           `Redis runtime store operation timed out: ${operationName}.`,
@@ -907,6 +931,7 @@ export async function createRedisRuntimeStore(
         performance.now() - startedAt,
       );
     });
+
     const reported = outcome.catch((error: unknown) => {
       metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
       logPendingOperationError(
@@ -1079,8 +1104,13 @@ export async function createRedisRuntimeStore(
       // later, for the same reason: a second read is a second chance to pin the
       // wrong instance. The join is refused and the client retries it, which is
       // the trade this path already makes for the index write itself.
-      const pinnedGeneration = redis
-        .get(roomGenerationKey(keyPrefix, roomCode))
+      const pinnedGeneration = commandPacer
+        .capAttempt(
+          redis.get(roomGenerationKey(keyPrefix, roomCode)),
+          pendingOperationTimeoutMs,
+          () =>
+            new Error(`Timed out reading the generation of room ${roomCode}.`),
+        )
         // An absent generation pins as `""`, which a room that predates #237
         // still matches. What it must NOT match is a room deleted since the
         // pin — see `ROOM_GENERATION_TOMBSTONE`, which is what the teardown
@@ -1565,7 +1595,6 @@ export async function createRedisRuntimeStore(
             expectedGeneration === undefined ? "*" : (expectedGeneration ?? ""),
             code,
             ROOM_GENERATION_TOMBSTONE,
-            String(ROOM_GENERATION_TOMBSTONE_TTL_MS),
           );
         })(),
       ).then((applied) => {

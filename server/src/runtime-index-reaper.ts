@@ -137,6 +137,7 @@ export function createRuntimeIndexReaper(options: {
   async function publishPendingResync(
     roomCode: string,
     timeoutMs = RESYNC_PUBLISH_TIMEOUT_MS,
+    keepRecord = false,
   ): Promise<void> {
     if (inFlightResyncByRoom.has(roomCode)) {
       // Still waiting on the previous call. Piling another on top is what the
@@ -163,7 +164,9 @@ export function createRuntimeIndexReaper(options: {
             new Error(`Room state resync publish timed out for ${roomCode}.`),
         );
       }
-      roomsAwaitingResync.delete(roomCode);
+      if (!keepRecord) {
+        roomsAwaitingResync.delete(roomCode);
+      }
     } catch (error) {
       // Kept for the next sweep. The sweep's own work is done and must not be
       // undone by a bus hiccup.
@@ -186,13 +189,19 @@ export function createRuntimeIndexReaper(options: {
    * Serial, because a sweep runs on its own timer and has all the time it
    * needs. `stop` does NOT — see {@link flushPendingResyncsWithinBudget}.
    */
-  async function flushPendingResyncs(): Promise<void> {
+  async function flushPendingResyncs(
+    flushOptions: { keepRecords?: boolean } = {},
+  ): Promise<void> {
     for (const roomCode of Array.from(roomsAwaitingResync)) {
       if (pacer.stopped()) {
         // `stop` is waiting on this sweep and has its own bounded pass to run.
         return;
       }
-      await publishPendingResync(roomCode);
+      await publishPendingResync(
+        roomCode,
+        RESYNC_PUBLISH_TIMEOUT_MS,
+        flushOptions.keepRecords,
+      );
     }
   }
 
@@ -266,16 +275,31 @@ export function createRuntimeIndexReaper(options: {
     const sessions = await options.runtimeStore.listClusterSessions();
     let cleanedSessions = 0;
     const roomsToResync = new Set<string>();
+    /** Durable results of this sweep's member removals; see the push below. */
+    const memberRemovals: Array<Promise<void>> = [];
     for (const session of sessions) {
       if (!session.instanceId || !offlineInstanceIds.has(session.instanceId)) {
         continue;
       }
 
       if (session.roomCode && session.memberId) {
-        await options.runtimeStore.removeMember(
+        // `session` is passed, so `REMOVE_MEMBER_LUA`'s binding guard is armed.
+        // Without it the script HDELs the memberId unconditionally — and this
+        // write can land late, after the member reconnected elsewhere with the
+        // token they were allowed to keep, deleting the NEW session's binding
+        // (#242 review).
+        const removal = options.runtimeStore.removeMember(
           session.roomCode,
           session.memberId,
+          session,
         );
+        // The removal's own durable write is NOT part of `confirmWrites`, which
+        // only ever sees the session write queue. Publishing before it lands
+        // announces a state rebuilt from a member map that still holds the dead
+        // seat (#242 review).
+        if (removal.durable) {
+          memberRemovals.push(removal.durable.catch(() => undefined));
+        }
       }
       if (session.roomCode) {
         // Swallowed, and NOT used to gate the announcement. One unwritable entry
@@ -307,32 +331,37 @@ export function createRuntimeIndexReaper(options: {
     // announcement — see the `markSessionLeftRoom` comment above for why
     // announcing is still better than silence — but an unconfirmed sweep is
     // worth saying out loud.
-    if (options.runtimeStore.confirmWrites) {
-      await pacer
-        .capAttempt(
+    let writesConfirmed = true;
+    const confirmation = options.runtimeStore.confirmWrites
+      ? Promise.all([
           options.runtimeStore.confirmWrites(),
-          WRITE_CONFIRMATION_TIMEOUT_MS,
-          () =>
-            new Error(
-              "Runtime index reaper gave up waiting for its writes to be confirmed.",
-            ),
-        )
-        .catch((error: unknown) => {
-          options.logEvent?.("runtime_index_writes_unconfirmed", {
-            result: "error",
-            error: error instanceof Error ? error.message : String(error),
-          });
+          ...memberRemovals,
+        ]).then(() => undefined)
+      : (options.runtimeStore.flush?.() ?? Promise.resolve());
+    await pacer
+      .capAttempt(confirmation, WRITE_CONFIRMATION_TIMEOUT_MS, () => {
+        return new Error(
+          "Runtime index reaper gave up waiting for its writes to be confirmed.",
+        );
+      })
+      .catch((error: unknown) => {
+        writesConfirmed = false;
+        options.logEvent?.("runtime_index_writes_unconfirmed", {
+          result: "error",
+          error: error instanceof Error ? error.message : String(error),
         });
-    } else {
-      await options.runtimeStore.flush?.();
-    }
+      });
 
     // After the whole sweep, so a room that lost several members to the same
     // dead node is announced once rather than once per seat.
     for (const roomCode of roomsToResync) {
       rememberResync(roomCode);
     }
-    await flushPendingResyncs();
+    // `keepRecords` when the writes were not confirmed: the state this
+    // announcement triggers may still be rebuilt from an index the cleanup has
+    // not reached, and dropping the record on that publish leaves nothing to
+    // announce the real state once the writes do land (#242 review).
+    await flushPendingResyncs({ keepRecords: !writesConfirmed });
 
     const remainingSessions = await options.runtimeStore.listClusterSessions();
     const activeInstanceIds = new Set(

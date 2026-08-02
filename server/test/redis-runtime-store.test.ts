@@ -2179,8 +2179,9 @@ test("redis runtime store declines a join pinned before the room was torn down",
     eval(script: string, numKeys: number, ...args: Array<string | number>) {
       // `HSET` is the join script's alone; the teardown only deletes and SREMs.
       if (!script.includes("HSET")) {
-        // The teardown script: it stamps the tombstone it was handed.
-        generation = String(args[args.length - 2]);
+        // The teardown script: it stamps the tombstone it was handed, which is
+        // the last ARGV now that the tombstone carries no TTL.
+        generation = String(args[args.length - 1]);
         return Promise.resolve(1);
       }
       // The join script. Held so the teardown can land between the pin and the
@@ -2306,4 +2307,143 @@ test("redis runtime store waits for in-flight commands before closing the connec
   (releaseCommand as (() => void) | null)?.();
   await closing;
   assert.deepEqual(order, ["command-landed", "quit"]);
+});
+
+test("redis runtime store leaves a generation tombstone that cannot expire", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // A TTL would have to outlive every write still holding the old pin, and
+  // nothing bounds those — a session chain waits on a command that was never
+  // cancelled. A tombstone that lapsed first lets the join's `""` pin match an
+  // absent key all over again (#242 review).
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const probe = new Redis(REDIS_URL);
+  const session = createSession("session-tombstone-ttl");
+
+  try {
+    store.registerSession(session);
+    await store.markSessionJoinedRoom(session.id, "ROOMTT");
+    await store.flush?.();
+    assert.equal(await store.deleteRoom("ROOMTT", null), true);
+
+    const key = `${keyPrefix}room:ROOMTT:generation`;
+    assert.equal(await probe.get(key), "deleted");
+    // -1 is redis for "no expiry"; anything positive is a lapsing tombstone.
+    assert.equal(await probe.pttl(key), -1);
+  } finally {
+    await probe.quit();
+    await store.close();
+  }
+});
+
+test("redis runtime store holds backpressure capacity until the command finishes", async () => {
+  // The retry budget rejects the outcome long before the commands stop running.
+  // Freeing the slot there let the next session's write take it and leave one
+  // more uncancellable command behind, so the configured cap stopped bounding
+  // anything (#242 review).
+  const releases: Array<() => void> = [];
+  let hangCommands = true;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async hgetall() {
+      return {};
+    },
+    async get() {
+      return "gen-1";
+    },
+    eval() {
+      if (!hangCommands) {
+        return Promise.resolve(1);
+      }
+      return new Promise((resolve) => {
+        releases.push(() => resolve(1));
+      });
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:capacity:",
+    redisClient: fakeRedis,
+    maxPendingOperations: 1,
+    pendingOperationTimeoutMs: 20,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    const first = store.markSessionJoinedRoom("session-cap-a", "ROOMCA");
+    await assert.rejects(first, /timed out/);
+    // The caller has been answered, but the command is still out there — so the
+    // slot it occupies must not be handed to anybody else.
+    assert.throws(
+      () => store.markSessionJoinedRoom("session-cap-b", "ROOMCB"),
+      /backpressure/,
+    );
+
+    hangCommands = false;
+    for (const release of releases) {
+      release();
+    }
+    // A tick for the commands to answer: capacity is released by the command
+    // itself, and `flush` cannot stand in for that — its outcome settled back
+    // when the attempt timed out.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // Once the commands answer, capacity comes back.
+    await store.markSessionJoinedRoom("session-cap-c", "ROOMCC");
+  } finally {
+    for (const release of releases) {
+      release();
+    }
+    await store.close();
+  }
+});
+
+test("redis runtime store drains the generation read it started at enqueue", async () => {
+  // That `GET` belongs to the write but is started before it — so it is in
+  // neither `settle`'s list nor anything else, and `close()` could `quit()`
+  // straight through it (#242 review).
+  const order: string[] = [];
+  let releaseGet: (() => void) | null = null;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async quit() {
+      order.push("quit");
+      return "OK";
+    },
+    async hgetall() {
+      return {};
+    },
+    get() {
+      return new Promise<string | null>((resolve) => {
+        releaseGet = () => {
+          order.push("generation-read-answered");
+          resolve("gen-1");
+        };
+      });
+    },
+    async eval() {
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:enqueue-read:",
+    redisClient: fakeRedis,
+    pendingOperationTimeoutMs: 30,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  const joined = store.markSessionJoinedRoom("session-read", "ROOMRD");
+  await assert.rejects(joined, /Timed out reading the generation/);
+
+  const closing = store.close();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(order, [], "close must not quit under the pinned read");
+
+  (releaseGet as (() => void) | null)?.();
+  await closing;
+  assert.deepEqual(order, ["generation-read-answered", "quit"]);
 });

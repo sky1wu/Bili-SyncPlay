@@ -272,3 +272,42 @@ test("pending resync queue bounds how long it waits for an abandoned call", asyn
 
   assert.equal(queue.size(), 0);
 });
+
+test("pending resync queue caps how many rooms it publishes at once", async () => {
+  // The backlog is uncapped on purpose, so without a concurrency limit a bus
+  // that recovers after a long outage turns every retained record into a
+  // simultaneous publish — an unbounded backlog becoming an unbounded burst,
+  // and one that bypasses `firePublishRoomEvent`'s own cap (#242 review).
+  let active = 0;
+  let peak = 0;
+  const releases: Array<() => void> = [];
+  const queue = createPendingResyncQueue({
+    sleep: instantSleep,
+    maxConcurrentPublishes: 3,
+    publish: () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      return new Promise<void>((resolve) => {
+        releases.push(() => {
+          active -= 1;
+          resolve();
+        });
+      });
+    },
+  });
+
+  for (let index = 0; index < 20; index += 1) {
+    queue.request(`ROOM${index}`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(queue.size(), 20, "every room keeps its record");
+  assert.equal(peak, 3, `at most 3 publishes at once, saw ${peak}`);
+
+  while (releases.length > 0) {
+    releases.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  await queue.drain();
+  assert.equal(peak, 3);
+});

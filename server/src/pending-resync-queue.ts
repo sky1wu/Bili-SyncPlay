@@ -52,6 +52,17 @@ export type PendingResyncQueueOptions = {
    * the drain, NOT against a single attempt — which is why it is its own knob.
    */
   abandonedDrainTimeoutMs?: number;
+  /**
+   * How many rooms may have a publish out at the same time.
+   *
+   * The backlog is deliberately uncapped, so without this a bus that recovers
+   * after a long outage turns every retained record into a simultaneous Redis
+   * publish — an unbounded backlog becoming an unbounded burst, and one that
+   * bypasses `firePublishRoomEvent`'s own `maxPendingPublishes` because these
+   * records do not go through it (#242 review). Records still all survive;
+   * only the attempts are paced.
+   */
+  maxConcurrentPublishes?: number;
   /** Backlog size that triggers {@link PendingResyncQueueOptions.onBacklog}. */
   backlogWarnThreshold?: number;
   /** Injectable so tests do not pay the backoff in wall-clock time. */
@@ -117,6 +128,7 @@ const DEFAULT_INITIAL_RETRY_DELAY_MS = 250;
 const DEFAULT_MAX_RETRY_DELAY_MS = 30_000;
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 5_000;
 const DEFAULT_BACKLOG_WARN_THRESHOLD = 256;
+const DEFAULT_MAX_CONCURRENT_PUBLISHES = 8;
 
 type PendingRecord = {
   /** Another publish is owed once the current attempt finishes. */
@@ -136,6 +148,42 @@ export function createPendingResyncQueue(
     options.abandonedDrainTimeoutMs ?? attemptTimeoutMs;
   const backlogWarnThreshold =
     options.backlogWarnThreshold ?? DEFAULT_BACKLOG_WARN_THRESHOLD;
+  const maxConcurrentPublishes = Math.max(
+    1,
+    options.maxConcurrentPublishes ?? DEFAULT_MAX_CONCURRENT_PUBLISHES,
+  );
+
+  /**
+   * Admission to the publish slots, shared across rooms.
+   *
+   * A plain counter plus a queue of waiters: every waiter is released by the
+   * publish that finishes, and `stopRetrying` releases them all so shutdown is
+   * never parked behind a slot that a hung bus will not give back.
+   */
+  let activePublishes = 0;
+  const slotWaiters: Array<() => void> = [];
+
+  function releaseSlot(): void {
+    activePublishes -= 1;
+    const next = slotWaiters.shift();
+    if (next) {
+      next();
+    }
+  }
+
+  async function acquireSlot(): Promise<void> {
+    if (activePublishes < maxConcurrentPublishes || pacer.stopped()) {
+      activePublishes += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      slotWaiters.push(resolve);
+      void pacer.whenStopped().then(() => {
+        resolve();
+      });
+    });
+    activePublishes += 1;
+  }
 
   const pacer = createRetryPacer({
     initialDelayMs: initialRetryDelayMs,
@@ -159,7 +207,9 @@ export function createPendingResyncQueue(
     roomCode: string,
     track: (call: Promise<void>) => void,
   ): Promise<void> {
+    await acquireSlot();
     const call = options.publish(roomCode);
+    void call.then(releaseSlot, releaseSlot);
     track(
       call.then(
         () => undefined,
