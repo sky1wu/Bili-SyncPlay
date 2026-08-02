@@ -123,27 +123,36 @@ test("pending resync queue treats a hung publish as a failed attempt", async () 
   assert.equal(attempts, 2);
 });
 
-test("pending resync queue refuses new rooms past its cap", async () => {
-  const rejected: string[] = [];
+test("pending resync queue never refuses a room, however long the backlog", async () => {
+  // This notification fires precisely because a room stopped advancing, so a
+  // room turned away has nothing else coming to fix a `sharedByMemberId` naming
+  // a member who is gone. A backlog is reported, never shed (#242 review).
+  const backlogged: string[] = [];
+  const published: string[] = [];
   let releaseAll: (() => void) | null = null;
   const gate = new Promise<void>((resolve) => {
     releaseAll = resolve;
   });
   const queue = createPendingResyncQueue({
     sleep: instantSleep,
-    maxPendingRooms: 2,
-    publish: () => gate,
-    onRejected: ({ roomCode }) => rejected.push(roomCode),
+    backlogWarnThreshold: 2,
+    publish: async (roomCode) => {
+      await gate;
+      published.push(roomCode);
+    },
+    onBacklog: ({ roomCode }) => backlogged.push(roomCode),
   });
 
-  queue.request("ROOM01");
-  queue.request("ROOM02");
-  queue.request("ROOM03");
+  for (const roomCode of ["ROOM01", "ROOM02", "ROOM03", "ROOM04"]) {
+    queue.request(roomCode);
+  }
 
-  assert.equal(queue.size(), 2);
-  assert.deepEqual(rejected, ["ROOM03"]);
+  assert.equal(queue.size(), 4, "nothing may be turned away");
+  assert.deepEqual(backlogged, ["ROOM03", "ROOM04"], "past the threshold");
+
   (releaseAll as (() => void) | null)?.();
   await queue.drain();
+  assert.deepEqual(published.sort(), ["ROOM01", "ROOM02", "ROOM03", "ROOM04"]);
 });
 
 test("pending resync queue still serves a request made while a doomed batch retried", async () => {

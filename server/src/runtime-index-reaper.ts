@@ -38,6 +38,16 @@ export type RuntimeIndexReaperStore = Pick<
  */
 const PENDING_RESYNC_BACKLOG_WARN_THRESHOLD = 512;
 
+/**
+ * The shutdown pass's own budget, and how many publishes it runs at once.
+ *
+ * Comfortably inside `stop_runtime_index_reaper`'s step timeout (see
+ * `createSharedServerShutdownSteps`), which is what keeps an overrun from being
+ * recorded as a failed shutdown step.
+ */
+const SHUTDOWN_RESYNC_BUDGET_MS = 3_000;
+const SHUTDOWN_RESYNC_CONCURRENCY = 8;
+
 export function createRuntimeIndexReaper(options: {
   enabled: boolean;
   runtimeStore: RuntimeIndexReaperStore;
@@ -89,28 +99,74 @@ export function createRuntimeIndexReaper(options: {
     }
   }
 
+  async function publishPendingResync(roomCode: string): Promise<void> {
+    try {
+      await options.publishRoomStateUpdate?.(roomCode);
+      roomsAwaitingResync.delete(roomCode);
+    } catch (error) {
+      // Kept for the next sweep. The sweep's own work is done and must not be
+      // undone by a bus hiccup.
+      options.logEvent?.("runtime_index_resync_publish_failed", {
+        roomCode,
+        pendingRooms: roomsAwaitingResync.size,
+        result: "error",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /**
    * Publish every outstanding announcement, keeping the ones that fail.
    *
    * Runs at the START of a sweep too, before the "no offline nodes" early
    * return — otherwise a backlog accumulated during a bus outage would only
    * ever be retried on a sweep that happened to find another dead node.
+   *
+   * Serial, because a sweep runs on its own timer and has all the time it
+   * needs. `stop` does NOT — see {@link flushPendingResyncsWithinBudget}.
    */
   async function flushPendingResyncs(): Promise<void> {
     for (const roomCode of Array.from(roomsAwaitingResync)) {
-      try {
-        await options.publishRoomStateUpdate?.(roomCode);
-        roomsAwaitingResync.delete(roomCode);
-      } catch (error) {
-        // Kept for the next sweep. The sweep's own work is done and must not be
-        // undone by a bus hiccup.
-        options.logEvent?.("runtime_index_resync_publish_failed", {
-          roomCode,
-          pendingRooms: roomsAwaitingResync.size,
-          result: "error",
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+      await publishPendingResync(roomCode);
+    }
+  }
+
+  /**
+   * The shutdown pass: bounded in both directions.
+   *
+   * The backlog has no cap — evicting an unpublished record is the loss this
+   * set exists to prevent — so a serial drain of it is unbounded too, and
+   * `stop_runtime_index_reaper` gets a few seconds. Overrunning it is not a
+   * harmless delay: the step is recorded as FAILED, shutdown carries on and
+   * closes the event bus, and publishes still in flight then return early
+   * against a closing bus, so their records get deleted as if they had
+   * succeeded (#242 review). Bounded concurrency plus a deadline keeps the pass
+   * inside the budget; whatever it does not reach stays in the set, which is
+   * honest — the set is memory-only and about to go with the process.
+   */
+  async function flushPendingResyncsWithinBudget(): Promise<void> {
+    const deadline = now() + SHUTDOWN_RESYNC_BUDGET_MS;
+    const queued = Array.from(roomsAwaitingResync);
+    let next = 0;
+    const workers = Array.from(
+      { length: Math.min(SHUTDOWN_RESYNC_CONCURRENCY, queued.length) },
+      async () => {
+        while (next < queued.length && now() < deadline) {
+          const roomCode = queued[next];
+          next += 1;
+          if (roomCode !== undefined) {
+            await publishPendingResync(roomCode);
+          }
+        }
+      },
+    );
+    await Promise.all(workers);
+    if (roomsAwaitingResync.size > 0) {
+      options.logEvent?.("runtime_index_resync_abandoned_at_shutdown", {
+        pendingRooms: roomsAwaitingResync.size,
+        budgetMs: SHUTDOWN_RESYNC_BUDGET_MS,
+        result: "dropped",
+      });
     }
   }
 
@@ -274,9 +330,9 @@ export function createRuntimeIndexReaper(options: {
       // Last chance for anything the final sweep could not announce. Nothing
       // else will ever rediscover those rooms: their sessions are already out
       // of the cluster index, and this record set is memory-only, so shutting
-      // down without trying loses the announcement for good (#242). One pass,
-      // not the retry loop — the shutdown step is on a clock.
-      await flushPendingResyncs();
+      // down without trying loses the announcement for good (#242). Bounded,
+      // because the shutdown step is on a clock and the backlog is not.
+      await flushPendingResyncsWithinBudget();
     },
   };
 }

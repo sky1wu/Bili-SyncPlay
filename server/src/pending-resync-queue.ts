@@ -48,17 +48,32 @@ export type PendingResyncQueueOptions = {
    * underlying publish is left running, exactly as `firePublishRoomEvent` does.
    */
   attemptTimeoutMs?: number;
-  /** Refuse new room codes past this many outstanding records. */
-  maxPendingRooms?: number;
+  /** Backlog size that triggers {@link PendingResyncQueueOptions.onBacklog}. */
+  backlogWarnThreshold?: number;
   /** Injectable so tests do not pay the backoff in wall-clock time. */
   sleep?: (delayMs: number) => Promise<void>;
   onAttemptFailed?: (info: PendingResyncFailureInfo) => void;
   onAbandoned?: (info: PendingResyncAbandonInfo) => void;
-  onRejected?: (info: { roomCode: string; pendingRooms: number }) => void;
+  /**
+   * The backlog crossed {@link PendingResyncQueueOptions.backlogWarnThreshold}.
+   * Reported, never used to shed: see `request`.
+   */
+  onBacklog?: (info: { roomCode: string; pendingRooms: number }) => void;
 };
 
 export type PendingResyncQueue = {
-  /** Ask for a resync of `roomCode`. Returns immediately. */
+  /**
+   * Ask for a resync of `roomCode`. Returns immediately, and never refuses.
+   *
+   * There is deliberately no cap. This notification fires precisely because a
+   * room stopped advancing, so a room turned away here has nothing else coming
+   * to fix a `sharedByMemberId` naming a member who is gone — dropping it is the
+   * permanent loss the queue exists to prevent, and a log line does not restore
+   * anyone's playback (#242 review). Growth is bounded by the number of rooms
+   * whose ownership moved while the bus was rejecting publishes, each entry is
+   * a room code, and the set drains as soon as the bus recovers; if that ever
+   * stops being enough the answer is to persist the records, not to refuse them.
+   */
   request: (roomCode: string) => void;
   /** Every outstanding record has settled, however it settled. */
   drain: () => Promise<void>;
@@ -95,7 +110,7 @@ const DEFAULT_MAX_ATTEMPTS = 4;
 const DEFAULT_INITIAL_RETRY_DELAY_MS = 250;
 const DEFAULT_MAX_RETRY_DELAY_MS = 5_000;
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 5_000;
-const DEFAULT_MAX_PENDING_ROOMS = 256;
+const DEFAULT_BACKLOG_WARN_THRESHOLD = 256;
 
 /**
  * Deliberately NOT `unref`'d. The backoff timer is the only thing keeping a
@@ -123,7 +138,8 @@ export function createPendingResyncQueue(
   const maxRetryDelayMs = options.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
   const attemptTimeoutMs =
     options.attemptTimeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS;
-  const maxPendingRooms = options.maxPendingRooms ?? DEFAULT_MAX_PENDING_ROOMS;
+  const backlogWarnThreshold =
+    options.backlogWarnThreshold ?? DEFAULT_BACKLOG_WARN_THRESHOLD;
   const sleep = options.sleep ?? defaultSleep;
 
   const records = new Map<string, PendingRecord>();
@@ -196,9 +212,8 @@ export function createPendingResyncQueue(
         existing.pending = true;
         return;
       }
-      if (records.size >= maxPendingRooms) {
-        options.onRejected?.({ roomCode, pendingRooms: records.size });
-        return;
+      if (records.size >= backlogWarnThreshold) {
+        options.onBacklog?.({ roomCode, pendingRooms: records.size });
       }
       const record: PendingRecord = {
         pending: true,

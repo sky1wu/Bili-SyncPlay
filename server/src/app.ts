@@ -404,6 +404,10 @@ export async function createSyncServer(
           },
           {
             name: "stop_runtime_index_reaper",
+            // Bigger than the reaper's own shutdown budget for its pending
+            // resync announcements, which is what stops that last pass from
+            // being cut short and recorded as a failed step (#242 review).
+            timeoutMs: 10_000,
             run: () => runtimeIndexReaper.stop(),
           },
           {

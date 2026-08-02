@@ -591,12 +591,12 @@ export function createMessageHandler(options: {
         error: error instanceof Error ? error.message : String(error),
       });
     },
-    onRejected: ({ roomCode, pendingRooms }) => {
-      logEvent("shared_owner_resync_rejected", {
+    onBacklog: ({ roomCode, pendingRooms }) => {
+      logEvent("shared_owner_resync_backlog", {
         roomCode,
         pendingRooms,
-        result: "rejected",
-        reason: "pending_resync_overflow",
+        result: "degraded",
+        reason: "shared_owner_resync_publish_backlog",
       });
     },
   });
@@ -635,7 +635,13 @@ export function createMessageHandler(options: {
       return await enter();
     } catch (error) {
       if (previous && session.roomCode !== previous.roomCode) {
-        await releasePreviousRoom(session, previous);
+        // Gated: the create/join FAILED, so no later write will re-stamp this
+        // session's room code. If the hook could not clear the index, a state
+        // built from it still lists the switcher and hands them the share back
+        // (#242 review).
+        if (await releasePreviousRoom(session, previous)) {
+          publishSharedOwnerResync(previous.roomCode);
+        }
       }
       throw error;
     }
@@ -650,24 +656,24 @@ export function createMessageHandler(options: {
    * The identity is passed in because the caller captured it BEFORE the switch —
    * by now `session.memberId` names the new room's seat.
    *
-   * Both events go out even when the index write failed, which is where this
-   * differs from an explicit leave. A switcher's session hash already names the
-   * NEW room, so `roomStateFromSessions` drops it from the old room's roster on
-   * its own and the state is correct regardless. Withholding it instead lost the
-   * announcement permanently: nothing afterwards carries the old room code, so
-   * there is no retry (#235 review). `leaveRoom` keeps its gate because a leaver
-   * ends up with no room code at all, which reads as missing information rather
-   * than as residue — a state published there really could put them back.
+   * `room_member_left` goes out even when the index write failed — it carries no
+   * state read, so a dirty index cannot corrupt it, and withholding it lost the
+   * announcement permanently since nothing afterwards carries the old room code
+   * (#235 review).
    *
-   * Unconditional otherwise: the internal leave's verdict never reaches here,
-   * and a switch is rare enough that one broadcast is cheaper than plumbing it
-   * out.
+   * The full `room:state` does NOT, and that is what changed in #242. The old
+   * reasoning was that "a switcher's session hash already names the NEW room, so
+   * `roomStateFromSessions` drops it from the old room's roster on its own" —
+   * but that hash is written by `onRoomLeft`'s own `registerSession`, so when the
+   * hook fails the hash can still name the OLD room and the state hands the
+   * switcher straight back into it, share and all. Returning the verdict lets
+   * each caller publish it where it is provably safe; see the call sites.
    */
   async function releasePreviousRoom(
     session: Session,
     previous: { roomCode: string; memberId: string; displayName: string },
-  ): Promise<void> {
-    await runRoomLeftHook(session, previous.roomCode);
+  ): Promise<boolean> {
+    const indexCleaned = await runRoomLeftHook(session, previous.roomCode);
     await firePublishRoomEvent(
       {
         type: "room_member_left",
@@ -682,7 +688,7 @@ export function createMessageHandler(options: {
         origin: session.origin,
       },
     );
-    publishSharedOwnerResync(previous.roomCode);
+    return indexCleaned;
   }
 
   function handleRateLimitedMessage(
@@ -833,6 +839,14 @@ export function createMessageHandler(options: {
             await abortJoin(session, room.code, socket);
             return;
           }
+          // AFTER the join hook, and unconditional. Its write re-stamps the
+          // whole session record under the NEW room code, so the old room's
+          // rebuild drops this session as index residue whatever `onRoomLeft`
+          // managed to write — which is what makes publishing safe here and not
+          // inside `releasePreviousRoom` (#242 review).
+          if (previousRoom && previousRoom.roomCode !== room.code) {
+            publishSharedOwnerResync(previousRoom.roomCode);
+          }
           send(socket, {
             type: "room:created",
             payload: {
@@ -909,6 +923,11 @@ export function createMessageHandler(options: {
             ) {
               await abortJoin(session, room.code, socket);
               return;
+            }
+            // AFTER the join hook, and unconditional — see the same call in
+            // `room:create` for why that ordering is what makes it safe.
+            if (previousRoom && previousRoom.roomCode !== room.code) {
+              publishSharedOwnerResync(previousRoom.roomCode);
             }
             const joinedRoomCode = room.code;
             const joinedMemberId = session.memberId ?? session.id;

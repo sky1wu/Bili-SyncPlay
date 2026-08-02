@@ -629,3 +629,92 @@ test("runtime index reaper never evicts an announcement it has not published", a
     await reaper.stop();
   }
 });
+
+test("runtime index reaper bounds its shutdown announcement pass", async () => {
+  // The backlog has no cap, so a serial drain of it is unbounded too — and
+  // `stop_runtime_index_reaper` is on a clock. Overrunning it is not a harmless
+  // delay: the step is recorded as FAILED, shutdown closes the event bus
+  // anyway, and publishes still in flight then return early against a closing
+  // bus with their records deleted as if they had succeeded (#242 review).
+  const events: string[] = [];
+  let currentTime = 1_000;
+  let busDown = true;
+  let sweepDone = false;
+  let shutdownPublishes = 0;
+  const roomCount = 200;
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return sweepDone
+        ? []
+        : [
+            {
+              instanceId: "offline-node",
+              version: "test",
+              startedAt: 0,
+              lastHeartbeatAt: 0,
+              staleAt: 0,
+              expiresAt: 0,
+              connectionCount: roomCount,
+              activeRoomCount: roomCount,
+              activeMemberCount: roomCount,
+              health: "offline" as const,
+            },
+          ];
+    },
+    async listClusterSessions() {
+      if (sweepDone) {
+        return [];
+      }
+      return Array.from({ length: roomCount }, (_unused, index) => {
+        const session = createSession(`session-${index}`, "offline-node");
+        session.roomCode = `ROOM${index}`;
+        session.memberId = `member-${index}`;
+        return session;
+      });
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    async flush() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => currentTime,
+    logEvent: (event) => {
+      events.push(event);
+    },
+    publishRoomStateUpdate: async () => {
+      // Every publish fails during the sweep, so the whole backlog survives it.
+      if (busDown) {
+        throw new Error("bus down");
+      }
+      // The bus is back by shutdown, but each publish "costs" a second of the
+      // pass's budget — so a serial drain of 200 rooms could never fit.
+      shutdownPublishes += 1;
+      currentTime += 1_000;
+    },
+  });
+
+  assert.equal(await reaper.sweep(), roomCount);
+  sweepDone = true;
+  busDown = false;
+
+  await reaper.stop();
+
+  assert.ok(
+    shutdownPublishes > 0,
+    "the shutdown pass must actually try to publish",
+  );
+  assert.ok(
+    shutdownPublishes < roomCount,
+    `the shutdown pass must stop at its deadline, made ${shutdownPublishes} publishes`,
+  );
+  assert.ok(events.includes("runtime_index_resync_abandoned_at_shutdown"));
+});

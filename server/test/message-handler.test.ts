@@ -2785,3 +2785,92 @@ test("the final publish flush does not let a resync record open a second batch",
     "the wind-down must not open a second resync batch",
   );
 });
+
+test("a room switch withholds the old room's full state until the join write re-stamps the session", async () => {
+  // #235 published it unconditionally on the reasoning that "a switcher's
+  // session hash already names the NEW room". That hash is written by
+  // `onRoomLeft`'s own `registerSession`, so when the hook fails it can still
+  // name the OLD room, and the state hands the switcher back in — share and all
+  // (#242 review). Publishing after the JOIN hook makes it safe unconditionally:
+  // that write re-stamps the whole session record under the new room code.
+  const order: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createSharedOwnerHandler({
+    published: [],
+    publishedRooms: [],
+    joinedRoomCode: "NEWR01",
+    hookOrder: order,
+    roomLeftHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "NEWR01",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  // The leave hook ran and failed; the join hook then re-stamped the record.
+  assert.deepEqual(order, ["room-left-hook", "room-joined-hook"]);
+});
+
+test("a create that fails after leaving withholds the old room's state when the index is dirty", async () => {
+  // Nothing re-stamps this session: the create failed, so it is in no room and
+  // no later write carries the old code. A state built from an index the hook
+  // could not clear still lists the switcher (#242 review).
+  const published: string[] = [];
+  const publishedRooms: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR02",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    enterRoomFails: true,
+    roomLeftHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:create",
+    payload: { displayName: "Alice" },
+  });
+  await handler.flushPendingPublishes();
+
+  // The delta still goes out — it reads no state, so a dirty index cannot
+  // corrupt it — but the full state does not.
+  assert.deepEqual(published, ["room_member_left"]);
+  assert.deepEqual(publishedRooms, ["OLDR02"]);
+});
+
+test("a create that fails after leaving still resyncs the old room when the index was cleared", async () => {
+  const published: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR03",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createSharedOwnerHandler({
+    published,
+    enterRoomFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:create",
+    payload: { displayName: "Alice" },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+});

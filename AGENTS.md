@@ -144,6 +144,16 @@ advances the room. Three rules keep it working, none enforced by a type:
   `room:state` build site must go through it. The persisted room keeps the
   original id on purpose: it is the _preferred_ owner, so a sharer whose socket
   merely blipped reclaims the share on reconnect instead of losing it for good.
+- **A full `room:state` may only be published where the index is provably
+  clean.** A room switch leaves the old room inside `createRoomForSession` /
+  `joinRoomForSession`, and `releasePreviousRoom` reports whether `onRoomLeft`
+  actually cleared the index. The `room_member_left` delta goes out regardless —
+  it reads no state — but the full state is published only where the switcher
+  cannot come back: on the success path AFTER `runRoomJoinedHook`, whose write
+  re-stamps the whole session record under the NEW room code, and on the
+  create/join FAILURE path only when the hook succeeded, since nothing later
+  carries the old code there. "The session hash already names the new room" is
+  not something to assume: that hash is written by `onRoomLeft` itself (#242).
 - **A membership delta that moves ownership owes a full `room:state`.**
   Protocol >= 2 clients get `room:member-joined` / `room:member-left`, which edit
   the recipient's member list and nothing else — their cached `sharedVideo` still
@@ -246,11 +256,16 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   `listClusterSessions` no longer returns those sessions, so a later sweep has
   nothing to rediscover the room from. The reaper keeps its own record set and
   retries it at the START of every sweep — before the "no offline nodes" early
-  return — dropping a record only once the publish succeeds. There is no cap:
-  evicting an unpublished record loses exactly what the set exists to keep, so
-  a backlog is logged, never shed. The set is memory-only, so `stop()` takes one
-  last pass over it, and sweeps no longer overlap: they share that set, and
-  `stop()` awaits only the sweep it knows about.
+  return — dropping a record only once the publish succeeds. Neither this queue
+  nor `pending-resync-queue` caps its backlog: evicting or refusing an
+  unpublished record loses exactly what they exist to keep, so a backlog is
+  logged, never shed. Because it is uncapped, the shutdown pass is the one that
+  must be bounded — `stop()` drains with bounded concurrency against its own
+  deadline, comfortably inside the step timeout, since an overrun step is
+  recorded as a failure AND lets the bus close under in-flight publishes that
+  then delete their records as if they had landed. Sweeps also no longer
+  overlap: they share that set, and `stop()` awaits only the sweep it knows
+  about.
 
 ## Engineering Constraints
 
