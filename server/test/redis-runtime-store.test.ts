@@ -2157,38 +2157,103 @@ test("redis runtime store keeps a session's rollback behind the command it aband
   }
 });
 
-test("redis runtime store refuses a join against a room with no generation at all", async () => {
-  // A teardown leaves the generation key absent, exactly like a room that never
-  // had one. Pinning `""` would match both, so a delayed write would rebuild
-  // the indexes of a room whose persisted record is gone and strand its code
-  // (#242 review).
-  let evalAttempts = 0;
+test("redis runtime store declines a join pinned before the room was torn down", async () => {
+  // Deleting the generation key made "torn down" indistinguishable from "never
+  // had a generation", so a join that pinned `""` against a legacy room matched
+  // just as well after the room was deleted — and rebuilt the indexes of a room
+  // whose persisted record was gone (#242 review). The teardown leaves a
+  // tombstone instead.
+  let generation: string | null = null;
+  let releaseJoinScript: (() => void) | null = null;
   const fakeRedis = {
     ...createFakeRedisClient([]),
     async hgetall() {
-      return { id: "session-nogen", roomCode: "" };
+      return { id: "session-tombstoned", roomCode: "" };
     },
     async get() {
-      return null;
+      return generation;
     },
-    async eval() {
-      evalAttempts += 1;
-      return 1;
+    async zrange() {
+      return [];
+    },
+    eval(script: string, numKeys: number, ...args: Array<string | number>) {
+      // `HSET` is the join script's alone; the teardown only deletes and SREMs.
+      if (!script.includes("HSET")) {
+        // The teardown script: it stamps the tombstone it was handed.
+        generation = String(args[args.length - 2]);
+        return Promise.resolve(1);
+      }
+      // The join script. Held so the teardown can land between the pin and the
+      // write — the very window the tombstone exists to close.
+      const expected = String(args[numKeys]);
+      return new Promise((resolve) => {
+        releaseJoinScript = () => {
+          resolve((generation ?? "") === expected ? 1 : 0);
+        };
+      });
     },
   };
 
   const store = await createRedisRuntimeStore("redis://unused", {
-    keyPrefix: "bsp:test:nogen:",
+    keyPrefix: "bsp:test:tombstone:",
     redisClient: fakeRedis,
-    writeRetry: { maxAttempts: 4, initialRetryDelayMs: 1 },
+    writeRetry: { maxAttempts: 1 },
   });
 
   try {
-    await assert.rejects(
-      store.markSessionJoinedRoom("session-nogen", "ROOMNG"),
-      /no generation to pin/,
-    );
-    assert.equal(evalAttempts, 0, "nothing may be written unguarded");
+    // The room never had a generation, so the join pins `""`.
+    const joined = store.markSessionJoinedRoom("session-tombstoned", "ROOMTS");
+    joined.catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(releaseJoinScript, "the join must have pinned and be waiting");
+
+    // It is torn down, which stamps the tombstone rather than clearing the key.
+    assert.equal(await store.deleteRoom("ROOMTS", null), true);
+    assert.equal(generation, "deleted");
+
+    // The pinned write now lands. An absent key would have matched `""` all
+    // over again and rebuilt the room's indexes.
+    (releaseJoinScript as (() => void) | null)?.();
+    await assert.rejects(joined, /changed hands/);
+  } finally {
+    (releaseJoinScript as (() => void) | null)?.();
+    await store.close();
+  }
+});
+
+test("redis runtime store leaves a tombstone where a torn-down room's generation was", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // Against the real script, because the tombstone IS the script: a fake that
+  // stands in for `DELETE_ROOM_LUA` cannot tell a `SET` from a `DEL` (#242
+  // review).
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const session = createSession("session-tombstone");
+
+  try {
+    store.registerSession(session);
+    await store.markSessionJoinedRoom(session.id, "ROOMTB");
+    session.memberId = "member-tombstone";
+    session.memberToken = "token-tombstone";
+    store.addMember("ROOMTB", session.memberId, session, session.memberToken);
+    await store.flush?.();
+
+    assert.equal(await store.getRoomGeneration("ROOMTB"), null);
+    assert.equal(await store.deleteRoom("ROOMTB", null), true);
+
+    // Deleting the key made "torn down" indistinguishable from "never had a
+    // generation", so a write pinned at `""` matched the room it was about to
+    // resurrect.
+    assert.equal(await store.getRoomGeneration("ROOMTB"), "deleted");
+    // Which is what the join script compares a pre-teardown pin against; the
+    // ordering half of that is pinned by the fake-driven test above.
+    // The tombstone must not keep the code reserved: it is deliberately absent
+    // from the residue check, so the code is free to be handed out again.
+    assert.equal(await store.hasRoomResidue("ROOMTB"), false);
   } finally {
     await store.close();
   }

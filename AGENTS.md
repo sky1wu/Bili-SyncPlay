@@ -210,10 +210,11 @@ decides something has to know which of the two questions it is asking (#242):
   `NonRetryableWriteError` (a generation only moves forward, so no later attempt
   can find its way back). An unreadable generation refuses the join rather than
   re-reading later, since a second read is a second chance to pin the wrong
-  instance — and so does an ABSENT one, because a teardown leaves the key absent
-  too, so `""` would match a deleted room as happily as a legacy one.
-  `createRoomForSession` awaits `markRoomGeneration` and expires the room if it
-  fails, so every joinable room has one. A new write that seats or moves anything by room code needs the same
+  instance. An ABSENT generation still pins as `""`, which is why the teardown
+  leaves a TOMBSTONE in that key rather than deleting it: deleting made "torn
+  down" indistinguishable from "never stamped", so a pin of `""` matched the
+  room it was about to resurrect. The tombstone expires, and `hasRoomResidue`
+  ignores it, so it never keeps a code reserved. A new write that seats or moves anything by room code needs the same
   pin; one that only touches keys named after the session does not, because
   session ids are never reused.
 - **Every retry budget is sized against the shutdown step that drains it.**

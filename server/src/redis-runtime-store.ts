@@ -237,6 +237,22 @@ function nodeStatusKey(prefix: string, instanceId: string): string {
   return `${prefix}node:${instanceId}`;
 }
 
+/**
+ * What a teardown leaves in the generation key instead of deleting it.
+ *
+ * Deleting made "this room was torn down" indistinguishable from "this room
+ * never had a generation", so a join that pinned `""` against a legacy room
+ * matched just as well after the room was deleted — and rebuilt the indexes of
+ * a room whose persisted record was gone, stranding the code with them (#242
+ * review). Generations are UUIDs, so this value can never be mistaken for one.
+ *
+ * It expires rather than lingering: it only has to outlive an in-flight write,
+ * and a new occupant's `markRoomGeneration` overwrites it anyway. Deliberately
+ * NOT counted by `hasRoomResidue`, so a tombstone never keeps a code reserved.
+ */
+const ROOM_GENERATION_TOMBSTONE = "deleted";
+const ROOM_GENERATION_TOMBSTONE_TTL_MS = 10 * 60_000;
+
 const DEFAULT_MAX_PENDING_OPERATIONS = 256;
 const DEFAULT_PENDING_OPERATION_TIMEOUT_MS = 5_000;
 // Floor TTL applied only when the caller's expiresAt is already non-positive
@@ -370,7 +386,7 @@ end
 for index = 3, #KEYS do
   redis.call("DEL", KEYS[index])
 end
-redis.call("DEL", KEYS[1])
+redis.call("SET", KEYS[1], ARGV[3], "PX", ARGV[4])
 redis.call("SREM", KEYS[2], ARGV[2])
 return 1
 `;
@@ -1066,27 +1082,12 @@ export async function createRedisRuntimeStore(
       // the trade this path already makes for the index write itself.
       const pinnedGeneration = redis
         .get(roomGenerationKey(keyPrefix, roomCode))
-        .then((generation) => {
-          if (generation === null) {
-            // An ABSENT generation is not a value to pin, because a teardown
-            // leaves the key absent too: pinning `""` would match a room that
-            // was deleted in the meantime just as happily as one that never had
-            // a generation, and the write would rebuild the indexes of a room
-            // whose persisted record is gone — stranding its code as well
-            // (#242 review). Every joinable room has one: `createRoomForSession`
-            // awaits `markRoomGeneration` and expires the room if it fails, so
-            // this only refuses rooms that predate #237.
-            throw new NonRetryableWriteError(
-              `Room ${roomCode} has no generation to pin the join index write against.`,
-              "room_generation_missing",
-            );
-          }
-          return generation;
-        })
+        // An absent generation pins as `""`, which a room that predates #237
+        // still matches. What it must NOT match is a room deleted since the
+        // pin — see `ROOM_GENERATION_TOMBSTONE`, which is what the teardown
+        // leaves behind instead of an absent key (#242 review).
+        .then((generation) => generation ?? "")
         .catch((error: unknown) => {
-          if (error instanceof NonRetryableWriteError) {
-            throw error;
-          }
           throw new NonRetryableWriteError(
             `Could not pin the generation of room ${roomCode}: ${
               error instanceof Error ? error.message : String(error)
@@ -1564,6 +1565,8 @@ export async function createRedisRuntimeStore(
             ...keys,
             expectedGeneration === undefined ? "*" : (expectedGeneration ?? ""),
             code,
+            ROOM_GENERATION_TOMBSTONE,
+            String(ROOM_GENERATION_TOMBSTONE_TTL_MS),
           );
         })(),
       ).then((applied) => {
