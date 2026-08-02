@@ -3052,3 +3052,115 @@ test("a join whose rollback succeeds leaves the connection alone", async () => {
   // The seat came back, so the client may simply retry on the same socket.
   assert.deepEqual(closes, []);
 });
+
+/**
+ * `abortJoin` must treat all three ways the rollback can fail to clean the room
+ * index the same. Only one of them throws; the other two resolve normally, and
+ * my first fix only covered the throwing one (#242 review).
+ */
+async function runAbortedJoin(options: {
+  leaveResult?: { room: { code: string } | null; notifyRoom?: boolean };
+  leaveThrows?: boolean;
+  roomLeftHookFails?: boolean;
+}): Promise<{ closes: number[]; errors: string[] }> {
+  const closes: number[] = [];
+  const errors: string[] = [];
+  const session = createSession("member-1");
+  (
+    session.socket as unknown as { close: (c: number, r: string) => void }
+  ).close = (code) => {
+    closes.push(code);
+  };
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = "ROOM01";
+        currentSession.memberId = "member-1";
+        currentSession.memberToken = "member-token-1";
+        return { room: { code: "ROOM01" }, memberToken: "member-token-1" };
+      },
+      async leaveRoomForSession() {
+        if (options.leaveThrows) {
+          throw new Error("leave persistence failed");
+        }
+        return {
+          memberRemoved: true,
+          ...(options.leaveResult ?? { room: { code: "ROOM01" } }),
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError(_socket, code) {
+      errors.push(code);
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+    async onRoomJoined() {
+      throw new Error("runtime index unavailable");
+    },
+    onRoomLeft() {
+      if (options.roomLeftHookFails) {
+        throw new Error("index cleanup failed");
+      }
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+  return { closes, errors };
+}
+
+test("an aborted join drops the socket when the leave call throws", async () => {
+  const { closes, errors } = await runAbortedJoin({ leaveThrows: true });
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [1011]);
+});
+
+test("an aborted join drops the socket when the room-left hook reports failure", async () => {
+  // Resolves normally — `runRoomLeftHook` swallows the error — so only the
+  // RETURNED verdict reveals that the index was never cleaned.
+  const { closes, errors } = await runAbortedJoin({ roomLeftHookFails: true });
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [1011]);
+});
+
+test("an aborted join drops the socket when the leave never reaches the hook", async () => {
+  // `!room && !notifyRoom` returns before `runRoomLeftHook` runs at all, so
+  // `markSessionLeftRoom` never went out and the index still lists the session.
+  const { closes, errors } = await runAbortedJoin({
+    leaveResult: { room: null },
+  });
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [1011]);
+});
+
+test("an aborted join whose rollback cleaned the index keeps the connection", async () => {
+  const { closes, errors } = await runAbortedJoin({});
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [], "the client may retry on the same socket");
+});

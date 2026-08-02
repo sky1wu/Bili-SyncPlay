@@ -189,11 +189,13 @@ export function createPendingResyncQueue(
       activePublishes += 1;
       return true;
     }
+    // No per-wait listener on the stop signal. Registering one was a reaction
+    // on a promise that only settles at shutdown, and a waiter woken normally
+    // by `releaseSlot` could not take it off again — so every wait the server
+    // ever performed stayed retained for its whole lifetime (#242 review).
+    // `stopRetrying` releases these waiters directly instead.
     await new Promise<void>((resolve) => {
       slotWaiters.push(resolve);
-      void pacer.whenStopped().then(() => {
-        resolve();
-      });
     });
     if (pacer.stopped()) {
       return false;
@@ -319,6 +321,11 @@ export function createPendingResyncQueue(
     },
     stopRetrying() {
       pacer.stop();
+      // Wake everything parked on a slot: the bus may never hand one back, and
+      // they answer `false` now that the queue is stopping.
+      while (slotWaiters.length > 0) {
+        slotWaiters.shift()?.();
+      }
     },
     async drain() {
       while (records.size > 0) {

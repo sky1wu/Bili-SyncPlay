@@ -474,7 +474,7 @@ return 1
  * 5 rooms set, 6 (optional) previous room sessions.
  * ARGV: 1 expected generation, 2 sessionId, 3 roomCode, 4.. hash field/value pairs.
  */
-const JOIN_ROOM_INDEX_LUA = `
+export const JOIN_ROOM_INDEX_LUA = `
 if (redis.call("GET", KEYS[1]) or "") ~= ARGV[1] then
   return 0
 end
@@ -1111,12 +1111,33 @@ export async function createRedisRuntimeStore(
           () =>
             new Error(`Timed out reading the generation of room ${roomCode}.`),
         )
-        // An absent generation pins as `""`, which a room that predates #237
-        // still matches. What it must NOT match is a room deleted since the
-        // pin — see `ROOM_GENERATION_TOMBSTONE`, which is what the teardown
-        // leaves behind instead of an absent key (#242 review).
-        .then((generation) => generation ?? "")
+        .then((generation) => {
+          // The tombstone is the teardown's answer to "this code is dead", so
+          // pinning it would make the script's comparison SUCCEED and rebuild
+          // the indexes of a room that no longer exists. Two ways in, and the
+          // Lua guard only ever covered the first: a pin taken BEFORE the
+          // teardown no longer matches the key afterwards, but a pin taken
+          // AFTER it reads the tombstone and matches itself. It also covers the
+          // recycling window — a new occupant that has passed the residue check
+          // but not yet stamped its generation still has the tombstone in place
+          // (#242 review).
+          if (generation === ROOM_GENERATION_TOMBSTONE) {
+            throw new NonRetryableWriteError(
+              `Room ${roomCode} was torn down before the join index write was pinned.`,
+              "room_deleted",
+            );
+          }
+          // An absent generation pins as `""`, which a room that predates #237
+          // still matches.
+          return generation ?? "";
+        })
         .catch((error: unknown) => {
+          // Verdicts pass through: this handler is here for the READ failing,
+          // and re-wrapping would relabel "the room is gone" as "we could not
+          // read the generation".
+          if (error instanceof NonRetryableWriteError) {
+            throw error;
+          }
           throw new NonRetryableWriteError(
             `Could not pin the generation of room ${roomCode}: ${
               error instanceof Error ? error.message : String(error)
@@ -1207,9 +1228,25 @@ export async function createRedisRuntimeStore(
           if (!targetRoomCode) {
             return;
           }
+          // The WHOLE record, not just `roomCode`. This write supersedes any
+          // earlier one for the same session, and a strict subset superseding
+          // a full `registerSession` that had failed left the hash missing
+          // every other field — a renamed member's `displayName` never landed
+          // and `confirm()` still reported success (#242 review). Writing the
+          // full snapshot makes the supersession sound, exactly as it does for
+          // the join.
+          //
+          // `roomCode` is still blanked unconditionally, which is this write's
+          // established meaning ("this session left"). A switcher is blanked
+          // for the moment between here and its join write, exactly as before;
+          // that write re-stamps the whole record anyway.
+          const localSession = localRuntimeStore.getSession(sessionId);
+          const record = localSession
+            ? sessionHashRecord(localSession, "")
+            : { roomCode: "" };
           await redis
             .multi()
-            .hset(sessionKey(keyPrefix, sessionId), "roomCode", "")
+            .hset(sessionKey(keyPrefix, sessionId), record)
             .srem(roomSessionsKey(keyPrefix, targetRoomCode), sessionId)
             .exec();
           await cleanupEmptyRoomIndex(

@@ -65,6 +65,14 @@ const RESYNC_PUBLISH_TIMEOUT_MS = 2_000;
  * longer than this buys nothing (#242 review).
  */
 const WRITE_CONFIRMATION_TIMEOUT_MS = 2_000;
+/**
+ * Caps the sweep's own wait on one session's index write.
+ *
+ * The write keeps going — the store retries it on its own budget — but the
+ * sweep must not inherit that budget, or one unreachable session holds `stop()`
+ * past the whole shutdown step.
+ */
+const SESSION_INDEX_WRITE_TIMEOUT_MS = 2_000;
 
 export function createRuntimeIndexReaper(options: {
   enabled: boolean;
@@ -127,7 +135,7 @@ export function createRuntimeIndexReaper(options: {
    * landed in between, that sweep found no offline session to rebuild the
    * record from either (#242 review).
    */
-  const resyncAwaitingWrites = new Set<string>();
+  const resyncAwaitingWrites = new Map<string, Promise<void>>();
 
   function rememberResync(roomCode: string): void {
     const isNew = !roomsAwaitingResync.has(roomCode);
@@ -265,28 +273,62 @@ export function createRuntimeIndexReaper(options: {
     }
   }
 
+  /**
+   * Re-check the writes that earlier sweeps could not confirm.
+   *
+   * `confirmWrites` alone is not the whole answer: the flag is also set by a
+   * member removal, whose `durable` promise the store's confirmation never
+   * sees. Clearing on `confirmWrites` alone therefore dropped records while
+   * `REMOVE_MEMBER_LUA` was still pending — or had already failed (#242
+   * review).
+   */
+  async function reconfirmEarlierSweepWrites(): Promise<void> {
+    if (resyncAwaitingWrites.size === 0) {
+      return;
+    }
+    const entries = Array.from(resyncAwaitingWrites);
+    const settled = await pacer
+      .capAttempt(
+        Promise.allSettled([
+          options.runtimeStore.confirmWrites?.() ?? Promise.resolve(),
+          ...entries.map(([, removal]) => removal),
+        ]),
+        WRITE_CONFIRMATION_TIMEOUT_MS,
+        () =>
+          new Error(
+            "Runtime index reaper gave up re-confirming earlier sweeps' writes.",
+          ),
+      )
+      .catch(() => null);
+    if (settled === null) {
+      // Still unanswered: every record stays gated.
+      return;
+    }
+    const [storeWrites, ...removals] = settled;
+    if (storeWrites?.status === "rejected") {
+      return;
+    }
+    entries.forEach(([roomCode], index) => {
+      if (removals[index]?.status === "rejected") {
+        // The removal will never land, so holding the record cannot fix it —
+        // only the member token's retention will. The announcement it gated
+        // has gone out on every sweep since; what is still wrong is the stale
+        // binding, and that needs saying rather than an endless republish.
+        options.logEvent?.("runtime_index_member_removal_failed", {
+          roomCode,
+          result: "error",
+        });
+      }
+      resyncAwaitingWrites.delete(roomCode);
+    });
+  }
+
   async function sweep(): Promise<number> {
     if (!options.enabled) {
       return 0;
     }
 
-    // Writes owed by earlier sweeps: once the store confirms them, the records
-    // they were gating are safe to publish AND drop.
-    if (options.runtimeStore.confirmWrites && resyncAwaitingWrites.size > 0) {
-      await pacer
-        .capAttempt(
-          options.runtimeStore.confirmWrites(),
-          WRITE_CONFIRMATION_TIMEOUT_MS,
-          () =>
-            new Error(
-              "Runtime index reaper gave up re-confirming earlier sweeps' writes.",
-            ),
-        )
-        .then(() => {
-          resyncAwaitingWrites.clear();
-        })
-        .catch(() => undefined);
-    }
+    await reconfirmEarlierSweepWrites();
     await flushPendingResyncs();
 
     const currentTime = now();
@@ -306,6 +348,8 @@ export function createRuntimeIndexReaper(options: {
     const roomsToResync = new Set<string>();
     /** Durable results of this sweep's member removals; see the push below. */
     const memberRemovals: Array<Promise<void>> = [];
+    /** The same promises, kept per room so a retained record can re-check them. */
+    const removalsByRoom = new Map<string, Array<Promise<void>>>();
     for (const session of sessions) {
       if (!session.instanceId || !offlineInstanceIds.has(session.instanceId)) {
         continue;
@@ -335,6 +379,9 @@ export function createRuntimeIndexReaper(options: {
           // separately so a rejection before `Promise.all` reads it stays quiet.
           void removal.durable.catch(() => undefined);
           memberRemovals.push(removal.durable);
+          const forRoom = removalsByRoom.get(session.roomCode) ?? [];
+          forRoom.push(removal.durable);
+          removalsByRoom.set(session.roomCode, forRoom);
         }
       }
       if (session.roomCode) {
@@ -347,8 +394,25 @@ export function createRuntimeIndexReaper(options: {
         // review). In the rare case both writes fail, announcing is still no
         // worse than silence: the rebuilt state names the dead member, which is
         // exactly what every client already caches.
-        await options.runtimeStore
-          .markSessionLeftRoom(session.id, session.roomCode)
+        // Capped, and by the reaper's own stop signal. This is the sweep's
+        // only direct `await` on a store write, and the store's write queue
+        // runs its FULL normal retry budget — five attempts of up to the
+        // pending-operation timeout each, per session, serially. One
+        // unreachable session was therefore enough to hold `stop()` past its
+        // step budget, because `stop` waits for the sweep in flight before its
+        // own bounded pass ever starts (#242 review).
+        await pacer
+          .capAttempt(
+            options.runtimeStore.markSessionLeftRoom(
+              session.id,
+              session.roomCode,
+            ),
+            SESSION_INDEX_WRITE_TIMEOUT_MS,
+            () =>
+              new Error(
+                `Runtime index reaper gave up waiting for the index write of ${session.id}.`,
+              ),
+          )
           .catch(() => undefined);
         roomsToResync.add(session.roomCode);
       }
@@ -403,7 +467,13 @@ export function createRuntimeIndexReaper(options: {
       }
     } else {
       for (const roomCode of roomsToResync) {
-        resyncAwaitingWrites.add(roomCode);
+        // The room carries the removals it is waiting on, so the next sweep
+        // re-checks THOSE and not just the store's own write queue.
+        const removals = removalsByRoom.get(roomCode) ?? [];
+        resyncAwaitingWrites.set(
+          roomCode,
+          Promise.all(removals).then(() => undefined),
+        );
       }
     }
     await flushPendingResyncs();

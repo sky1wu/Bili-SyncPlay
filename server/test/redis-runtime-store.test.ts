@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Redis } from "ioredis";
-import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
+import {
+  createRedisRuntimeStore,
+  JOIN_ROOM_INDEX_LUA,
+} from "../src/redis-runtime-store.js";
+import { NonRetryableWriteError } from "../src/durable-write-queue.js";
 import type { AttachedSession, Session } from "../src/types.js";
 
 const REDIS_URL = process.env.REDIS_URL;
@@ -2455,4 +2459,202 @@ test("redis runtime store drains the generation read it started at enqueue", asy
   (releaseGet as (() => void) | null)?.();
   await closing;
   assert.deepEqual(order, ["generation-read-answered", "quit"]);
+});
+
+test("redis runtime store refuses a join pinned after the room was torn down", async () => {
+  // The Lua guard only ever covered a pin taken BEFORE the teardown: that pin
+  // stops matching once the key holds the tombstone. A pin taken AFTER it reads
+  // the tombstone and matches ITSELF, so the script applied and rebuilt the
+  // indexes of a room that no longer exists (#242 review).
+  let evalCalls = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async hgetall() {
+      return { id: "session-late-pin", roomCode: "" };
+    },
+    async get() {
+      // The teardown already ran, so this is what the key holds.
+      return "deleted";
+    },
+    async eval() {
+      evalCalls += 1;
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:late-pin:",
+    redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 4, initialRetryDelayMs: 1 },
+  });
+
+  try {
+    await assert.rejects(
+      store.markSessionJoinedRoom("session-late-pin", "ROOMLP"),
+      // The `reason`, not a message substring: the read-failure handler wraps
+      // the message, and a wrapped one still CONTAINS the original — so a
+      // regex would pass either way and never notice the relabelling.
+      (error: unknown) =>
+        error instanceof NonRetryableWriteError &&
+        error.reason === "room_deleted",
+    );
+    assert.equal(evalCalls, 0, "nothing may be written against a dead room");
+  } finally {
+    await store.close();
+  }
+});
+
+test("the join index script declines a stale generation and writes nothing", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // The script IS the guard, and a fake client cannot run it — the store-level
+  // tests only ever assert what the store does with a script that already
+  // declined (#242 review).
+  const keyPrefix = createKeyPrefix();
+  const redis = new Redis(REDIS_URL);
+  const generationKey = `${keyPrefix}room:ROOMSG:generation`;
+  const sessionKey = `${keyPrefix}session:session-stale`;
+  const roomSessionsKey = `${keyPrefix}room:ROOMSG:sessions`;
+
+  const run = (expectedGeneration: string): Promise<unknown> =>
+    redis.eval(
+      JOIN_ROOM_INDEX_LUA,
+      5,
+      generationKey,
+      sessionKey,
+      `${keyPrefix}sessions`,
+      roomSessionsKey,
+      `${keyPrefix}rooms`,
+      expectedGeneration,
+      "session-stale",
+      "ROOMSG",
+      "id",
+      "session-stale",
+      "roomCode",
+      "ROOMSG",
+    );
+
+  try {
+    await redis.set(generationKey, "gen-2");
+
+    // A pin taken under the room's PREVIOUS generation.
+    assert.equal(Number(await run("gen-1")), 0);
+    assert.equal(await redis.exists(sessionKey), 0, "no session hash written");
+    assert.equal(await redis.scard(roomSessionsKey), 0, "no room index entry");
+
+    // The tombstone a teardown leaves is likewise not the live generation.
+    await redis.set(generationKey, "deleted");
+    assert.equal(Number(await run("gen-2")), 0);
+    assert.equal(await redis.exists(sessionKey), 0);
+
+    // And the matching pin does apply, so the guard is not simply refusing all.
+    assert.equal(Number(await run("deleted")), 1);
+    assert.equal(await redis.exists(sessionKey), 1);
+    assert.equal(await redis.scard(roomSessionsKey), 1);
+  } finally {
+    const keys = await redis.keys(`${keyPrefix}*`);
+    if (keys.length > 0) {
+      await redis.del(...keys);
+    }
+    await redis.quit();
+  }
+});
+
+test("redis runtime store keeps the full session record when a leave supersedes a lost registration", async () => {
+  // A leave supersedes the RETRY of a `registerSession` that failed. When it
+  // wrote only `roomCode`, everything else the registration carried — the new
+  // `displayName` above all — never landed, and `confirm()` still reported
+  // success because a superseded write is not counted as unconfirmed (#242
+  // review).
+  //
+  // Fake-driven on purpose: against real Redis the registration succeeds on its
+  // first attempt, so nothing is ever left for the leave to supersede and the
+  // test cannot tell the two implementations apart.
+  const hsetCalls: Array<Record<string, string> | string[]> = [];
+  let execCalls = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    multi() {
+      const commands = {
+        sadd() {
+          return commands;
+        },
+        srem() {
+          return commands;
+        },
+        del() {
+          return commands;
+        },
+        hset(_key: string, ...args: unknown[]) {
+          hsetCalls.push(
+            args.length === 1
+              ? (args[0] as Record<string, string>)
+              : (args as string[]),
+          );
+          return commands;
+        },
+        hdel() {
+          return commands;
+        },
+        zadd() {
+          return commands;
+        },
+        zrem() {
+          return commands;
+        },
+        exec() {
+          execCalls += 1;
+          // The registration's write fails, so its retry is what the leave
+          // then supersedes.
+          return execCalls === 1
+            ? Promise.reject(new Error("registration write failed"))
+            : Promise.resolve(null);
+        },
+      };
+      return commands;
+    },
+    async hgetall() {
+      return { id: "session-subset", roomCode: "ROOMSB" };
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:subset:",
+    redisClient: fakeRedis,
+    // Long enough that the registration is still waiting to retry when the
+    // leave arrives and supersedes it.
+    writeRetry: { maxAttempts: 5, initialRetryDelayMs: 10_000 },
+  });
+
+  try {
+    const session = createSession("session-subset");
+    session.displayName = "Renamed";
+    session.memberId = "member-subset";
+    session.memberToken = "token-subset";
+    void store.registerSession(session);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(
+      hsetCalls.length,
+      1,
+      "the registration attempt ran and failed",
+    );
+
+    session.roomCode = null;
+    await store.markSessionLeftRoom(session.id, "ROOMSB");
+
+    const leaveWrite = hsetCalls.at(-1);
+    assert.ok(
+      leaveWrite && !Array.isArray(leaveWrite),
+      `the leave must write a full record, got ${JSON.stringify(leaveWrite)}`,
+    );
+    assert.equal(leaveWrite.roomCode, "", "the leave still blanks the room");
+    assert.equal(leaveWrite.displayName, "Renamed", "the rename must land");
+    assert.equal(leaveWrite.id, "session-subset", "the record stays readable");
+    assert.equal(leaveWrite.memberId, "member-subset");
+  } finally {
+    await store.close();
+  }
 });

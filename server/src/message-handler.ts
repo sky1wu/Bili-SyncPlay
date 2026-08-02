@@ -160,7 +160,7 @@ export function createMessageHandler(options: {
    * must pass `"disconnect"`: the client still holds its `memberToken` and
    * will present it on the next join to reclaim the same `memberId` (#234).
    */
-  leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<void>;
+  leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<boolean>;
   flushPendingPublishes: (options?: { final?: boolean }) => Promise<void>;
 } {
   const { config, roomService, logEvent, send, sendError } = options;
@@ -220,11 +220,12 @@ export function createMessageHandler(options: {
     roomCode: string,
     socket: WebSocket,
   ): Promise<void> {
-    let rolledBack = true;
+    let rolledBack = false;
     try {
-      await leaveRoom(session, "disconnect");
+      // The RETURNED verdict, not merely "it did not throw": the cleanup is
+      // skipped on two paths that resolve normally (#242 review).
+      rolledBack = await leaveRoom(session, "disconnect");
     } catch (error) {
-      rolledBack = false;
       logEvent("room_join_rollback_failed", {
         sessionId: session.id,
         roomCode,
@@ -522,17 +523,31 @@ export function createMessageHandler(options: {
     }
   }
 
+  /**
+   * Returns whether the session is provably out of the room's index.
+   *
+   * `abortJoin` acts on it, so the three ways the cleanup can be skipped all
+   * have to answer `false` — not just the one that throws (#242 review):
+   * the service call rejecting, the early return that never reaches the hook,
+   * and the hook itself reporting failure.
+   */
   async function leaveRoom(
     session: Session,
     reason: LeaveRoomReason = "client-request",
-  ): Promise<void> {
+  ): Promise<boolean> {
     const roomCode = session.roomCode;
     const memberId = session.memberId ?? session.id;
     const displayName = session.displayName;
     const { room, notifyRoom, memberRemoved, needsRoomStateResync } =
       await roomService.leaveRoomForSession(session, reason);
-    if (!roomCode || (!room && !notifyRoom)) {
-      return;
+    if (!roomCode) {
+      // In no room to begin with; there is nothing to have failed.
+      return true;
+    }
+    if (!room && !notifyRoom) {
+      // The service released the room but this path never runs the hook, so
+      // `markSessionLeftRoom` never went out and the index still lists us.
+      return false;
     }
     const roomIndexCleaned = await runRoomLeftHook(session, roomCode);
     // Two independent questions, so two independent gates. `memberRemoved` is
@@ -545,7 +560,7 @@ export function createMessageHandler(options: {
       if (publishResync) {
         publishSharedOwnerResync(roomCode);
       }
-      return;
+      return roomIndexCleaned;
     }
 
     await firePublishRoomEvent(
@@ -570,6 +585,7 @@ export function createMessageHandler(options: {
     if (publishResync) {
       publishSharedOwnerResync(roomCode);
     }
+    return roomIndexCleaned;
   }
 
   /**
@@ -1092,7 +1108,11 @@ export function createMessageHandler(options: {
             );
             return;
           }
-          await measureMessageHandling("room:leave", () => leaveRoom(session));
+          await measureMessageHandling("room:leave", async () => {
+            // The verdict is for `abortJoin`; an explicit leave already gates
+            // its own publishing on it inside `leaveRoom`.
+            await leaveRoom(session);
+          });
           return;
         }
         case "profile:update": {
