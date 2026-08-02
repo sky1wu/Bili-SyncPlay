@@ -56,23 +56,29 @@ export function createRuntimeIndexReaper(options: {
         );
       }
       if (session.roomCode) {
-        // A failed index write only costs this room its announcement: one
-        // unwritable entry must not abandon the rest of the sweep, and a
-        // `room:state` rebuilt from an index that still lists the dead session
-        // would put it straight back into the roster. The next pass retries.
-        const roomCode = session.roomCode;
-        const indexCleaned = await options.runtimeStore
-          .markSessionLeftRoom(session.id, roomCode)
-          .then(() => true)
-          .catch(() => false);
-        if (indexCleaned) {
-          roomsToResync.add(roomCode);
-        }
+        // Swallowed, and NOT used to gate the announcement. One unwritable entry
+        // must not abandon the rest of the sweep, and gating on it lost the
+        // announcement for good: `unregisterSession` below deletes the session
+        // hash and SREMs the same room-sessions key on its own, so the room ends
+        // up clean either way — while the session disappears from
+        // `listClusterSessions`, leaving the next pass nothing to retry (#235
+        // review). In the rare case both writes fail, announcing is still no
+        // worse than silence: the rebuilt state names the dead member, which is
+        // exactly what every client already caches.
+        await options.runtimeStore
+          .markSessionLeftRoom(session.id, session.roomCode)
+          .catch(() => undefined);
+        roomsToResync.add(session.roomCode);
       }
 
       options.runtimeStore.unregisterSession(session.id);
       cleanedSessions += 1;
     }
+
+    // Both cleanups are queued writes, so the announcement has to wait for them
+    // to drain — otherwise the consumer rebuilds `room:state` from an index that
+    // still lists the sessions this sweep just reaped.
+    await options.runtimeStore.flush?.();
 
     // After the whole sweep, so a room that lost several members to the same
     // dead node is announced once rather than once per seat.

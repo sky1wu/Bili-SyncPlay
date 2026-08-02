@@ -2507,9 +2507,11 @@ test("a resync survives a leave that publishes no member delta", async () => {
 });
 
 test("switching rooms tells the old room even when the index cleanup fails", async () => {
-  // The delta reads no state, so a dirty index cannot corrupt it — suppressing
-  // it left protocol >= 2 clients holding the switcher forever (#235 review).
-  // The full state is the only half that has to be withheld.
+  // Both halves go out here, unlike an explicit leave: a switcher's session hash
+  // already names the NEW room, so `roomStateFromSessions` drops it from the old
+  // room's roster by itself. Withholding the full state instead lost the
+  // announcement permanently — nothing afterwards carries the old room code, so
+  // there is no retry (#235 review).
   const published: string[] = [];
   const publishedRooms: string[] = [];
   const session = createSession("member-1", {
@@ -2534,6 +2536,10 @@ test("switching rooms tells the old room even when the index cleanup fails", asy
   });
   await handler.flushPendingPublishes();
 
-  assert.deepEqual(published, ["room_member_left", "room_member_joined"]);
-  assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-NEW"]);
+  assert.deepEqual(published, [
+    "room_member_left",
+    "room_state_updated",
+    "room_member_joined",
+  ]);
+  assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-OLD", "ROOM-NEW"]);
 });

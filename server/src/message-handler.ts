@@ -521,21 +521,27 @@ export function createMessageHandler(options: {
    * nothing — so the old room is told neither that the member is gone nor that
    * the share may have moved with them (#235 review).
    *
-   * Split the same way as an explicit leave, and for the same reason: the delta
-   * reads no state, so it goes out even when the index write failed, while the
-   * full `room:state` must not be built on an index still listing the member.
    * The identity is passed in because the caller captured it BEFORE the switch —
    * by now `session.memberId` names the new room's seat.
    *
-   * The full state is unconditional otherwise: the internal leave's verdict
-   * never reaches here, and a switch is rare enough that one broadcast is
-   * cheaper than plumbing it out.
+   * Both events go out even when the index write failed, which is where this
+   * differs from an explicit leave. A switcher's session hash already names the
+   * NEW room, so `roomStateFromSessions` drops it from the old room's roster on
+   * its own and the state is correct regardless. Withholding it instead lost the
+   * announcement permanently: nothing afterwards carries the old room code, so
+   * there is no retry (#235 review). `leaveRoom` keeps its gate because a leaver
+   * ends up with no room code at all, which reads as missing information rather
+   * than as residue — a state published there really could put them back.
+   *
+   * Unconditional otherwise: the internal leave's verdict never reaches here,
+   * and a switch is rare enough that one broadcast is cheaper than plumbing it
+   * out.
    */
   async function releasePreviousRoom(
     session: Session,
     previous: { roomCode: string; memberId: string; displayName: string },
   ): Promise<void> {
-    const roomIndexCleaned = await runRoomLeftHook(session, previous.roomCode);
+    await runRoomLeftHook(session, previous.roomCode);
     await firePublishRoomEvent(
       {
         type: "room_member_left",
@@ -550,9 +556,6 @@ export function createMessageHandler(options: {
         origin: session.origin,
       },
     );
-    if (!roomIndexCleaned) {
-      return;
-    }
     await publishSharedOwnerResync(
       session,
       previous.roomCode,

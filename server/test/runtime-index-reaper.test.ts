@@ -208,3 +208,75 @@ test("runtime index reaper tells the rooms it emptied to rebuild", async (t) => 
     await runtimeStore.close();
   }
 });
+
+test("runtime index reaper announces the room even when the index write fails", async () => {
+  // Gating the announcement on that write lost it for good: `unregisterSession`
+  // deletes the session hash and SREMs the same room-sessions key on its own, so
+  // the room ends up clean either way — while the session disappears from
+  // `listClusterSessions`, leaving the next pass nothing to retry (#235 review).
+  const published: string[] = [];
+  let flushed = 0;
+  const reaped: string[] = [];
+  const deadSession = createSession("session-unwritable", "offline-node");
+  deadSession.roomCode = "ROOM42";
+  deadSession.memberId = "member-unwritable";
+
+  const runtimeStore = {
+    async listNodeStatuses() {
+      return [
+        {
+          instanceId: "offline-node",
+          version: "test",
+          startedAt: 0,
+          lastHeartbeatAt: 0,
+          staleAt: 0,
+          expiresAt: 0,
+          connectionCount: 1,
+          activeRoomCount: 1,
+          activeMemberCount: 1,
+          health: "offline" as const,
+        },
+      ];
+    },
+    async listClusterSessions() {
+      return reaped.length > 0 ? [] : [deadSession];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {
+      throw new Error("index write failed");
+    },
+    unregisterSession(sessionId: string) {
+      reaped.push(sessionId);
+    },
+    async purgeNodeStatus() {},
+    async flush() {
+      flushed += 1;
+    },
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore: runtimeStore as unknown as Parameters<
+      typeof createRuntimeIndexReaper
+    >[0]["runtimeStore"],
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async (roomCode) => {
+      published.push(roomCode);
+    },
+  });
+
+  try {
+    assert.equal(await reaper.sweep(), 1);
+    assert.deepEqual(reaped, ["session-unwritable"]);
+    assert.deepEqual(published, ["ROOM42"]);
+    assert.ok(
+      flushed > 0,
+      "queued cleanups must drain before the announcement",
+    );
+  } finally {
+    await reaper.stop();
+  }
+});
