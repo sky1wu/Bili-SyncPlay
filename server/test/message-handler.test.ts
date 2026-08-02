@@ -2700,3 +2700,88 @@ test("shutdown drains the retrying shared-owner resync, not just the one-shot pu
   await handler.flushPendingPublishes();
   assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
 });
+
+test("the final publish flush does not let a resync record open a second batch", async () => {
+  // `flush_pending_room_event_publishes` is sized for one retry budget. A
+  // request that arrived mid-batch earns a fresh one at runtime, which at
+  // shutdown is two budgets in a step sized for one (#242 review).
+  const published: string[] = [];
+  let releaseFirstResync: (() => void) | null = null;
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        return {
+          room: { code: "ROOM01" },
+          memberRemoved: true,
+          needsRoomStateResync: true,
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    publishRoomEvent(message) {
+      published.push(message.type);
+      if (message.type === "room_state_updated" && !releaseFirstResync) {
+        return new Promise<void>((resolve) => {
+          releaseFirstResync = resolve;
+        });
+      }
+      return Promise.resolve();
+    },
+    instanceId: "node-a",
+    sharedOwnerResyncRetry: {
+      initialRetryDelayMs: 1,
+      sleep: () => Promise.resolve(),
+    },
+  });
+
+  // Two leaves: the second asks for a resync while the first one's publish is
+  // still in flight, which is what would earn the extra batch.
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  session.roomCode = "ROOM01";
+  session.memberId = "member-1";
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+
+  const flushed = handler.flushPendingPublishes({ final: true });
+  (releaseFirstResync as (() => void) | null)?.();
+  await flushed;
+
+  assert.equal(
+    published.filter((type) => type === "room_state_updated").length,
+    1,
+    "the wind-down must not open a second resync batch",
+  );
+});

@@ -503,7 +503,7 @@ export async function createSyncServer(
             // close_room_event_consumer / close_room_event_bus tears the bus down,
             // so we don't lose final broadcasts under Redis backpressure.
             timeoutMs: 30_000,
-            run: () => messageHandler.flushPendingPublishes(),
+            run: () => messageHandler.flushPendingPublishes({ final: true }),
           },
           {
             name: "close_admin_command_consumer",

@@ -179,3 +179,36 @@ test("pending resync queue still serves a request made while a doomed batch retr
   assert.equal(attempts, 3);
   assert.equal(queue.size(), 0);
 });
+
+test("pending resync queue stops opening new batches once it is winding down", async () => {
+  // Each batch costs a full retry budget, and the drain is otherwise unbounded
+  // in how many a record may run — two of them exceed the shutdown step that
+  // waits for them, and an overrun step is a FAILED step, after which the bus
+  // is torn down anyway (#242 review).
+  const attempts: string[] = [];
+  let releaseFirst: (() => void) | null = null;
+  const queue = createPendingResyncQueue({
+    sleep: instantSleep,
+    publish: (roomCode) => {
+      attempts.push(roomCode);
+      if (attempts.length === 1) {
+        return new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return Promise.resolve();
+    },
+  });
+
+  queue.request("ROOM01");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  // Mid-batch: at runtime this earns a second batch (see the test above).
+  queue.request("ROOM01");
+
+  queue.stopAfterCurrentBatch();
+  (releaseFirst as (() => void) | null)?.();
+  await queue.drain();
+
+  assert.deepEqual(attempts, ["ROOM01"], "the second batch must not open");
+  assert.equal(queue.size(), 0);
+});

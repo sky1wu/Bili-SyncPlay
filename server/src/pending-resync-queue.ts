@@ -62,6 +62,23 @@ export type PendingResyncQueue = {
   request: (roomCode: string) => void;
   /** Every outstanding record has settled, however it settled. */
   drain: () => Promise<void>;
+  /**
+   * Let each record finish the batch it is on and stop there, instead of
+   * running another for the requests that arrived mid-batch. Irreversible.
+   *
+   * A drain is otherwise unbounded in the number of batches, and each batch
+   * costs a full retry budget: two of them exceed the shutdown step that has to
+   * wait for them, and an overrun step is a FAILED step — after which the bus
+   * is torn down anyway, so the publish is lost AND the process exits non-zero
+   * (#242 review). Batches for DIFFERENT rooms run concurrently, so bounding
+   * each record to one batch bounds the whole drain to one.
+   *
+   * The cost is the mid-batch request itself: at shutdown it is dropped rather
+   * than given the fresh budget it would get at runtime. Session cleanup has
+   * already drained by the time this is called, so there should be nothing left
+   * to make one.
+   */
+  stopAfterCurrentBatch: () => void;
   /** Room codes with an outstanding record. */
   size: () => number;
 };
@@ -110,6 +127,7 @@ export function createPendingResyncQueue(
   const sleep = options.sleep ?? defaultSleep;
 
   const records = new Map<string, PendingRecord>();
+  let stoppedAfterCurrentBatch = false;
 
   function retryDelayMs(attempt: number): number {
     return Math.min(initialRetryDelayMs * 2 ** (attempt - 1), maxRetryDelayMs);
@@ -144,7 +162,7 @@ export function createPendingResyncQueue(
    */
   async function drive(roomCode: string, record: PendingRecord): Promise<void> {
     try {
-      while (record.pending) {
+      while (record.pending && !stoppedAfterCurrentBatch) {
         record.pending = false;
         for (let attempt = 1; ; attempt += 1) {
           try {
@@ -189,6 +207,9 @@ export function createPendingResyncQueue(
       records.set(roomCode, record);
       record.settled = drive(roomCode, record);
       void record.settled.catch(() => undefined);
+    },
+    stopAfterCurrentBatch() {
+      stoppedAfterCurrentBatch = true;
     },
     async drain() {
       while (records.size > 0) {

@@ -159,7 +159,7 @@ export function createMessageHandler(options: {
    * will present it on the next join to reclaim the same `memberId` (#234).
    */
   leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<void>;
-  flushPendingPublishes: () => Promise<void>;
+  flushPendingPublishes: (options?: { final?: boolean }) => Promise<void>;
 } {
   const { config, roomService, logEvent, send, sendError } = options;
   const now = options.now ?? Date.now;
@@ -477,8 +477,18 @@ export function createMessageHandler(options: {
    * Drains the retrying resync records too, not just the one-shot wrappers.
    * Shutdown calls this before the bus is torn down, and a record left behind
    * is the one broadcast nothing else will ever re-send (#242).
+   *
+   * `final` marks the shutdown call. Without it the drain is unbounded in the
+   * number of retry BATCHES a record may run — a request that arrived mid-batch
+   * earns a fresh budget, which is right at runtime and, at shutdown, is two
+   * budgets in a step sized for one (#242 review).
    */
-  async function flushPendingPublishes(): Promise<void> {
+  async function flushPendingPublishes(options?: {
+    final?: boolean;
+  }): Promise<void> {
+    if (options?.final) {
+      sharedOwnerResyncQueue.stopAfterCurrentBatch();
+    }
     while (pendingPublishes.size > 0 || sharedOwnerResyncQueue.size() > 0) {
       await Promise.allSettled([
         ...Array.from(pendingPublishes),

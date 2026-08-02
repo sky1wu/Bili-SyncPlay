@@ -237,7 +237,10 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   that returns immediately; `firePublishRoomEvent` deliberately does not await
   its wrapper, and making the leave/join handlers block on the bus would be the
   worse trade. `flushPendingPublishes` must drain that queue too, or shutdown
-  tears the bus down with records still owed.
+  tears the bus down with records still owed — and the shutdown call passes
+  `{ final: true }`, which stops each record after the batch it is on. A request
+  that lands mid-batch earns a fresh retry budget, which is right at runtime and
+  is two budgets in a step sized for one at shutdown.
 - The **runtime index reaper's** announcement is the only thing that tells a
   room a dead node's members are gone. Once the sweep has cleaned the indexes,
   `listClusterSessions` no longer returns those sessions, so a later sweep has
