@@ -22,14 +22,21 @@ export type RuntimeIndexReaperStore = Pick<
   Partial<Pick<RuntimeStore, "flush" | "confirmWrites">>;
 
 /**
- * How many rooms may be waiting for a resync announcement at once.
+ * Backlog size that gets logged, NOT a cap.
  *
- * The records are the only retry trail there is, so they are kept until the
- * publish succeeds — but a bus that is down for a long time must not turn that
- * into unbounded growth. Overflow drops the OLDEST record: the newest ones name
- * the rooms whose members most recently lost a seat.
+ * There is deliberately no eviction. A record is the only trail back to its
+ * room: the offline sessions are already out of the cluster index, so a dropped
+ * record means that room's clients keep a dead `sharedByMemberId` until someone
+ * reloads the page — the exact loss this set exists to prevent, now caused by
+ * the thing meant to bound it (#242 review). Shedding load by discarding
+ * unpublished one-shot notifications is not a trade this can make.
+ *
+ * Growth is bounded in practice by the number of distinct rooms that held a
+ * dead node's members while the bus was rejecting publishes, and each entry is
+ * a room code; the set drains as soon as the bus recovers. If that ever stops
+ * being true the answer is to persist the records, not to evict them.
  */
-const MAX_PENDING_RESYNC_ROOMS = 512;
+const PENDING_RESYNC_BACKLOG_WARN_THRESHOLD = 512;
 
 export function createRuntimeIndexReaper(options: {
   enabled: boolean;
@@ -66,22 +73,20 @@ export function createRuntimeIndexReaper(options: {
   const roomsAwaitingResync = new Set<string>();
 
   function rememberResync(roomCode: string): void {
-    if (
-      !roomsAwaitingResync.has(roomCode) &&
-      roomsAwaitingResync.size >= MAX_PENDING_RESYNC_ROOMS
-    ) {
-      const oldest = roomsAwaitingResync.values().next();
-      if (!oldest.done) {
-        roomsAwaitingResync.delete(oldest.value);
-        options.logEvent?.("runtime_index_resync_dropped", {
-          roomCode: oldest.value,
-          pendingRooms: roomsAwaitingResync.size,
-          result: "dropped",
-          reason: "pending_resync_overflow",
-        });
-      }
-    }
+    const isNew = !roomsAwaitingResync.has(roomCode);
     roomsAwaitingResync.add(roomCode);
+    if (
+      isNew &&
+      roomsAwaitingResync.size >= PENDING_RESYNC_BACKLOG_WARN_THRESHOLD
+    ) {
+      // Reported, never evicted — see the threshold's own comment.
+      options.logEvent?.("runtime_index_resync_backlog", {
+        pendingRooms: roomsAwaitingResync.size,
+        threshold: PENDING_RESYNC_BACKLOG_WARN_THRESHOLD,
+        result: "degraded",
+        reason: "room_state_resync_publish_backlog",
+      });
+    }
   }
 
   /**

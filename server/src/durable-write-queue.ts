@@ -98,13 +98,16 @@ export type DurableWriteQueue = {
    */
   confirm: () => Promise<void>;
   /**
-   * Let every outstanding write finish its CURRENT attempt and then give up,
-   * instead of backing off for another one. Irreversible.
+   * Wind down: writes already running finish the attempt they are on, backoffs
+   * in flight are cut short, and writes that have not started yet are dropped
+   * without one. Irreversible.
    *
-   * Shutdown needs it. A close step gets a few seconds; a queue that kept
-   * retrying through a Redis outage would spend the whole retry budget there
-   * and the step would be recorded as failed, so the process exits non-zero
-   * over writes that were never going to land anyway (#242).
+   * Shutdown needs it, and needs all three. A close step gets a few seconds; a
+   * queue that kept retrying through a Redis outage — or that let each queued
+   * write open one more attempt of its own — would overrun that step, and an
+   * overrun step is recorded as a FAILURE, so the process exits non-zero over
+   * writes that were never going to land anyway (#242). What is left after
+   * this call is bounded by ONE attempt.
    */
   stopRetrying: () => void;
   /** Writes still in flight or waiting to retry. */
@@ -191,11 +194,21 @@ export function createDurableWriteQueue(
     request: DurableWriteRequest,
     isSuperseded: () => boolean,
   ): Promise<void> {
+    // Shutdown is the one thing that stops a write before it has tried at all.
+    // A queue can hold several writes for one session, and each would otherwise
+    // still start an attempt and hold the close step for a whole attempt
+    // timeout apiece — so the step times out and the process exits non-zero
+    // over writes nobody is waiting for any more (#242 review).
+    if (retriesStopped) {
+      throw new Error(
+        `Durable write ${request.operationName} for ${request.key} was dropped: the queue is shutting down.`,
+      );
+    }
     let lastError: unknown;
-    // Every write gets its FIRST attempt regardless of supersession: the queue
-    // cannot know that a newer write covers the same fields, and skipping the
-    // attempt outright would silently lose writes that touch disjoint state.
-    // Only the retries are given up.
+    // Supersession, by contrast, never skips the FIRST attempt: the queue
+    // cannot know that the newer write covers the same fields, and skipping
+    // outright would silently lose writes that touch disjoint state. Only the
+    // retries are given up.
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         await request.run();

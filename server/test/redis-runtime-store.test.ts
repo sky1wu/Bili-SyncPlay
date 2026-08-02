@@ -1964,3 +1964,100 @@ test("redis runtime store stops backing off once it is closing", async () => {
   );
   assert.equal(attempts, 1, "no further attempt after the close began");
 });
+
+test("redis runtime store pins the join generation before the queue gets to it", async () => {
+  // The operation body does not run until the session's chain drains, and that
+  // is unbounded — a prior write for the same session can hold it. Pinning in
+  // there reads whatever generation exists by THEN, including the new
+  // occupant's after a recycle, and the Lua check then waves the old join into
+  // a room it never joined (#242 review).
+  let currentGeneration = "gen-1";
+  let evalAttempts = 0;
+  const expectedGenerations: string[] = [];
+  const slowRegistration = createDeferred<unknown>();
+  const fakeRedis = {
+    ...createFakeRedisClient([slowRegistration.promise]),
+    async hgetall() {
+      return { id: "session-queued", roomCode: "" };
+    },
+    async get() {
+      return currentGeneration;
+    },
+    async eval(
+      _script: string,
+      numKeys: number,
+      ...args: Array<string | number>
+    ) {
+      evalAttempts += 1;
+      expectedGenerations.push(String(args[numKeys]));
+      // Stands in for the script's own check against the live generation.
+      return String(args[numKeys]) === currentGeneration ? 1 : 0;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:queued:",
+    redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 4, initialRetryDelayMs: 1 },
+  });
+
+  try {
+    const session = createSession("session-queued");
+    // Occupies the session's chain: its first attempt is in flight, and
+    // supersession only abandons RETRIES, so the join queues behind it.
+    store.registerSession(session);
+    const joined = store.markSessionJoinedRoom(session.id, "ROOMQD");
+    joined.catch(() => undefined);
+
+    // The join is pinned by now, but its body has not run. The code changes
+    // hands while it waits.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(evalAttempts, 0, "the join body must still be queued");
+    currentGeneration = "gen-2";
+    slowRegistration.resolve(null);
+
+    await assert.rejects(joined, /changed hands/);
+    // Pinned at the call, so it still names the room the join was actually for.
+    assert.deepEqual(expectedGenerations, ["gen-1"]);
+    assert.equal(evalAttempts, 1);
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store refuses a join whose room generation cannot be read", async () => {
+  // A second read is a second chance to pin the WRONG room instance, so an
+  // unreadable generation refuses the join rather than retrying the read. The
+  // client retries the join — the same trade this path makes for the index
+  // write itself (#242 review).
+  let evalAttempts = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async hgetall() {
+      return { id: "session-blind", roomCode: "" };
+    },
+    async get() {
+      throw new Error("generation read failed");
+    },
+    async eval() {
+      evalAttempts += 1;
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:blind:",
+    redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 4, initialRetryDelayMs: 1 },
+  });
+
+  try {
+    await assert.rejects(
+      store.markSessionJoinedRoom("session-blind", "ROOMBL"),
+      /Could not pin the generation/,
+    );
+    assert.equal(evalAttempts, 0, "nothing may be written unguarded");
+  } finally {
+    await store.close();
+  }
+});

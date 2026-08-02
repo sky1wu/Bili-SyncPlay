@@ -191,18 +191,25 @@ decides something has to know which of the two questions it is asking (#242):
   `durable-write-queue` gives every queued write a bounded, backed-off retry
   budget. That reopens the room-code recycling hazard #237 closed: a retry that
   lands after the code changed hands would write into the new room. Only the
-  join write ADDS a session to a room, so only it needs the guard — it pins the
-  room generation BEFORE its first attempt and carries it into the script, and
-  a mismatch is a `NonRetryableWriteError` (a generation only moves forward, so
-  no later attempt can find its way back). A new write that seats or moves
-  anything by room code needs the same pin; one that only touches keys named
-  after the session does not, because session ids are never reused.
-  Every retry budget is sized against the shutdown step that has to drain it —
-  a close step gets 5s, `flush_pending_room_event_publishes` 30s — and a drain
-  that overruns is recorded as a FAILED step, so the process exits non-zero.
-  `close()` therefore calls `stopRetrying()` first, which cancels the backoffs
-  in flight rather than waiting them out. Raising `maxAttempts` or a delay
-  means re-checking that arithmetic.
+  join write ADDS a session to a room, so only it needs the guard — and the pin
+  is read when `markSessionJoinedRoom` is CALLED, never inside the retryable
+  body: the body does not run until the session's chain drains, which is
+  unbounded, so a pin taken there can already name the code's NEXT occupant and
+  the check waves the write straight through. A mismatch is a
+  `NonRetryableWriteError` (a generation only moves forward, so no later attempt
+  can find its way back), and an unreadable generation refuses the join rather
+  than re-reading later, since a second read is a second chance to pin the wrong
+  instance. A new write that seats or moves anything by room code needs the same
+  pin; one that only touches keys named after the session does not, because
+  session ids are never reused.
+- **Every retry budget is sized against the shutdown step that drains it.**
+  `close_shared_runtime_store` and `flush_pending_room_event_publishes` carry
+  explicit timeouts, and an overrun is recorded as a FAILED step — so a shutdown
+  that merely waited out a retry exits the process non-zero. `close()` calls
+  `stopRetrying()` first, which cuts the backoffs in flight short AND drops
+  writes that have not started, leaving at most ONE in-flight attempt; the step
+  budget must exceed that attempt's own timeout. Raising `maxAttempts` or a
+  delay means redoing that arithmetic.
 - **A retry is abandoned when a newer write for the same session is queued.**
   Retrying past that point fights the newer write. This is only sound because
   the join write re-writes the WHOLE session record rather than patching
@@ -236,10 +243,11 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   `listClusterSessions` no longer returns those sessions, so a later sweep has
   nothing to rediscover the room from. The reaper keeps its own record set and
   retries it at the START of every sweep — before the "no offline nodes" early
-  return — dropping a record only once the publish succeeds. The set is
-  memory-only, so `stop()` takes one last pass over it, and sweeps no longer
-  overlap: they share that set, and `stop()` awaits only the sweep it knows
-  about.
+  return — dropping a record only once the publish succeeds. There is no cap:
+  evicting an unpublished record loses exactly what the set exists to keep, so
+  a backlog is logged, never shed. The set is memory-only, so `stop()` takes one
+  last pass over it, and sweeps no longer overlap: they share that set, and
+  `stop()` awaits only the sweep it knows about.
 
 ## Engineering Constraints
 

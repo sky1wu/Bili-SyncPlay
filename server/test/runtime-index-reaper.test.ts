@@ -546,3 +546,86 @@ test("runtime index reaper does not start a sweep while one is still running", a
     await reaper.stop();
   }
 });
+
+test("runtime index reaper never evicts an announcement it has not published", async () => {
+  // A record is the only trail back to its room: the offline sessions are
+  // already out of the cluster index. Shedding load by discarding unpublished
+  // one-shot notifications reintroduces the exact loss the set exists to
+  // prevent (#242 review).
+  const published: string[] = [];
+  let busDown = true;
+  let sweepIndex = 0;
+  const roomCount = 600;
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return sweepIndex === 0
+        ? [
+            {
+              instanceId: "offline-node",
+              version: "test",
+              startedAt: 0,
+              lastHeartbeatAt: 0,
+              staleAt: 0,
+              expiresAt: 0,
+              connectionCount: roomCount,
+              activeRoomCount: roomCount,
+              activeMemberCount: roomCount,
+              health: "offline" as const,
+            },
+          ]
+        : [];
+    },
+    async listClusterSessions() {
+      if (sweepIndex > 0) {
+        return [];
+      }
+      return Array.from({ length: roomCount }, (_unused, index) => {
+        const session = createSession(`session-${index}`, "offline-node");
+        session.roomCode = `ROOM${index}`;
+        session.memberId = `member-${index}`;
+        return session;
+      });
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    async flush() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async (roomCode) => {
+      if (busDown) {
+        throw new Error("bus down");
+      }
+      published.push(roomCode);
+    },
+  });
+
+  try {
+    assert.equal(await reaper.sweep(), roomCount);
+    // `.length`, not `deepEqual(published, [])`: under `assert/strict` that is
+    // an assertion signature and narrows `published` to `never[]` for the rest
+    // of the test, which `tsx --test` runs happily and `tsc` then rejects.
+    assert.equal(published.length, 0, "every publish failed");
+
+    // The bus recovers. Every room — including the ones a cap would have
+    // evicted — still gets its announcement, and the sessions are long gone
+    // from the cluster index by now.
+    sweepIndex = 1;
+    busDown = false;
+    assert.equal(await reaper.sweep(), 0);
+    assert.equal(published.length, roomCount);
+    assert.ok(published.includes("ROOM0"), "the oldest record survived");
+    assert.ok(published.includes(`ROOM${roomCount - 1}`));
+  } finally {
+    await reaper.stop();
+  }
+});

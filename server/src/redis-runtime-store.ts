@@ -1030,28 +1030,43 @@ export async function createRedisRuntimeStore(
     markSessionJoinedRoom(sessionId: string, roomCode: string) {
       ensurePendingCapacity("mark_session_joined_room");
       void localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
-      // Pinned before the first attempt writes anything, and carried by every
-      // attempt including that one. A retry is the obvious way this write can
-      // outlive the room instance it was meant for, and room codes are recycled
-      // — so without it a slow-to-land join could seat its session in whichever
-      // room took the code over (#242, #237). Reading it here rather than
-      // inside the script is what makes the pin survive a failed attempt: a
-      // generation the script only reported on success could never constrain
-      // the retry that follows a failure.
-      let expectedGeneration: string | undefined;
+      // Read HERE, at the moment the join is made — not inside the operation
+      // body, and not per attempt.
+      //
+      // Room codes are recycled, and the guard only works if the pinned value
+      // predates any recycle of the room instance this join is for. The body
+      // does not run until the session's chain drains, which is unbounded: a
+      // prior write for the same session may still be retrying. Pinning in
+      // there would read whatever generation existed by then — including the
+      // NEW occupant's, after which the Lua check passes and this join seats
+      // its session in a room it never joined (#242 review, #237).
+      //
+      // A failed read makes the write non-retryable rather than re-reading it
+      // later, for the same reason: a second read is a second chance to pin the
+      // wrong instance. The join is refused and the client retries it, which is
+      // the trade this path already makes for the index write itself.
+      const pinnedGeneration = redis
+        .get(roomGenerationKey(keyPrefix, roomCode))
+        .then((generation) => generation ?? "")
+        .catch((error: unknown) => {
+          throw new NonRetryableWriteError(
+            `Could not pin the generation of room ${roomCode}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            "room_generation_unreadable",
+          );
+        });
+      pinnedGeneration.catch(() => undefined);
       return queueSessionOperation(
         sessionId,
         "mark_session_joined_room",
         async () => {
           // Concurrent with the session read, so the guard costs no extra
           // round trip on the path a join actually waits for.
-          const [storedSession, generation] = await Promise.all([
+          const [storedSession, expectedGeneration] = await Promise.all([
             loadSession(redis, keyPrefix, sessionId),
-            expectedGeneration === undefined
-              ? redis.get(roomGenerationKey(keyPrefix, roomCode))
-              : Promise.resolve(expectedGeneration),
+            pinnedGeneration,
           ]);
-          expectedGeneration = generation ?? "";
           const localSession = localRuntimeStore.getSession(sessionId);
           const roomCodeToLeave = getPreviousRoomToLeave(
             storedSession?.roomCode ?? null,

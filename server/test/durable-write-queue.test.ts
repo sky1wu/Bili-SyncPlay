@@ -228,3 +228,47 @@ test("durable write queue does not count a superseded write as unconfirmed", asy
   // The newer write landed, so the key IS in the state the caller wanted.
   await queue.confirm();
 });
+
+test("durable write queue drops writes that have not started once it is winding down", async () => {
+  // A queue can hold several writes for one session, and they run one at a
+  // time. Letting each still open an attempt held the close step for a whole
+  // attempt timeout apiece, so the step overran and the process exited non-zero
+  // over writes nobody was waiting for (#242 review). What survives
+  // `stopRetrying` is bounded by ONE attempt: the one already running.
+  const started: string[] = [];
+  let releaseFirst: (() => void) | null = null;
+  const queue = createDurableWriteQueue({ sleep: () => Promise.resolve() });
+
+  const first = queue.enqueue({
+    key: "session-a",
+    operationName: "first",
+    run: () =>
+      new Promise<void>((resolve) => {
+        started.push("first");
+        releaseFirst = resolve;
+      }),
+  });
+  const queued = ["second", "third"].map((operationName) => {
+    const outcome = queue.enqueue({
+      key: "session-a",
+      operationName,
+      run: async () => {
+        started.push(operationName);
+      },
+    });
+    outcome.catch(() => undefined);
+    return outcome;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, ["first"], "only the first write may be running");
+
+  queue.stopRetrying();
+  (releaseFirst as (() => void) | null)?.();
+
+  await first;
+  for (const outcome of queued) {
+    await assert.rejects(outcome, /shutting down/);
+  }
+  assert.deepEqual(started, ["first"]);
+});
