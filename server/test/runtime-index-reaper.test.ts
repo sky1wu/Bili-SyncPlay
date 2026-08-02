@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
-import { createRuntimeIndexReaper } from "../src/runtime-index-reaper.js";
+import {
+  createRuntimeIndexReaper,
+  type RuntimeIndexReaperStore,
+} from "../src/runtime-index-reaper.js";
 import type { AttachedSession, Session } from "../src/types.js";
 
 const REDIS_URL = process.env.REDIS_URL;
@@ -221,7 +224,7 @@ test("runtime index reaper announces the room even when the index write fails", 
   deadSession.roomCode = "ROOM42";
   deadSession.memberId = "member-unwritable";
 
-  const runtimeStore = {
+  const runtimeStore: RuntimeIndexReaperStore = {
     async listNodeStatuses() {
       return [
         {
@@ -258,9 +261,9 @@ test("runtime index reaper announces the room even when the index write fails", 
 
   const reaper = createRuntimeIndexReaper({
     enabled: true,
-    runtimeStore: runtimeStore as unknown as Parameters<
-      typeof createRuntimeIndexReaper
-    >[0]["runtimeStore"],
+    // Structurally checked, not cast: the whole point of this test is the
+    // contract of the writes it drives (#235 review).
+    runtimeStore,
     intervalMs: 50,
     now: () => 1_000,
     publishRoomStateUpdate: async (roomCode) => {

@@ -2,9 +2,28 @@ import { clampTimerIntervalMs } from "./timers.js";
 import type { LogEvent } from "./types.js";
 import type { RuntimeStore } from "./runtime-store.js";
 
+/**
+ * Exactly what the sweep touches, and no more.
+ *
+ * Narrow on purpose: a fake that has to satisfy the whole `RuntimeStore` gets
+ * cast past the checker instead, and the cast then swallows every later change
+ * to the contracts these tests exist to pin — `markSessionLeftRoom` becoming
+ * awaitable, `removeMember` carrying `durable` (#235 review).
+ */
+export type RuntimeIndexReaperStore = Pick<
+  RuntimeStore,
+  | "listNodeStatuses"
+  | "listClusterSessions"
+  | "removeMember"
+  | "markSessionLeftRoom"
+  | "unregisterSession"
+  | "purgeNodeStatus"
+> &
+  Partial<Pick<RuntimeStore, "flush">>;
+
 export function createRuntimeIndexReaper(options: {
   enabled: boolean;
-  runtimeStore: RuntimeStore;
+  runtimeStore: RuntimeIndexReaperStore;
   intervalMs: number;
   now?: () => number;
   logEvent?: LogEvent;
