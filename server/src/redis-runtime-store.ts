@@ -446,19 +446,41 @@ end
 return removed
 `;
 
+/**
+ * Best-effort housekeeping: drop a room that has no sessions and no members
+ * from the active-room set. Never fails its caller.
+ *
+ * It rides along at the end of operations whose REAL work is something else —
+ * removing one session from one room's index — and those operations now report
+ * whether that work landed. Letting a transient failure here reject the whole
+ * thing said "the index was not cleaned" about a write that had already
+ * succeeded, and the leave path answered by withholding the `room:state` the
+ * room was owed (#235 review).
+ *
+ * Swallowing is safe because a stale entry is collected anyway: `deleteRoom`
+ * purges `<prefix>rooms` when the room is torn down, and it retries through
+ * `pendingRuntimeTeardowns`. Nothing correctness-bearing reads this set —
+ * `hasRoomResidue` treats a stale entry as "code still dirty" and simply picks
+ * another room code.
+ */
 async function cleanupEmptyRoomIndex(
   redis: RedisClient,
   prefix: string,
   roomCode: string,
+  onError: (error: unknown) => void,
 ): Promise<void> {
-  await redis.eval(
-    CLEANUP_EMPTY_ROOM_LUA,
-    3,
-    roomSessionsKey(prefix, roomCode),
-    `${prefix}rooms`,
-    roomMembersKey(prefix, roomCode),
-    roomCode,
-  );
+  try {
+    await redis.eval(
+      CLEANUP_EMPTY_ROOM_LUA,
+      3,
+      roomSessionsKey(prefix, roomCode),
+      `${prefix}rooms`,
+      roomMembersKey(prefix, roomCode),
+      roomCode,
+    );
+  } catch (error) {
+    onError(error);
+  }
 }
 
 export async function createRedisRuntimeStore(
@@ -627,6 +649,18 @@ export async function createRedisRuntimeStore(
     });
   }
 
+  /** Reports a swallowed housekeeping failure without failing its operation. */
+  function reportEmptyRoomCleanupFailure(error: unknown): void {
+    logPendingOperationError(
+      {
+        operationName: "cleanup_empty_room_index",
+        pendingCount: pendingOperations.size,
+        reason: "failed",
+      },
+      error,
+    );
+  }
+
   /** Collect identities past their retention. Lazy — called on token reads/writes. */
   async function pruneExpiredMemberTokens(code: string): Promise<void> {
     await redis.eval(
@@ -761,7 +795,12 @@ export async function createRedisRuntimeStore(
 
         await transaction.exec();
         if (session.roomCode) {
-          await cleanupEmptyRoomIndex(redis, keyPrefix, session.roomCode);
+          await cleanupEmptyRoomIndex(
+            redis,
+            keyPrefix,
+            session.roomCode,
+            reportEmptyRoomCleanupFailure,
+          );
         }
         purgedCount += 1;
       }
@@ -783,7 +822,12 @@ export async function createRedisRuntimeStore(
         }
         await transaction.exec();
         if (roomCode) {
-          await cleanupEmptyRoomIndex(redis, keyPrefix, roomCode);
+          await cleanupEmptyRoomIndex(
+            redis,
+            keyPrefix,
+            roomCode,
+            reportEmptyRoomCleanupFailure,
+          );
         }
       });
     },
@@ -813,7 +857,12 @@ export async function createRedisRuntimeStore(
         transaction.sadd(`${keyPrefix}rooms`, roomCode);
         await transaction.exec();
         if (roomCodeToLeave) {
-          await cleanupEmptyRoomIndex(redis, keyPrefix, roomCodeToLeave);
+          await cleanupEmptyRoomIndex(
+            redis,
+            keyPrefix,
+            roomCodeToLeave,
+            reportEmptyRoomCleanupFailure,
+          );
         }
       });
     },
@@ -836,7 +885,12 @@ export async function createRedisRuntimeStore(
             .hset(sessionKey(keyPrefix, sessionId), "roomCode", "")
             .srem(roomSessionsKey(keyPrefix, targetRoomCode), sessionId)
             .exec();
-          await cleanupEmptyRoomIndex(redis, keyPrefix, targetRoomCode);
+          await cleanupEmptyRoomIndex(
+            redis,
+            keyPrefix,
+            targetRoomCode,
+            reportEmptyRoomCleanupFailure,
+          );
         },
       );
     },

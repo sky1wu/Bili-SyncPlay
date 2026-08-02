@@ -1578,3 +1578,34 @@ test("redis runtime store reports a failed room-index cleanup to the caller", as
     await store.close();
   }
 });
+
+test("redis runtime store confirms the index removal even when empty-room cleanup fails", async () => {
+  // The transaction that removes this session from the room index is the write
+  // the caller acts on; the empty-room cleanup that follows is housekeeping. A
+  // transient failure in the latter used to reject the whole operation, so the
+  // leave path read "the index was not cleaned" about a write that had already
+  // landed and withheld the `room:state` the room was owed (#235 review).
+  let cleanupAttempts = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async hgetall() {
+      return { id: "session-aux", roomCode: "ROOMAX" };
+    },
+    async eval() {
+      cleanupAttempts += 1;
+      throw new Error("cleanup script failed");
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:aux:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    await store.markSessionLeftRoom("session-aux", "ROOMAX");
+    assert.ok(cleanupAttempts > 0, "the cleanup must actually have been tried");
+  } finally {
+    await store.close();
+  }
+});
