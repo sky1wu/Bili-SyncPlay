@@ -1964,6 +1964,7 @@ function createSharedOwnerHandler(options: {
   publishedRooms?: string[];
   enterRoomFails?: boolean;
   roomLeftHookFails?: boolean;
+  roomJoinedHookFails?: boolean;
 }) {
   return createMessageHandler({
     config: CONFIG,
@@ -2057,6 +2058,10 @@ function createSharedOwnerHandler(options: {
     },
     onRoomJoined() {
       options.hookOrder?.push("room-joined-hook");
+      if (options.roomJoinedHookFails) {
+        // Stands in for the room-index write failing, which refuses the join.
+        throw new Error("runtime index unavailable");
+      }
     },
   });
 }
@@ -2873,4 +2878,76 @@ test("a create that fails after leaving still resyncs the old room when the inde
   await handler.flushPendingPublishes();
 
   assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+});
+
+test("a rolled-back room switch still resyncs the old room it cleanly left", async () => {
+  // The refused join is the NEW room's problem. The old room was cleanly left,
+  // so it is still owed its full state — and if the leaver held the share,
+  // silence there means every client keeps a `sharedByMemberId` naming them and
+  // the room stops advancing (#242 review).
+  const published: string[] = [];
+  const publishedRooms: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR04",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    joinedRoomCode: "NEWR04",
+    roomJoinedHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "NEWR04",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  // The abort's own leave announces the NEW room; what matters here is that the
+  // OLD room got its full state as well as its delta.
+  const oldRoomEvents = published.filter(
+    (_type, index) => publishedRooms[index] === "OLDR04",
+  );
+  assert.deepEqual(oldRoomEvents, ["room_member_left", "room_state_updated"]);
+});
+
+test("a rolled-back room switch stays silent when the old room was not cleanly left", async () => {
+  const published: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR05",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const publishedRooms: string[] = [];
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    joinedRoomCode: "NEWR05",
+    roomJoinedHookFails: true,
+    roomLeftHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "NEWR05",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  // Neither hook landed, so nothing can vouch for the old room's index.
+  const oldRoomEvents = published.filter(
+    (_type, index) => publishedRooms[index] === "OLDR05",
+  );
+  assert.deepEqual(oldRoomEvents, ["room_member_left"]);
 });

@@ -149,11 +149,12 @@ advances the room. Three rules keep it working, none enforced by a type:
   `joinRoomForSession`, and `releasePreviousRoom` reports whether `onRoomLeft`
   actually cleared the index. The `room_member_left` delta goes out regardless —
   it reads no state — but the full state is published only where the switcher
-  cannot come back: on the success path AFTER `runRoomJoinedHook`, whose write
-  re-stamps the whole session record under the NEW room code, and on the
-  create/join FAILURE path only when the hook succeeded, since nothing later
-  carries the old code there. "The session hash already names the new room" is
-  not something to assume: that hash is written by `onRoomLeft` itself (#242).
+  cannot come back — `publishPreviousRoomResync` holds both licences: the join
+  was seated (its write re-stamps the whole session record under the NEW room
+  code) OR `onRoomLeft` itself landed. A refused join still owes the old room
+  its state on the second licence, since the rollback only unwinds the new room.
+  "The session hash already names the new room" is not something to assume: that
+  hash is written by `onRoomLeft` itself (#242).
 - **A membership delta that moves ownership owes a full `room:state`.**
   Protocol >= 2 clients get `room:member-joined` / `room:member-left`, which edit
   the recipient's member list and nothing else — their cached `sharedVideo` still
@@ -246,11 +247,11 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   through `pending-resync-queue`, which retries with backoff behind a `request`
   that returns immediately; `firePublishRoomEvent` deliberately does not await
   its wrapper, and making the leave/join handlers block on the bus would be the
-  worse trade. `flushPendingPublishes` must drain that queue too, or shutdown
-  tears the bus down with records still owed — and the shutdown call passes
-  `{ final: true }`, which stops each record after the batch it is on. A request
-  that lands mid-batch earns a fresh retry budget, which is right at runtime and
-  is two budgets in a step sized for one at shutdown.
+  worse trade. A record retries until the bus takes it — a per-record attempt
+  budget is just a slower way to discard a notification nothing else will
+  re-send — so `drain` is unbounded by design and the shutdown call passes
+  `{ final: true }`, which calls `stopRetrying` first and leaves at most one
+  in-flight attempt to wait for.
 - The **runtime index reaper's** announcement is the only thing that tells a
   room a dead node's members are gone. Once the sweep has cleaned the indexes,
   `listClusterSessions` no longer returns those sessions, so a later sweep has
@@ -259,13 +260,15 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   return — dropping a record only once the publish succeeds. Neither this queue
   nor `pending-resync-queue` caps its backlog: evicting or refusing an
   unpublished record loses exactly what they exist to keep, so a backlog is
-  logged, never shed. Because it is uncapped, the shutdown pass is the one that
-  must be bounded — `stop()` drains with bounded concurrency against its own
-  deadline, comfortably inside the step timeout, since an overrun step is
-  recorded as a failure AND lets the bus close under in-flight publishes that
-  then delete their records as if they had landed. Sweeps also no longer
-  overlap: they share that set, and `stop()` awaits only the sweep it knows
-  about.
+  logged, never shed. Because it is uncapped, every SHUTDOWN path over it has to
+  be bounded, and there are two: `stop()` drains with bounded concurrency
+  against its own deadline, and it sets `stopping` BEFORE awaiting the sweep in
+  flight so that sweep's serial drain gives way instead of running the whole
+  backlog first. Bounding only the second one leaves the budget just as blown.
+  An overrun step is recorded as a failure AND lets the bus close under
+  in-flight publishes, which then delete their records as if they had landed.
+  Sweeps also no longer overlap: they share that set, and `stop()` awaits only
+  the sweep it knows about.
 
 ## Engineering Constraints
 

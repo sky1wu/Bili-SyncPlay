@@ -30,17 +30,13 @@ export type PendingResyncFailureInfo = {
   error: unknown;
 };
 
-export type PendingResyncAbandonInfo = {
-  roomCode: string;
-  attempts: number;
-  error: unknown;
-};
-
 export type PendingResyncQueueOptions = {
   publish: (roomCode: string) => Promise<void>;
-  /** Total attempts per publish, including the first. */
-  maxAttempts?: number;
   initialRetryDelayMs?: number;
+  /**
+   * The backoff ceiling, and therefore the pace at which a stranded record
+   * keeps knocking. There is no attempt LIMIT — see `request`.
+   */
   maxRetryDelayMs?: number;
   /**
    * Caps a single attempt so a bus call that never settles cannot pin a record
@@ -53,7 +49,6 @@ export type PendingResyncQueueOptions = {
   /** Injectable so tests do not pay the backoff in wall-clock time. */
   sleep?: (delayMs: number) => Promise<void>;
   onAttemptFailed?: (info: PendingResyncFailureInfo) => void;
-  onAbandoned?: (info: PendingResyncAbandonInfo) => void;
   /**
    * The backlog crossed {@link PendingResyncQueueOptions.backlogWarnThreshold}.
    * Reported, never used to shed: see `request`.
@@ -73,55 +68,47 @@ export type PendingResyncQueue = {
    * whose ownership moved while the bus was rejecting publishes, each entry is
    * a room code, and the set drains as soon as the bus recovers; if that ever
    * stops being enough the answer is to persist the records, not to refuse them.
+   *
+   * For the same reason there is no attempt limit either. A per-record budget
+   * is just a slower way to discard the notification: the room is idle by
+   * definition, so nothing follows the give-up (#242 review). Records retry at
+   * `maxRetryDelayMs` until they land or {@link PendingResyncQueue.stopRetrying}
+   * ends them.
    */
   request: (roomCode: string) => void;
-  /** Every outstanding record has settled, however it settled. */
+  /**
+   * Every outstanding record has been published.
+   *
+   * Unbounded by design, because the retries are: it terminates when the bus
+   * accepts the records or when {@link PendingResyncQueue.stopRetrying} has
+   * been called, and shutdown does the latter first.
+   */
   drain: () => Promise<void>;
   /**
-   * Let each record finish the batch it is on and stop there, instead of
-   * running another for the requests that arrived mid-batch. Irreversible.
+   * Let each record finish the attempt it is on and stop there: no further
+   * retries, no further batches, and the backoffs in flight are cut short.
+   * Irreversible.
    *
-   * A drain is otherwise unbounded in the number of batches, and each batch
-   * costs a full retry budget: two of them exceed the shutdown step that has to
-   * wait for them, and an overrun step is a FAILED step — after which the bus
-   * is torn down anyway, so the publish is lost AND the process exits non-zero
-   * (#242 review). Batches for DIFFERENT rooms run concurrently, so bounding
-   * each record to one batch bounds the whole drain to one.
-   *
-   * The cost is the mid-batch request itself: at shutdown it is dropped rather
-   * than given the fresh budget it would get at runtime. Session cleanup has
-   * already drained by the time this is called, so there should be nothing left
-   * to make one.
+   * This is what bounds shutdown. `drain` is deliberately unbounded — records
+   * retry until they land — so the shutdown step calls this first, leaving at
+   * most ONE in-flight attempt to wait for. An overrun step is not a harmless
+   * delay: it is recorded as a FAILURE, and shutdown then closes the bus under
+   * whatever was still trying (#242 review).
    */
-  stopAfterCurrentBatch: () => void;
+  stopRetrying: () => void;
   /** Room codes with an outstanding record. */
   size: () => number;
 };
 
-/**
- * The budget is sized against the shutdown step that drains this queue.
- * `flush_pending_room_event_publishes` gets 30s, and a drain has to fit inside
- * it or shutdown records a failed step and the process exits non-zero — so the
- * worst case (every attempt hanging its full timeout, plus the backoff between
- * them) has to stay under that: 4 × 5s + 1.75s ≈ 22s. Raising either constant
- * means revisiting that step's timeout in `app.ts`.
- */
-const DEFAULT_MAX_ATTEMPTS = 4;
 const DEFAULT_INITIAL_RETRY_DELAY_MS = 250;
-const DEFAULT_MAX_RETRY_DELAY_MS = 5_000;
+/**
+ * The pace a stranded record settles into. Long enough that a room nobody can
+ * reach is not a busy loop against a dead bus, short enough that recovery is
+ * measured in seconds.
+ */
+const DEFAULT_MAX_RETRY_DELAY_MS = 30_000;
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 5_000;
 const DEFAULT_BACKLOG_WARN_THRESHOLD = 256;
-
-/**
- * Deliberately NOT `unref`'d. The backoff timer is the only thing keeping a
- * retry alive; unrefing it lets an otherwise idle event loop drain and the
- * write is silently lost — the exact failure this queue exists to prevent.
- */
-function defaultSleep(delayMs: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, delayMs);
-  });
-}
 
 type PendingRecord = {
   /** Another publish is owed once the current attempt finishes. */
@@ -132,7 +119,6 @@ type PendingRecord = {
 export function createPendingResyncQueue(
   options: PendingResyncQueueOptions,
 ): PendingResyncQueue {
-  const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
   const initialRetryDelayMs =
     options.initialRetryDelayMs ?? DEFAULT_INITIAL_RETRY_DELAY_MS;
   const maxRetryDelayMs = options.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
@@ -140,10 +126,34 @@ export function createPendingResyncQueue(
     options.attemptTimeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS;
   const backlogWarnThreshold =
     options.backlogWarnThreshold ?? DEFAULT_BACKLOG_WARN_THRESHOLD;
-  const sleep = options.sleep ?? defaultSleep;
 
   const records = new Map<string, PendingRecord>();
-  let stoppedAfterCurrentBatch = false;
+  /** `cancel` for every backoff currently being waited out. */
+  const pendingWaits = new Set<() => void>();
+  let retriesStopped = false;
+
+  /**
+   * An injected `sleep` is a test clock and resolves on its own; the real timer
+   * has to be cancellable, or `stopRetrying` would still have to sit through a
+   * 30s backoff before shutdown could move on.
+   */
+  function waitBeforeRetry(delayMs: number): Promise<void> {
+    if (options.sleep) {
+      return options.sleep(delayMs);
+    }
+    let cancel = (): void => {};
+    const promise = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delayMs);
+      cancel = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    pendingWaits.add(cancel);
+    return promise.finally(() => {
+      pendingWaits.delete(cancel);
+    });
+  }
 
   function retryDelayMs(attempt: number): number {
     return Math.min(initialRetryDelayMs * 2 ** (attempt - 1), maxRetryDelayMs);
@@ -170,7 +180,13 @@ export function createPendingResyncQueue(
   }
 
   /**
-   * Drives one room's record to completion.
+   * Drives one room's record until the bus takes it.
+   *
+   * The attempt loop has no give-up branch on purpose. A per-record budget is
+   * just a slower way to discard the notification — the room is idle by
+   * definition, so nothing follows the give-up and the clients keep a
+   * `sharedByMemberId` naming a member who left, until someone reloads (#242
+   * review). Only `stopRetrying` ends it, and only at shutdown.
    *
    * The `pending` flag is re-read synchronously after each publish settles, so
    * a request that landed mid-flight is picked up before the record is dropped
@@ -178,25 +194,22 @@ export function createPendingResyncQueue(
    */
   async function drive(roomCode: string, record: PendingRecord): Promise<void> {
     try {
-      while (record.pending && !stoppedAfterCurrentBatch) {
+      while (record.pending && !retriesStopped) {
         record.pending = false;
         for (let attempt = 1; ; attempt += 1) {
           try {
             await publishOnce(roomCode);
             break;
           } catch (error) {
-            if (attempt >= maxAttempts) {
-              options.onAbandoned?.({ roomCode, attempts: attempt, error });
-              // `break`, not `return`: a request that arrived while this batch
-              // was retrying describes a LATER change and is owed a publish of
-              // its own. Returning here dropped it along with the exhausted
-              // batch, which is the same permanent loss this queue exists to
-              // prevent — and the outer loop is what gives it a fresh budget.
-              break;
-            }
             const delayMs = retryDelayMs(attempt);
             options.onAttemptFailed?.({ roomCode, attempt, delayMs, error });
-            await sleep(delayMs);
+            if (retriesStopped) {
+              return;
+            }
+            await waitBeforeRetry(delayMs);
+            if (retriesStopped) {
+              return;
+            }
           }
         }
       }
@@ -223,8 +236,14 @@ export function createPendingResyncQueue(
       record.settled = drive(roomCode, record);
       void record.settled.catch(() => undefined);
     },
-    stopAfterCurrentBatch() {
-      stoppedAfterCurrentBatch = true;
+    stopRetrying() {
+      retriesStopped = true;
+      // Cut the backoffs short too: a record parked on the 30s ceiling would
+      // otherwise hold the drain for that long.
+      for (const cancel of Array.from(pendingWaits)) {
+        cancel();
+      }
+      pendingWaits.clear();
     },
     async drain() {
       while (records.size > 0) {

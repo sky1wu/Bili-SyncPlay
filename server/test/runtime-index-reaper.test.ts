@@ -718,3 +718,104 @@ test("runtime index reaper bounds its shutdown announcement pass", async () => {
   );
   assert.ok(events.includes("runtime_index_resync_abandoned_at_shutdown"));
 });
+
+test("runtime index reaper cuts a sweep's serial backlog drain short at stop", async () => {
+  // `stop` waits for the sweep in flight BEFORE its own bounded pass runs, and
+  // that sweep's drain of an uncapped backlog is serial and uncapped too — so
+  // the step budget was still being blown by the wait itself (#242 review).
+  const events: string[] = [];
+  let currentTime = 1_000;
+  let busDown = true;
+  let sweepDone = false;
+  let sweepDrainPublishes = 0;
+  let releaseSweepDrain: (() => void) | null = null;
+  const roomCount = 100;
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return sweepDone
+        ? []
+        : [
+            {
+              instanceId: "offline-node",
+              version: "test",
+              startedAt: 0,
+              lastHeartbeatAt: 0,
+              staleAt: 0,
+              expiresAt: 0,
+              connectionCount: roomCount,
+              activeRoomCount: roomCount,
+              activeMemberCount: roomCount,
+              health: "offline" as const,
+            },
+          ];
+    },
+    async listClusterSessions() {
+      if (sweepDone) {
+        return [];
+      }
+      return Array.from({ length: roomCount }, (_unused, index) => {
+        const session = createSession(`session-${index}`, "offline-node");
+        session.roomCode = `ROOM${index}`;
+        session.memberId = `member-${index}`;
+        return session;
+      });
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    async flush() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => currentTime,
+    logEvent: (event) => {
+      events.push(event);
+    },
+    publishRoomStateUpdate: async () => {
+      if (busDown) {
+        throw new Error("bus down");
+      }
+      sweepDrainPublishes += 1;
+      // The bus recovered mid-sweep, so this sweep's SERIAL drain would happily
+      // walk the whole backlog. Hold the first one so `stop` can overlap it.
+      if (sweepDrainPublishes === 1) {
+        await new Promise<void>((resolve) => {
+          releaseSweepDrain = resolve;
+        });
+      }
+      currentTime += 100;
+    },
+  });
+
+  // Sweep one: the whole backlog fails to publish and is retained.
+  assert.equal(await reaper.sweep(), roomCount);
+  sweepDone = true;
+  busDown = false;
+
+  // Sweep two starts its serial drain of the retained backlog and parks.
+  reaper.start();
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(sweepDrainPublishes, 1, "the sweep drain is parked");
+
+  const stopStartedAt = currentTime;
+  const stopped = reaper.stop();
+  (releaseSweepDrain as (() => void) | null)?.();
+  await stopped;
+
+  // The whole of `stop` — the wait for the sweep INCLUDED — has to fit in the
+  // budget. Without the yield the sweep's serial drain walks all 100 rooms at
+  // 100ms each before the bounded pass ever starts.
+  const stopCostMs = currentTime - stopStartedAt;
+  assert.ok(
+    stopCostMs <= 3_100,
+    `stop must stay inside its budget, spent ${stopCostMs}ms`,
+  );
+  assert.ok(events.includes("runtime_index_resync_abandoned_at_shutdown"));
+});

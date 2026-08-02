@@ -26,28 +26,56 @@ test("pending resync queue keeps retrying a publish until it lands", async () =>
   assert.equal(queue.size(), 0);
 });
 
-test("pending resync queue gives up only after its whole budget", async () => {
-  const abandoned: Array<{ roomCode: string; attempts: number }> = [];
+test("pending resync queue never gives up on a record by itself", async () => {
+  // A per-record attempt budget is just a slower way to discard the
+  // notification: the room is idle by definition, so nothing follows the
+  // give-up and its clients keep a `sharedByMemberId` naming a member who left
+  // (#242 review). Only an explicit stop ends the retries.
   const failures: number[] = [];
   let attempts = 0;
   const queue = createPendingResyncQueue({
     sleep: instantSleep,
-    maxAttempts: 3,
     publish: async () => {
       attempts += 1;
-      throw new Error("bus down");
+      if (attempts < 25) {
+        throw new Error("bus down");
+      }
     },
     onAttemptFailed: ({ attempt }) => failures.push(attempt),
-    onAbandoned: (info) =>
-      abandoned.push({ roomCode: info.roomCode, attempts: info.attempts }),
   });
 
   queue.request("ROOM01");
   await queue.drain();
 
-  assert.equal(attempts, 3);
-  assert.deepEqual(failures, [1, 2]);
-  assert.deepEqual(abandoned, [{ roomCode: "ROOM01", attempts: 3 }]);
+  // Well past any budget a bounded queue would have had.
+  assert.equal(attempts, 25);
+  assert.equal(failures.length, 24);
+  assert.equal(queue.size(), 0);
+});
+
+test("pending resync queue keeps knocking at the backoff ceiling", async () => {
+  const delays: number[] = [];
+  let attempts = 0;
+  const queue = createPendingResyncQueue({
+    initialRetryDelayMs: 10,
+    maxRetryDelayMs: 40,
+    sleep: (delayMs) => {
+      delays.push(delayMs);
+      return Promise.resolve();
+    },
+    publish: async () => {
+      attempts += 1;
+      if (attempts < 6) {
+        throw new Error("bus down");
+      }
+    },
+  });
+
+  queue.request("ROOM01");
+  await queue.drain();
+
+  // Exponential, then flat — it settles into a pace rather than giving up.
+  assert.deepEqual(delays, [10, 20, 40, 40, 40]);
 });
 
 test("pending resync queue collapses repeat requests for one room", async () => {
@@ -155,69 +183,33 @@ test("pending resync queue never refuses a room, however long the backlog", asyn
   assert.deepEqual(published.sort(), ["ROOM01", "ROOM02", "ROOM03", "ROOM04"]);
 });
 
-test("pending resync queue still serves a request made while a doomed batch retried", async () => {
-  // The batch that gives up describes an EARLIER change; a request that arrived
-  // during its retries describes a later one and is owed a publish of its own.
-  // Dropping it with the exhausted batch is the same permanent loss this queue
-  // exists to prevent (#242).
-  const abandoned: string[] = [];
+test("pending resync queue stops on demand so shutdown is bounded", async () => {
+  // `drain` is unbounded by design — records retry until they land — so the
+  // shutdown step calls `stopRetrying` first, leaving at most ONE in-flight
+  // attempt to wait for (#242 review).
   let attempts = 0;
-  let requestedAgain = false;
-  const queue = createPendingResyncQueue({
-    sleep: instantSleep,
-    maxAttempts: 2,
-    publish: async (roomCode) => {
-      attempts += 1;
-      if (attempts <= 2) {
-        if (!requestedAgain) {
-          requestedAgain = true;
-          // Arrives mid-batch, i.e. while the record is still outstanding.
-          queue.request(roomCode);
-        }
-        throw new Error("bus rejected");
-      }
-    },
-    onAbandoned: ({ roomCode }) => abandoned.push(roomCode),
-  });
-
-  queue.request("ROOM01");
-  await queue.drain();
-
-  assert.deepEqual(abandoned, ["ROOM01"], "the first batch ran out of budget");
-  // Attempt 3 is the fresh batch the mid-flight request earned.
-  assert.equal(attempts, 3);
-  assert.equal(queue.size(), 0);
-});
-
-test("pending resync queue stops opening new batches once it is winding down", async () => {
-  // Each batch costs a full retry budget, and the drain is otherwise unbounded
-  // in how many a record may run — two of them exceed the shutdown step that
-  // waits for them, and an overrun step is a FAILED step, after which the bus
-  // is torn down anyway (#242 review).
-  const attempts: string[] = [];
   let releaseFirst: (() => void) | null = null;
   const queue = createPendingResyncQueue({
     sleep: instantSleep,
-    publish: (roomCode) => {
-      attempts.push(roomCode);
-      if (attempts.length === 1) {
-        return new Promise<void>((resolve) => {
-          releaseFirst = resolve;
+    publish: () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Promise<void>((_resolve, reject) => {
+          releaseFirst = () => reject(new Error("bus down"));
         });
       }
-      return Promise.resolve();
+      return Promise.reject(new Error("bus down"));
     },
   });
 
   queue.request("ROOM01");
   await new Promise((resolve) => setTimeout(resolve, 5));
-  // Mid-batch: at runtime this earns a second batch (see the test above).
-  queue.request("ROOM01");
+  assert.equal(attempts, 1);
 
-  queue.stopAfterCurrentBatch();
+  queue.stopRetrying();
   (releaseFirst as (() => void) | null)?.();
   await queue.drain();
 
-  assert.deepEqual(attempts, ["ROOM01"], "the second batch must not open");
+  assert.equal(attempts, 1, "the in-flight attempt must be the last one");
   assert.equal(queue.size(), 0);
 });

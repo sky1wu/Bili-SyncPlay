@@ -81,6 +81,14 @@ export function createRuntimeIndexReaper(options: {
    * publish succeeds.
    */
   const roomsAwaitingResync = new Set<string>();
+  /**
+   * Set before `stop` awaits the sweep in flight, so that sweep's own serial
+   * drain of the backlog gives way instead of running to completion. The
+   * backlog is uncapped, so that drain is uncapped too — and `stop` waits for
+   * it BEFORE its own bounded pass ever starts, which is how the step budget
+   * was still being blown (#242 review).
+   */
+  let stopping = false;
 
   function rememberResync(roomCode: string): void {
     const isNew = !roomsAwaitingResync.has(roomCode);
@@ -127,6 +135,10 @@ export function createRuntimeIndexReaper(options: {
    */
   async function flushPendingResyncs(): Promise<void> {
     for (const roomCode of Array.from(roomsAwaitingResync)) {
+      if (stopping) {
+        // `stop` is waiting on this sweep and has its own bounded pass to run.
+        return;
+      }
       await publishPendingResync(roomCode);
     }
   }
@@ -321,6 +333,7 @@ export function createRuntimeIndexReaper(options: {
       return sweep();
     },
     async stop() {
+      stopping = true;
       if (timer) {
         clearInterval(timer);
         timer = null;

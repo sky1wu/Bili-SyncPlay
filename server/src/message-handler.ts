@@ -120,7 +120,6 @@ export function createMessageHandler(options: {
    * that nothing else repeats. See `pending-resync-queue`.
    */
   sharedOwnerResyncRetry?: {
-    maxAttempts?: number;
     initialRetryDelayMs?: number;
     maxRetryDelayMs?: number;
     sleep?: (delayMs: number) => Promise<void>;
@@ -479,15 +478,14 @@ export function createMessageHandler(options: {
    * is the one broadcast nothing else will ever re-send (#242).
    *
    * `final` marks the shutdown call. Without it the drain is unbounded in the
-   * number of retry BATCHES a record may run — a request that arrived mid-batch
-   * earns a fresh budget, which is right at runtime and, at shutdown, is two
-   * budgets in a step sized for one (#242 review).
+   * time it takes: records retry until the bus takes them, which is the point
+   * of the queue and no bound at all for a shutdown step (#242 review).
    */
   async function flushPendingPublishes(options?: {
     final?: boolean;
   }): Promise<void> {
     if (options?.final) {
-      sharedOwnerResyncQueue.stopAfterCurrentBatch();
+      sharedOwnerResyncQueue.stopRetrying();
     }
     while (pendingPublishes.size > 0 || sharedOwnerResyncQueue.size() > 0) {
       await Promise.allSettled([
@@ -583,14 +581,6 @@ export function createMessageHandler(options: {
         error: error instanceof Error ? error.message : String(error),
       });
     },
-    onAbandoned: ({ roomCode, attempts, error }) => {
-      logEvent("shared_owner_resync_abandoned", {
-        roomCode,
-        attempts,
-        result: "dropped",
-        error: error instanceof Error ? error.message : String(error),
-      });
-    },
     onBacklog: ({ roomCode, pendingRooms }) => {
       logEvent("shared_owner_resync_backlog", {
         roomCode,
@@ -639,9 +629,11 @@ export function createMessageHandler(options: {
         // session's room code. If the hook could not clear the index, a state
         // built from it still lists the switcher and hands them the share back
         // (#242 review).
-        if (await releasePreviousRoom(session, previous)) {
-          publishSharedOwnerResync(previous.roomCode);
-        }
+        const indexCleaned = await releasePreviousRoom(session, previous);
+        publishPreviousRoomResync(previous, "", {
+          seated: false,
+          indexCleaned,
+        });
       }
       throw error;
     }
@@ -689,6 +681,31 @@ export function createMessageHandler(options: {
       },
     );
     return indexCleaned;
+  }
+
+  /**
+   * Publish the old room's full `room:state` — but only where the switcher
+   * provably cannot come back into it.
+   *
+   * Two ways to know that. `seated` means `runRoomJoinedHook` succeeded, and
+   * its write re-stamps the whole session record under the NEW room code, so
+   * the old room's rebuild drops this session as index residue whatever
+   * `onRoomLeft` managed to write. `indexCleaned` means `onRoomLeft` itself
+   * landed. Either is enough; neither is optional, because a state built on an
+   * index nobody cleared hands the leaver their share straight back (#242
+   * review).
+   */
+  function publishPreviousRoomResync(
+    previousRoom: { roomCode: string } | null,
+    joinedRoomCode: string,
+    outcome: { seated: boolean; indexCleaned: boolean },
+  ): void {
+    if (!previousRoom || previousRoom.roomCode === joinedRoomCode) {
+      return;
+    }
+    if (outcome.seated || outcome.indexCleaned) {
+      publishSharedOwnerResync(previousRoom.roomCode);
+    }
   }
 
   function handleRateLimitedMessage(
@@ -830,23 +847,32 @@ export function createMessageHandler(options: {
                 message.payload?.displayName,
               ),
           );
+          let previousRoomIndexCleaned = false;
           if (previousRoom && previousRoom.roomCode !== room.code) {
-            await releasePreviousRoom(session, previousRoom);
+            previousRoomIndexCleaned = await releasePreviousRoom(
+              session,
+              previousRoom,
+            );
           }
-          if (
-            !(await runRoomJoinedHook(session, room.code, previousRoomCode))
-          ) {
+          const seated = await runRoomJoinedHook(
+            session,
+            room.code,
+            previousRoomCode,
+          );
+          if (!seated) {
             await abortJoin(session, room.code, socket);
+            // The refused join is the NEW room's problem; the old room is still
+            // owed its state, and a clean index is the licence to send it.
+            publishPreviousRoomResync(previousRoom, room.code, {
+              seated,
+              indexCleaned: previousRoomIndexCleaned,
+            });
             return;
           }
-          // AFTER the join hook, and unconditional. Its write re-stamps the
-          // whole session record under the NEW room code, so the old room's
-          // rebuild drops this session as index residue whatever `onRoomLeft`
-          // managed to write — which is what makes publishing safe here and not
-          // inside `releasePreviousRoom` (#242 review).
-          if (previousRoom && previousRoom.roomCode !== room.code) {
-            publishSharedOwnerResync(previousRoom.roomCode);
-          }
+          publishPreviousRoomResync(previousRoom, room.code, {
+            seated,
+            indexCleaned: previousRoomIndexCleaned,
+          });
           send(socket, {
             type: "room:created",
             payload: {
@@ -915,20 +941,30 @@ export function createMessageHandler(options: {
                   message.payload.memberToken,
                 ),
             );
+            let previousRoomIndexCleaned = false;
             if (previousRoom && previousRoom.roomCode !== room.code) {
-              await releasePreviousRoom(session, previousRoom);
+              previousRoomIndexCleaned = await releasePreviousRoom(
+                session,
+                previousRoom,
+              );
             }
-            if (
-              !(await runRoomJoinedHook(session, room.code, previousRoomCode))
-            ) {
+            const seated = await runRoomJoinedHook(
+              session,
+              room.code,
+              previousRoomCode,
+            );
+            if (!seated) {
               await abortJoin(session, room.code, socket);
+              publishPreviousRoomResync(previousRoom, room.code, {
+                seated,
+                indexCleaned: previousRoomIndexCleaned,
+              });
               return;
             }
-            // AFTER the join hook, and unconditional — see the same call in
-            // `room:create` for why that ordering is what makes it safe.
-            if (previousRoom && previousRoom.roomCode !== room.code) {
-              publishSharedOwnerResync(previousRoom.roomCode);
-            }
+            publishPreviousRoomResync(previousRoom, room.code, {
+              seated,
+              indexCleaned: previousRoomIndexCleaned,
+            });
             const joinedRoomCode = room.code;
             const joinedMemberId = session.memberId ?? session.id;
             const joinedDisplayName = session.displayName;
