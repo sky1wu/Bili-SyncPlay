@@ -825,6 +825,7 @@ test("runtime index reaper caps a resync publish that never settles", async () =
   // at all when the bus hangs rather than rejecting: the call already in flight
   // pins the sweep drain and the shutdown pass alike (#242 review).
   const events: string[] = [];
+  let releasePublish: (() => void) | null = null;
   const deadSession = createSession("session-hung", "offline-node");
   deadSession.roomCode = "ROOM46";
   deadSession.memberId = "member-hung";
@@ -869,9 +870,12 @@ test("runtime index reaper caps a resync publish that never settles", async () =
     logEvent: (event) => {
       events.push(event);
     },
-    // Never settles. Without a per-publish cap the sweep — and every later
-    // shutdown pass — waits on it forever.
-    publishRoomStateUpdate: () => new Promise<void>(() => {}),
+    // Never settles until released. Without a per-publish cap the sweep — and
+    // every later shutdown pass — waits on it forever.
+    publishRoomStateUpdate: () =>
+      new Promise<void>((resolve) => {
+        releasePublish = resolve;
+      }),
   });
 
   try {
@@ -879,6 +883,151 @@ test("runtime index reaper caps a resync publish that never settles", async () =
     assert.ok(events.includes("runtime_index_resync_publish_failed"));
   } finally {
     sweepDone = true;
+    // The shutdown pass deliberately waits out its budget for a call still in
+    // flight; letting it answer keeps this test off that 3s path.
+    (releasePublish as (() => void) | null)?.();
+    await reaper.stop();
+  }
+});
+
+test("runtime index reaper does not start a second publish for a room still waiting", async () => {
+  // The per-publish cap races the bus call, it cannot abort it — so without
+  // tracking, every sweep starts ANOTHER publish for the same room and one hung
+  // bus accumulates Redis commands for as long as it stays hung (#242 review).
+  let publishCalls = 0;
+  let releasePublish: (() => void) | null = null;
+  let sweepsRun = 0;
+  const deadSession = createSession("session-stuck", "offline-node");
+  deadSession.roomCode = "ROOM47";
+  deadSession.memberId = "member-stuck";
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return sweepsRun > 0
+        ? []
+        : [
+            {
+              instanceId: "offline-node",
+              version: "test",
+              startedAt: 0,
+              lastHeartbeatAt: 0,
+              staleAt: 0,
+              expiresAt: 0,
+              connectionCount: 1,
+              activeRoomCount: 1,
+              activeMemberCount: 1,
+              health: "offline" as const,
+            },
+          ];
+    },
+    async listClusterSessions() {
+      return sweepsRun > 0 ? [] : [deadSession];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    async flush() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: () => {
+      publishCalls += 1;
+      return new Promise<void>((resolve) => {
+        releasePublish = resolve;
+      });
+    },
+  });
+
+  try {
+    // Sweep one starts the publish; its cap fires and the record is retained.
+    await reaper.sweep();
+    sweepsRun = 1;
+    assert.equal(publishCalls, 1);
+
+    // Later sweeps retry the record — but the first call has still not come
+    // back, so they must not open another.
+    await reaper.sweep();
+    await reaper.sweep();
+    assert.equal(publishCalls, 1, "one in-flight publish per room, no more");
+  } finally {
+    (releasePublish as (() => void) | null)?.();
+    await reaper.stop();
+  }
+});
+
+test("runtime index reaper does not inherit the write queue's full retry budget", async () => {
+  // `confirmWrites` waits on the NORMAL retry budget — attempts of up to
+  // `pendingOperationTimeoutMs` each, per session, serially — and one
+  // unreachable session is enough to stretch that past the whole shutdown step.
+  // The sweep announces either way, so waiting longer buys nothing (#242 review).
+  const events: string[] = [];
+  const deadSession = createSession("session-slowconfirm", "offline-node");
+  deadSession.roomCode = "ROOM48";
+  deadSession.memberId = "member-slowconfirm";
+  let releaseConfirm: (() => void) | null = null;
+  const published: string[] = [];
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return [
+        {
+          instanceId: "offline-node",
+          version: "test",
+          startedAt: 0,
+          lastHeartbeatAt: 0,
+          staleAt: 0,
+          expiresAt: 0,
+          connectionCount: 1,
+          activeRoomCount: 1,
+          activeMemberCount: 1,
+          health: "offline" as const,
+        },
+      ];
+    },
+    async listClusterSessions() {
+      return published.length > 0 ? [] : [deadSession];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    // Stands in for a session whose writes are still burning their retry
+    // budget against an unreachable Redis.
+    confirmWrites: () =>
+      new Promise<void>((resolve) => {
+        releaseConfirm = resolve;
+      }),
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    logEvent: (event) => {
+      events.push(event);
+    },
+    publishRoomStateUpdate: async (roomCode) => {
+      published.push(roomCode);
+    },
+  });
+
+  try {
+    // Completes because the wait is capped, not because the store answered.
+    assert.equal(await reaper.sweep(), 1);
+    assert.ok(events.includes("runtime_index_writes_unconfirmed"));
+    assert.deepEqual(published, ["ROOM48"], "the announcement is not gated");
+  } finally {
+    (releaseConfirm as (() => void) | null)?.();
     await reaper.stop();
   }
 });

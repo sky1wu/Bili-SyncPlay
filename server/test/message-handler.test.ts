@@ -2951,3 +2951,104 @@ test("a rolled-back room switch stays silent when the old room was not cleanly l
   );
   assert.deepEqual(oldRoomEvents, ["room_member_left"]);
 });
+
+test("a join whose rollback fails drops the socket instead of claiming it was aborted", async () => {
+  // `leaveCurrentRoom` RESTORES the member when its own persistence fails and
+  // the socket is still open. Telling the client the join failed while the
+  // server still holds it as a member leaves the two disagreeing, and that
+  // connection can go on driving playback from a seat the shared index never
+  // received (#242 review).
+  const errors: string[] = [];
+  const closes: Array<{ code: number; reason: string }> = [];
+  const events: string[] = [];
+  const session = createSession("member-1");
+  (
+    session.socket as unknown as { close: (c: number, r: string) => void }
+  ).close = (code, reason) => {
+    closes.push({ code, reason });
+  };
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = "ROOM01";
+        currentSession.memberId = "member-1";
+        currentSession.memberToken = "member-token-1";
+        return { room: { code: "ROOM01" }, memberToken: "member-token-1" };
+      },
+      async leaveRoomForSession() {
+        // The rollback cannot complete: the member stays seated.
+        throw new Error("leave persistence failed");
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent(event) {
+      events.push(event);
+    },
+    send() {},
+    sendError(_socket, code) {
+      errors.push(code);
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+    async onRoomJoined() {
+      throw new Error("runtime index unavailable");
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.ok(events.includes("room_join_rollback_failed"));
+  assert.deepEqual(closes, [{ code: 1011, reason: "join_rollback_failed" }]);
+});
+
+test("a join whose rollback succeeds leaves the connection alone", async () => {
+  const closes: number[] = [];
+  const session = createSession("member-1");
+  (
+    session.socket as unknown as { close: (c: number, r: string) => void }
+  ).close = (code) => {
+    closes.push(code);
+  };
+
+  const handler = createSharedOwnerHandler({
+    published: [],
+    roomJoinedHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  // The seat came back, so the client may simply retry on the same socket.
+  assert.deepEqual(closes, []);
+});

@@ -44,6 +44,12 @@ export type PendingResyncQueueOptions = {
    * underlying publish is left running, exactly as `firePublishRoomEvent` does.
    */
   attemptTimeoutMs?: number;
+  /**
+   * How long {@link PendingResyncQueue.drain} waits for calls that were given
+   * up on but are still out there. Sized against the shutdown step that runs
+   * the drain, NOT against a single attempt — which is why it is its own knob.
+   */
+  abandonedDrainTimeoutMs?: number;
   /** Backlog size that triggers {@link PendingResyncQueueOptions.onBacklog}. */
   backlogWarnThreshold?: number;
   /** Injectable so tests do not pay the backoff in wall-clock time. */
@@ -124,6 +130,8 @@ export function createPendingResyncQueue(
   const maxRetryDelayMs = options.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
   const attemptTimeoutMs =
     options.attemptTimeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS;
+  const abandonedDrainTimeoutMs =
+    options.abandonedDrainTimeoutMs ?? attemptTimeoutMs;
   const backlogWarnThreshold =
     options.backlogWarnThreshold ?? DEFAULT_BACKLOG_WARN_THRESHOLD;
 
@@ -131,6 +139,14 @@ export function createPendingResyncQueue(
   /** `cancel` for every backoff currently being waited out. */
   const pendingWaits = new Set<() => void>();
   let retriesStopped = false;
+  /**
+   * Publishes that were given up on but are still on their way to the bus.
+   *
+   * `drain` waits for these after the loops have stopped: the very next
+   * shutdown step closes the bus, and "we stopped retrying" is not the same as
+   * "the call came back" (#242 review).
+   */
+  const abandonedCalls = new Set<Promise<void>>();
   let signalStopped = (): void => {};
   /** Resolves when {@link PendingResyncQueue.stopRetrying} is called. */
   const stopped = new Promise<void>((resolve) => {
@@ -179,12 +195,15 @@ export function createPendingResyncQueue(
   ): Promise<void> {
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     const call = options.publish(roomCode);
-    track(
-      call.then(
-        () => undefined,
-        () => undefined,
-      ),
+    const settled = call.then(
+      () => undefined,
+      () => undefined,
     );
+    abandonedCalls.add(settled);
+    void settled.finally(() => {
+      abandonedCalls.delete(settled);
+    });
+    track(settled);
     try {
       await Promise.race([
         call,
@@ -291,6 +310,22 @@ export function createPendingResyncQueue(
         await Promise.allSettled(
           Array.from(records.values(), (record) => record.settled),
         );
+      }
+      // The records are done, but a call one of them gave up on may still be
+      // out there — and the bus is closed straight after this. Bounded: an
+      // unbounded wait here would only move the overrun from the bus close to
+      // this step.
+      if (abandonedCalls.size > 0) {
+        let handle: ReturnType<typeof setTimeout> | null = null;
+        await Promise.race([
+          Promise.allSettled(Array.from(abandonedCalls)),
+          new Promise<void>((resolve) => {
+            handle = setTimeout(resolve, abandonedDrainTimeoutMs);
+          }),
+        ]);
+        if (handle !== null) {
+          clearTimeout(handle);
+        }
       }
     },
     size() {

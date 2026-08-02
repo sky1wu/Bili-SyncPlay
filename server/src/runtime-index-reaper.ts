@@ -54,6 +54,34 @@ const SHUTDOWN_RESYNC_CONCURRENCY = 8;
  * step times out with the publish still running (#242 review).
  */
 const RESYNC_PUBLISH_TIMEOUT_MS = 2_000;
+/**
+ * Caps the sweep's `confirmWrites` wait.
+ *
+ * That call inherits the write queue's NORMAL retry budget — five attempts of
+ * up to `pendingOperationTimeoutMs` each, per session, serially — which one
+ * unreachable session is enough to stretch past the whole shutdown step. The
+ * sweep does not act on the answer (it announces either way), so waiting
+ * longer than this buys nothing (#242 review).
+ */
+const WRITE_CONFIRMATION_TIMEOUT_MS = 2_000;
+
+function withTimeout<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => Error,
+): Promise<T> {
+  let handle: ReturnType<typeof setTimeout> | null = null;
+  return Promise.race([
+    work,
+    new Promise<never>((_resolve, reject) => {
+      handle = setTimeout(() => reject(onTimeout()), Math.max(timeoutMs, 1));
+    }),
+  ]).finally(() => {
+    if (handle !== null) {
+      clearTimeout(handle);
+    }
+  });
+}
 
 export function createRuntimeIndexReaper(options: {
   enabled: boolean;
@@ -89,6 +117,16 @@ export function createRuntimeIndexReaper(options: {
    */
   const roomsAwaitingResync = new Set<string>();
   /**
+   * The publish a room already has out that has not answered yet.
+   *
+   * The per-publish cap races the bus call, it cannot abort it — so without
+   * this the next sweep starts ANOTHER publish for the same room every
+   * interval, and one hung bus accumulates Redis commands for as long as it
+   * stays hung (#242 review). Same reasoning as `pending-resync-queue`; the
+   * difference is only that here the retries are driven by the sweep timer.
+   */
+  const inFlightResyncByRoom = new Map<string, Promise<void>>();
+  /**
    * Set before `stop` awaits the sweep in flight, so that sweep's own serial
    * drain of the backlog gives way instead of running to completion. The
    * backlog is uncapped, so that drain is uncapped too — and `stop` waits for
@@ -118,10 +156,25 @@ export function createRuntimeIndexReaper(options: {
     roomCode: string,
     timeoutMs = RESYNC_PUBLISH_TIMEOUT_MS,
   ): Promise<void> {
+    if (inFlightResyncByRoom.has(roomCode)) {
+      // Still waiting on the previous call. Piling another on top is what the
+      // per-publish cap would otherwise turn every retry into.
+      return;
+    }
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     try {
       const publish = options.publishRoomStateUpdate?.(roomCode);
       if (publish) {
+        const tracked = publish.then(
+          () => undefined,
+          () => undefined,
+        );
+        inFlightResyncByRoom.set(roomCode, tracked);
+        void tracked.finally(() => {
+          if (inFlightResyncByRoom.get(roomCode) === tracked) {
+            inFlightResyncByRoom.delete(roomCode);
+          }
+        });
         await Promise.race([
           publish,
           new Promise<never>((_resolve, reject) => {
@@ -210,6 +263,21 @@ export function createRuntimeIndexReaper(options: {
       },
     );
     await Promise.all(workers);
+    // A publish that timed out is still on its way to the bus, and the very
+    // next shutdown step closes that bus. Give the leftovers what remains of
+    // the budget rather than closing under them (#242 review).
+    const leftovers = Array.from(inFlightResyncByRoom.values());
+    if (leftovers.length > 0) {
+      await Promise.race([
+        Promise.allSettled(leftovers),
+        // Not `unref`'d, for the same reason as every other timer here: it is
+        // the only thing that ends this wait, and an idle loop must not drain
+        // past it.
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, Math.max(deadline - now(), 1));
+        }),
+      ]);
+    }
     if (roomsAwaitingResync.size > 0) {
       options.logEvent?.("runtime_index_resync_abandoned_at_shutdown", {
         pendingRooms: roomsAwaitingResync.size,
@@ -283,7 +351,14 @@ export function createRuntimeIndexReaper(options: {
     // announcing is still better than silence — but an unconfirmed sweep is
     // worth saying out loud.
     if (options.runtimeStore.confirmWrites) {
-      await options.runtimeStore.confirmWrites().catch((error: unknown) => {
+      await withTimeout(
+        options.runtimeStore.confirmWrites(),
+        WRITE_CONFIRMATION_TIMEOUT_MS,
+        () =>
+          new Error(
+            "Runtime index reaper gave up waiting for its writes to be confirmed.",
+          ),
+      ).catch((error: unknown) => {
         options.logEvent?.("runtime_index_writes_unconfirmed", {
           result: "error",
           error: error instanceof Error ? error.message : String(error),

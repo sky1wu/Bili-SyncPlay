@@ -225,14 +225,21 @@ decides something has to know which of the two questions it is asking (#242):
   writes that have not started, leaving at most ONE in-flight attempt; the step
   budget must exceed that attempt's own timeout. Raising `maxAttempts` or a
   delay means redoing that arithmetic.
-- **A timeout answers the caller; it does not cancel the command.** So the
-  session's key is released only once every command the write started has
-  really finished (`DurableWriteRequest.settle`). Releasing it when the caller
-  is answered lets the compensating write — queued on that same key — run
-  first, and the abandoned command then lands on top of its own rollback,
-  leaving a member the client was told does not exist and who can win the share
-  back. `drain` waits for those releases; `confirm` deliberately does not, since
-  a command still in flight has already reported whether it can be confirmed.
+- **A timeout answers the caller; it does not cancel the command.** This one
+  bites in three places, and fixing one of them is not fixing it:
+  - The session's key is released only once every command the write started has
+    really finished (`DurableWriteRequest.settle`). Releasing it when the caller
+    is answered lets the compensating write — queued on that same key — run
+    first, and the abandoned command then lands on top of its own rollback,
+    leaving a member the client was told does not exist and who can win the
+    share back. `drain` waits for those releases; `confirm` deliberately does
+    not, since a command still in flight has already reported its verdict.
+  - Nothing starts a second call while the first has not answered — not the
+    write queue, not `pending-resync-queue`, not the reaper's per-room publish.
+    Otherwise a hung dependency accumulates one live command per retry.
+  - Nothing that closes a connection or a bus does so under a live call:
+    `close()` drains the chain (bounded) before `quit`, and the resync drain
+    waits out its abandoned calls (bounded) before shutdown closes the bus.
 - **A retry is abandoned when a newer write for the same session is queued.**
   Retrying past that point fights the newer write. This is only sound because
   the join write re-writes the WHOLE session record rather than patching
@@ -245,7 +252,10 @@ decides something has to know which of the two questions it is asking (#242):
   `leaveRoom(session, "disconnect")` — `"disconnect"` so a reconnecting member
   keeps the identity the ownership rule depends on. Everything a join sends next
   is read back off the index this write maintains, so a member the room cannot
-  see is worse than a refused join the client retries.
+  see is worse than a refused join the client retries. And if the ROLLBACK
+  fails, the socket is dropped: `leaveCurrentRoom` restores the member when its
+  own persistence fails and the socket is open, so reporting the join refused
+  while the server still holds the seat leaves the two disagreeing.
 
 ### One-shot broadcasts need a retry trail; repeated ones do not
 

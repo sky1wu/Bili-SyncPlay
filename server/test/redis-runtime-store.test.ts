@@ -2258,3 +2258,52 @@ test("redis runtime store leaves a tombstone where a torn-down room's generation
     await store.close();
   }
 });
+
+test("redis runtime store waits for in-flight commands before closing the connection", async () => {
+  // `pendingOperations` holds the CALLERS' answers, and a write that timed out
+  // answered long before its command did. Quitting on that alone closes the
+  // connection under commands still in flight — the same "a timeout is not a
+  // cancel" gap `settle` closes for the session chain (#242 review).
+  const order: string[] = [];
+  let releaseCommand: (() => void) | null = null;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async quit() {
+      order.push("quit");
+      return "OK";
+    },
+    async hgetall() {
+      return { id: "session-closing", roomCode: "" };
+    },
+    async get() {
+      return "gen-1";
+    },
+    eval() {
+      return new Promise((resolve) => {
+        releaseCommand = () => {
+          order.push("command-landed");
+          resolve(1);
+        };
+      });
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:closing-drain:",
+    redisClient: fakeRedis,
+    pendingOperationTimeoutMs: 100,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  const joined = store.markSessionJoinedRoom("session-closing", "ROOMCL");
+  await assert.rejects(joined, /timed out/);
+  assert.deepEqual(order, [], "the command has not answered yet");
+
+  const closing = store.close();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(order, [], "close must not quit under a live command");
+
+  (releaseCommand as (() => void) | null)?.();
+  await closing;
+  assert.deepEqual(order, ["command-landed", "quit"]);
+});

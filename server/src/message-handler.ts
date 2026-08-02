@@ -30,6 +30,9 @@ type RoomEventBusPublishInput<T> = T extends unknown
   ? Omit<T, "sourceInstanceId" | "emittedAt">
   : never;
 
+/** RFC 6455 "internal error": the server could not put the session back. */
+const CLOSE_CODE_JOIN_ROLLBACK_FAILED = 1011;
+
 export function createMessageHandler(options: {
   config: {
     maxMembersPerRoom: number;
@@ -217,9 +220,11 @@ export function createMessageHandler(options: {
     roomCode: string,
     socket: WebSocket,
   ): Promise<void> {
+    let rolledBack = true;
     try {
       await leaveRoom(session, "disconnect");
     } catch (error) {
+      rolledBack = false;
       logEvent("room_join_rollback_failed", {
         sessionId: session.id,
         roomCode,
@@ -236,8 +241,30 @@ export function createMessageHandler(options: {
       origin: session.origin,
       result: "rejected",
       reason: "room_index_write_failed",
+      rolledBack,
     });
     sendError(socket, "internal_error", INTERNAL_SERVER_ERROR_MESSAGE);
+    if (rolledBack) {
+      return;
+    }
+    // The seat did not come back. `leaveCurrentRoom` RESTORES the member when
+    // its own persistence fails and the socket is still open, so telling the
+    // client the join failed while the server still holds it as a member leaves
+    // the two disagreeing — and that connection can go on sharing and driving
+    // playback from a seat the shared index never received (#242 review).
+    //
+    // Dropping the socket is the only honest end: `cleanupSessionAfterClose`
+    // runs the leave again with no socket to restore into, and unregisters the
+    // session either way.
+    if (
+      hasAttachedSocket(session) &&
+      session.socket.readyState === session.socket.OPEN
+    ) {
+      session.socket.close(
+        CLOSE_CODE_JOIN_ROLLBACK_FAILED,
+        "join_rollback_failed",
+      );
+    }
   }
 
   /**

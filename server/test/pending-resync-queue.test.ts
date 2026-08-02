@@ -220,3 +220,55 @@ test("pending resync queue stops on demand so shutdown is bounded", async () => 
   assert.equal(attempts, 1, "the in-flight attempt must be the last one");
   assert.equal(queue.size(), 0);
 });
+
+test("pending resync queue waits out its abandoned calls before the drain returns", async () => {
+  // "We stopped retrying" is not "the call came back", and the bus is closed
+  // straight after the drain (#242 review).
+  const order: string[] = [];
+  let releasePublish: (() => void) | null = null;
+  const queue = createPendingResyncQueue({
+    sleep: instantSleep,
+    // Small, so the record itself stops promptly and the ONLY thing that can
+    // still hold the drain is the abandoned call.
+    attemptTimeoutMs: 5,
+    abandonedDrainTimeoutMs: 1_000,
+    publish: () =>
+      new Promise<void>((resolve) => {
+        releasePublish = () => {
+          order.push("publish-settled");
+          resolve();
+        };
+      }),
+  });
+
+  queue.request("ROOM01");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  queue.stopRetrying();
+
+  const drained = queue.drain().then(() => {
+    order.push("drain-returned");
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  (releasePublish as (() => void) | null)?.();
+  await drained;
+
+  assert.deepEqual(order, ["publish-settled", "drain-returned"]);
+});
+
+test("pending resync queue bounds how long it waits for an abandoned call", async () => {
+  // Bounded, because an unbounded wait would only move the shutdown overrun
+  // from the bus close to this step.
+  const queue = createPendingResyncQueue({
+    sleep: instantSleep,
+    attemptTimeoutMs: 5,
+    // Never answers at all.
+    publish: () => new Promise<void>(() => {}),
+  });
+
+  queue.request("ROOM01");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  queue.stopRetrying();
+  await queue.drain();
+
+  assert.equal(queue.size(), 0);
+});

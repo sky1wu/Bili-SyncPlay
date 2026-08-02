@@ -1585,6 +1585,22 @@ export async function createRedisRuntimeStore(
       // and exit the process non-zero (#242).
       sessionWriteQueue.stopRetrying();
       await Promise.allSettled(Array.from(pendingOperations));
+      // `pendingOperations` holds the CALLERS' answers, and a write that timed
+      // out answered long before its command did. Quitting on that alone closes
+      // the connection under commands still in flight, which is the same
+      // "a timeout is not a cancel" gap `settle` closes for the session chain —
+      // so wait for the chain releases too, bounded so a dead Redis cannot
+      // stretch the close step (#242 review).
+      let drainTimer: ReturnType<typeof setTimeout> | null = null;
+      await Promise.race([
+        sessionWriteQueue.drain(),
+        new Promise<void>((resolve) => {
+          drainTimer = setTimeout(resolve, pendingOperationTimeoutMs);
+        }),
+      ]);
+      if (drainTimer !== null) {
+        clearTimeout(drainTimer);
+      }
       await redis.quit();
     },
     async heartbeatNode(status: ClusterNodeStatus) {
