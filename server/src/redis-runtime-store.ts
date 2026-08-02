@@ -984,19 +984,20 @@ export async function createRedisRuntimeStore(
       // landing after it has no second event to correct the display name (#242
       // review).
       //
-      // Bounded because the command cannot be cancelled: this is an ordering
-      // barrier, not a durability one, and hanging it on a dead Redis would
-      // block every caller that only wanted its own writes visible.
-      let barrier: ReturnType<typeof setTimeout> | null = null;
-      await Promise.race([
+      // Bounded because the command cannot be cancelled — but the bound
+      // REJECTS. Resolving on it would report the barrier held when it had not,
+      // which is the failure mode this whole method exists to prevent: the
+      // caller goes on to read or broadcast from an index the write never
+      // reached (#242 review). Callers that cannot act on it swallow it
+      // explicitly at their own call site.
+      await commandPacer.capAttempt(
         sessionWriteQueue.drain(),
-        new Promise<void>((resolve) => {
-          barrier = setTimeout(resolve, pendingOperationTimeoutMs);
-        }),
-      ]);
-      if (barrier !== null) {
-        clearTimeout(barrier);
-      }
+        pendingOperationTimeoutMs,
+        () =>
+          new Error(
+            "Redis runtime store flush timed out before the session keys were released.",
+          ),
+      );
     },
     /**
      * Unlike `flush`, this REPORTS. `flush` waits on error-swallowed copies, so
@@ -1518,16 +1519,22 @@ export async function createRedisRuntimeStore(
       // ONE attempt: a transient error made `durable` reject for good, the
       // member binding stayed in Redis with no retention clock armed, and the
       // reaper grew a latch to compensate for a failure a retry would have
-      // healed (#242 review). Keyed by the MEMBER, not the session — two
-      // removals of the same seat must serialize, and a session's own writes
-      // must not queue behind them.
+      // healed (#242 review). Keyed by the member AND the session that is being
+      // removed. Not by the member alone: `REMOVE_MEMBER_LUA` is guarded on
+      // `session.id`, so a removal for a DIFFERENT session succeeds by doing
+      // nothing — and if it superseded a still-retrying removal for the session
+      // that actually holds the binding, that binding stayed and its retention
+      // clock was never armed. Supersession is only sound when the newer write
+      // covers the older one, which two differently-guarded removals never do.
+      // Not by the session alone either: a session's own writes must not queue
+      // behind a removal of somebody else's seat.
       //
       // `durable` still reports the REAL outcome, so a caller that acts on it
       // (`leaveCurrentRoom` elects the next share owner) sees a rejection, and
       // `queueSessionOperation` already marks it handled for the callers that
       // decide nothing from it.
       const durable = queueSessionOperation(
-        `member:${code}:${memberId}`,
+        `member:${code}:${memberId}:${session?.id ?? ""}`,
         "remove_member",
         async () => {
           await redis.eval(

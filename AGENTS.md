@@ -213,10 +213,15 @@ decides something has to know which of the two questions it is asking (#242):
   instance. An ABSENT generation still pins as `""`, which is why the teardown
   leaves a TOMBSTONE in that key rather than deleting it: deleting made "torn
   down" indistinguishable from "never stamped", so a pin of `""` matched the
-  room it was about to resurrect. The tombstone expires, and `hasRoomResidue`
-  ignores it, so it never keeps a code reserved. A new write that seats or moves anything by room code needs the same
-  pin; one that only touches keys named after the session does not, because
-  session ids are never reused.
+  room it was about to resurrect. The tombstone does NOT expire — a TTL would
+  have to outlive every write that could still be holding the old pin, and
+  nothing bounds those, so a lapsed tombstone lets a `""` pin match an absent
+  key all over again. What reclaims it is the next occupant's
+  `markRoomGeneration`. Pinning the tombstone ITSELF is refused, or a pin taken
+  after the teardown would match it. `hasRoomResidue` ignores the key, so a
+  tombstone never keeps a code reserved. A new write that seats or moves
+  anything by room code needs the same pin; one that only touches keys named
+  after the session does not, because session ids are never reused.
 - **Every retry budget is sized against the shutdown step that drains it.**
   `close_shared_runtime_store` and `flush_pending_room_event_publishes` carry
   explicit timeouts, and an overrun is recorded as a FAILED step — so a shutdown

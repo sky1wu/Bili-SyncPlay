@@ -2787,3 +2787,108 @@ test("redis runtime store flush waits for the session key to be released", async
     await store.close();
   }
 });
+
+test("redis runtime store flush reports a barrier it could not hold", async () => {
+  // Resolving on the bound would say the barrier held when it had not, and the
+  // caller goes straight on to read or broadcast from an index the write never
+  // reached — the very failure `flush` exists to prevent (#242 review).
+  let releaseCommand: (() => void) | null = null;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    multi() {
+      const commands = {
+        sadd: () => commands,
+        srem: () => commands,
+        del: () => commands,
+        hset: () => commands,
+        hdel: () => commands,
+        zadd: () => commands,
+        zrem: () => commands,
+        exec: () =>
+          new Promise((resolve) => {
+            releaseCommand = () => resolve(null);
+          }),
+      };
+      return commands;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:flush-reject:",
+    redisClient: fakeRedis,
+    pendingOperationTimeoutMs: 40,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    store.registerSession(createSession("session-barrier-fail"));
+    // Past the attempt cap, so the caller has been answered while the command
+    // runs on and the key is still held.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    await assert.rejects(async () => {
+      await store.flush?.();
+    }, /flush timed out before the session keys were released/);
+  } finally {
+    (releaseCommand as (() => void) | null)?.();
+    await store.close();
+  }
+});
+
+test("redis runtime store does not let one session's removal supersede another's", async () => {
+  // `REMOVE_MEMBER_LUA` is guarded on `session.id`, so a removal for a
+  // DIFFERENT session succeeds by doing nothing. Sharing a queue key let it
+  // supersede a still-retrying removal for the session that actually holds the
+  // binding — which then stayed, with no retention clock armed (#242 review).
+  const evalSessions: string[] = [];
+  let attempts = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async eval(
+      _script: string,
+      numKeys: number,
+      ...args: Array<string | number>
+    ) {
+      attempts += 1;
+      // ARGV[2] is the guarding session id: KEYS come first, then memberId.
+      evalSessions.push(String(args[numKeys + 1]));
+      // The holder's first attempt fails, so its retry is what a shared key
+      // would have let the other session's removal cancel.
+      if (attempts === 1) {
+        throw new Error("remove member write failed");
+      }
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:remove-key:",
+    redisClient: fakeRedis,
+    // Long enough that the holder is still waiting to retry when the other
+    // session's removal is queued.
+    writeRetry: { maxAttempts: 3, initialRetryDelayMs: 30 },
+  });
+
+  try {
+    const holder = createSession("session-holder");
+    const stale = createSession("session-stale");
+    const holderRemoval = store.removeMember("ROOMRK", "member-rk", holder);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const staleRemoval = store.removeMember("ROOMRK", "member-rk", stale);
+
+    await staleRemoval.durable;
+    await holderRemoval.durable;
+
+    assert.ok(
+      evalSessions.includes("session-holder"),
+      `the holder's removal must have been retried, saw ${evalSessions.join()}`,
+    );
+    assert.equal(
+      evalSessions.filter((id) => id === "session-holder").length,
+      2,
+      "the holder's retry ran",
+    );
+  } finally {
+    await store.close();
+  }
+});
