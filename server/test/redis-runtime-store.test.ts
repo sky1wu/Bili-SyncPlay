@@ -2061,3 +2061,95 @@ test("redis runtime store refuses a join whose room generation cannot be read", 
     await store.close();
   }
 });
+
+test("redis runtime store keeps a session's rollback behind the command it abandoned", async () => {
+  // The attempt timeout races the Redis command; it does not abort it. If the
+  // session's key were released when the CALLER is answered, the rollback the
+  // handler performs would run first and the abandoned join would then land on
+  // top of it — leaving a member the client was told does not exist, and one
+  // that can win the share back (#242 review).
+  const order: string[] = [];
+  let releaseJoin: (() => void) | null = null;
+  let evalCalls = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    multi() {
+      return {
+        sadd() {
+          return this;
+        },
+        srem() {
+          return this;
+        },
+        del() {
+          return this;
+        },
+        hset() {
+          return this;
+        },
+        hdel() {
+          return this;
+        },
+        zadd() {
+          return this;
+        },
+        zrem() {
+          return this;
+        },
+        exec() {
+          order.push("leave-write");
+          return Promise.resolve(null);
+        },
+      };
+    },
+    async hgetall() {
+      return { id: "session-late", roomCode: "" };
+    },
+    async get() {
+      return "gen-1";
+    },
+    eval() {
+      evalCalls += 1;
+      if (evalCalls > 1) {
+        // Later calls are the empty-room cleanup, not the join script.
+        return Promise.resolve(1);
+      }
+      // Never settles inside the attempt window; lands only when released.
+      return new Promise((resolve) => {
+        releaseJoin = () => {
+          order.push("join-write");
+          resolve(1);
+        };
+      });
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:late:",
+    redisClient: fakeRedis,
+    pendingOperationTimeoutMs: 20,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    const joined = store.markSessionJoinedRoom("session-late", "ROOMLT");
+    await assert.rejects(joined, /timed out/);
+    order.push("caller-answered");
+
+    // The rollback the handler performs on a refused join.
+    const left = store.markSessionLeftRoom("session-late", "ROOMLT");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(
+      order,
+      ["caller-answered"],
+      "the rollback must not overtake the abandoned command",
+    );
+
+    (releaseJoin as (() => void) | null)?.();
+    await left;
+    assert.deepEqual(order, ["caller-answered", "join-write", "leave-write"]);
+  } finally {
+    (releaseJoin as (() => void) | null)?.();
+    await store.close();
+  }
+});

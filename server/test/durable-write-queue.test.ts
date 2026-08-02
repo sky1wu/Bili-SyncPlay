@@ -272,3 +272,57 @@ test("durable write queue drops writes that have not started once it is winding 
   }
   assert.deepEqual(started, ["first"]);
 });
+
+test("durable write queue holds the key until an abandoned command really finishes", async () => {
+  // A timeout races a command, it cannot abort one. Releasing the key when the
+  // caller is answered lets the compensating write — queued on this same key —
+  // run FIRST, and the abandoned command then lands on top of its own rollback
+  // (#242 review).
+  const order: string[] = [];
+  let releaseAbandoned: (() => void) | null = null;
+  const queue = createDurableWriteQueue({
+    maxAttempts: 1,
+    sleep: () => Promise.resolve(),
+  });
+
+  const abandonedCommand = new Promise<void>((resolve) => {
+    releaseAbandoned = () => {
+      order.push("abandoned-command-landed");
+      resolve();
+    };
+  });
+
+  const gaveUp = queue.enqueue({
+    key: "session-a",
+    operationName: "join",
+    run: async () => {
+      // Stands in for the raced timeout: the attempt reports failure while the
+      // command it started keeps going.
+      throw new Error("attempt timed out");
+    },
+    settle: () => abandonedCommand,
+  });
+  await assert.rejects(gaveUp, /timed out/);
+  order.push("caller-answered");
+
+  // The rollback the caller now performs.
+  const rollback = queue.enqueue({
+    key: "session-a",
+    operationName: "leave",
+    run: async () => {
+      order.push("rollback-ran");
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(order, ["caller-answered"], "the rollback must wait");
+
+  (releaseAbandoned as (() => void) | null)?.();
+  await rollback;
+
+  assert.deepEqual(order, [
+    "caller-answered",
+    "abandoned-command-landed",
+    "rollback-ran",
+  ]);
+});

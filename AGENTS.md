@@ -221,6 +221,14 @@ decides something has to know which of the two questions it is asking (#242):
   writes that have not started, leaving at most ONE in-flight attempt; the step
   budget must exceed that attempt's own timeout. Raising `maxAttempts` or a
   delay means redoing that arithmetic.
+- **A timeout answers the caller; it does not cancel the command.** So the
+  session's key is released only once every command the write started has
+  really finished (`DurableWriteRequest.settle`). Releasing it when the caller
+  is answered lets the compensating write — queued on that same key — run
+  first, and the abandoned command then lands on top of its own rollback,
+  leaving a member the client was told does not exist and who can win the share
+  back. `drain` waits for those releases; `confirm` deliberately does not, since
+  a command still in flight has already reported whether it can be confirmed.
 - **A retry is abandoned when a newer write for the same session is queued.**
   Retrying past that point fights the newer write. This is only sound because
   the join write re-writes the WHOLE session record rather than patching
@@ -267,6 +275,8 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   backlog first. Bounding only the second one leaves the budget just as blown.
   An overrun step is recorded as a failure AND lets the bus close under
   in-flight publishes, which then delete their records as if they had landed.
+  Each publish is capped on its own too: a deadline that only decides whether to
+  START the next record bounds nothing when the bus hangs instead of rejecting.
   Sweeps also no longer overlap: they share that set, and `stop()` awaits only
   the sweep it knows about.
 

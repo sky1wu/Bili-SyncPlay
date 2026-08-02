@@ -64,6 +64,18 @@ export type DurableWriteRequest = {
   key: string;
   operationName: string;
   run: () => Promise<void>;
+  /**
+   * Awaited before the KEY is released to the next write — never before the
+   * caller is answered.
+   *
+   * A `run` that gives up on a command it cannot cancel (a timeout races the
+   * command, it does not abort it) must report that here, or the command lands
+   * AFTER whatever the caller did about the failure. That is not a harmless
+   * duplicate: the caller's compensating write is queued on this same key, so
+   * an abandoned join would be re-applied on top of its own rollback and leave
+   * a member the client was told does not exist (#242 review).
+   */
+  settle?: () => Promise<void>;
 };
 
 export type DurableWriteQueueOptions = {
@@ -83,7 +95,12 @@ export type DurableWriteQueue = {
    * {@link SupersededWriteError} when a newer write for the same key took over.
    */
   enqueue: (request: DurableWriteRequest) => Promise<void>;
-  /** Every write queued so far has settled, however it settled. */
+  /**
+   * Every write queued so far has released its key — which is later than "its
+   * caller was answered", because a command a timeout gave up on is still in
+   * flight until Redis answers. Use it when the point is that the store is
+   * quiet; `confirm` is the one that reports.
+   */
   drain: () => Promise<void>;
   /**
    * Every write is CONFIRMED: the outstanding ones have landed, and none has
@@ -159,6 +176,13 @@ export function createDurableWriteQueue(
   const chains = new Map<string, ChainEntry>();
   /** The REAL outcomes, each pre-marked handled so a rejection stays quiet. */
   const outcomes = new Set<Promise<void>>();
+  /**
+   * One per write, resolving when its KEY is released — i.e. after `settle`.
+   * `drain` waits on these rather than on `outcomes`, because a write whose
+   * command is still in flight has not finished with the store just because its
+   * caller has been answered.
+   */
+  const released = new Set<Promise<void>>();
   /**
    * Writes given up on since the last {@link DurableWriteQueue.confirm}. Capped
    * so a store-wide outage cannot turn the record of it into a leak; the count
@@ -257,7 +281,7 @@ export function createDurableWriteQueue(
       const outcome = (previous?.settled ?? Promise.resolve()).then(() =>
         runWithRetries(request, () => superseded),
       );
-      const settled = outcome.then(
+      const reported = outcome.then(
         () => undefined,
         (error: unknown) => {
           // A superseded write is not an unconfirmed one: the newer write for
@@ -271,6 +295,14 @@ export function createDurableWriteQueue(
           }
         },
       );
+      // The chain is released only once the underlying commands have really
+      // finished — see `settle`. The caller still gets `outcome` on time.
+      const settled = reported
+        .then(() => request.settle?.())
+        .then(
+          () => undefined,
+          () => undefined,
+        );
       const entry: ChainEntry = {
         settled,
         supersede: () => {
@@ -280,12 +312,14 @@ export function createDurableWriteQueue(
       chains.set(request.key, entry);
 
       outcomes.add(outcome);
+      released.add(settled);
       // Marks the rejection handled without consuming it, so a caller that DOES
       // await `enqueue` still sees it while a fire-and-forget caller does not
       // crash the process.
       void outcome.catch(() => undefined);
       void settled.then(() => {
         outcomes.delete(outcome);
+        released.delete(settled);
         if (chains.get(request.key) === entry) {
           chains.delete(request.key);
         }
@@ -293,12 +327,17 @@ export function createDurableWriteQueue(
       return outcome;
     },
     async drain() {
-      await Promise.allSettled(Array.from(outcomes));
+      while (released.size > 0) {
+        await Promise.allSettled(Array.from(released));
+      }
     },
     async confirm() {
       // Settling the outstanding writes first is what folds THEIR failures into
       // `abandoned`, so the check below covers both the writes that had already
       // been given up on and the ones still running when this was called.
+      // The callers' answers, not the key releases: a command that is still in
+      // flight has already reported whether it can be confirmed, and waiting
+      // for it to finish would make this hang exactly when the store is sick.
       await Promise.allSettled(Array.from(outcomes));
       if (abandoned.length === 0) {
         return;
@@ -320,7 +359,7 @@ export function createDurableWriteQueue(
       pendingWaits.clear();
     },
     size() {
-      return outcomes.size;
+      return released.size;
     },
   };
 }

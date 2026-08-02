@@ -47,6 +47,13 @@ const PENDING_RESYNC_BACKLOG_WARN_THRESHOLD = 512;
  */
 const SHUTDOWN_RESYNC_BUDGET_MS = 3_000;
 const SHUTDOWN_RESYNC_CONCURRENCY = 8;
+/**
+ * Caps ONE publish. A deadline that only decides whether to START the next
+ * record is no bound at all when the bus hangs rather than rejecting: the call
+ * already in flight pins the sweep drain and the shutdown pass alike, and the
+ * step times out with the publish still running (#242 review).
+ */
+const RESYNC_PUBLISH_TIMEOUT_MS = 2_000;
 
 export function createRuntimeIndexReaper(options: {
   enabled: boolean;
@@ -107,9 +114,30 @@ export function createRuntimeIndexReaper(options: {
     }
   }
 
-  async function publishPendingResync(roomCode: string): Promise<void> {
+  async function publishPendingResync(
+    roomCode: string,
+    timeoutMs = RESYNC_PUBLISH_TIMEOUT_MS,
+  ): Promise<void> {
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     try {
-      await options.publishRoomStateUpdate?.(roomCode);
+      const publish = options.publishRoomStateUpdate?.(roomCode);
+      if (publish) {
+        await Promise.race([
+          publish,
+          new Promise<never>((_resolve, reject) => {
+            timeoutHandle = setTimeout(
+              () => {
+                reject(
+                  new Error(
+                    `Room state resync publish timed out for ${roomCode}.`,
+                  ),
+                );
+              },
+              Math.max(timeoutMs, 1),
+            );
+          }),
+        ]);
+      }
       roomsAwaitingResync.delete(roomCode);
     } catch (error) {
       // Kept for the next sweep. The sweep's own work is done and must not be
@@ -120,6 +148,10 @@ export function createRuntimeIndexReaper(options: {
         result: "error",
         error: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+      }
     }
   }
 
@@ -167,7 +199,12 @@ export function createRuntimeIndexReaper(options: {
           const roomCode = queued[next];
           next += 1;
           if (roomCode !== undefined) {
-            await publishPendingResync(roomCode);
+            // Capped by what is LEFT of the budget, not by the per-publish
+            // default: the last record must not be able to overrun it either.
+            await publishPendingResync(
+              roomCode,
+              Math.min(RESYNC_PUBLISH_TIMEOUT_MS, deadline - now()),
+            );
           }
         }
       },

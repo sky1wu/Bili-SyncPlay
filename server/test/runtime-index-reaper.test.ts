@@ -819,3 +819,66 @@ test("runtime index reaper cuts a sweep's serial backlog drain short at stop", a
   );
   assert.ok(events.includes("runtime_index_resync_abandoned_at_shutdown"));
 });
+
+test("runtime index reaper caps a resync publish that never settles", async () => {
+  // A deadline that only decides whether to START the next record is no bound
+  // at all when the bus hangs rather than rejecting: the call already in flight
+  // pins the sweep drain and the shutdown pass alike (#242 review).
+  const events: string[] = [];
+  const deadSession = createSession("session-hung", "offline-node");
+  deadSession.roomCode = "ROOM46";
+  deadSession.memberId = "member-hung";
+  let sweepDone = false;
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return sweepDone
+        ? []
+        : [
+            {
+              instanceId: "offline-node",
+              version: "test",
+              startedAt: 0,
+              lastHeartbeatAt: 0,
+              staleAt: 0,
+              expiresAt: 0,
+              connectionCount: 1,
+              activeRoomCount: 1,
+              activeMemberCount: 1,
+              health: "offline" as const,
+            },
+          ];
+    },
+    async listClusterSessions() {
+      return sweepDone ? [] : [deadSession];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    async flush() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    logEvent: (event) => {
+      events.push(event);
+    },
+    // Never settles. Without a per-publish cap the sweep — and every later
+    // shutdown pass — waits on it forever.
+    publishRoomStateUpdate: () => new Promise<void>(() => {}),
+  });
+
+  try {
+    assert.equal(await reaper.sweep(), 1);
+    assert.ok(events.includes("runtime_index_resync_publish_failed"));
+  } finally {
+    sweepDone = true;
+    await reaper.stop();
+  }
+});

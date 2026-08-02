@@ -17,6 +17,7 @@ import {
   createDurableWriteQueue,
   NonRetryableWriteError,
   type DurableWriteQueueOptions,
+  type DurableWriteRequest,
 } from "./durable-write-queue.js";
 
 type RedisMulti = {
@@ -818,12 +819,24 @@ export async function createRedisRuntimeStore(
   function withAttemptTimeout(
     operationName: string,
     operation: () => Promise<void>,
-  ): () => Promise<void> {
-    return async () => {
+  ): Pick<DurableWriteRequest, "run" | "settle"> {
+    // Every command this write ever started, error-swallowed. The timeout races
+    // a command, it cannot abort one, so a "failed" attempt may still be on its
+    // way to Redis — and the queue must not hand this session's key to the
+    // compensating write until it has landed (#242 review).
+    const started: Array<Promise<void>> = [];
+    const run = async () => {
       let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+      const command = operation();
+      started.push(
+        command.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
       try {
         await Promise.race([
-          operation(),
+          command,
           new Promise<never>((_resolve, reject) => {
             timeoutHandle = setTimeout(() => {
               const error = new Error(
@@ -850,6 +863,12 @@ export async function createRedisRuntimeStore(
         }
       }
     };
+    return {
+      run,
+      settle: async () => {
+        await Promise.all(started);
+      },
+    };
   }
 
   function queueSessionOperation(
@@ -862,7 +881,7 @@ export async function createRedisRuntimeStore(
     const outcome = sessionWriteQueue.enqueue({
       key: sessionId,
       operationName,
-      run: withAttemptTimeout(operationName, operation),
+      ...withAttemptTimeout(operationName, operation),
     });
     const settled = outcome.catch(() => undefined);
     pendingOperations.add(settled);
