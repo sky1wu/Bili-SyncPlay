@@ -1157,6 +1157,7 @@ test("runtime index reaper keeps the resync record when its writes were not conf
     async purgeNodeStatus() {},
     confirmWrites: () =>
       confirmed ? Promise.resolve() : new Promise<void>(() => {}),
+    flush: async () => {},
   };
 
   const reaper = createRuntimeIndexReaper({
@@ -1184,6 +1185,155 @@ test("runtime index reaper keeps the resync record when its writes were not conf
     // And now it is finally dropped.
     await reaper.sweep();
     assert.deepEqual(published, ["ROOM50", "ROOM50"]);
+  } finally {
+    await reaper.stop();
+  }
+});
+
+test("runtime index reaper treats a refused member removal as unconfirmed", async () => {
+  // Swallowing `removal.durable` turned a refused `REMOVE_MEMBER_LUA` into a
+  // confirmed write, so the sweep published and then dropped the room's only
+  // resync record — while the stale member binding was still in Redis and its
+  // token retention had never been armed (#242 review).
+  const published: string[] = [];
+  const deadSession = createSession("session-refused", "offline-node");
+  deadSession.roomCode = "ROOM51";
+  deadSession.memberId = "member-refused";
+  let sweeps = 0;
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return sweeps > 1
+        ? []
+        : [
+            {
+              instanceId: "offline-node",
+              version: "test",
+              startedAt: 0,
+              lastHeartbeatAt: 0,
+              staleAt: 0,
+              expiresAt: 0,
+              connectionCount: 1,
+              activeRoomCount: 1,
+              activeMemberCount: 1,
+              health: "offline" as const,
+            },
+          ];
+    },
+    async listClusterSessions() {
+      sweeps += 1;
+      return sweeps > 1 ? [] : [deadSession];
+    },
+    removeMember() {
+      return {
+        room: null,
+        roomEmpty: false,
+        removed: true,
+        durable: Promise.reject(new Error("remove member refused")),
+      };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    async confirmWrites() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async (roomCode) => {
+      published.push(roomCode);
+    },
+  });
+
+  try {
+    await reaper.sweep();
+    // Announced — silence would be worse — but the record must NOT have been
+    // dropped on a removal that was refused.
+    assert.deepEqual(published, ["ROOM51"]);
+    await reaper.sweep();
+    assert.deepEqual(published, ["ROOM51", "ROOM51"], "the record survived");
+  } finally {
+    await reaper.stop();
+  }
+});
+
+test("runtime index reaper keeps an unconfirmed record across the next sweep's opening flush", async () => {
+  // `keepRecords` used to be applied only in the sweep that created the record,
+  // so the very next sweep's OPENING flush published and deleted it before
+  // anything had been re-confirmed — and if the cleanup landed in between, that
+  // sweep found no offline session to rebuild the record from either (#242
+  // review).
+  const published: string[] = [];
+  let confirmable = false;
+  let sessionsVisible = true;
+  const deadSession = createSession("session-crossflush", "offline-node");
+  deadSession.roomCode = "ROOM52";
+  deadSession.memberId = "member-crossflush";
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return sessionsVisible
+        ? [
+            {
+              instanceId: "offline-node",
+              version: "test",
+              startedAt: 0,
+              lastHeartbeatAt: 0,
+              staleAt: 0,
+              expiresAt: 0,
+              connectionCount: 1,
+              activeRoomCount: 1,
+              activeMemberCount: 1,
+              health: "offline" as const,
+            },
+          ]
+        : [];
+    },
+    async listClusterSessions() {
+      return sessionsVisible ? [deadSession] : [];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    confirmWrites: () =>
+      confirmable ? Promise.resolve() : new Promise<void>(() => {}),
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async (roomCode) => {
+      published.push(roomCode);
+    },
+  });
+
+  try {
+    // Sweep one: cleanup writes never confirm, so the record must survive.
+    await reaper.sweep();
+    assert.deepEqual(published, ["ROOM52"]);
+
+    // The session is now gone from the cluster index — exactly the state in
+    // which nothing could rebuild the record — and the writes still do not
+    // confirm. The opening flush of sweep two must NOT drop it.
+    sessionsVisible = false;
+    await reaper.sweep();
+    assert.deepEqual(published, ["ROOM52", "ROOM52"]);
+
+    // Once the writes confirm, the record is published on a state built from
+    // them and finally dropped.
+    confirmable = true;
+    await reaper.sweep();
+    assert.deepEqual(published, ["ROOM52", "ROOM52", "ROOM52"]);
+    await reaper.sweep();
+    assert.deepEqual(published, ["ROOM52", "ROOM52", "ROOM52"]);
   } finally {
     await reaper.stop();
   }

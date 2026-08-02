@@ -326,3 +326,50 @@ test("durable write queue holds the key until an abandoned command really finish
     "rollback-ran",
   ]);
 });
+
+test("durable write queue waits for the abandoned command before it retries", async () => {
+  // A timed-out attempt races its command rather than aborting it. Starting the
+  // next attempt straight away left up to `maxAttempts` uncancellable commands
+  // out at once for a single write — and the internal retries never go back
+  // through the store's capacity check, so nothing saw them (#242 review).
+  let live = 0;
+  let peak = 0;
+  const releases: Array<() => void> = [];
+  const started: Array<Promise<void>> = [];
+  const queue = createDurableWriteQueue({
+    maxAttempts: 4,
+    sleep: () => Promise.resolve(),
+  });
+
+  const outcome = queue.enqueue({
+    key: "session-a",
+    operationName: "write",
+    run: async () => {
+      const command = new Promise<void>((resolve) => {
+        live += 1;
+        peak = Math.max(peak, live);
+        releases.push(() => {
+          live -= 1;
+          resolve();
+        });
+      });
+      started.push(command);
+      // Stands in for the raced attempt timeout: the attempt gives up while the
+      // command it started is still running.
+      throw new Error("attempt timed out");
+    },
+    settle: async () => {
+      await Promise.all(started);
+    },
+  });
+  outcome.catch(() => undefined);
+
+  // Let every retry that is going to happen happen.
+  for (let tick = 0; tick < 8; tick += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    releases.shift()?.();
+  }
+  await assert.rejects(outcome, /timed out/);
+
+  assert.equal(peak, 1, `one live command per write at a time, saw ${peak}`);
+});

@@ -171,10 +171,23 @@ export function createPendingResyncQueue(
     }
   }
 
-  async function acquireSlot(): Promise<void> {
-    if (activePublishes < maxConcurrentPublishes || pacer.stopped()) {
+  /**
+   * Returns whether a slot was taken. `false` means the queue stopped while
+   * waiting — the caller must NOT publish.
+   *
+   * The stop signal releases the waiters so shutdown is not parked behind a
+   * slot a hung bus will never give back, but releasing them used to GRANT the
+   * slot: every waiter then published, turning the whole uncapped backlog into
+   * one simultaneous burst at shutdown and defeating the very cap this function
+   * exists to apply (#242 review).
+   */
+  async function acquireSlot(): Promise<boolean> {
+    if (pacer.stopped()) {
+      return false;
+    }
+    if (activePublishes < maxConcurrentPublishes) {
       activePublishes += 1;
-      return;
+      return true;
     }
     await new Promise<void>((resolve) => {
       slotWaiters.push(resolve);
@@ -182,7 +195,11 @@ export function createPendingResyncQueue(
         resolve();
       });
     });
+    if (pacer.stopped()) {
+      return false;
+    }
     activePublishes += 1;
+    return true;
   }
 
   const pacer = createRetryPacer({
@@ -207,7 +224,11 @@ export function createPendingResyncQueue(
     roomCode: string,
     track: (call: Promise<void>) => void,
   ): Promise<void> {
-    await acquireSlot();
+    if (!(await acquireSlot())) {
+      throw new Error(
+        `Room state resync publish for ${roomCode} was dropped: the queue is stopping.`,
+      );
+    }
     const call = options.publish(roomCode);
     void call.then(releaseSlot, releaseSlot);
     track(

@@ -551,10 +551,15 @@ test("redis runtime store rejects new pending operations after reaching the conf
 });
 
 test("redis runtime store retries a timed-out write instead of dropping it", async () => {
-  // The first attempt never settles: the timeout has to end THAT ATTEMPT and
+  // The first attempt outlives its cap: the timeout has to end THAT ATTEMPT and
   // hand the write back to the retry queue, rather than end the write (#242).
-  const hangingOperation = createDeferred<unknown>();
-  const fakeRedis = createFakeRedisClient([hangingOperation.promise]);
+  //
+  // The slow command then ANSWERS, which is what releases the retry — the queue
+  // deliberately does not open a second attempt while the first command is
+  // still out there, or one write could leave `maxAttempts` uncancellable
+  // commands behind at once (#242 review).
+  const slowOperation = createDeferred<unknown>();
+  const fakeRedis = createFakeRedisClient([slowOperation.promise]);
   const errors: string[] = [];
   const store = await createRedisRuntimeStore("redis://unused", {
     redisClient: fakeRedis,
@@ -564,6 +569,9 @@ test("redis runtime store retries a timed-out write instead of dropping it", asy
       errors.push(context.reason);
     },
   });
+  const answered = setTimeout(() => {
+    slowOperation.reject(new Error("slow redis command finally answered"));
+  }, 40);
 
   try {
     store.registerSession(createSession("timed-out"));
@@ -575,7 +583,8 @@ test("redis runtime store retries a timed-out write instead of dropping it", asy
     assert.ok(errors.includes("retry"));
     assert.equal(errors.includes("failed"), false);
   } finally {
-    hangingOperation.resolve(null);
+    clearTimeout(answered);
+    slowOperation.reject(new Error("cleanup"));
     await store.close();
   }
 });

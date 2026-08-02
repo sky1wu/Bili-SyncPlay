@@ -214,6 +214,17 @@ export function createDurableWriteQueue(
           error,
         });
         await pacer.wait(delayMs);
+        // The attempt that just failed may have failed by TIMEOUT, which races
+        // its command rather than aborting it. Starting the next attempt now
+        // would leave up to `maxAttempts` uncancellable commands out at once
+        // for a single write — and the internal retries never go back through
+        // `ensurePendingCapacity`, so the configured cap would not see them
+        // (#242 review). `settle` is exactly "every command started so far has
+        // answered"; the stop signal is what keeps shutdown from waiting on it.
+        await Promise.race([
+          request.settle?.() ?? Promise.resolve(),
+          pacer.whenStopped(),
+        ]);
         if (isSuperseded()) {
           throw new SupersededWriteError(request.key, request.operationName);
         }

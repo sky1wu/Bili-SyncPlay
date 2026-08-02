@@ -116,6 +116,18 @@ export function createRuntimeIndexReaper(options: {
    * difference is only that here the retries are driven by the sweep timer.
    */
   const inFlightResyncByRoom = new Map<string, Promise<void>>();
+  /**
+   * Rooms whose CLEANUP writes were never confirmed.
+   *
+   * A record here may be announced but must not be dropped on that
+   * announcement: the state it triggers can still be rebuilt from an index the
+   * cleanup has not reached. `keepRecords` used to be applied only in the sweep
+   * that created the record, so the very next sweep's opening flush published
+   * and deleted it before anything had been re-confirmed — and if the cleanup
+   * landed in between, that sweep found no offline session to rebuild the
+   * record from either (#242 review).
+   */
+  const resyncAwaitingWrites = new Set<string>();
 
   function rememberResync(roomCode: string): void {
     const isNew = !roomsAwaitingResync.has(roomCode);
@@ -164,7 +176,7 @@ export function createRuntimeIndexReaper(options: {
             new Error(`Room state resync publish timed out for ${roomCode}.`),
         );
       }
-      if (!keepRecord) {
+      if (!keepRecord && !resyncAwaitingWrites.has(roomCode)) {
         roomsAwaitingResync.delete(roomCode);
       }
     } catch (error) {
@@ -258,6 +270,23 @@ export function createRuntimeIndexReaper(options: {
       return 0;
     }
 
+    // Writes owed by earlier sweeps: once the store confirms them, the records
+    // they were gating are safe to publish AND drop.
+    if (options.runtimeStore.confirmWrites && resyncAwaitingWrites.size > 0) {
+      await pacer
+        .capAttempt(
+          options.runtimeStore.confirmWrites(),
+          WRITE_CONFIRMATION_TIMEOUT_MS,
+          () =>
+            new Error(
+              "Runtime index reaper gave up re-confirming earlier sweeps' writes.",
+            ),
+        )
+        .then(() => {
+          resyncAwaitingWrites.clear();
+        })
+        .catch(() => undefined);
+    }
     await flushPendingResyncs();
 
     const currentTime = now();
@@ -298,7 +327,14 @@ export function createRuntimeIndexReaper(options: {
         // announces a state rebuilt from a member map that still holds the dead
         // seat (#242 review).
         if (removal.durable) {
-          memberRemovals.push(removal.durable.catch(() => undefined));
+          // The REAL outcome goes into the confirmation set — swallowing it
+          // here turned a refused `REMOVE_MEMBER_LUA` into a confirmed write,
+          // so the sweep published and then dropped the room's only resync
+          // record while the stale member binding was still in Redis and its
+          // token retention had never been armed (#242 review). Marked handled
+          // separately so a rejection before `Promise.all` reads it stays quiet.
+          void removal.durable.catch(() => undefined);
+          memberRemovals.push(removal.durable);
         }
       }
       if (session.roomCode) {
@@ -361,7 +397,16 @@ export function createRuntimeIndexReaper(options: {
     // announcement triggers may still be rebuilt from an index the cleanup has
     // not reached, and dropping the record on that publish leaves nothing to
     // announce the real state once the writes do land (#242 review).
-    await flushPendingResyncs({ keepRecords: !writesConfirmed });
+    if (writesConfirmed) {
+      for (const roomCode of roomsToResync) {
+        resyncAwaitingWrites.delete(roomCode);
+      }
+    } else {
+      for (const roomCode of roomsToResync) {
+        resyncAwaitingWrites.add(roomCode);
+      }
+    }
+    await flushPendingResyncs();
 
     const remainingSessions = await options.runtimeStore.listClusterSessions();
     const activeInstanceIds = new Set(

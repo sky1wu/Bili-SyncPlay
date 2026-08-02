@@ -311,3 +311,38 @@ test("pending resync queue caps how many rooms it publishes at once", async () =
   await queue.drain();
   assert.equal(peak, 3);
 });
+
+test("pending resync queue does not publish the backlog when it is stopping", async () => {
+  // The stop signal releases the slot waiters so shutdown is not parked behind
+  // a slot a hung bus will never give back — but releasing them used to GRANT
+  // the slot, so every waiter published and the whole uncapped backlog became
+  // one simultaneous burst at shutdown (#242 review).
+  let published = 0;
+  const releases: Array<() => void> = [];
+  const queue = createPendingResyncQueue({
+    sleep: instantSleep,
+    maxConcurrentPublishes: 2,
+    publish: () => {
+      published += 1;
+      return new Promise<void>((resolve) => {
+        releases.push(resolve);
+      });
+    },
+  });
+
+  for (let index = 0; index < 25; index += 1) {
+    queue.request(`ROOM${index}`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(published, 2, "only the slot holders may be publishing");
+
+  queue.stopRetrying();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(published, 2, "the waiters must exit, not take a slot");
+
+  for (const release of releases) {
+    release();
+  }
+  await queue.drain();
+  assert.equal(published, 2);
+});
