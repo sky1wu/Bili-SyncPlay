@@ -283,3 +283,266 @@ test("runtime index reaper announces the room even when the index write fails", 
     await reaper.stop();
   }
 });
+
+test("runtime index reaper keeps a failed announcement until it is published", async () => {
+  // The announcement is one-shot. Once this sweep has cleaned the indexes,
+  // `listClusterSessions` no longer returns those sessions, so a later sweep
+  // finds nothing to rediscover the room from — a swallowed publish failure
+  // stranded the room forever, with every survivor caching a dead member as
+  // `sharedByMemberId` (#242).
+  const published: string[] = [];
+  const events: string[] = [];
+  let publishFailures = 2;
+  const reaped: string[] = [];
+  const deadSession = createSession("session-stranded", "offline-node");
+  deadSession.roomCode = "ROOM43";
+  deadSession.memberId = "member-stranded";
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      // Only the FIRST sweep sees a dead node. Every later sweep takes the
+      // "nothing to do" early return — which the retry has to survive.
+      return reaped.length > 0
+        ? []
+        : [
+            {
+              instanceId: "offline-node",
+              version: "test",
+              startedAt: 0,
+              lastHeartbeatAt: 0,
+              staleAt: 0,
+              expiresAt: 0,
+              connectionCount: 1,
+              activeRoomCount: 1,
+              activeMemberCount: 1,
+              health: "offline" as const,
+            },
+          ];
+    },
+    async listClusterSessions() {
+      return reaped.length > 0 ? [] : [deadSession];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession(sessionId: string) {
+      reaped.push(sessionId);
+    },
+    async purgeNodeStatus() {},
+    async flush() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    logEvent: (event) => {
+      events.push(event);
+    },
+    publishRoomStateUpdate: async (roomCode) => {
+      if (publishFailures > 0) {
+        publishFailures -= 1;
+        throw new Error("bus rejected");
+      }
+      published.push(roomCode);
+    },
+  });
+
+  try {
+    assert.equal(await reaper.sweep(), 1);
+    assert.deepEqual(published, [], "the first announcement failed");
+    assert.ok(events.includes("runtime_index_resync_publish_failed"));
+
+    // The session is gone from the cluster index by now, so the record kept in
+    // the reaper is the only trail left.
+    assert.equal(await reaper.sweep(), 0);
+    assert.deepEqual(published, []);
+
+    assert.equal(await reaper.sweep(), 0);
+    assert.deepEqual(published, ["ROOM43"]);
+
+    // Dropped only once it landed: a fourth sweep must not re-announce.
+    assert.equal(await reaper.sweep(), 0);
+    assert.deepEqual(published, ["ROOM43"]);
+  } finally {
+    await reaper.stop();
+  }
+});
+
+test("runtime index reaper reports writes it could not confirm before announcing", async () => {
+  // `flush` says only that the queue emptied; the sweep is about to announce a
+  // state rebuilt from those very writes, so it asks the question that can be
+  // answered wrong (#242). It does NOT gate the announcement — silence is worse
+  // than a state naming a member every client already caches.
+  const published: string[] = [];
+  const events: string[] = [];
+  const reaped: string[] = [];
+  const deadSession = createSession("session-unconfirmed", "offline-node");
+  deadSession.roomCode = "ROOM44";
+  deadSession.memberId = "member-unconfirmed";
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return [
+        {
+          instanceId: "offline-node",
+          version: "test",
+          startedAt: 0,
+          lastHeartbeatAt: 0,
+          staleAt: 0,
+          expiresAt: 0,
+          connectionCount: 1,
+          activeRoomCount: 1,
+          activeMemberCount: 1,
+          health: "offline" as const,
+        },
+      ];
+    },
+    async listClusterSessions() {
+      return reaped.length > 0 ? [] : [deadSession];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession(sessionId: string) {
+      reaped.push(sessionId);
+    },
+    async purgeNodeStatus() {},
+    async confirmWrites() {
+      throw new AggregateError([new Error("redis down")], "not confirmed");
+    },
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    logEvent: (event) => {
+      events.push(event);
+    },
+    publishRoomStateUpdate: async (roomCode) => {
+      published.push(roomCode);
+    },
+  });
+
+  try {
+    assert.equal(await reaper.sweep(), 1);
+    assert.ok(events.includes("runtime_index_writes_unconfirmed"));
+    assert.deepEqual(published, ["ROOM44"]);
+  } finally {
+    await reaper.stop();
+  }
+});
+
+test("runtime index reaper takes one last shot at its announcements on stop", async () => {
+  // The record set is memory-only and the sessions are already out of the
+  // cluster index, so shutting down without trying loses the announcement for
+  // good — nothing will ever rediscover the room (#242).
+  const published: string[] = [];
+  let publishFailures = 1;
+  const reaped: string[] = [];
+  const deadSession = createSession("session-shutdown", "offline-node");
+  deadSession.roomCode = "ROOM45";
+  deadSession.memberId = "member-shutdown";
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return [
+        {
+          instanceId: "offline-node",
+          version: "test",
+          startedAt: 0,
+          lastHeartbeatAt: 0,
+          staleAt: 0,
+          expiresAt: 0,
+          connectionCount: 1,
+          activeRoomCount: 1,
+          activeMemberCount: 1,
+          health: "offline" as const,
+        },
+      ];
+    },
+    async listClusterSessions() {
+      return reaped.length > 0 ? [] : [deadSession];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession(sessionId: string) {
+      reaped.push(sessionId);
+    },
+    async purgeNodeStatus() {},
+    async flush() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async (roomCode) => {
+      if (publishFailures > 0) {
+        publishFailures -= 1;
+        throw new Error("bus rejected");
+      }
+      published.push(roomCode);
+    },
+  });
+
+  assert.equal(await reaper.sweep(), 1);
+  assert.deepEqual(published, []);
+
+  await reaper.stop();
+  assert.deepEqual(published, ["ROOM45"]);
+});
+
+test("runtime index reaper does not start a sweep while one is still running", async () => {
+  // The sweeps share `roomsAwaitingResync`, so two of them would walk the same
+  // records and announce the same room twice — and `stop()` awaits whichever
+  // was scheduled LAST, so a newer sweep finishing first let shutdown tear
+  // Redis down under an older one (#242).
+  let releaseSweep: (() => void) | null = null;
+  let sweepsStarted = 0;
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      sweepsStarted += 1;
+      await new Promise<void>((resolve) => {
+        releaseSweep = resolve;
+      });
+      return [];
+    },
+    async listClusterSessions() {
+      return [];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    async flush() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    // Clamped up by `clampTimerIntervalMs`, but still far below the time the
+    // first sweep is held for.
+    intervalMs: 1,
+    now: () => 1_000,
+  });
+
+  try {
+    reaper.start();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(sweepsStarted, 1, "ticks must not stack sweeps");
+  } finally {
+    (releaseSweep as (() => void) | null)?.();
+    await reaper.stop();
+  }
+});

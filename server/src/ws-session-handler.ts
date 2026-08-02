@@ -249,7 +249,7 @@ export function createWsConnectionHandler(args: {
     };
 
     args.securityPolicy.incrementConnectionCount(session.remoteAddress);
-    args.runtimeStore.registerSession(session);
+    void args.runtimeStore.registerSession(session);
     args.wsHeartbeat?.track(socket, session);
     args.logEvent("ws_connection_accepted", {
       sessionId: session.id,

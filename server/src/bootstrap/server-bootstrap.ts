@@ -17,7 +17,10 @@ import { createMirroredRuntimeStore } from "../mirrored-runtime-store.js";
 import { createRedisAdminCommandBus } from "../redis-admin-command-bus.js";
 import { createRedisRoomEventBus } from "../redis-room-event-bus.js";
 import { createRedisRoomStore } from "../redis-room-store.js";
-import { createRedisRuntimeStore } from "../redis-runtime-store.js";
+import {
+  createRedisRuntimeStore,
+  type PendingOperationLogContext,
+} from "../redis-runtime-store.js";
 import {
   getRedisAdminCommandChannelPrefix,
   getRedisAdminCommandResultChannelPrefix,
@@ -88,12 +91,6 @@ export type ServerBootstrapDependencies = {
   serviceVersion?: string;
   logLevel?: LogLevel;
   logSampling?: Record<string, number>;
-};
-
-type PendingOperationLogContext = {
-  operationName: string;
-  pendingCount: number;
-  reason: "backpressure" | "timeout" | "failed";
 };
 
 type BootstrapLoggingHooks = {

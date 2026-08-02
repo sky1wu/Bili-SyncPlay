@@ -356,7 +356,7 @@ export function createRoomService(options: {
     }
 
     session.displayName = nextDisplayName;
-    runtimeStore.registerSession?.(session);
+    void runtimeStore.registerSession?.(session);
     return true;
   }
 

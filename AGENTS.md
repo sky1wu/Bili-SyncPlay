@@ -173,6 +173,74 @@ advances the room. Three rules keep it working, none enforced by a type:
     changed, or a failure that never got as far as leaving would broadcast a
     room the member never left.
 
+### The runtime store is write-behind, so "drained" never means "written"
+
+`registerSession`, `markSessionJoinedRoom`, `markSessionLeftRoom` and
+`unregisterSession` update this node's own maps synchronously and queue the
+shared write behind them. Everything downstream that writes, reads back, and
+decides something has to know which of the two questions it is asking (#242):
+
+- **`flush()` says the queue emptied. `confirmWrites()` says the writes landed.**
+  `flush` waits on error-swallowed copies, so a failed write drains exactly like
+  a successful one. Use `flush` when the point is ordering ("my own writes are
+  visible to the read I am about to do") and `confirmWrites` when the point is
+  durability. `confirmWrites` is store-wide and clears what it reports, so the
+  answer is "since you last asked"; a caller that only needs its OWN write
+  confirmed should await that write, since all four report their real outcome.
+- **Queued writes are retried with backoff, and a retry can outlive its room.**
+  `durable-write-queue` gives every queued write a bounded, backed-off retry
+  budget. That reopens the room-code recycling hazard #237 closed: a retry that
+  lands after the code changed hands would write into the new room. Only the
+  join write ADDS a session to a room, so only it needs the guard — it pins the
+  room generation BEFORE its first attempt and carries it into the script, and
+  a mismatch is a `NonRetryableWriteError` (a generation only moves forward, so
+  no later attempt can find its way back). A new write that seats or moves
+  anything by room code needs the same pin; one that only touches keys named
+  after the session does not, because session ids are never reused.
+  Every retry budget is sized against the shutdown step that has to drain it —
+  a close step gets 5s, `flush_pending_room_event_publishes` 30s — and a drain
+  that overruns is recorded as a FAILED step, so the process exits non-zero.
+  `close()` therefore calls `stopRetrying()` first, which cancels the backoffs
+  in flight rather than waiting them out. Raising `maxAttempts` or a delay
+  means re-checking that arithmetic.
+- **A retry is abandoned when a newer write for the same session is queued.**
+  Retrying past that point fights the newer write. This is only sound because
+  the join write re-writes the WHOLE session record rather than patching
+  `roomCode` — so a lost `registerSession` is repaired by the next join instead
+  of leaving a hash with no `id`, which `loadSession` reads as no session at
+  all. A new session write that carries a strict subset of the record must not
+  rely on an earlier one having landed.
+- **A join whose index write fails is aborted, not seated.** `runRoomJoinedHook`
+  reports failure and the handler rolls the join back through
+  `leaveRoom(session, "disconnect")` — `"disconnect"` so a reconnecting member
+  keeps the identity the ownership rule depends on. Everything a join sends next
+  is read back off the index this write maintains, so a member the room cannot
+  see is worse than a refused join the client retries.
+
+### One-shot broadcasts need a retry trail; repeated ones do not
+
+Nearly every `room_state_updated` is re-sent by the next `video:share` /
+`playback:update` / `profile:update`, so dropping one costs a moment. Two are
+one-shot, and both lose the room permanently when the bus rejects them (#242):
+
+- The **share-ownership resync** (`publishSharedOwnerResync`) fires precisely
+  because the room stopped advancing, so nothing follows it, and an idle room
+  never sends `sync:request` either — only a page reload recovers. It goes
+  through `pending-resync-queue`, which retries with backoff behind a `request`
+  that returns immediately; `firePublishRoomEvent` deliberately does not await
+  its wrapper, and making the leave/join handlers block on the bus would be the
+  worse trade. `flushPendingPublishes` must drain that queue too, or shutdown
+  tears the bus down with records still owed.
+- The **runtime index reaper's** announcement is the only thing that tells a
+  room a dead node's members are gone. Once the sweep has cleaned the indexes,
+  `listClusterSessions` no longer returns those sessions, so a later sweep has
+  nothing to rediscover the room from. The reaper keeps its own record set and
+  retries it at the START of every sweep — before the "no offline nodes" early
+  return — dropping a record only once the publish succeeds. The set is
+  memory-only, so `stop()` takes one last pass over it, and sweeps no longer
+  overlap: they share that set, and `stop()` awaits only the sweep it knows
+  about.
+
 ## Engineering Constraints
 
 - Repository-wide contribution and refactoring constraints are defined in [CONTRIBUTING.md](./CONTRIBUTING.md).

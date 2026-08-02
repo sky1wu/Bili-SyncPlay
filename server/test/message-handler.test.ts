@@ -252,7 +252,13 @@ test("message handler keeps room:create successful when bootstrap state fails", 
   assert.ok(events.includes("room_created"));
 });
 
-test("message handler keeps room:create successful when room join hook fails", async () => {
+test("message handler aborts room:create when the room join hook fails", async () => {
+  // The hook puts the session into the room index, and everything the create
+  // sends next is read back off that index. Carrying on used to seat a member
+  // the room could not see: their bootstrap state was missing them, and a
+  // stored sharer reconnecting into that room got a stand-in owner with no full
+  // state to follow (#242).
+  const leaveReasons: (string | undefined)[] = [];
   const sent: string[] = [];
   const errors: string[] = [];
   const events: string[] = [];
@@ -274,7 +280,8 @@ test("message handler keeps room:create successful when room join hook fails", a
       async joinRoomForSession() {
         throw new Error("unreachable");
       },
-      async leaveRoomForSession() {
+      async leaveRoomForSession(_session, reason) {
+        leaveReasons.push(reason);
         return { room: null };
       },
       async shareVideoForSession() {
@@ -316,10 +323,14 @@ test("message handler keeps room:create successful when room join hook fails", a
     payload: { displayName: "Alice" },
   });
 
-  assert.deepEqual(sent, ["room:created", "room:state"]);
-  assert.deepEqual(errors, []);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(errors, ["internal_error"]);
   assert.ok(events.includes("room_join_hook_failed"));
-  assert.ok(events.includes("room_created"));
+  assert.ok(events.includes("room_join_aborted"));
+  assert.equal(events.includes("room_created"), false);
+  // `"disconnect"`, so a reconnecting member keeps the identity the whole
+  // ownership rule depends on.
+  assert.deepEqual(leaveReasons, ["disconnect"]);
 });
 
 test("message handler skips room state publish when playback update is ignored", async () => {
@@ -1382,7 +1393,11 @@ test("message handler keeps room:join successful when bootstrap state fails", as
   assert.ok(events.includes("room_joined"));
 });
 
-test("message handler keeps room:join successful when room join hook fails", async () => {
+test("message handler aborts room:join when the room join hook fails", async () => {
+  // Mirror of the create path: a joiner the room index never received is
+  // missing from every state built off the shared view, so refusing the join —
+  // which the client simply retries — beats seating them (#242).
+  const leaveReasons: (string | undefined)[] = [];
   const sent: string[] = [];
   const errors: string[] = [];
   const events: string[] = [];
@@ -1404,7 +1419,8 @@ test("message handler keeps room:join successful when room join hook fails", asy
           memberToken: "member-token-2",
         };
       },
-      async leaveRoomForSession() {
+      async leaveRoomForSession(_session, reason) {
+        leaveReasons.push(reason);
         return { room: null };
       },
       async shareVideoForSession() {
@@ -1451,12 +1467,16 @@ test("message handler keeps room:join successful when room join hook fails", asy
       protocolVersion: 2,
     },
   });
+  await handler.flushPendingPublishes();
 
-  assert.deepEqual(sent, ["room:joined", "room:state"]);
-  assert.deepEqual(errors, []);
-  assert.deepEqual(published, ["room_member_joined"]);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(errors, ["internal_error"]);
+  // Nothing is announced: the room never gained this member.
+  assert.deepEqual(published, []);
   assert.ok(events.includes("room_join_hook_failed"));
-  assert.ok(events.includes("room_joined"));
+  assert.ok(events.includes("room_join_aborted"));
+  assert.equal(events.includes("room_joined"), false);
+  assert.deepEqual(leaveReasons, ["disconnect"]);
 });
 
 test("message handler keeps room:join successful when member joined publish fails", async () => {
@@ -2542,4 +2562,141 @@ test("switching rooms tells the old room even when the index cleanup fails", asy
     "room_member_joined",
   ]);
   assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-OLD", "ROOM-NEW"]);
+});
+
+test("a shared-owner resync that the bus rejects is retried until it lands", async () => {
+  // The one broadcast nothing else repeats. It goes out precisely because the
+  // room stopped advancing, so no later `video:share` / `playback:update`
+  // corrects a dropped one, and an idle room never sends `sync:request` either
+  // — the user would have to reload the page (#242).
+  const published: string[] = [];
+  let resyncFailures = 2;
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        return {
+          room: { code: "ROOM01" },
+          memberRemoved: true,
+          needsRoomStateResync: true,
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    async publishRoomEvent(message) {
+      if (message.type === "room_state_updated" && resyncFailures > 0) {
+        resyncFailures -= 1;
+        throw new Error("bus rejected");
+      }
+      published.push(message.type);
+    },
+    instanceId: "node-a",
+    sharedOwnerResyncRetry: {
+      initialRetryDelayMs: 1,
+      sleep: () => Promise.resolve(),
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+});
+
+test("shutdown drains the retrying shared-owner resync, not just the one-shot publishes", async () => {
+  // `flushPendingPublishes` runs before the bus is torn down. A resync record
+  // left behind is the broadcast nothing will ever re-send (#242).
+  const published: string[] = [];
+  let resyncFailures = 1;
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        return {
+          room: { code: "ROOM01" },
+          memberRemoved: true,
+          needsRoomStateResync: true,
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    async publishRoomEvent(message) {
+      if (message.type === "room_state_updated" && resyncFailures > 0) {
+        resyncFailures -= 1;
+        throw new Error("bus rejected");
+      }
+      published.push(message.type);
+    },
+    instanceId: "node-a",
+    sharedOwnerResyncRetry: {
+      initialRetryDelayMs: 30,
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  // The retry is still parked in its backoff at this point.
+  assert.deepEqual(published, ["room_member_left"]);
+
+  await handler.flushPendingPublishes();
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
 });

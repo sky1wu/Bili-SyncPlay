@@ -249,24 +249,25 @@ export async function createSyncServer(
     instanceId: persistenceConfig.instanceId,
     metricsCollector,
     onRoomJoined: async (session, roomCode) => {
-      runtimeStore.registerSession(session);
-      // Awaited for its REAL outcome, and retried once. The bootstrap
-      // `room:state` sent right after this is rebuilt from the index this write
-      // maintains, so a write that has not landed produces a state missing the
-      // member who just joined — and the ownership decision taken from it is
-      // then wrong in the one case it exists for, the stored sharer reconnecting
-      // (#235 review). The write is idempotent (`HSET` + `SADD`), so retrying it
-      // is safe; a second failure propagates and fails the join rather than
-      // seating a member the room cannot see.
-      try {
-        await runtimeStore.markSessionJoinedRoom(session.id, roomCode);
-      } catch {
-        await runtimeStore.markSessionJoinedRoom(session.id, roomCode);
-      }
+      // Not awaited, and deliberately so: `markSessionJoinedRoom` writes the
+      // WHOLE session record under the same key, so a registration that failed
+      // is repaired by the very next line and blocking on its retries would only
+      // delay the join (#242). Its outcome is still reported — the store marks
+      // the rejection handled, the log carries it.
+      void runtimeStore.registerSession(session);
+      // Awaited for its REAL outcome; the retries live in the store's write
+      // queue now, so the ad-hoc second try this used to do is gone. The
+      // bootstrap `room:state` sent right after this is rebuilt from the index
+      // this write maintains, so a write that has not landed produces a state
+      // missing the member who just joined — and the ownership decision taken
+      // from it is then wrong in the one case it exists for, the stored sharer
+      // reconnecting (#235 review). A failure propagates and ABORTS the join
+      // rather than seating a member the room cannot see (#242).
+      await runtimeStore.markSessionJoinedRoom(session.id, roomCode);
       await runtimeStore.flush?.();
     },
     onRoomLeft: async (session, roomCode) => {
-      runtimeStore.registerSession(session);
+      void runtimeStore.registerSession(session);
       // Awaited for its REAL outcome, so a failure reaches the handler and
       // suppresses the full `room:state` it would otherwise publish. Everything
       // published next is read back off the room index this write clears, so a

@@ -550,18 +550,16 @@ test("redis runtime store rejects new pending operations after reaching the conf
   }
 });
 
-test("redis runtime store removes timed out pending operations and recovers", async () => {
-  const firstOperation = createDeferred<unknown>();
-  const secondOperation = createDeferred<unknown>();
-  const fakeRedis = createFakeRedisClient([
-    firstOperation.promise,
-    secondOperation.promise,
-  ]);
+test("redis runtime store retries a timed-out write instead of dropping it", async () => {
+  // The first attempt never settles: the timeout has to end THAT ATTEMPT and
+  // hand the write back to the retry queue, rather than end the write (#242).
+  const hangingOperation = createDeferred<unknown>();
+  const fakeRedis = createFakeRedisClient([hangingOperation.promise]);
   const errors: string[] = [];
   const store = await createRedisRuntimeStore("redis://unused", {
     redisClient: fakeRedis,
-    maxPendingOperations: 1,
     pendingOperationTimeoutMs: 20,
+    writeRetry: { initialRetryDelayMs: 1 },
     onPendingOperationError(context) {
       errors.push(context.reason);
     },
@@ -569,25 +567,37 @@ test("redis runtime store removes timed out pending operations and recovers", as
 
   try {
     store.registerSession(createSession("timed-out"));
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    await store.flush?.();
-
-    secondOperation.resolve(null);
-    store.registerSession(createSession("recovered"));
-    await store.flush?.();
+    // Resolves only because the second attempt got a fresh `multi()`, which the
+    // fake answers with a resolved exec.
+    await store.confirmWrites?.();
 
     assert.ok(errors.includes("timeout"));
+    assert.ok(errors.includes("retry"));
+    assert.equal(errors.includes("failed"), false);
   } finally {
+    hangingOperation.resolve(null);
     await store.close();
   }
 });
 
-test("redis runtime store counts a timed-out operation failure only once", async () => {
-  const pending = createDeferred<unknown>();
+test("redis runtime store counts one failure per write, not per attempt", async () => {
   const failureOperations: string[] = [];
+  const errors: string[] = [];
+  // Every attempt rejects, so the write is genuinely lost — and it must be
+  // reported exactly once however many times the queue tried.
+  const rejections = Array.from({ length: 8 }, () =>
+    Promise.reject(new Error("redis failure")),
+  );
+  for (const rejection of rejections) {
+    rejection.catch(() => undefined);
+  }
   const store = await createRedisRuntimeStore("redis://example.test:6379", {
-    redisClient: createFakeRedisClient([pending.promise]),
+    redisClient: createFakeRedisClient(rejections),
     pendingOperationTimeoutMs: 5,
+    writeRetry: { maxAttempts: 3, initialRetryDelayMs: 1 },
+    onPendingOperationError(context) {
+      errors.push(context.reason);
+    },
     metricsCollector: {
       observeRedisRuntimeStoreDuration() {},
       observeRedisRuntimeStoreFailure(operation) {
@@ -597,14 +607,36 @@ test("redis runtime store counts a timed-out operation failure only once", async
   });
 
   try {
-    const session = createSession("session-timeout");
-    store.registerSession(session);
-
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    pending.reject(new Error("late redis failure"));
-    await store.flush?.();
+    store.registerSession(createSession("session-timeout"));
+    await assert.rejects(async () => {
+      await store.confirmWrites?.();
+    });
 
     assert.deepEqual(failureOperations, ["register_session"]);
+    // Two retries scheduled between the three attempts.
+    assert.equal(errors.filter((reason) => reason === "retry").length, 2);
+    assert.equal(errors.filter((reason) => reason === "failed").length, 1);
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store confirms writes separately from draining them", async () => {
+  const rejection = Promise.reject(new Error("redis failure"));
+  rejection.catch(() => undefined);
+  const store = await createRedisRuntimeStore("redis://example.test:6379", {
+    redisClient: createFakeRedisClient([rejection]),
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    store.registerSession(createSession("session-unconfirmed"));
+    // `flush` only ever says the queue emptied — a failed write drains exactly
+    // like a successful one, which is the conflation #242 exists to end.
+    await store.flush?.();
+    await assert.rejects(async () => {
+      await store.confirmWrites?.();
+    }, /not confirmed/);
   } finally {
     await store.close();
   }
@@ -1552,8 +1584,41 @@ test("redis runtime store reports a failed room-index cleanup to the caller", as
   // cannot carry that answer — it waits on the error-swallowed copies
   // `trackOperation` keeps for backpressure accounting, so it reports only that
   // the queue drained.
+  //
+  // The caller only hears about it once the retries are spent, so every attempt
+  // has to fail here — a single rejection would now be absorbed (#242).
+  let execAttempts = 0;
   const fakeRedis = {
-    ...createFakeRedisClient([Promise.reject(new Error("index write failed"))]),
+    ...createFakeRedisClient([]),
+    multi() {
+      return {
+        sadd() {
+          return this;
+        },
+        srem() {
+          return this;
+        },
+        del() {
+          return this;
+        },
+        hset() {
+          return this;
+        },
+        hdel() {
+          return this;
+        },
+        zadd() {
+          return this;
+        },
+        zrem() {
+          return this;
+        },
+        exec() {
+          execAttempts += 1;
+          return Promise.reject(new Error("index write failed"));
+        },
+      };
+    },
     async hgetall() {
       return { id: "session-dirty", roomCode: "ROOMDT" };
     },
@@ -1565,6 +1630,7 @@ test("redis runtime store reports a failed room-index cleanup to the caller", as
   const store = await createRedisRuntimeStore("redis://unused", {
     keyPrefix: "bsp:test:dirty:",
     redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 3, initialRetryDelayMs: 1 },
   });
 
   try {
@@ -1572,6 +1638,7 @@ test("redis runtime store reports a failed room-index cleanup to the caller", as
       store.markSessionLeftRoom("session-dirty", "ROOMDT"),
       /index write failed/,
     );
+    assert.equal(execAttempts, 3, "the write must have been retried first");
     // The asymmetry the fix rests on: draining the queue looks like success.
     await store.flush?.();
   } finally {
@@ -1616,19 +1683,22 @@ test("redis runtime store reports a failed join-index write to the caller", asyn
   // produces a state missing the member who just joined — and the ownership
   // decision taken from it is wrong in the one case it exists for, the stored
   // sharer reconnecting (#235 review). `flush` cannot report it.
+  let evalAttempts = 0;
   const fakeRedis = {
-    ...createFakeRedisClient([Promise.reject(new Error("join write failed"))]),
+    ...createFakeRedisClient([]),
     async hgetall() {
       return { id: "session-join", roomCode: "" };
     },
     async eval() {
-      return 1;
+      evalAttempts += 1;
+      throw new Error("join write failed");
     },
   };
 
   const store = await createRedisRuntimeStore("redis://unused", {
     keyPrefix: "bsp:test:join:",
     redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 3, initialRetryDelayMs: 1 },
   });
 
   try {
@@ -1636,8 +1706,261 @@ test("redis runtime store reports a failed join-index write to the caller", asyn
       store.markSessionJoinedRoom("session-join", "ROOMJN"),
       /join write failed/,
     );
+    assert.equal(evalAttempts, 3, "the write must have been retried first");
     await store.flush?.();
   } finally {
     await store.close();
   }
+});
+
+test("redis runtime store pins the room generation a join retry must still match", async () => {
+  // Room codes are recycled. A retry that outlived the room instance it was
+  // meant for would seat this session in whichever room took the code over, so
+  // the generation is read ONCE — before the first attempt writes anything —
+  // and every attempt carries it (#242, #237). Reading it per attempt instead
+  // would let the retry re-pin itself onto the new occupant.
+  const generationReads: string[] = [];
+  const expectedGenerations: string[] = [];
+  let evalAttempts = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async hgetall() {
+      return { id: "session-recycled", roomCode: "" };
+    },
+    async get(key: string) {
+      generationReads.push(key);
+      // The code changes hands right after the first read. A store that read
+      // the generation again on the retry would happily write into "gen-2".
+      return generationReads.length === 1 ? "gen-1" : "gen-2";
+    },
+    async eval(
+      _script: string,
+      numKeys: number,
+      ...args: Array<string | number>
+    ) {
+      evalAttempts += 1;
+      // The expected generation is the first ARGV, i.e. straight after the keys.
+      expectedGenerations.push(String(args[numKeys]));
+      if (evalAttempts === 1) {
+        throw new Error("transient redis failure");
+      }
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:recycled:",
+    redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 4, initialRetryDelayMs: 1 },
+  });
+
+  try {
+    await store.markSessionJoinedRoom("session-recycled", "ROOMRC");
+    assert.equal(evalAttempts, 2);
+    assert.equal(generationReads.length, 1, "the generation is read once");
+    assert.deepEqual(expectedGenerations, ["gen-1", "gen-1"]);
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store stops retrying a join whose room code changed hands", async () => {
+  let evalAttempts = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async hgetall() {
+      return { id: "session-moved", roomCode: "" };
+    },
+    async get() {
+      return "gen-1";
+    },
+    // The script declines: by the time it ran, the code carried another
+    // generation.
+    async eval() {
+      evalAttempts += 1;
+      return 0;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:moved:",
+    redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 4, initialRetryDelayMs: 1 },
+  });
+
+  try {
+    await assert.rejects(
+      store.markSessionJoinedRoom("session-moved", "ROOMMV"),
+      /changed hands/,
+    );
+    // Declined, never retried: a generation only moves forward, so no later
+    // attempt could find its way back.
+    assert.equal(evalAttempts, 1);
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store re-writes the whole session record when a join seats it", async () => {
+  // `registerSession` is a separate queued write and can have failed. A join
+  // that patched only `roomCode` on top of that left a hash with no `id`, which
+  // `loadSession` reads as no session at all — so the joiner was missing from
+  // every state built off the shared view, and the stored sharer's reconnect
+  // handed the share to a stand-in (#242).
+  let evalArgs: Array<string | number> = [];
+  const fakeRedis = {
+    ...createFakeRedisClient([
+      Promise.reject(new Error("registration write failed")),
+    ]),
+    async hgetall() {
+      // The registration never landed, so Redis holds nothing for it.
+      return {};
+    },
+    async get() {
+      return "gen-1";
+    },
+    async eval(
+      _script: string,
+      _numKeys: number,
+      ...args: Array<string | number>
+    ) {
+      evalArgs = args;
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:heal:",
+    redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    const session = createSession("session-heal");
+    session.displayName = "Alice";
+    session.memberId = "member-heal";
+    session.memberToken = "token-heal";
+    void store.registerSession(session);
+    await store.markSessionJoinedRoom(session.id, "ROOMHL");
+
+    const fields = evalArgs.map(String);
+    for (const field of [
+      "id",
+      "instanceId",
+      "remoteAddress",
+      "origin",
+      "roomCode",
+      "memberId",
+      "displayName",
+      "memberToken",
+      "joinedAt",
+      "invalidMessageCount",
+    ]) {
+      assert.ok(
+        fields.includes(field),
+        `the join write must carry ${field}, not just the room code`,
+      );
+    }
+    assert.ok(fields.includes("session-heal"));
+    assert.ok(fields.includes("Alice"));
+    assert.ok(fields.includes("member-heal"));
+    // And it is still the write that puts the session into both indexes.
+    assert.ok(fields.includes("ROOMHL"));
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store never leaks an unhandled rejection from a dropped write", async () => {
+  // `queueSessionOperation` returns a NEW promise (the one that logs and
+  // re-throws), so the durable queue's own handled-marker does not cover it.
+  // `unregisterSession` drops that promise on the floor, which crashed the
+  // process on an unhandled rejection once every retry had failed (#242).
+  const rejections: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+
+  const rejection = Promise.reject(new Error("redis down"));
+  rejection.catch(() => undefined);
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:unhandled:",
+    redisClient: createFakeRedisClient([rejection]),
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    store.unregisterSession("session-dropped");
+    await store.flush?.();
+    // Unhandled rejections are reported a macrotask after the microtask queue
+    // drains, so give the process a tick to raise one.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(rejections, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    await store.close();
+  }
+});
+
+test("redis runtime store stops backing off once it is closing", async () => {
+  // The close step is on a clock. Spending the whole retry budget on writes a
+  // dead Redis was never going to accept would record the step as failed and
+  // exit the process non-zero (#242).
+  let attempts = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    multi() {
+      return {
+        sadd() {
+          return this;
+        },
+        srem() {
+          return this;
+        },
+        del() {
+          return this;
+        },
+        hset() {
+          return this;
+        },
+        hdel() {
+          return this;
+        },
+        zadd() {
+          return this;
+        },
+        zrem() {
+          return this;
+        },
+        exec() {
+          attempts += 1;
+          return Promise.reject(new Error("redis down"));
+        },
+      };
+    },
+  };
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:closing:",
+    redisClient: fakeRedis,
+    // A backoff long enough that a close which waited it out would be obvious.
+    writeRetry: {
+      maxAttempts: 6,
+      initialRetryDelayMs: 10_000,
+      maxRetryDelayMs: 10_000,
+    },
+  });
+
+  store.registerSession(createSession("session-closing"));
+  // Let the first attempt fail and park in the backoff.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(attempts, 1);
+
+  const closedAt = Date.now();
+  await store.close();
+  assert.ok(
+    Date.now() - closedAt < 5_000,
+    "close must not wait out the retry backoff",
+  );
+  assert.equal(attempts, 1, "no further attempt after the close began");
 });

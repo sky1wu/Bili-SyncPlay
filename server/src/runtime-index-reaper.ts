@@ -19,7 +19,17 @@ export type RuntimeIndexReaperStore = Pick<
   | "unregisterSession"
   | "purgeNodeStatus"
 > &
-  Partial<Pick<RuntimeStore, "flush">>;
+  Partial<Pick<RuntimeStore, "flush" | "confirmWrites">>;
+
+/**
+ * How many rooms may be waiting for a resync announcement at once.
+ *
+ * The records are the only retry trail there is, so they are kept until the
+ * publish succeeds — but a bus that is down for a long time must not turn that
+ * into unbounded growth. Overflow drops the OLDEST record: the newest ones name
+ * the rooms whose members most recently lost a seat.
+ */
+const MAX_PENDING_RESYNC_ROOMS = 512;
 
 export function createRuntimeIndexReaper(options: {
   enabled: boolean;
@@ -42,11 +52,69 @@ export function createRuntimeIndexReaper(options: {
   const now = options.now ?? Date.now;
   let timer: NodeJS.Timeout | null = null;
   let pendingSweep: Promise<number> | null = null;
+  /**
+   * Rooms still owed a resync announcement.
+   *
+   * The announcement is one-shot: a dead node's members left without anyone
+   * publishing their departure, and once this sweep has cleaned the indexes
+   * there is nothing left to rediscover them from — `listClusterSessions` no
+   * longer returns those sessions, so a later sweep finds no work and the room
+   * is stranded pointing at a member who will never come back (#242). The record
+   * therefore outlives the sweep that created it and is dropped only once the
+   * publish succeeds.
+   */
+  const roomsAwaitingResync = new Set<string>();
+
+  function rememberResync(roomCode: string): void {
+    if (
+      !roomsAwaitingResync.has(roomCode) &&
+      roomsAwaitingResync.size >= MAX_PENDING_RESYNC_ROOMS
+    ) {
+      const oldest = roomsAwaitingResync.values().next();
+      if (!oldest.done) {
+        roomsAwaitingResync.delete(oldest.value);
+        options.logEvent?.("runtime_index_resync_dropped", {
+          roomCode: oldest.value,
+          pendingRooms: roomsAwaitingResync.size,
+          result: "dropped",
+          reason: "pending_resync_overflow",
+        });
+      }
+    }
+    roomsAwaitingResync.add(roomCode);
+  }
+
+  /**
+   * Publish every outstanding announcement, keeping the ones that fail.
+   *
+   * Runs at the START of a sweep too, before the "no offline nodes" early
+   * return — otherwise a backlog accumulated during a bus outage would only
+   * ever be retried on a sweep that happened to find another dead node.
+   */
+  async function flushPendingResyncs(): Promise<void> {
+    for (const roomCode of Array.from(roomsAwaitingResync)) {
+      try {
+        await options.publishRoomStateUpdate?.(roomCode);
+        roomsAwaitingResync.delete(roomCode);
+      } catch (error) {
+        // Kept for the next sweep. The sweep's own work is done and must not be
+        // undone by a bus hiccup.
+        options.logEvent?.("runtime_index_resync_publish_failed", {
+          roomCode,
+          pendingRooms: roomsAwaitingResync.size,
+          result: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
 
   async function sweep(): Promise<number> {
     if (!options.enabled) {
       return 0;
     }
+
+    await flushPendingResyncs();
 
     const currentTime = now();
     const nodeStatuses =
@@ -97,22 +165,30 @@ export function createRuntimeIndexReaper(options: {
     // Both cleanups are queued writes, so the announcement has to wait for them
     // to drain — otherwise the consumer rebuilds `room:state` from an index that
     // still lists the sessions this sweep just reaped.
-    await options.runtimeStore.flush?.();
+    //
+    // `confirmWrites` rather than `flush` where the store offers it: draining
+    // says only that the queue emptied, and this sweep is about to announce a
+    // state rebuilt from those very writes (#242). It does NOT gate the
+    // announcement — see the `markSessionLeftRoom` comment above for why
+    // announcing is still better than silence — but an unconfirmed sweep is
+    // worth saying out loud.
+    if (options.runtimeStore.confirmWrites) {
+      await options.runtimeStore.confirmWrites().catch((error: unknown) => {
+        options.logEvent?.("runtime_index_writes_unconfirmed", {
+          result: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    } else {
+      await options.runtimeStore.flush?.();
+    }
 
     // After the whole sweep, so a room that lost several members to the same
     // dead node is announced once rather than once per seat.
     for (const roomCode of roomsToResync) {
-      try {
-        await options.publishRoomStateUpdate?.(roomCode);
-      } catch (error) {
-        // The sweep's own work is done and must not be undone by a bus hiccup.
-        options.logEvent?.("runtime_index_resync_publish_failed", {
-          roomCode,
-          result: "error",
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+      rememberResync(roomCode);
     }
+    await flushPendingResyncs();
 
     const remainingSessions = await options.runtimeStore.listClusterSessions();
     const activeInstanceIds = new Set(
@@ -141,14 +217,33 @@ export function createRuntimeIndexReaper(options: {
     return cleanedSessions;
   }
 
+  /**
+   * Skips the tick when the previous sweep is still running.
+   *
+   * Overlapping sweeps used to only waste work; now they share
+   * `roomsAwaitingResync`, so two of them would walk the same records and
+   * announce the same room twice. Worse, `stop()` awaits whichever sweep was
+   * scheduled LAST — so if the newer one finished first, shutdown tore Redis
+   * and the bus down while an older sweep was still writing.
+   */
   function scheduleSweep(): void {
-    pendingSweep = sweep().catch((error) => {
-      options.logEvent?.("runtime_index_reaper_failed", {
-        result: "error",
-        error: error instanceof Error ? error.message : String(error),
+    if (pendingSweep) {
+      return;
+    }
+    const running = sweep()
+      .catch((error: unknown) => {
+        options.logEvent?.("runtime_index_reaper_failed", {
+          result: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return 0;
+      })
+      .finally(() => {
+        if (pendingSweep === running) {
+          pendingSweep = null;
+        }
       });
-      return 0;
-    });
+    pendingSweep = running;
   }
 
   return {
@@ -171,6 +266,12 @@ export function createRuntimeIndexReaper(options: {
       }
       await pendingSweep;
       pendingSweep = null;
+      // Last chance for anything the final sweep could not announce. Nothing
+      // else will ever rediscover those rooms: their sessions are already out
+      // of the cluster index, and this record set is memory-only, so shutting
+      // down without trying loses the announcement for good (#242). One pass,
+      // not the retry loop — the shutdown step is on a clock.
+      await flushPendingResyncs();
     },
   };
 }
