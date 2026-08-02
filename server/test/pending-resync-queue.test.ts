@@ -132,23 +132,30 @@ test("pending resync queue publishes again for a request made mid-flight", async
   assert.deepEqual(attempts, ["ROOM01", "ROOM01"]);
 });
 
-test("pending resync queue treats a hung publish as a failed attempt", async () => {
-  let attempts = 0;
+test("pending resync queue keeps at most one publish in flight per room", async () => {
+  // The attempt cap races the bus call; it cannot abort it. With an unbounded
+  // retry loop behind it, starting a fresh publish on every timeout piles up
+  // one in-flight Redis command per retry for as long as the bus stays hung,
+  // and every one of them then spills into `roomEventBus.close()` (#242 review).
+  let calls = 0;
   const queue = createPendingResyncQueue({
     sleep: instantSleep,
-    attemptTimeoutMs: 10,
+    attemptTimeoutMs: 5,
     publish: () => {
-      attempts += 1;
-      // The first call never settles: without a cap it would pin the record and
-      // the resync would never be re-sent.
-      return attempts === 1 ? new Promise<void>(() => {}) : Promise.resolve();
+      calls += 1;
+      // Never settles: the bus is hung rather than rejecting.
+      return new Promise<void>(() => {});
     },
   });
 
   queue.request("ROOM01");
-  await queue.drain();
+  // Long enough for many attempt windows to have elapsed.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(calls, 1, "the record must wait, not pile on");
 
-  assert.equal(attempts, 2);
+  queue.stopRetrying();
+  await queue.drain();
+  assert.equal(calls, 1);
 });
 
 test("pending resync queue never refuses a room, however long the backlog", async () => {

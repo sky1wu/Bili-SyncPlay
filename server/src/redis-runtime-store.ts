@@ -1066,8 +1066,27 @@ export async function createRedisRuntimeStore(
       // the trade this path already makes for the index write itself.
       const pinnedGeneration = redis
         .get(roomGenerationKey(keyPrefix, roomCode))
-        .then((generation) => generation ?? "")
+        .then((generation) => {
+          if (generation === null) {
+            // An ABSENT generation is not a value to pin, because a teardown
+            // leaves the key absent too: pinning `""` would match a room that
+            // was deleted in the meantime just as happily as one that never had
+            // a generation, and the write would rebuild the indexes of a room
+            // whose persisted record is gone — stranding its code as well
+            // (#242 review). Every joinable room has one: `createRoomForSession`
+            // awaits `markRoomGeneration` and expires the room if it fails, so
+            // this only refuses rooms that predate #237.
+            throw new NonRetryableWriteError(
+              `Room ${roomCode} has no generation to pin the join index write against.`,
+              "room_generation_missing",
+            );
+          }
+          return generation;
+        })
         .catch((error: unknown) => {
+          if (error instanceof NonRetryableWriteError) {
+            throw error;
+          }
           throw new NonRetryableWriteError(
             `Could not pin the generation of room ${roomCode}: ${
               error instanceof Error ? error.message : String(error)

@@ -131,6 +131,11 @@ export function createPendingResyncQueue(
   /** `cancel` for every backoff currently being waited out. */
   const pendingWaits = new Set<() => void>();
   let retriesStopped = false;
+  let signalStopped = (): void => {};
+  /** Resolves when {@link PendingResyncQueue.stopRetrying} is called. */
+  const stopped = new Promise<void>((resolve) => {
+    signalStopped = resolve;
+  });
 
   /**
    * An injected `sleep` is a test clock and resolves on its own; the real timer
@@ -159,11 +164,30 @@ export function createPendingResyncQueue(
     return Math.min(initialRetryDelayMs * 2 ** (attempt - 1), maxRetryDelayMs);
   }
 
-  async function publishOnce(roomCode: string): Promise<void> {
+  /**
+   * Runs one publish, capped, and reports the underlying call so the caller can
+   * refuse to start another while it is still out there.
+   *
+   * The cap races the call; it cannot abort it. With an unbounded retry loop
+   * behind it, starting a fresh publish on every timeout piles up one in-flight
+   * Redis command per retry for as long as the bus stays hung, and every one of
+   * them then spills into `roomEventBus.close()` (#242 review).
+   */
+  async function publishOnce(
+    roomCode: string,
+    track: (call: Promise<void>) => void,
+  ): Promise<void> {
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const call = options.publish(roomCode);
+    track(
+      call.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
     try {
       await Promise.race([
-        options.publish(roomCode),
+        call,
         new Promise<never>((_resolve, reject) => {
           timeoutHandle = setTimeout(() => {
             reject(
@@ -193,12 +217,28 @@ export function createPendingResyncQueue(
    * — there is no await between the final check and the `delete`.
    */
   async function drive(roomCode: string, record: PendingRecord): Promise<void> {
+    /** The publish this record started that has not answered yet, if any. */
+    let inFlight: Promise<void> | null = null;
     try {
       while (record.pending && !retriesStopped) {
         record.pending = false;
         for (let attempt = 1; ; attempt += 1) {
+          if (inFlight) {
+            // The previous call never came back. Wait for it rather than pile
+            // another on top — at most ONE publish per room is ever out there.
+            // `stopRetrying` cuts the wait short so shutdown is not pinned by
+            // a bus that has stopped answering.
+            await Promise.race([inFlight, stopped]);
+            if (retriesStopped) {
+              return;
+            }
+          }
           try {
-            await publishOnce(roomCode);
+            await publishOnce(roomCode, (call) => {
+              inFlight = call.finally(() => {
+                inFlight = null;
+              });
+            });
             break;
           } catch (error) {
             const delayMs = retryDelayMs(attempt);
@@ -238,6 +278,7 @@ export function createPendingResyncQueue(
     },
     stopRetrying() {
       retriesStopped = true;
+      signalStopped();
       // Cut the backoffs short too: a record parked on the 30s ceiling would
       // otherwise hold the drain for that long.
       for (const cancel of Array.from(pendingWaits)) {

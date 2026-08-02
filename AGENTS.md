@@ -208,9 +208,12 @@ decides something has to know which of the two questions it is asking (#242):
   unbounded, so a pin taken there can already name the code's NEXT occupant and
   the check waves the write straight through. A mismatch is a
   `NonRetryableWriteError` (a generation only moves forward, so no later attempt
-  can find its way back), and an unreadable generation refuses the join rather
-  than re-reading later, since a second read is a second chance to pin the wrong
-  instance. A new write that seats or moves anything by room code needs the same
+  can find its way back). An unreadable generation refuses the join rather than
+  re-reading later, since a second read is a second chance to pin the wrong
+  instance — and so does an ABSENT one, because a teardown leaves the key absent
+  too, so `""` would match a deleted room as happily as a legacy one.
+  `createRoomForSession` awaits `markRoomGeneration` and expires the room if it
+  fails, so every joinable room has one. A new write that seats or moves anything by room code needs the same
   pin; one that only touches keys named after the session does not, because
   session ids are never reused.
 - **Every retry budget is sized against the shutdown step that drains it.**
@@ -259,7 +262,11 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   budget is just a slower way to discard a notification nothing else will
   re-send — so `drain` is unbounded by design and the shutdown call passes
   `{ final: true }`, which calls `stopRetrying` first and leaves at most one
-  in-flight attempt to wait for.
+  in-flight attempt to wait for. A record never starts a second publish while
+  its first has not answered: the attempt cap races the bus call, it does not
+  abort it, so an unbounded retry loop over a hung bus would otherwise pile up
+  one live Redis command per retry — the same "a timeout is not a cancel"
+  reasoning as the write queue's `settle`.
 - The **runtime index reaper's** announcement is the only thing that tells a
   room a dead node's members are gone. Once the sweep has cleaned the indexes,
   `listClusterSessions` no longer returns those sessions, so a later sweep has

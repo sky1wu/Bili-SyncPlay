@@ -1689,6 +1689,9 @@ test("redis runtime store reports a failed join-index write to the caller", asyn
     async hgetall() {
       return { id: "session-join", roomCode: "" };
     },
+    async get() {
+      return "gen-1";
+    },
     async eval() {
       evalAttempts += 1;
       throw new Error("join write failed");
@@ -2150,6 +2153,43 @@ test("redis runtime store keeps a session's rollback behind the command it aband
     assert.deepEqual(order, ["caller-answered", "join-write", "leave-write"]);
   } finally {
     (releaseJoin as (() => void) | null)?.();
+    await store.close();
+  }
+});
+
+test("redis runtime store refuses a join against a room with no generation at all", async () => {
+  // A teardown leaves the generation key absent, exactly like a room that never
+  // had one. Pinning `""` would match both, so a delayed write would rebuild
+  // the indexes of a room whose persisted record is gone and strand its code
+  // (#242 review).
+  let evalAttempts = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async hgetall() {
+      return { id: "session-nogen", roomCode: "" };
+    },
+    async get() {
+      return null;
+    },
+    async eval() {
+      evalAttempts += 1;
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:nogen:",
+    redisClient: fakeRedis,
+    writeRetry: { maxAttempts: 4, initialRetryDelayMs: 1 },
+  });
+
+  try {
+    await assert.rejects(
+      store.markSessionJoinedRoom("session-nogen", "ROOMNG"),
+      /no generation to pin/,
+    );
+    assert.equal(evalAttempts, 0, "nothing may be written unguarded");
+  } finally {
     await store.close();
   }
 });
