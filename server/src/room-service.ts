@@ -971,6 +971,15 @@ export function createRoomService(options: {
         );
       }
       await runtimeStore.flush?.();
+      // The removal's REAL outcome, which `flush` cannot give: it waits on the
+      // error-swallowed copies kept for backpressure accounting. A failed member
+      // write leaves the leaver in the member hash that `resolveActiveRoom`
+      // reads below, while the session-index cleanup that `room:state` is built
+      // from goes on to succeed — the election would then be decided from a view
+      // no client ever sees (#235 review).
+      const memberRemovalConfirmed = await Promise.resolve(removal.durable)
+        .then(() => true)
+        .catch(() => false);
       clearSessionRoom(session);
 
       const persistedRoom = await resolveRoom(roomCode);
@@ -1000,6 +1009,7 @@ export function createRoomService(options: {
       const needsRoomStateResync =
         !roomEmpty &&
         (!sharedRoom ||
+          !memberRemovalConfirmed ||
           sharedVideoOwnerChangedOnLeave({
             sharedByMemberId: persistedRoom.sharedVideo?.sharedByMemberId,
             membersAfter: Array.from(

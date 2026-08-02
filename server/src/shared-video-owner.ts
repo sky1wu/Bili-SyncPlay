@@ -95,19 +95,25 @@ export function sharedVideoOwnerChangedOnLeave(args: {
   membersAfter: readonly SharedVideoOwnerCandidate[];
   leavingMember: SharedVideoOwnerCandidate;
 }): boolean {
-  // A seat still held by that id did not go anywhere — the session was replaced,
-  // not the member. Re-adding it would put the same id in the election twice
-  // with two different `joinedAt` values, and the older copy would beat the
-  // survivor's own entry and report a handover that never happened.
-  const memberStillSeated = args.membersAfter.some(
+  // The before-list is the member set as it stood while this session held its
+  // seat: `membersAfter` with the leaver's own tenure put back. Substituted, not
+  // appended — when the seat is still held (the session was replaced, not the
+  // member) appending would enter that id twice with two `joinedAt` values, and
+  // the older copy would beat the survivor's own entry. Nor may it simply be
+  // skipped: a reconnect stamps a fresh `joinedAt`, so the replacement really
+  // can hand the share to a member who joined in between, and reusing
+  // `membersAfter` for both sides reports that as no change (#235 review).
+  const membersBefore = args.membersAfter.some(
     (member) => member.id === args.leavingMember.id,
+  )
+    ? args.membersAfter.map((member) =>
+        member.id === args.leavingMember.id ? args.leavingMember : member,
+      )
+    : [...args.membersAfter, args.leavingMember];
+  const ownerBefore = resolveSharedVideoOwnerId(
+    args.sharedByMemberId,
+    membersBefore,
   );
-  const ownerBefore = memberStillSeated
-    ? resolveSharedVideoOwnerId(args.sharedByMemberId, args.membersAfter)
-    : resolveSharedVideoOwnerId(args.sharedByMemberId, [
-        ...args.membersAfter,
-        args.leavingMember,
-      ]);
   const ownerAfter = resolveSharedVideoOwnerId(
     args.sharedByMemberId,
     args.membersAfter,

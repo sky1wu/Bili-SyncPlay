@@ -4775,3 +4775,64 @@ test("an unreadable shared member view still asks for a resync", async () => {
 
   assert.equal(leave.needsRoomStateResync, true);
 });
+
+test("an unconfirmed member removal still asks for a resync", async () => {
+  // The member hash and the session index are separate writes. When the member
+  // removal fails but the index cleanup succeeds, the shared view still lists
+  // the leaver — so the election says nothing moved — while the `room:state`
+  // clients eventually get is built from the index and no longer contains them.
+  // The two disagree exactly where it matters, so an unconfirmed removal is
+  // treated like an unreadable view (#235 review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let removalFails = false;
+  const runtimeStore = {
+    ...activeRooms,
+    removeMember: (code: string, memberId: string, session?: Session) => {
+      const removal = activeRooms.removeMember(code, memberId, session);
+      return removalFails
+        ? {
+            ...removal,
+            durable: Promise.reject(new Error("member write failed")),
+          }
+        : removal;
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: runtimeStore,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM39",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  currentTime = 2_000;
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  // A bystander leaves, so a confirmed removal would report no handover at all.
+  currentTime = 3_000;
+  removalFails = true;
+  const leave = await service.leaveRoomForSession(guest, "client-request");
+
+  assert.equal(leave.needsRoomStateResync, true);
+});

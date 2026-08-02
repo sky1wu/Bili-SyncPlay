@@ -1072,7 +1072,11 @@ export async function createRedisRuntimeStore(
       // reconnect can reclaim this `memberId` (#234) — but it goes on its own
       // clock, so a room that never empties still releases the people who left
       // it. The script starts that clock only while a token is actually there.
-      void trackOperation(
+      // `trackAwaitedOperation` rather than `trackOperation`: it registers the
+      // write for backpressure exactly the same way, but hands back the REAL
+      // outcome instead of the error-swallowed copy, so `durable` can reject
+      // (#235 review).
+      const durable = trackAwaitedOperation(
         "remove_member",
         redis.eval(
           REMOVE_MEMBER_LUA,
@@ -1084,8 +1088,13 @@ export async function createRedisRuntimeStore(
           session?.id ?? "",
           String(now() + memberTokenRetentionMs),
         ),
-      );
-      return removal;
+      ).then(() => undefined);
+      // Marks `durable` handled without consuming it: callers that DO await it
+      // still see the rejection, while the reaper and the join-rollback — which
+      // decide nothing from this write — no longer turn a Redis hiccup into an
+      // unhandled rejection.
+      void durable.catch(() => undefined);
+      return { ...removal, durable };
     },
     evictMemberToken(
       code: string,

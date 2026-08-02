@@ -138,10 +138,23 @@ export function createMirroredRuntimeStore(
     releaseMessageSlot: readShared(sharedRuntimeStore.releaseMessageSlot),
     acquireRoomLock: readShared(sharedRuntimeStore.acquireRoomLock),
     releaseRoomLock: readShared(sharedRuntimeStore.releaseRoomLock),
-    removeMember: mirrorLocalResult(
-      localRuntimeStore.removeMember,
-      sharedRuntimeStore.removeMember,
-    ),
+    // The local result decides membership (see `leaveCurrentRoom`), but the
+    // SHARED store owns the durable write — so its `durable` has to ride along
+    // rather than be dropped, or the caller cannot tell whether the member view
+    // it reads next reflects this removal (#235 review).
+    removeMember: (code, memberId, session) => {
+      const localRemoval = localRuntimeStore.removeMember(
+        code,
+        memberId,
+        session,
+      );
+      const sharedRemoval = sharedRuntimeStore.removeMember(
+        code,
+        memberId,
+        session,
+      );
+      return { ...localRemoval, durable: sharedRemoval.durable };
+    },
     evictMemberToken: mirrorAwaitedWrite(
       localRuntimeStore.evictMemberToken,
       sharedRuntimeStore.evictMemberToken,

@@ -136,17 +136,35 @@ test("an unshared room never reports an ownership move", () => {
   );
 });
 
-test("a replaced session does not count as the member leaving", () => {
-  // A member reconnecting on another node keeps the seat; the old session's
-  // cleanup still runs here. Putting that id into the election a second time —
-  // with the older session's `joinedAt` — would beat the survivor's own entry
-  // and report a handover that never happened (#235 review).
+test("a replacement that re-dates the owner past another member moves the share", () => {
+  // The old session held the seat since 1_000 and owned the share; the
+  // replacement stamps a fresh 3_000, which puts `member-b` ahead of it. That is
+  // a real handover, and computing both sides from `membersAfter` reported it as
+  // no change — while the join branch stays silent too, because the joiner did
+  // not end up owning anything (#235 review).
   assert.equal(
     sharedVideoOwnerChangedOnLeave({
       sharedByMemberId: "member-gone",
       membersAfter: [
         { id: "member-b", joinedAt: 2_000 },
         { id: "member-c", joinedAt: 3_000 },
+      ],
+      leavingMember: { id: "member-c", joinedAt: 1_000 },
+    }),
+    true,
+  );
+});
+
+test("a replacement that keeps the owner ahead moves nothing", () => {
+  // The other half: re-dating the owner only matters when it actually loses the
+  // election. Here the replacement's fresh `joinedAt` is still ahead of every
+  // other member, so nobody's cached owner is wrong and no broadcast is owed.
+  assert.equal(
+    sharedVideoOwnerChangedOnLeave({
+      sharedByMemberId: "member-gone",
+      membersAfter: [
+        { id: "member-b", joinedAt: 3_000 },
+        { id: "member-c", joinedAt: 2_500 },
       ],
       leavingMember: { id: "member-c", joinedAt: 1_000 },
     }),

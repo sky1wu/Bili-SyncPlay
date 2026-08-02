@@ -96,7 +96,25 @@ export type RuntimeStore = {
     code: string,
     memberId: string,
     session?: Session,
-  ) => { room: ActiveRoom | null; roomEmpty: boolean; removed: boolean };
+  ) => {
+    room: ActiveRoom | null;
+    roomEmpty: boolean;
+    removed: boolean;
+    /**
+     * Resolves once the removal is durable and REJECTS when it is not.
+     *
+     * The three fields above describe this node's own map, which is updated
+     * synchronously; the shared write is queued behind them. A caller that
+     * reads the shared member view afterwards and decides something from it —
+     * `leaveCurrentRoom` elects the next share owner — has to know the view it
+     * read reflects this removal, because a failed write leaves the leaver in
+     * the member hash while the session index cleanup goes on to succeed, and
+     * the two disagree exactly where it matters (#235 review).
+     *
+     * Absent on stores with no separate durable step.
+     */
+    durable?: Promise<void>;
+  };
   /**
    * Revoke a member's identity so their `memberToken` can no longer reclaim
    * their `memberId`. Only for deliberate departures: an explicit `room:leave`
