@@ -24,7 +24,19 @@ export type RuntimeStore = {
   purgeSessionsByInstance?: (instanceId: string) => Promise<number>;
   unregisterSession: (sessionId: string) => void;
   markSessionJoinedRoom: (sessionId: string, roomCode: string) => void;
-  markSessionLeftRoom: (sessionId: string, roomCode?: string | null) => void;
+  /**
+   * Awaitable, and it rejects when the index write fails.
+   *
+   * Unlike its `markSessionJoinedRoom` sibling, callers ACT on the answer: a
+   * `room:state` built while this write is outstanding — or after it failed —
+   * still lists the session, so the member who just left reappears in the
+   * snapshot and can win the share back (#235 review). A fire-and-forget
+   * version cannot tell them apart from success.
+   */
+  markSessionLeftRoom: (
+    sessionId: string,
+    roomCode?: string | null,
+  ) => Promise<void>;
   recordEvent: (event: string, timestamp?: number) => void;
   getSession: (sessionId: string) => Session | null;
   listSessionsByRoom: (roomCode: string) => Session[];
@@ -309,7 +321,7 @@ export function createInMemoryRuntimeStore(
       roomSessionIds.set(roomCode, ids);
       session.roomCode = roomCode;
     },
-    markSessionLeftRoom(sessionId, roomCode) {
+    async markSessionLeftRoom(sessionId, roomCode) {
       const session = sessionsById.get(sessionId);
       const targetRoomCode = resolveRoomCodeToLeave(
         session?.roomCode,

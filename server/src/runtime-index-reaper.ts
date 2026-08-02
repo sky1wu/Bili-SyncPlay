@@ -42,9 +42,15 @@ export function createRuntimeIndexReaper(options: {
           session.roomCode,
           session.memberId,
         );
-        options.runtimeStore.markSessionLeftRoom(session.id, session.roomCode);
-      } else if (session.roomCode) {
-        options.runtimeStore.markSessionLeftRoom(session.id, session.roomCode);
+      }
+      if (session.roomCode) {
+        // Swallowed on purpose: this reaper sweeps every stale session in one
+        // pass, and one unwritable index entry must not abandon the rest. It
+        // publishes nothing, so unlike the leave path it has no decision riding
+        // on the answer — the next pass retries.
+        await options.runtimeStore
+          .markSessionLeftRoom(session.id, session.roomCode)
+          .catch(() => undefined);
       }
 
       options.runtimeStore.unregisterSession(session.id);

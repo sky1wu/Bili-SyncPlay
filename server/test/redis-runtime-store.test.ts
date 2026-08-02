@@ -1544,3 +1544,37 @@ test("redis runtime store stops reserving a code whose blocked and dedup entries
     await store.close();
   }
 });
+
+test("redis runtime store reports a failed room-index cleanup to the caller", async () => {
+  // `markSessionLeftRoom` is the one session write whose caller acts on the
+  // answer: a `room:state` published while the index still lists the session
+  // hands the share back to the member who just left (#235 review). `flush`
+  // cannot carry that answer — it waits on the error-swallowed copies
+  // `trackOperation` keeps for backpressure accounting, so it reports only that
+  // the queue drained.
+  const fakeRedis = {
+    ...createFakeRedisClient([Promise.reject(new Error("index write failed"))]),
+    async hgetall() {
+      return { id: "session-dirty", roomCode: "ROOMDT" };
+    },
+    async eval() {
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:dirty:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    await assert.rejects(
+      store.markSessionLeftRoom("session-dirty", "ROOMDT"),
+      /index write failed/,
+    );
+    // The asymmetry the fix rests on: draining the queue looks like success.
+    await store.flush?.();
+  } finally {
+    await store.close();
+  }
+});

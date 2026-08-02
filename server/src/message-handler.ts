@@ -419,7 +419,16 @@ export function createMessageHandler(options: {
       return;
     }
     const roomIndexCleaned = await runRoomLeftHook(session, roomCode);
+    // Two independent questions, so two independent gates. `memberRemoved` is
+    // THIS node's local removal result, while `needsRoomStateResync` came out of
+    // the shared view — a session replaced on another node clears no local seat
+    // yet still changes who the election picks, and folding the resync into the
+    // delta's early return dropped exactly that case (#235 review).
+    const publishResync = needsRoomStateResync === true && roomIndexCleaned;
     if (!memberRemoved && !notifyRoom) {
+      if (publishResync) {
+        await publishSharedOwnerResync(session, roomCode);
+      }
       return;
     }
 
@@ -442,7 +451,7 @@ export function createMessageHandler(options: {
     // uncleaned index cannot corrupt it, and it still drops the member from
     // every roster. The full state is the one that must not be built on an
     // index we failed to clean (#235 review).
-    if (needsRoomStateResync && roomIndexCleaned) {
+    if (publishResync) {
       await publishSharedOwnerResync(session, roomCode);
     }
   }
@@ -477,17 +486,6 @@ export function createMessageHandler(options: {
   }
 
   /**
-   * A member switching rooms leaves the old one through `createRoomForSession` /
-   * `joinRoomForSession`, which call `leaveCurrentRoom` internally and publish
-   * nothing — so the old room is told neither that the member is gone nor that
-   * the share may have moved with them (#235 review).
-   *
-   * One full `room:state` covers both: it carries the corrected roster and the
-   * resolved owner. Unconditional, because the internal leave's verdict never
-   * reaches here, and a switch is rare enough that one broadcast is cheaper
-   * than plumbing it out.
-   */
-  /**
    * Runs a create/join and makes sure the room being left is released even when
    * it fails.
    *
@@ -500,30 +498,64 @@ export function createMessageHandler(options: {
    */
   async function enterRoom<T>(
     session: Session,
-    previousRoomCode: string | null,
+    previous: {
+      roomCode: string;
+      memberId: string;
+      displayName: string;
+    } | null,
     enter: () => Promise<T>,
   ): Promise<T> {
     try {
       return await enter();
     } catch (error) {
-      if (previousRoomCode && session.roomCode !== previousRoomCode) {
-        await releasePreviousRoom(session, previousRoomCode);
+      if (previous && session.roomCode !== previous.roomCode) {
+        await releasePreviousRoom(session, previous);
       }
       throw error;
     }
   }
 
+  /**
+   * A member switching rooms leaves the old one through `createRoomForSession` /
+   * `joinRoomForSession`, which call `leaveCurrentRoom` internally and publish
+   * nothing — so the old room is told neither that the member is gone nor that
+   * the share may have moved with them (#235 review).
+   *
+   * Split the same way as an explicit leave, and for the same reason: the delta
+   * reads no state, so it goes out even when the index write failed, while the
+   * full `room:state` must not be built on an index still listing the member.
+   * The identity is passed in because the caller captured it BEFORE the switch —
+   * by now `session.memberId` names the new room's seat.
+   *
+   * The full state is unconditional otherwise: the internal leave's verdict
+   * never reaches here, and a switch is rare enough that one broadcast is
+   * cheaper than plumbing it out.
+   */
   async function releasePreviousRoom(
     session: Session,
-    previousRoomCode: string,
+    previous: { roomCode: string; memberId: string; displayName: string },
   ): Promise<void> {
-    const roomIndexCleaned = await runRoomLeftHook(session, previousRoomCode);
+    const roomIndexCleaned = await runRoomLeftHook(session, previous.roomCode);
+    await firePublishRoomEvent(
+      {
+        type: "room_member_left",
+        roomCode: previous.roomCode,
+        memberId: previous.memberId,
+        displayName: previous.displayName,
+      },
+      {
+        reason: "room_switch_member_left_broadcast_failed",
+        sessionId: session.id,
+        remoteAddress: session.remoteAddress,
+        origin: session.origin,
+      },
+    );
     if (!roomIndexCleaned) {
       return;
     }
     await publishSharedOwnerResync(
       session,
-      previousRoomCode,
+      previous.roomCode,
       "room_switch_resync_broadcast_failed",
     );
   }
@@ -627,6 +659,15 @@ export function createMessageHandler(options: {
       switch (message.type) {
         case "room:create": {
           const previousRoomCode = session.roomCode;
+          // Captured before the service call: entering the new room overwrites
+          // `memberId`, and the old room's delta needs the seat that is leaving.
+          const previousRoom = previousRoomCode
+            ? {
+                roomCode: previousRoomCode,
+                memberId: session.memberId ?? session.id,
+                displayName: session.displayName,
+              }
+            : null;
           if (
             !consumeFixedWindow(
               session.rateLimitState.roomCreate,
@@ -651,15 +692,15 @@ export function createMessageHandler(options: {
 
           const { room, memberToken } = await enterRoom(
             session,
-            previousRoomCode,
+            previousRoom,
             () =>
               roomService.createRoomForSession(
                 session,
                 message.payload?.displayName,
               ),
           );
-          if (previousRoomCode && previousRoomCode !== room.code) {
-            await releasePreviousRoom(session, previousRoomCode);
+          if (previousRoom && previousRoom.roomCode !== room.code) {
+            await releasePreviousRoom(session, previousRoom);
           }
           await runRoomJoinedHook(session, room.code, previousRoomCode);
           send(socket, {
@@ -686,6 +727,15 @@ export function createMessageHandler(options: {
         }
         case "room:join": {
           const previousRoomCode = session.roomCode;
+          // Captured before the service call: entering the new room overwrites
+          // `memberId`, and the old room's delta needs the seat that is leaving.
+          const previousRoom = previousRoomCode
+            ? {
+                roomCode: previousRoomCode,
+                memberId: session.memberId ?? session.id,
+                displayName: session.displayName,
+              }
+            : null;
           if (
             !consumeFixedWindow(
               session.rateLimitState.roomJoin,
@@ -711,7 +761,7 @@ export function createMessageHandler(options: {
           await measureMessageHandling("room:join", async () => {
             const { room, memberToken } = await enterRoom(
               session,
-              previousRoomCode,
+              previousRoom,
               () =>
                 roomService.joinRoomForSession(
                   session,
@@ -721,8 +771,8 @@ export function createMessageHandler(options: {
                   message.payload.memberToken,
                 ),
             );
-            if (previousRoomCode && previousRoomCode !== room.code) {
-              await releasePreviousRoom(session, previousRoomCode);
+            if (previousRoom && previousRoom.roomCode !== room.code) {
+              await releasePreviousRoom(session, previousRoom);
             }
             await runRoomJoinedHook(session, room.code, previousRoomCode);
             const joinedRoomCode = room.code;

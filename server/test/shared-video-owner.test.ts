@@ -135,3 +135,21 @@ test("an unshared room never reports an ownership move", () => {
     false,
   );
 });
+
+test("a replaced session does not count as the member leaving", () => {
+  // A member reconnecting on another node keeps the seat; the old session's
+  // cleanup still runs here. Putting that id into the election a second time —
+  // with the older session's `joinedAt` — would beat the survivor's own entry
+  // and report a handover that never happened (#235 review).
+  assert.equal(
+    sharedVideoOwnerChangedOnLeave({
+      sharedByMemberId: "member-gone",
+      membersAfter: [
+        { id: "member-b", joinedAt: 2_000 },
+        { id: "member-c", joinedAt: 3_000 },
+      ],
+      leavingMember: { id: "member-c", joinedAt: 1_000 },
+    }),
+    false,
+  );
+});

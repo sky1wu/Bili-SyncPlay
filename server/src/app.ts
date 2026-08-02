@@ -255,11 +255,14 @@ export async function createSyncServer(
     },
     onRoomLeft: async (session, roomCode) => {
       runtimeStore.registerSession(session);
-      runtimeStore.markSessionLeftRoom(session.id, roomCode);
-      // Flushed like the join hook, and for a sharper reason: everything the
-      // handler publishes next is read back off the room index this write
-      // clears. Leaving it queued lets a `room:state` be rebuilt with the
-      // leaver still in it (#235 review).
+      // Awaited for its REAL outcome, so a failure reaches the handler and
+      // suppresses the full `room:state` it would otherwise publish. Everything
+      // published next is read back off the room index this write clears, so a
+      // state built while it is outstanding — or after it failed — still lists
+      // the leaver, who then wins the share back (#235 review). `flush` alone
+      // cannot report this: it waits on error-swallowed copies with
+      // `Promise.allSettled`, so it only says the queue drained.
+      await runtimeStore.markSessionLeftRoom(session.id, roomCode);
       await runtimeStore.flush?.();
     },
     now,

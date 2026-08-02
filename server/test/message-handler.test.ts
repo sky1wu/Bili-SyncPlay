@@ -1936,7 +1936,7 @@ test("room:state is aged at the send, not at the room-store read", async () => {
  */
 function createSharedOwnerHandler(options: {
   published: string[];
-  leaveResult?: { needsRoomStateResync?: boolean };
+  leaveResult?: { memberRemoved?: boolean; needsRoomStateResync?: boolean };
   bootstrapSharedByMemberId?: string;
   bootstrapFails?: boolean;
   joinedRoomCode?: string;
@@ -2177,8 +2177,12 @@ test("switching rooms tells the room being left", async () => {
   });
   await handler.flushPendingPublishes();
 
-  assert.deepEqual(published, ["room_state_updated", "room_member_joined"]);
-  assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-NEW"]);
+  assert.deepEqual(published, [
+    "room_member_left",
+    "room_state_updated",
+    "room_member_joined",
+  ]);
+  assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-OLD", "ROOM-NEW"]);
 });
 
 test("creating a room tells the room being left", async () => {
@@ -2201,8 +2205,8 @@ test("creating a room tells the room being left", async () => {
   });
   await handler.flushPendingPublishes();
 
-  assert.deepEqual(published, ["room_state_updated"]);
-  assert.deepEqual(publishedRooms, ["ROOM-OLD"]);
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+  assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-OLD"]);
 });
 
 test("staying in the same room publishes no switch resync", async () => {
@@ -2323,32 +2327,6 @@ test("a failed room-left hook suppresses the full state but not the delta", asyn
   assert.deepEqual(published, ["room_member_left"]);
 });
 
-test("a failed room-left hook suppresses the switch resync too", async () => {
-  const published: string[] = [];
-  const session = createSession("member-1", {
-    roomCode: "ROOM-OLD",
-    memberId: "member-1",
-    memberToken: "member-token-1",
-  });
-  const handler = createSharedOwnerHandler({
-    published,
-    joinedRoomCode: "ROOM-NEW",
-    roomLeftHookFails: true,
-  });
-
-  await handler.handleClientMessage(session, {
-    type: "room:join",
-    payload: {
-      roomCode: "ROOM-NEW",
-      joinToken: "join-token-1",
-      displayName: "Alice",
-    },
-  });
-  await handler.flushPendingPublishes();
-
-  assert.deepEqual(published, ["room_member_joined"]);
-});
-
 test("a failed join still releases the room it already left", async () => {
   // `joinRoomForSession` leaves the current room before it can fail on a full
   // room or a bad token. The release used to run only after success, so the old
@@ -2380,8 +2358,8 @@ test("a failed join still releases the room it already left", async () => {
   await handler.flushPendingPublishes();
 
   assert.deepEqual(hookOrder, ["room-left-hook"]);
-  assert.deepEqual(published, ["room_state_updated"]);
-  assert.deepEqual(publishedRooms, ["ROOM-OLD"]);
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+  assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-OLD"]);
 });
 
 test("a failed create still releases the room it already left", async () => {
@@ -2404,8 +2382,8 @@ test("a failed create still releases the room it already left", async () => {
   });
   await handler.flushPendingPublishes();
 
-  assert.deepEqual(published, ["room_state_updated"]);
-  assert.deepEqual(publishedRooms, ["ROOM-OLD"]);
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+  assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-OLD"]);
 });
 
 test("a create that fails before leaving releases nothing", async () => {
@@ -2467,4 +2445,61 @@ test("a create that fails before leaving releases nothing", async () => {
 
   assert.deepEqual(hookOrder, []);
   assert.deepEqual(published, []);
+});
+
+test("a resync survives a leave that publishes no member delta", async () => {
+  // `memberRemoved` is THIS node's local removal result; `needsRoomStateResync`
+  // came out of the shared view. A session replaced on another node clears no
+  // local seat yet still changes who the election picks, so folding the resync
+  // into the delta's early return dropped exactly that case (#235 review).
+  const published: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+  const handler = createSharedOwnerHandler({
+    published,
+    leaveResult: { memberRemoved: false, needsRoomStateResync: true },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_state_updated"]);
+});
+
+test("switching rooms tells the old room even when the index cleanup fails", async () => {
+  // The delta reads no state, so a dirty index cannot corrupt it — suppressing
+  // it left protocol >= 2 clients holding the switcher forever (#235 review).
+  // The full state is the only half that has to be withheld.
+  const published: string[] = [];
+  const publishedRooms: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "ROOM-OLD",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    joinedRoomCode: "ROOM-NEW",
+    roomLeftHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM-NEW",
+      joinToken: "join-token-1",
+      displayName: "Alice",
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_left", "room_member_joined"]);
+  assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-NEW"]);
 });

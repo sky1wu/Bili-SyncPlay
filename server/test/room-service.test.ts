@@ -1149,7 +1149,7 @@ test("room service flushes pending runtime store writes before exposing updated 
         staged.roomCode = roomCode;
       }
     },
-    markSessionLeftRoom() {},
+    async markSessionLeftRoom() {},
     recordEvent() {},
     getSession() {
       return null;
@@ -4722,4 +4722,56 @@ test("the sharer reclaims the share on reconnect", async () => {
       ?.sharedByMemberId,
     sharerMemberId,
   );
+});
+
+test("an unreadable shared member view still asks for a resync", async () => {
+  // The election cannot run without the shared member list, and silence is the
+  // worse default: a room left pointing at a member who is gone has nothing
+  // scheduled to correct it, while an unnecessary broadcast costs one message
+  // (#235 review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let sharedViewFails = false;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    resolveActiveRoom: async (roomCode) => {
+      if (sharedViewFails) {
+        throw new Error("transient shared runtime read failure");
+      }
+      return activeRooms.getRoom(roomCode);
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM38",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  currentTime = 2_000;
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  currentTime = 3_000;
+  sharedViewFails = true;
+  const leave = await service.leaveRoomForSession(guest, "client-request");
+
+  assert.equal(leave.needsRoomStateResync, true);
 });

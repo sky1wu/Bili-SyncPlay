@@ -102,7 +102,10 @@ export function createMirroredRuntimeStore(
       localRuntimeStore.markSessionJoinedRoom,
       sharedRuntimeStore.markSessionJoinedRoom,
     ),
-    markSessionLeftRoom: mirrorVoidWrite(
+    // Awaited, not fire-and-forget: callers act on whether the index write
+    // landed, and `mirrorVoidWrite` drops the promise that carries the answer
+    // (#235 review).
+    markSessionLeftRoom: mirrorAwaitedWrite(
       localRuntimeStore.markSessionLeftRoom,
       sharedRuntimeStore.markSessionLeftRoom,
     ),

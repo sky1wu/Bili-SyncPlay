@@ -990,29 +990,30 @@ export function createRoomService(options: {
         : removal.roomEmpty;
 
       // Derived from the member list this leave already loaded, so it adds no
-      // store read. Without a shared view we cannot tell — but that case can
-      // only be an unreadable store, which the catch below turns into an
-      // unconditional resync request rather than silence (#235).
-      // An emptied room has nobody left to hold a wrong owner, and the election
-      // has no candidates to run over — it would report a change back to the
-      // stored id that no client will ever see.
+      // store read. An unreadable shared view means we cannot run the election
+      // at all, and that resolves to a resync request rather than to silence —
+      // the same call the catch below makes, for the same reason: a room left
+      // pointing at a member who is gone has nothing scheduled to correct it,
+      // while an unnecessary broadcast costs one message (#235 review).
+      // An emptied room is the one case that needs neither: nobody is left to
+      // hold a wrong owner, and the election has no candidates to run over.
       const needsRoomStateResync =
-        sharedRoom && !roomEmpty
-          ? sharedVideoOwnerChangedOnLeave({
-              sharedByMemberId: persistedRoom.sharedVideo?.sharedByMemberId,
-              membersAfter: Array.from(
-                sharedRoom.members,
-                ([memberId, member]) => ({
-                  id: memberId,
-                  joinedAt: member.joinedAt,
-                }),
-              ),
-              leavingMember: {
-                id: leavingMemberId,
-                joinedAt: sessionSnapshot?.joinedAt ?? leavingJoinedAt,
-              },
-            })
-          : false;
+        !roomEmpty &&
+        (!sharedRoom ||
+          sharedVideoOwnerChangedOnLeave({
+            sharedByMemberId: persistedRoom.sharedVideo?.sharedByMemberId,
+            membersAfter: Array.from(
+              sharedRoom.members,
+              ([memberId, member]) => ({
+                id: memberId,
+                joinedAt: member.joinedAt,
+              }),
+            ),
+            leavingMember: {
+              id: leavingMemberId,
+              joinedAt: sessionSnapshot?.joinedAt ?? leavingJoinedAt,
+            },
+          }));
 
       if (!roomEmpty) {
         logEvent("room_left", {

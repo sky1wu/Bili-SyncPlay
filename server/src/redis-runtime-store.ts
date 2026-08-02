@@ -640,11 +640,18 @@ export async function createRedisRuntimeStore(
     );
   }
 
+  /**
+   * Returns the chained promise with its REAL outcome, so a caller that acts on
+   * whether the write landed can await it. `trackOperation` deliberately
+   * swallows the rejection for backpressure accounting, and `flush` waits on
+   * those swallowed copies with `Promise.allSettled` — so awaiting the queue
+   * says only that it drained, never that the write succeeded (#235 review).
+   */
   function queueSessionOperation(
     sessionId: string,
     operationName: string,
     operation: () => Promise<void>,
-  ): void {
+  ): Promise<void> {
     ensurePendingCapacity(operationName);
     const previous = sessionOperationChains.get(sessionId) ?? Promise.resolve();
     const next = previous
@@ -657,6 +664,7 @@ export async function createRedisRuntimeStore(
       });
     sessionOperationChains.set(sessionId, next);
     void trackOperation(operationName, next);
+    return next;
   }
 
   const store = {
@@ -811,22 +819,26 @@ export async function createRedisRuntimeStore(
     },
     markSessionLeftRoom(sessionId: string, roomCode?: string | null) {
       ensurePendingCapacity("mark_session_left_room");
-      localRuntimeStore.markSessionLeftRoom(sessionId, roomCode);
-      queueSessionOperation(sessionId, "mark_session_left_room", async () => {
-        const targetRoomCode = resolveRoomCodeToLeave(
-          (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null,
-          roomCode,
-        );
-        if (!targetRoomCode) {
-          return;
-        }
-        await redis
-          .multi()
-          .hset(sessionKey(keyPrefix, sessionId), "roomCode", "")
-          .srem(roomSessionsKey(keyPrefix, targetRoomCode), sessionId)
-          .exec();
-        await cleanupEmptyRoomIndex(redis, keyPrefix, targetRoomCode);
-      });
+      void localRuntimeStore.markSessionLeftRoom(sessionId, roomCode);
+      return queueSessionOperation(
+        sessionId,
+        "mark_session_left_room",
+        async () => {
+          const targetRoomCode = resolveRoomCodeToLeave(
+            (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null,
+            roomCode,
+          );
+          if (!targetRoomCode) {
+            return;
+          }
+          await redis
+            .multi()
+            .hset(sessionKey(keyPrefix, sessionId), "roomCode", "")
+            .srem(roomSessionsKey(keyPrefix, targetRoomCode), sessionId)
+            .exec();
+          await cleanupEmptyRoomIndex(redis, keyPrefix, targetRoomCode);
+        },
+      );
     },
     recordEvent(event: string, timestamp?: number) {
       localRuntimeStore.recordEvent(event, timestamp);
