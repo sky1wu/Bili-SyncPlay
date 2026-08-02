@@ -1245,3 +1245,70 @@ test("runtime index reaper does not inherit the store's retry budget on the inde
     await reaper.stop();
   }
 });
+
+test("runtime index reaper leaves the rest of the offline sessions to the next instance", async () => {
+  // A per-write bound is not a bound on the loop: each remaining session still
+  // spent its own wait, and a handful of them outlasted the whole shutdown step
+  // (#242 review). Stopping is the only thing that cuts the sweep short — the
+  // sessions it did not reach are still in the cluster index for next time.
+  const touched: string[] = [];
+  const sessions = Array.from({ length: 6 }, (_unused, index) => {
+    const session = createSession(`session-bulk-${index}`, "offline-node");
+    session.roomCode = `ROOMB${index}`;
+    session.memberId = `member-bulk-${index}`;
+    return session;
+  });
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return [
+        {
+          instanceId: "offline-node",
+          version: "test",
+          startedAt: 0,
+          lastHeartbeatAt: 0,
+          staleAt: 0,
+          expiresAt: 0,
+          connectionCount: sessions.length,
+          activeRoomCount: sessions.length,
+          activeMemberCount: sessions.length,
+          health: "offline" as const,
+        },
+      ];
+    },
+    async listClusterSessions() {
+      return sessions;
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    markSessionLeftRoom(sessionId: string) {
+      touched.push(sessionId);
+      // Never answers: only the per-write bound or the stop signal ends it.
+      return new Promise<void>(() => {});
+    },
+    unregisterSession() {},
+    async purgeNodeStatus() {},
+    async confirmWrites() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async () => {},
+  });
+
+  const swept = reaper.sweep();
+  // Long enough for the first session's write to be outstanding, far too short
+  // for all six to have taken their own bounded wait in turn.
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await reaper.stop();
+  await swept;
+
+  assert.ok(
+    touched.length < sessions.length,
+    `the loop must give way at stop, touched ${touched.length}/${sessions.length}`,
+  );
+});

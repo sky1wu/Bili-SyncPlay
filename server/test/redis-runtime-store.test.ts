@@ -2939,3 +2939,64 @@ test("redis runtime store counts an unanswered generation read against capacity"
     await store.close();
   }
 });
+
+test("redis runtime store flush waiters do not consume command capacity", async () => {
+  // Routing the barrier through the command tracker made every concurrent
+  // `flush` register as another unanswered command, so one slow write could be
+  // amplified by its waiters until unrelated writes hit backpressure (#242
+  // review).
+  let releaseCommand: (() => void) | null = null;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    multi() {
+      const commands = {
+        sadd: () => commands,
+        srem: () => commands,
+        del: () => commands,
+        hset: () => commands,
+        hdel: () => commands,
+        zadd: () => commands,
+        zrem: () => commands,
+        exec: () =>
+          new Promise((resolve) => {
+            releaseCommand = () => resolve(null);
+          }),
+      };
+      return commands;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:flush-capacity:",
+    redisClient: fakeRedis,
+    maxPendingOperations: 4,
+    pendingOperationTimeoutMs: 120,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    store.registerSession(createSession("session-slow"));
+    // Past the attempt cap, so `flush` gets past its `pendingOperations` wait
+    // and reaches the key-release barrier — the part under test.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // Ten callers waiting on the same drain. Only ONE Redis command exists.
+    const waiters = Array.from({ length: 10 }, () => {
+      const flushed = store.flush?.();
+      flushed?.catch(() => undefined);
+      return flushed;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Capacity must reflect the one real command, not its ten waiters.
+    assert.doesNotThrow(() => {
+      store.registerSession(createSession("session-unrelated"));
+    }, "flush waiters must not consume command capacity");
+
+    (releaseCommand as (() => void) | null)?.();
+    await Promise.allSettled(waiters);
+  } finally {
+    (releaseCommand as (() => void) | null)?.();
+    await store.close();
+  }
+});

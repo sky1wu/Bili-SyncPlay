@@ -1005,14 +1005,30 @@ export async function createRedisRuntimeStore(
       // caller goes on to read or broadcast from an index the write never
       // reached (#242 review). Callers that cannot act on it swallow it
       // explicitly at their own call site.
-      await commandPacer.capAttempt(
-        sessionWriteQueue.drain(),
-        pendingOperationTimeoutMs,
-        () =>
-          new Error(
-            "Redis runtime store flush timed out before the session keys were released.",
-          ),
-      );
+      // Deliberately NOT through `commandPacer`. This wait is a pure ordering
+      // barrier, not a Redis command — routing it through the tracker made
+      // every concurrent `flush` register as another unanswered command, so a
+      // single slow write could be amplified by its waiters until unrelated
+      // registrations hit backpressure (#242 review).
+      let barrier: ReturnType<typeof setTimeout> | null = null;
+      try {
+        await Promise.race([
+          sessionWriteQueue.drain(),
+          new Promise<never>((_resolve, reject) => {
+            barrier = setTimeout(() => {
+              reject(
+                new Error(
+                  "Redis runtime store flush timed out before the session keys were released.",
+                ),
+              );
+            }, pendingOperationTimeoutMs);
+          }),
+        ]);
+      } finally {
+        if (barrier !== null) {
+          clearTimeout(barrier);
+        }
+      }
     },
     /**
      * Unlike `flush`, this REPORTS. `flush` waits on error-swallowed copies, so

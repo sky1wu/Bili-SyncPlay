@@ -266,6 +266,15 @@ export function createRuntimeIndexReaper(options: {
     /** Durable results of this sweep's member removals; see the push below. */
     const memberRemovals: Array<Promise<void>> = [];
     for (const session of sessions) {
+      if (pacer.stopped()) {
+        // The same rule as the confirmation wait below: stopping is the only
+        // thing that cuts this sweep short. Without it each remaining session
+        // still spent its own bounded wait on the index write, and five of them
+        // were enough to outlast the whole shutdown step (#242 review). What is
+        // left is picked up by the next instance — these sessions are still in
+        // the cluster index precisely because this sweep did not get to them.
+        break;
+      }
       if (!session.instanceId || !offlineInstanceIds.has(session.instanceId)) {
         continue;
       }
@@ -313,19 +322,22 @@ export function createRuntimeIndexReaper(options: {
         // unreachable session was therefore enough to hold `stop()` past its
         // step budget, because `stop` waits for the sweep in flight before its
         // own bounded pass ever starts (#242 review).
-        await pacer
-          .capAttempt(
-            options.runtimeStore.markSessionLeftRoom(
-              session.id,
-              session.roomCode,
-            ),
-            SESSION_INDEX_WRITE_TIMEOUT_MS,
-            () =>
-              new Error(
-                `Runtime index reaper gave up waiting for the index write of ${session.id}.`,
+        await Promise.race([
+          pacer
+            .capAttempt(
+              options.runtimeStore.markSessionLeftRoom(
+                session.id,
+                session.roomCode,
               ),
-          )
-          .catch(() => undefined);
+              SESSION_INDEX_WRITE_TIMEOUT_MS,
+              () =>
+                new Error(
+                  `Runtime index reaper gave up waiting for the index write of ${session.id}.`,
+                ),
+            )
+            .catch(() => undefined),
+          pacer.whenStopped(),
+        ]);
         roomsToResync.add(session.roomCode);
       }
 
