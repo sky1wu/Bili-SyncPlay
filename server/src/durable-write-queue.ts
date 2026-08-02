@@ -18,6 +18,8 @@
  *   overtake a newer write for the same key — see {@link SupersededWriteError}.
  */
 
+import { createRetryPacer } from "./retry-pacer.js";
+
 /** A write that must not be retried, however many attempts are left. */
 export class NonRetryableWriteError extends Error {
   constructor(
@@ -136,30 +138,6 @@ const DEFAULT_INITIAL_RETRY_DELAY_MS = 50;
 const DEFAULT_MAX_RETRY_DELAY_MS = 1_000;
 const MAX_REMEMBERED_FAILURES = 64;
 
-/**
- * A backoff that can be cut short.
- *
- * Deliberately NOT `unref`'d: the timer is the only thing keeping a retry
- * alive, and unrefing it lets an otherwise idle event loop drain, silently
- * losing the write. That makes it the caller's job to end the wait — hence
- * `cancel`, which {@link DurableWriteQueue.stopRetrying} uses so a shutdown
- * does not have to sit through a backoff for a write it has already given up
- * on.
- */
-type RetryWait = { promise: Promise<void>; cancel: () => void };
-
-function startRetryWait(delayMs: number): RetryWait {
-  let cancel = (): void => {};
-  const promise = new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, delayMs);
-    cancel = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-  });
-  return { promise, cancel };
-}
-
 type ChainEntry = {
   settled: Promise<void>;
   supersede: () => void;
@@ -169,9 +147,13 @@ export function createDurableWriteQueue(
   options: DurableWriteQueueOptions = {},
 ): DurableWriteQueue {
   const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
-  const initialRetryDelayMs =
-    options.initialRetryDelayMs ?? DEFAULT_INITIAL_RETRY_DELAY_MS;
-  const maxRetryDelayMs = options.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
+
+  const pacer = createRetryPacer({
+    initialDelayMs:
+      options.initialRetryDelayMs ?? DEFAULT_INITIAL_RETRY_DELAY_MS,
+    maxDelayMs: options.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS,
+    sleep: options.sleep,
+  });
 
   const chains = new Map<string, ChainEntry>();
   /** The REAL outcomes, each pre-marked handled so a rejection stays quiet. */
@@ -189,31 +171,6 @@ export function createDurableWriteQueue(
    * that matters is "any", and the first few carry the diagnosis.
    */
   const abandoned: unknown[] = [];
-  /** `cancel` for every backoff currently being waited out. */
-  const pendingWaits = new Set<() => void>();
-  let retriesStopped = false;
-
-  /**
-   * An injected `sleep` is a test clock and resolves on its own, so it needs no
-   * canceller — stopping the LOOP is enough there. The real timer does need
-   * one; see {@link startRetryWait}.
-   */
-  function waitBeforeRetry(delayMs: number): Promise<void> {
-    if (options.sleep) {
-      return options.sleep(delayMs);
-    }
-    const wait = startRetryWait(delayMs);
-    pendingWaits.add(wait.cancel);
-    return wait.promise.finally(() => {
-      pendingWaits.delete(wait.cancel);
-    });
-  }
-
-  function retryDelayMs(attempt: number): number {
-    const backoff = initialRetryDelayMs * 2 ** (attempt - 1);
-    return Math.min(backoff, maxRetryDelayMs);
-  }
-
   async function runWithRetries(
     request: DurableWriteRequest,
     isSuperseded: () => boolean,
@@ -223,7 +180,7 @@ export function createDurableWriteQueue(
     // still start an attempt and hold the close step for a whole attempt
     // timeout apiece — so the step times out and the process exits non-zero
     // over writes nobody is waiting for any more (#242 review).
-    if (retriesStopped) {
+    if (pacer.stopped()) {
       throw new Error(
         `Durable write ${request.operationName} for ${request.key} was dropped: the queue is shutting down.`,
       );
@@ -242,13 +199,13 @@ export function createDurableWriteQueue(
         if (error instanceof NonRetryableWriteError) {
           throw error;
         }
-        if (attempt === maxAttempts || retriesStopped) {
+        if (attempt === maxAttempts || pacer.stopped()) {
           break;
         }
         if (isSuperseded()) {
           throw new SupersededWriteError(request.key, request.operationName);
         }
-        const delayMs = retryDelayMs(attempt);
+        const delayMs = pacer.delayFor(attempt);
         options.onRetryScheduled?.({
           key: request.key,
           operationName: request.operationName,
@@ -256,7 +213,7 @@ export function createDurableWriteQueue(
           delayMs,
           error,
         });
-        await waitBeforeRetry(delayMs);
+        await pacer.wait(delayMs);
         if (isSuperseded()) {
           throw new SupersededWriteError(request.key, request.operationName);
         }
@@ -264,7 +221,7 @@ export function createDurableWriteQueue(
         // in its backoff when the queue was told to stop would otherwise wake up
         // and start one more attempt — which is exactly the attempt the close
         // step has no time for.
-        if (retriesStopped) {
+        if (pacer.stopped()) {
           break;
         }
       }
@@ -349,14 +306,7 @@ export function createDurableWriteQueue(
       );
     },
     stopRetrying() {
-      retriesStopped = true;
-      // Cut the backoffs short as well as refusing new ones: a write already
-      // parked in one would otherwise hold `drain` for the full delay, which is
-      // the very wait the close step has no time for.
-      for (const cancel of Array.from(pendingWaits)) {
-        cancel();
-      }
-      pendingWaits.clear();
+      pacer.stop();
     },
     size() {
       return released.size;

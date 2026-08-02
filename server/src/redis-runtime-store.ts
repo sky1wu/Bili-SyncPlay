@@ -13,6 +13,7 @@ import {
   getPreviousRoomToLeave,
   resolveRoomCodeToLeave,
 } from "./runtime-store-state.js";
+import { createRetryPacer } from "./retry-pacer.js";
 import {
   createDurableWriteQueue,
   NonRetryableWriteError,
@@ -627,6 +628,19 @@ export async function createRedisRuntimeStore(
    * with backoff, and confirmable. Before #242 a queued write got one attempt
    * and its failure was swallowed, so a blip silently cost the write.
    */
+  /**
+   * Caps each Redis command and remembers the ones that outlive their cap.
+   *
+   * Only the cap and the tracking are used — the retry SCHEDULE belongs to
+   * `sessionWriteQueue`, which drives the retries. Sharing the primitive is
+   * what keeps "a timeout is not a cancel" from having a fourth private
+   * implementation here (#242 review).
+   */
+  const commandPacer = createRetryPacer({
+    initialDelayMs: pendingOperationTimeoutMs,
+    maxDelayMs: pendingOperationTimeoutMs,
+  });
+
   const sessionWriteQueue = createDurableWriteQueue({
     ...options.writeRetry,
     onRetryScheduled: (info) => {
@@ -842,7 +856,6 @@ export async function createRedisRuntimeStore(
     // compensating write until it has landed (#242 review).
     const started: Array<Promise<void>> = [];
     const run = async () => {
-      let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
       const command = operation();
       started.push(
         command.then(
@@ -850,34 +863,20 @@ export async function createRedisRuntimeStore(
           () => undefined,
         ),
       );
-      try {
-        await Promise.race([
-          command,
-          new Promise<never>((_resolve, reject) => {
-            timeoutHandle = setTimeout(() => {
-              const error = new Error(
-                `Redis runtime store operation timed out: ${operationName}.`,
-              );
-              logPendingOperationError(
-                {
-                  operationName,
-                  pendingCount: pendingOperations.size,
-                  reason: "timeout",
-                },
-                error,
-              );
-              reject(error);
-              // Not `unref`'d: it is the only thing that can end a hung
-              // command, so letting an idle event loop drain past it would
-              // leave the write pinned forever.
-            }, pendingOperationTimeoutMs);
-          }),
-        ]);
-      } finally {
-        if (timeoutHandle !== null) {
-          clearTimeout(timeoutHandle);
-        }
-      }
+      await commandPacer.capAttempt(command, pendingOperationTimeoutMs, () => {
+        const error = new Error(
+          `Redis runtime store operation timed out: ${operationName}.`,
+        );
+        logPendingOperationError(
+          {
+            operationName,
+            pendingCount: pendingOperations.size,
+            reason: "timeout",
+          },
+          error,
+        );
+        return error;
+      });
     };
     return {
       run,
@@ -1591,16 +1590,7 @@ export async function createRedisRuntimeStore(
       // "a timeout is not a cancel" gap `settle` closes for the session chain —
       // so wait for the chain releases too, bounded so a dead Redis cannot
       // stretch the close step (#242 review).
-      let drainTimer: ReturnType<typeof setTimeout> | null = null;
-      await Promise.race([
-        sessionWriteQueue.drain(),
-        new Promise<void>((resolve) => {
-          drainTimer = setTimeout(resolve, pendingOperationTimeoutMs);
-        }),
-      ]);
-      if (drainTimer !== null) {
-        clearTimeout(drainTimer);
-      }
+      await commandPacer.settleTracked(pendingOperationTimeoutMs);
       await redis.quit();
     },
     async heartbeatNode(status: ClusterNodeStatus) {

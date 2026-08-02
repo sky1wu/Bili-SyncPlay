@@ -22,6 +22,8 @@
  * announced was visible.
  */
 
+import { createRetryPacer } from "./retry-pacer.js";
+
 export type PendingResyncFailureInfo = {
   roomCode: string;
   /** 1-based index of the attempt that just failed. */
@@ -135,91 +137,40 @@ export function createPendingResyncQueue(
   const backlogWarnThreshold =
     options.backlogWarnThreshold ?? DEFAULT_BACKLOG_WARN_THRESHOLD;
 
-  const records = new Map<string, PendingRecord>();
-  /** `cancel` for every backoff currently being waited out. */
-  const pendingWaits = new Set<() => void>();
-  let retriesStopped = false;
-  /**
-   * Publishes that were given up on but are still on their way to the bus.
-   *
-   * `drain` waits for these after the loops have stopped: the very next
-   * shutdown step closes the bus, and "we stopped retrying" is not the same as
-   * "the call came back" (#242 review).
-   */
-  const abandonedCalls = new Set<Promise<void>>();
-  let signalStopped = (): void => {};
-  /** Resolves when {@link PendingResyncQueue.stopRetrying} is called. */
-  const stopped = new Promise<void>((resolve) => {
-    signalStopped = resolve;
+  const pacer = createRetryPacer({
+    initialDelayMs: initialRetryDelayMs,
+    maxDelayMs: maxRetryDelayMs,
+    sleep: options.sleep,
   });
 
-  /**
-   * An injected `sleep` is a test clock and resolves on its own; the real timer
-   * has to be cancellable, or `stopRetrying` would still have to sit through a
-   * 30s backoff before shutdown could move on.
-   */
-  function waitBeforeRetry(delayMs: number): Promise<void> {
-    if (options.sleep) {
-      return options.sleep(delayMs);
-    }
-    let cancel = (): void => {};
-    const promise = new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, delayMs);
-      cancel = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-    });
-    pendingWaits.add(cancel);
-    return promise.finally(() => {
-      pendingWaits.delete(cancel);
-    });
-  }
-
-  function retryDelayMs(attempt: number): number {
-    return Math.min(initialRetryDelayMs * 2 ** (attempt - 1), maxRetryDelayMs);
-  }
+  const records = new Map<string, PendingRecord>();
 
   /**
-   * Runs one publish, capped, and reports the underlying call so the caller can
-   * refuse to start another while it is still out there.
+   * Runs one publish under the attempt cap, and reports the underlying call so
+   * the caller can refuse to start another while it is still out there.
    *
    * The cap races the call; it cannot abort it. With an unbounded retry loop
    * behind it, starting a fresh publish on every timeout piles up one in-flight
    * Redis command per retry for as long as the bus stays hung, and every one of
-   * them then spills into `roomEventBus.close()` (#242 review).
+   * them then spills into `roomEventBus.close()` (#242 review). The pacer keeps
+   * the ones that outlived their cap so `drain` can wait them out.
    */
   async function publishOnce(
     roomCode: string,
     track: (call: Promise<void>) => void,
   ): Promise<void> {
-    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     const call = options.publish(roomCode);
-    const settled = call.then(
-      () => undefined,
-      () => undefined,
+    track(
+      call.then(
+        () => undefined,
+        () => undefined,
+      ),
     );
-    abandonedCalls.add(settled);
-    void settled.finally(() => {
-      abandonedCalls.delete(settled);
-    });
-    track(settled);
-    try {
-      await Promise.race([
-        call,
-        new Promise<never>((_resolve, reject) => {
-          timeoutHandle = setTimeout(() => {
-            reject(
-              new Error(`Room state resync publish timed out for ${roomCode}.`),
-            );
-          }, attemptTimeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timeoutHandle !== null) {
-        clearTimeout(timeoutHandle);
-      }
-    }
+    await pacer.capAttempt(
+      call,
+      attemptTimeoutMs,
+      () => new Error(`Room state resync publish timed out for ${roomCode}.`),
+    );
   }
 
   /**
@@ -239,7 +190,7 @@ export function createPendingResyncQueue(
     /** The publish this record started that has not answered yet, if any. */
     let inFlight: Promise<void> | null = null;
     try {
-      while (record.pending && !retriesStopped) {
+      while (record.pending && !pacer.stopped()) {
         record.pending = false;
         for (let attempt = 1; ; attempt += 1) {
           if (inFlight) {
@@ -247,8 +198,8 @@ export function createPendingResyncQueue(
             // another on top — at most ONE publish per room is ever out there.
             // `stopRetrying` cuts the wait short so shutdown is not pinned by
             // a bus that has stopped answering.
-            await Promise.race([inFlight, stopped]);
-            if (retriesStopped) {
+            await Promise.race([inFlight, pacer.whenStopped()]);
+            if (pacer.stopped()) {
               return;
             }
           }
@@ -260,13 +211,13 @@ export function createPendingResyncQueue(
             });
             break;
           } catch (error) {
-            const delayMs = retryDelayMs(attempt);
+            const delayMs = pacer.delayFor(attempt);
             options.onAttemptFailed?.({ roomCode, attempt, delayMs, error });
-            if (retriesStopped) {
+            if (pacer.stopped()) {
               return;
             }
-            await waitBeforeRetry(delayMs);
-            if (retriesStopped) {
+            await pacer.wait(delayMs);
+            if (pacer.stopped()) {
               return;
             }
           }
@@ -296,14 +247,7 @@ export function createPendingResyncQueue(
       void record.settled.catch(() => undefined);
     },
     stopRetrying() {
-      retriesStopped = true;
-      signalStopped();
-      // Cut the backoffs short too: a record parked on the 30s ceiling would
-      // otherwise hold the drain for that long.
-      for (const cancel of Array.from(pendingWaits)) {
-        cancel();
-      }
-      pendingWaits.clear();
+      pacer.stop();
     },
     async drain() {
       while (records.size > 0) {
@@ -312,21 +256,8 @@ export function createPendingResyncQueue(
         );
       }
       // The records are done, but a call one of them gave up on may still be
-      // out there — and the bus is closed straight after this. Bounded: an
-      // unbounded wait here would only move the overrun from the bus close to
-      // this step.
-      if (abandonedCalls.size > 0) {
-        let handle: ReturnType<typeof setTimeout> | null = null;
-        await Promise.race([
-          Promise.allSettled(Array.from(abandonedCalls)),
-          new Promise<void>((resolve) => {
-            handle = setTimeout(resolve, abandonedDrainTimeoutMs);
-          }),
-        ]);
-        if (handle !== null) {
-          clearTimeout(handle);
-        }
-      }
+      // out there — and the bus is closed straight after this.
+      await pacer.settleTracked(abandonedDrainTimeoutMs);
     },
     size() {
       return records.size;

@@ -225,6 +225,16 @@ decides something has to know which of the two questions it is asking (#242):
   writes that have not started, leaving at most ONE in-flight attempt; the step
   budget must exceed that attempt's own timeout. Raising `maxAttempts` or a
   delay means redoing that arithmetic.
+- **The retry timing lives in `retry-pacer`, not in each facility.** The
+  backoff schedule, the shutdown-cancellable wait, the per-attempt cap that
+  does not cancel the call, and the record of calls that outlived one are ONE
+  implementation shared by `durable-write-queue`, `pending-resync-queue`,
+  `runtime-index-reaper` and the store's command wrapper. They used to be four
+  hand-rolled copies, and six of #242's review findings were the same defect in
+  whichever copy the previous round had not touched. A new retrying facility
+  uses the pacer; it does not grow a fifth copy. What stays local is what
+  genuinely differs: ordering/supersession/confirmation, dedupe, and who decides
+  to retry.
 - **A timeout answers the caller; it does not cancel the command.** This one
   bites in three places, and fixing one of them is not fixing it:
   - The session's key is released only once every command the write started has
