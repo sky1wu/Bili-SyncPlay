@@ -833,38 +833,42 @@ export async function createRedisRuntimeStore(
     },
     markSessionJoinedRoom(sessionId: string, roomCode: string) {
       ensurePendingCapacity("mark_session_joined_room");
-      localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
-      queueSessionOperation(sessionId, "mark_session_joined_room", async () => {
-        const previousRoomCode =
-          (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
-        const roomCodeToLeave = getPreviousRoomToLeave(
-          previousRoomCode,
-          roomCode,
-        );
-        const transaction = redis.multi();
-        if (roomCodeToLeave) {
-          transaction.srem(
-            roomSessionsKey(keyPrefix, roomCodeToLeave),
-            sessionId,
+      void localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
+      return queueSessionOperation(
+        sessionId,
+        "mark_session_joined_room",
+        async () => {
+          const previousRoomCode =
+            (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
+          const roomCodeToLeave = getPreviousRoomToLeave(
+            previousRoomCode,
+            roomCode,
           );
-        }
-        transaction.hset(
-          sessionKey(keyPrefix, sessionId),
-          "roomCode",
-          roomCode,
-        );
-        transaction.sadd(roomSessionsKey(keyPrefix, roomCode), sessionId);
-        transaction.sadd(`${keyPrefix}rooms`, roomCode);
-        await transaction.exec();
-        if (roomCodeToLeave) {
-          await cleanupEmptyRoomIndex(
-            redis,
-            keyPrefix,
-            roomCodeToLeave,
-            reportEmptyRoomCleanupFailure,
+          const transaction = redis.multi();
+          if (roomCodeToLeave) {
+            transaction.srem(
+              roomSessionsKey(keyPrefix, roomCodeToLeave),
+              sessionId,
+            );
+          }
+          transaction.hset(
+            sessionKey(keyPrefix, sessionId),
+            "roomCode",
+            roomCode,
           );
-        }
-      });
+          transaction.sadd(roomSessionsKey(keyPrefix, roomCode), sessionId);
+          transaction.sadd(`${keyPrefix}rooms`, roomCode);
+          await transaction.exec();
+          if (roomCodeToLeave) {
+            await cleanupEmptyRoomIndex(
+              redis,
+              keyPrefix,
+              roomCodeToLeave,
+              reportEmptyRoomCleanupFailure,
+            );
+          }
+        },
+      );
     },
     markSessionLeftRoom(sessionId: string, roomCode?: string | null) {
       ensurePendingCapacity("mark_session_left_room");

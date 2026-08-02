@@ -56,6 +56,9 @@ test("roomStateOf serializes persisted room state with active members", () => {
     id: "member-1",
     memberId: "member-1",
     displayName: "Alice",
+    // A member of this room says so. The `as Session` cast had been hiding the
+    // field, and the residue filter reads it (#235 review).
+    roomCode: "ROOM01",
   } as Session;
   const persistedRoom: PersistedRoom = {
     code: "ROOM01",
@@ -141,10 +144,13 @@ test("roomStateFromSessions ignores sessions that belong to another room", () =>
   assert.equal(state.sharedVideo?.sharedByMemberId, "member-here");
 });
 
-test("roomStateFromSessions keeps sessions that do not state a room", () => {
-  // Absent information is not evidence of residue: the session hash carries an
-  // empty `roomCode` in the window between a join's member binding and its
-  // index write, and that member is genuinely in the room.
+test("roomStateFromSessions drops a session whose room was already cleared", () => {
+  // An explicit leave re-registers the session with its room already cleared, so
+  // a failed index write leaves exactly this shape in the room's set. Treating
+  // `null` as "unknown, keep it" put the leaver back on the roster and let them
+  // win the share again (#235 review). Safe to drop because a join writes the
+  // hash's `roomCode` and the room-set entry in one transaction, so no in-flight
+  // join can look like this.
   const persistedRoom: PersistedRoom = {
     code: "ROOMRK",
     joinToken: "join-token-123456",
@@ -159,17 +165,19 @@ test("roomStateFromSessions keeps sessions that do not state a room", () => {
   };
 
   const state = roomStateFromSessions(persistedRoom, [
-    { id: "session-unknown", memberId: "member-unknown", displayName: "Bob" },
     {
-      id: "session-null",
-      memberId: "member-null",
+      id: "session-left",
+      memberId: "member-left",
       displayName: "Carol",
       roomCode: null,
     },
+    {
+      id: "session-here",
+      memberId: "member-here",
+      displayName: "Dave",
+      roomCode: "ROOMRK",
+    },
   ]);
 
-  assert.deepEqual(state.members, [
-    { id: "member-unknown", name: "Bob" },
-    { id: "member-null", name: "Carol" },
-  ]);
+  assert.deepEqual(state.members, [{ id: "member-here", name: "Dave" }]);
 });

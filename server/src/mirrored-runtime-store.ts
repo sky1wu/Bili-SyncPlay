@@ -98,7 +98,9 @@ export function createMirroredRuntimeStore(
       localRuntimeStore.unregisterSession,
       sharedRuntimeStore.unregisterSession,
     ),
-    markSessionJoinedRoom: mirrorVoidWrite(
+    // Awaited for the same reason as `markSessionLeftRoom`: the join's own
+    // bootstrap `room:state` is rebuilt from the index this write maintains.
+    markSessionJoinedRoom: mirrorAwaitedWrite(
       localRuntimeStore.markSessionJoinedRoom,
       sharedRuntimeStore.markSessionJoinedRoom,
     ),

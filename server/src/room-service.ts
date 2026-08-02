@@ -1005,12 +1005,22 @@ export function createRoomService(options: {
         () => ({ readable: false as const, room: null }),
       );
       const sharedRoom = sharedView.room;
+      // The shared view can still be carrying THIS leave's own entry: the member
+      // write is queued, and an unconfirmed one leaves the seat behind. Only our
+      // own stale entry is discounted — the binding has to still name this very
+      // session, so a member who reconnected elsewhere keeps their seat and the
+      // #237 hazard above stays closed. Without this the room's last member
+      // could not empty it: the leaver kept it "occupied", no `expiresAt` was
+      // written, and nothing afterwards collects the room, its member map or its
+      // tokens (#235 review).
+      const remainingMembers = Array.from(sharedRoom?.members ?? []).filter(
+        ([memberId, member]) =>
+          memberId !== leavingMemberId || member.id !== session.id,
+      );
       // Unknown counts as non-empty. That can strand a genuinely empty room
       // without an `expiresAt`, which is the trade this file already makes in
       // the catch below: an orphan is recoverable, an erased live room is not.
-      roomEmpty = sharedView.readable
-        ? (sharedRoom?.members.size ?? 0) === 0
-        : false;
+      roomEmpty = sharedView.readable ? remainingMembers.length === 0 : false;
       if (!sharedView.readable) {
         logEvent("room_leave_orphan_possible", {
           sessionId: session.id,
@@ -1036,13 +1046,10 @@ export function createRoomService(options: {
           !memberRemovalConfirmed ||
           sharedVideoOwnerChangedOnLeave({
             sharedByMemberId: persistedRoom.sharedVideo?.sharedByMemberId,
-            membersAfter: Array.from(
-              sharedRoom.members,
-              ([memberId, member]) => ({
-                id: memberId,
-                joinedAt: member.joinedAt,
-              }),
-            ),
+            membersAfter: remainingMembers.map(([memberId, member]) => ({
+              id: memberId,
+              joinedAt: member.joinedAt,
+            })),
             leavingMember: {
               id: leavingMemberId,
               joinedAt: sessionSnapshot?.joinedAt ?? leavingJoinedAt,

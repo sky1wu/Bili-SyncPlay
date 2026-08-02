@@ -23,7 +23,14 @@ export type RuntimeStore = {
   flush?: () => Promise<void>;
   purgeSessionsByInstance?: (instanceId: string) => Promise<number>;
   unregisterSession: (sessionId: string) => void;
-  markSessionJoinedRoom: (sessionId: string, roomCode: string) => void;
+  /**
+   * Awaitable, and it rejects when the index write fails — the same contract as
+   * `markSessionLeftRoom`, and for a mirror-image reason: the join's own
+   * bootstrap `room:state` is rebuilt from this index, so a write that has not
+   * landed produces a state missing the member who just joined, and every
+   * ownership decision taken from it is wrong (#235 review).
+   */
+  markSessionJoinedRoom: (sessionId: string, roomCode: string) => Promise<void>;
   /**
    * Awaitable, and it rejects when the index write fails.
    *
@@ -328,7 +335,7 @@ export function createInMemoryRuntimeStore(
       }
       sessionsById.delete(sessionId);
     },
-    markSessionJoinedRoom(sessionId, roomCode) {
+    async markSessionJoinedRoom(sessionId, roomCode) {
       const session = sessionsById.get(sessionId);
       if (!session) {
         return;

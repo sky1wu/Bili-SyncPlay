@@ -1609,3 +1609,35 @@ test("redis runtime store confirms the index removal even when empty-room cleanu
     await store.close();
   }
 });
+
+test("redis runtime store reports a failed join-index write to the caller", async () => {
+  // Mirror image of the leave side: the join's own bootstrap `room:state` is
+  // rebuilt from the index this write maintains, so a write that has not landed
+  // produces a state missing the member who just joined — and the ownership
+  // decision taken from it is wrong in the one case it exists for, the stored
+  // sharer reconnecting (#235 review). `flush` cannot report it.
+  const fakeRedis = {
+    ...createFakeRedisClient([Promise.reject(new Error("join write failed"))]),
+    async hgetall() {
+      return { id: "session-join", roomCode: "" };
+    },
+    async eval() {
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:join:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    await assert.rejects(
+      store.markSessionJoinedRoom("session-join", "ROOMJN"),
+      /join write failed/,
+    );
+    await store.flush?.();
+  } finally {
+    await store.close();
+  }
+});

@@ -14,7 +14,7 @@ import {
   createInMemoryRuntimeStore,
   type RuntimeStore,
 } from "../src/runtime-store.js";
-import type { LogEvent, Session } from "../src/types.js";
+import type { ActiveRoom, LogEvent, Session } from "../src/types.js";
 
 function createSession(id: string): Session {
   const config = getDefaultSecurityConfig();
@@ -1143,7 +1143,7 @@ test("room service flushes pending runtime store writes before exposing updated 
       stagedSessionsById.clear();
     },
     unregisterSession() {},
-    markSessionJoinedRoom(sessionId, roomCode) {
+    async markSessionJoinedRoom(sessionId, roomCode) {
       const staged = stagedSessionsById.get(sessionId);
       if (staged) {
         staged.roomCode = roomCode;
@@ -4885,5 +4885,62 @@ test("an unreadable shared member view is not treated as an empty room", async (
     (await roomStore.getRoom(created.room.code))?.expiresAt ?? null,
     null,
     "a room whose membership is unknown must not be scheduled for expiry",
+  );
+});
+
+test("an unconfirmed removal of the last member still empties the room", async () => {
+  // The member write is queued, so an unconfirmed one leaves this leave's own
+  // seat in the shared view. Counting it kept the room "occupied": no
+  // `expiresAt` was written, and nothing afterwards collects the room, its
+  // member map or its tokens (#235 review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let removalFails = false;
+  let staleMembers: ActiveRoom | null = null;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      removeMember: (code: string, memberId: string, session?: Session) => {
+        // Snapshot the pre-removal view, which is what a failed write leaves
+        // the shared store holding.
+        const room = activeRooms.getRoom(code);
+        staleMembers = room
+          ? { ...room, members: new Map(room.members) }
+          : null;
+        const removal = activeRooms.removeMember(code, memberId, session);
+        return removalFails
+          ? {
+              ...removal,
+              durable: Promise.reject(new Error("member write failed")),
+            }
+          : removal;
+      },
+    },
+    resolveActiveRoom: async (roomCode) =>
+      removalFails ? staleMembers : activeRooms.getRoom(roomCode),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM43",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  currentTime = 2_000;
+  removalFails = true;
+  await service.leaveRoomForSession(owner, "disconnect");
+
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt,
+    7_000,
+    "the room the leaver just emptied must still be scheduled for expiry",
   );
 });

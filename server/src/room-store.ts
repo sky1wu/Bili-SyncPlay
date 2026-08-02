@@ -220,23 +220,27 @@ export function roomStateFromSessions(
     memberId: string | null;
     displayName: string;
     joinedAt?: number | null;
-    roomCode?: string | null;
+    /** Required to be a member: see the residue filter below. */
+    roomCode: string | null;
   }>,
 ): RoomStoreRoomState {
   const members = new Map<string, { id: string; name: string }>();
   const candidates: SharedVideoOwnerCandidate[] = [];
   for (const session of sessions) {
-    // A session that says it is somewhere else is index residue, not a member.
+    // A session that does not name this room is index residue, not a member.
     // Removing a session from a room's index is the ONE write keyed on the old
-    // room code, and nothing afterwards remembers that code — a switch whose
-    // cleanup failed leaves the id in the old room's set forever, and the
-    // session it loads then rejoins that roster and can win the share back
-    // (#235 review). The session's own `roomCode` settles it, and it is
-    // maintained by every path that moves a session between rooms.
+    // room code, and nothing afterwards remembers that code — a leave or switch
+    // whose cleanup failed leaves the id in that room's set forever, and the
+    // session it loads then rejoins the roster and can win the share back
+    // (#235 review).
     //
-    // Only a session that ANSWERS the question is dropped: an absent `roomCode`
-    // is missing information, not evidence of residue.
-    if (session.roomCode != null && session.roomCode !== room.code) {
+    // `roomCode: null` counts as residue too, which is what makes this cover an
+    // explicit leave: `onRoomLeft` re-registers the session with its room
+    // already cleared, so a failed index write leaves exactly that shape behind.
+    // Safe because a join writes the hash's `roomCode` and the room-set entry in
+    // ONE transaction (`markSessionJoinedRoom`) — a session in the set always
+    // names the room it is in, so no in-flight join can be mistaken for residue.
+    if ((session.roomCode ?? null) !== room.code) {
       continue;
     }
     const memberId = session.memberId ?? session.id;
