@@ -130,7 +130,7 @@ export function installGracefulShutdown(
 
   const runShutdown = (close: ShutdownCloseTarget): void => {
     void (async () => {
-      let exitCode = 0;
+      let exitCode: number;
       try {
         const failures = (await close()) ?? [];
         if (failures.length > 0) {
@@ -139,10 +139,22 @@ export function installGracefulShutdown(
               .map((failure) => `${failure.step} (${failure.result})`)
               .join(", ")}.`,
           );
-          exitCode = 1;
         } else {
           log(`${name} shutdown complete.`);
         }
+        // A step that THREW got something wrong and the operator should hear
+        // about it as a failed shutdown. A step that merely ran out of its
+        // budget did not: the budget exists because the work it waits on is
+        // I/O this process cannot cancel — a Redis command, a bus publish —
+        // and giving up on it is the designed outcome, not a fault. Exiting
+        // non-zero for that made every "what if this particular call hangs?"
+        // a correctness claim, which is a question with no last answer: every
+        // bounded wait added to satisfy it becomes a new call site to ask it
+        // about (#242). Both are still logged at error level; only the exit
+        // code distinguishes them.
+        exitCode = failures.some((failure) => failure.result === "error")
+          ? 1
+          : 0;
       } catch (error) {
         logError(`${name} shutdown failed:`, error);
         exitCode = 1;

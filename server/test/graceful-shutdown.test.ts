@@ -121,10 +121,10 @@ test("SIGINT is handled as well", async () => {
   assert.deepEqual(harness.exitCodes, [0]);
 });
 
-test("a shutdown step failure exits with code 1", async () => {
+test("a shutdown step that threw exits with code 1", async () => {
   const harness = createHarness();
   install(harness, async () => [
-    { step: "close_room_store", result: "timeout", error: "…" },
+    { step: "close_room_store", result: "error", error: "…" },
   ]);
 
   harness.signalTarget.emit("SIGTERM");
@@ -132,10 +132,46 @@ test("a shutdown step failure exits with code 1", async () => {
 
   assert.deepEqual(harness.exitCodes, [1]);
   assert.ok(
-    harness.errors.some((line) => line.includes("close_room_store (timeout)")),
+    harness.errors.some((line) => line.includes("close_room_store (error)")),
     `Missing failed-step log: ${harness.errors.join(" | ")}`,
   );
   assert.ok(!harness.logs.some((line) => line.includes("shutdown complete")));
+});
+
+test("a shutdown step that only ran out of its budget still exits cleanly", async () => {
+  // The budget exists because the work these steps wait on is I/O this process
+  // cannot cancel. Giving up on it is the designed outcome, not a fault —
+  // exiting non-zero for it turned every "what if this particular call hangs?"
+  // into a correctness claim with no last answer (#242).
+  const harness = createHarness();
+  install(harness, async () => [
+    { step: "close_shared_runtime_store", result: "timeout", error: "…" },
+  ]);
+
+  harness.signalTarget.emit("SIGTERM");
+  await flush();
+
+  assert.deepEqual(harness.exitCodes, [0]);
+  // Still loud: only the exit code distinguishes the two.
+  assert.ok(
+    harness.errors.some((line) =>
+      line.includes("close_shared_runtime_store (timeout)"),
+    ),
+    `Missing degraded-step log: ${harness.errors.join(" | ")}`,
+  );
+});
+
+test("a shutdown that timed out AND threw still exits with code 1", async () => {
+  const harness = createHarness();
+  install(harness, async () => [
+    { step: "close_shared_runtime_store", result: "timeout", error: "…" },
+    { step: "close_room_store", result: "error", error: "…" },
+  ]);
+
+  harness.signalTarget.emit("SIGTERM");
+  await flush();
+
+  assert.deepEqual(harness.exitCodes, [1]);
 });
 
 test("close runs once even if more signals arrive during shutdown", async () => {

@@ -235,6 +235,15 @@ decides something has to know which of the two questions it is asking (#242):
   uses the pacer; it does not grow a fifth copy. What stays local is what
   genuinely differs: ordering/supersession/confirmation, dedupe, and who decides
   to retry.
+- **A shutdown step that ran out of its budget is DEGRADED, not failed.** Only
+  a step that threw exits the process non-zero (`graceful-shutdown.ts`). The
+  budgets exist because these steps wait on I/O this process cannot cancel, so
+  giving up on it is the designed outcome. Treating an overrun as a failure
+  turned every "what if this particular call hangs?" into a correctness claim —
+  a question with no last answer, because each bounded wait added to satisfy it
+  becomes a new call site to ask it about. Ten of #242's review findings were
+  that one question re-asked. Both outcomes are still logged at error level; a
+  drain that gives up must stay visible.
 - **A timeout answers the caller; it does not cancel the command.** This one
   bites in three places, and fixing one of them is not fixing it:
   - The session's key is released only once every command the write started has
