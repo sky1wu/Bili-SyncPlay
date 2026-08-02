@@ -23,8 +23,27 @@ export type RuntimeStore = {
   flush?: () => Promise<void>;
   purgeSessionsByInstance?: (instanceId: string) => Promise<number>;
   unregisterSession: (sessionId: string) => void;
-  markSessionJoinedRoom: (sessionId: string, roomCode: string) => void;
-  markSessionLeftRoom: (sessionId: string, roomCode?: string | null) => void;
+  /**
+   * Awaitable, and it rejects when the index write fails — the same contract as
+   * `markSessionLeftRoom`, and for a mirror-image reason: the join's own
+   * bootstrap `room:state` is rebuilt from this index, so a write that has not
+   * landed produces a state missing the member who just joined, and every
+   * ownership decision taken from it is wrong (#235 review).
+   */
+  markSessionJoinedRoom: (sessionId: string, roomCode: string) => Promise<void>;
+  /**
+   * Awaitable, and it rejects when the index write fails.
+   *
+   * Unlike its `markSessionJoinedRoom` sibling, callers ACT on the answer: a
+   * `room:state` built while this write is outstanding — or after it failed —
+   * still lists the session, so the member who just left reappears in the
+   * snapshot and can win the share back (#235 review). A fire-and-forget
+   * version cannot tell them apart from success.
+   */
+  markSessionLeftRoom: (
+    sessionId: string,
+    roomCode?: string | null,
+  ) => Promise<void>;
   recordEvent: (event: string, timestamp?: number) => void;
   getSession: (sessionId: string) => Session | null;
   listSessionsByRoom: (roomCode: string) => Session[];
@@ -84,7 +103,25 @@ export type RuntimeStore = {
     code: string,
     memberId: string,
     session?: Session,
-  ) => { room: ActiveRoom | null; roomEmpty: boolean; removed: boolean };
+  ) => {
+    room: ActiveRoom | null;
+    roomEmpty: boolean;
+    removed: boolean;
+    /**
+     * Resolves once the removal is durable and REJECTS when it is not.
+     *
+     * The three fields above describe this node's own map, which is updated
+     * synchronously; the shared write is queued behind them. A caller that
+     * reads the shared member view afterwards and decides something from it —
+     * `leaveCurrentRoom` elects the next share owner — has to know the view it
+     * read reflects this removal, because a failed write leaves the leaver in
+     * the member hash while the session index cleanup goes on to succeed, and
+     * the two disagree exactly where it matters (#235 review).
+     *
+     * Absent on stores with no separate durable step.
+     */
+    durable?: Promise<void>;
+  };
   /**
    * Revoke a member's identity so their `memberToken` can no longer reclaim
    * their `memberId`. Only for deliberate departures: an explicit `room:leave`
@@ -298,7 +335,7 @@ export function createInMemoryRuntimeStore(
       }
       sessionsById.delete(sessionId);
     },
-    markSessionJoinedRoom(sessionId, roomCode) {
+    async markSessionJoinedRoom(sessionId, roomCode) {
       const session = sessionsById.get(sessionId);
       if (!session) {
         return;
@@ -309,7 +346,7 @@ export function createInMemoryRuntimeStore(
       roomSessionIds.set(roomCode, ids);
       session.roomCode = roomCode;
     },
-    markSessionLeftRoom(sessionId, roomCode) {
+    async markSessionLeftRoom(sessionId, roomCode) {
       const session = sessionsById.get(sessionId);
       const targetRoomCode = resolveRoomCodeToLeave(
         session?.roomCode,

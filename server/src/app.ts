@@ -250,12 +250,32 @@ export async function createSyncServer(
     metricsCollector,
     onRoomJoined: async (session, roomCode) => {
       runtimeStore.registerSession(session);
-      runtimeStore.markSessionJoinedRoom(session.id, roomCode);
+      // Awaited for its REAL outcome, and retried once. The bootstrap
+      // `room:state` sent right after this is rebuilt from the index this write
+      // maintains, so a write that has not landed produces a state missing the
+      // member who just joined — and the ownership decision taken from it is
+      // then wrong in the one case it exists for, the stored sharer reconnecting
+      // (#235 review). The write is idempotent (`HSET` + `SADD`), so retrying it
+      // is safe; a second failure propagates and fails the join rather than
+      // seating a member the room cannot see.
+      try {
+        await runtimeStore.markSessionJoinedRoom(session.id, roomCode);
+      } catch {
+        await runtimeStore.markSessionJoinedRoom(session.id, roomCode);
+      }
       await runtimeStore.flush?.();
     },
-    onRoomLeft: (session, roomCode) => {
+    onRoomLeft: async (session, roomCode) => {
       runtimeStore.registerSession(session);
-      runtimeStore.markSessionLeftRoom(session.id, roomCode);
+      // Awaited for its REAL outcome, so a failure reaches the handler and
+      // suppresses the full `room:state` it would otherwise publish. Everything
+      // published next is read back off the room index this write clears, so a
+      // state built while it is outstanding — or after it failed — still lists
+      // the leaver, who then wins the share back (#235 review). `flush` alone
+      // cannot report this: it waits on error-swallowed copies with
+      // `Promise.allSettled`, so it only says the queue drained.
+      await runtimeStore.markSessionLeftRoom(session.id, roomCode);
+      await runtimeStore.flush?.();
     },
     now,
   });

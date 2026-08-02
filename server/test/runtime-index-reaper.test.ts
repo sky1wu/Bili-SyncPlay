@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
-import { createRuntimeIndexReaper } from "../src/runtime-index-reaper.js";
+import {
+  createRuntimeIndexReaper,
+  type RuntimeIndexReaperStore,
+} from "../src/runtime-index-reaper.js";
 import type { AttachedSession, Session } from "../src/types.js";
 
 const REDIS_URL = process.env.REDIS_URL;
@@ -137,5 +140,146 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
   } finally {
     await reaper.stop();
     await runtimeStore.close();
+  }
+});
+
+test("runtime index reaper tells the rooms it emptied to rebuild", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // A node that dies takes its members' seats with it and publishes nothing, so
+  // as far as the survivors are concerned nobody left. When one of those seats
+  // held the share, every client still names it as `sharedByMemberId` and the
+  // room stops advancing (#235 review).
+  let currentTime = 1_000;
+  const keyPrefix = createKeyPrefix();
+  const runtimeStore = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+  });
+  const publishedRooms: string[] = [];
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => currentTime,
+    publishRoomStateUpdate: async (roomCode) => {
+      publishedRooms.push(roomCode);
+    },
+  });
+
+  const first = createSession("session-dead-1", "offline-node");
+  const second = createSession("session-dead-2", "offline-node");
+
+  try {
+    for (const [index, session] of [first, second].entries()) {
+      runtimeStore.registerSession(session);
+      runtimeStore.markSessionJoinedRoom(session.id, "ROOM41");
+      session.roomCode = "ROOM41";
+      session.memberId = `member-dead-${index}`;
+      session.memberToken = `token-dead-${index}`;
+      runtimeStore.registerSession(session);
+      runtimeStore.addMember(
+        "ROOM41",
+        session.memberId,
+        session,
+        session.memberToken,
+      );
+    }
+    await runtimeStore.heartbeatNode({
+      instanceId: "offline-node",
+      version: "test-version",
+      startedAt: 100,
+      lastHeartbeatAt: currentTime,
+      staleAt: currentTime + 50,
+      expiresAt: currentTime + 100,
+      connectionCount: 2,
+      activeRoomCount: 1,
+      activeMemberCount: 2,
+      health: "ok",
+    });
+
+    currentTime += 200;
+    assert.equal(await reaper.sweep(), 2);
+
+    // Once per room, not once per seat: both members sat in the same room.
+    assert.deepEqual(publishedRooms, ["ROOM41"]);
+  } finally {
+    await reaper.stop();
+    await runtimeStore.close();
+  }
+});
+
+test("runtime index reaper announces the room even when the index write fails", async () => {
+  // Gating the announcement on that write lost it for good: `unregisterSession`
+  // deletes the session hash and SREMs the same room-sessions key on its own, so
+  // the room ends up clean either way — while the session disappears from
+  // `listClusterSessions`, leaving the next pass nothing to retry (#235 review).
+  const published: string[] = [];
+  let flushed = 0;
+  const reaped: string[] = [];
+  const deadSession = createSession("session-unwritable", "offline-node");
+  deadSession.roomCode = "ROOM42";
+  deadSession.memberId = "member-unwritable";
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return [
+        {
+          instanceId: "offline-node",
+          version: "test",
+          startedAt: 0,
+          lastHeartbeatAt: 0,
+          staleAt: 0,
+          expiresAt: 0,
+          connectionCount: 1,
+          activeRoomCount: 1,
+          activeMemberCount: 1,
+          health: "offline" as const,
+        },
+      ];
+    },
+    async listClusterSessions() {
+      return reaped.length > 0 ? [] : [deadSession];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {
+      throw new Error("index write failed");
+    },
+    unregisterSession(sessionId: string) {
+      reaped.push(sessionId);
+    },
+    async purgeNodeStatus() {},
+    async flush() {
+      flushed += 1;
+    },
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    // Structurally checked, not cast: the whole point of this test is the
+    // contract of the writes it drives (#235 review).
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async (roomCode) => {
+      published.push(roomCode);
+    },
+  });
+
+  try {
+    assert.equal(await reaper.sweep(), 1);
+    assert.deepEqual(reaped, ["session-unwritable"]);
+    assert.deepEqual(published, ["ROOM42"]);
+    assert.ok(
+      flushed > 0,
+      "queued cleanups must drain before the announcement",
+    );
+  } finally {
+    await reaper.stop();
   }
 });

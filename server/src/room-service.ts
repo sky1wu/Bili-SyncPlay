@@ -26,6 +26,7 @@ import {
   type RoomStore,
 } from "./room-store.js";
 import type { RuntimeStore } from "./runtime-store.js";
+import { sharedVideoOwnerChangedOnLeave } from "./shared-video-owner.js";
 import { hasAttachedSocket } from "./types.js";
 import type {
   ActiveRoom,
@@ -169,6 +170,15 @@ export function createRoomService(options: {
     room: PersistedRoom | null;
     notifyRoom?: boolean;
     memberRemoved?: boolean;
+    /**
+     * The caller owes the room a full `room:state` on top of the
+     * `room:member-left` delta, because a delta only edits the recipient's
+     * member list and leaves its cached `sharedVideo` untouched (#235).
+     *
+     * Set when the leave moved the share to another member — and also when a
+     * persistence failure meant we could not work out whether it did.
+     */
+    needsRoomStateResync?: boolean;
   }>;
   shareVideoForSession: (
     session: Session,
@@ -918,6 +928,7 @@ export function createRoomService(options: {
     room: PersistedRoom | null;
     notifyRoom?: boolean;
     memberRemoved?: boolean;
+    needsRoomStateResync?: boolean;
   }> {
     if (!session.roomCode) {
       return { room: null };
@@ -926,6 +937,7 @@ export function createRoomService(options: {
     const roomCode = session.roomCode;
     const leavingMemberId = session.memberId ?? session.id;
     const leavingDisplayName = session.displayName;
+    const leavingJoinedAt = session.joinedAt;
     const sessionSnapshot = snapshotJoinedSession(session);
     const removal = session.memberId
       ? runtimeStore.removeMember(roomCode, session.memberId, session)
@@ -959,6 +971,15 @@ export function createRoomService(options: {
         );
       }
       await runtimeStore.flush?.();
+      // The removal's REAL outcome, which `flush` cannot give: it waits on the
+      // error-swallowed copies kept for backpressure accounting. A failed member
+      // write leaves the leaver in the member hash that `resolveActiveRoom`
+      // reads below, while the session-index cleanup that `room:state` is built
+      // from goes on to succeed — the election would then be decided from a view
+      // no client ever sees (#235 review).
+      const memberRemovalConfirmed = await Promise.resolve(removal.durable)
+        .then(() => true)
+        .catch(() => false);
       clearSessionRoom(session);
 
       const persistedRoom = await resolveRoom(roomCode);
@@ -972,10 +993,68 @@ export function createRoomService(options: {
       // only local member and calls the room empty — then writes an `expiresAt`
       // over the one the new node's join had just cleared, and the reaper
       // eventually deletes a room that still has members (#237 review).
-      const sharedRoom = await resolveActiveRoom(roomCode).catch(() => null);
-      roomEmpty = sharedRoom
-        ? sharedRoom.members.size === 0
-        : removal.roomEmpty;
+      // A successful read that finds no active room means the room IS empty; a
+      // failed read means nothing at all. Collapsing both into `null` is what
+      // let an unreadable view fall back to `removal.roomEmpty` — reinstating
+      // the very thing the paragraph above describes, on the one path where
+      // nothing can contradict it: the expiry lands on a room other nodes are
+      // still using, and the same `!roomEmpty` guard swallows the resync that
+      // would have told them (#235 review).
+      const sharedView = await resolveActiveRoom(roomCode).then(
+        (room) => ({ readable: true as const, room }),
+        () => ({ readable: false as const, room: null }),
+      );
+      const sharedRoom = sharedView.room;
+      // The shared view can still be carrying THIS leave's own entry: the member
+      // write is queued, and an unconfirmed one leaves the seat behind. Only our
+      // own stale entry is discounted — the binding has to still name this very
+      // session, so a member who reconnected elsewhere keeps their seat and the
+      // #237 hazard above stays closed. Without this the room's last member
+      // could not empty it: the leaver kept it "occupied", no `expiresAt` was
+      // written, and nothing afterwards collects the room, its member map or its
+      // tokens (#235 review).
+      const remainingMembers = Array.from(sharedRoom?.members ?? []).filter(
+        ([memberId, member]) =>
+          memberId !== leavingMemberId || member.id !== session.id,
+      );
+      // Unknown counts as non-empty. That can strand a genuinely empty room
+      // without an `expiresAt`, which is the trade this file already makes in
+      // the catch below: an orphan is recoverable, an erased live room is not.
+      roomEmpty = sharedView.readable ? remainingMembers.length === 0 : false;
+      if (!sharedView.readable) {
+        logEvent("room_leave_orphan_possible", {
+          sessionId: session.id,
+          roomCode,
+          remoteAddress: session.remoteAddress,
+          origin: session.origin,
+          provider: persistence.provider,
+          reason: "shared_member_view_unreadable",
+        });
+      }
+
+      // Derived from the member list this leave already loaded, so it adds no
+      // store read. An unreadable shared view means we cannot run the election
+      // at all, and that resolves to a resync request rather than to silence —
+      // the same call the catch below makes, for the same reason: a room left
+      // pointing at a member who is gone has nothing scheduled to correct it,
+      // while an unnecessary broadcast costs one message (#235 review).
+      // An emptied room is the one case that needs neither: nobody is left to
+      // hold a wrong owner, and the election has no candidates to run over.
+      const needsRoomStateResync =
+        !roomEmpty &&
+        (!sharedRoom ||
+          !memberRemovalConfirmed ||
+          sharedVideoOwnerChangedOnLeave({
+            sharedByMemberId: persistedRoom.sharedVideo?.sharedByMemberId,
+            membersAfter: remainingMembers.map(([memberId, member]) => ({
+              id: memberId,
+              joinedAt: member.joinedAt,
+            })),
+            leavingMember: {
+              id: leavingMemberId,
+              joinedAt: sessionSnapshot?.joinedAt ?? leavingJoinedAt,
+            },
+          }));
 
       if (!roomEmpty) {
         logEvent("room_left", {
@@ -987,7 +1066,11 @@ export function createRoomService(options: {
           origin: session.origin,
           result: "ok",
         });
-        return { room: persistedRoom, memberRemoved: removal.removed };
+        return {
+          room: persistedRoom,
+          memberRemoved: removal.removed,
+          needsRoomStateResync,
+        };
       }
 
       const expiresAt = now() + persistence.emptyRoomTtlMs;
@@ -1115,7 +1198,17 @@ export function createRoomService(options: {
       });
 
       if (swallowWithNotifyRoom) {
-        return { room: null, notifyRoom: true, memberRemoved: removal.removed };
+        return {
+          room: null,
+          notifyRoom: true,
+          memberRemoved: removal.removed,
+          // We never got far enough to run the election, so whether this member
+          // held the share is unknowable here. Ask for the full state anyway:
+          // over-sending costs one broadcast, while staying silent leaves every
+          // remaining client pointing at a member who is gone until some
+          // unrelated event happens to resync them (#235).
+          needsRoomStateResync: true,
+        };
       }
 
       if (error instanceof RoomServiceError) {

@@ -131,6 +131,48 @@ background path touches room state or playback timing.
   `expireBootstrapRoomStateWait` each carry this check; a new delivery path needs
   its own.
 
+### Share ownership is derived, and deltas do not carry it
+
+`sharedVideo.sharedByMemberId` is written once, at `video:share`, and is a
+durable reference to a volatile identity — the sharer's seat. #235 is what
+happens when it dangles: nobody computes `isLocalSharedSource()`, so nobody
+advances the room. Three rules keep it working, none enforced by a type:
+
+- **Resolve at build, never rewrite the room.** `roomStateFromSessions` is the
+  single place `sharedVideo` reaches a client, and the only place the stored id
+  is reconciled with the live member list (`resolveSharedVideoOwnerId`). A new
+  `room:state` build site must go through it. The persisted room keeps the
+  original id on purpose: it is the _preferred_ owner, so a sharer whose socket
+  merely blipped reclaims the share on reconnect instead of losing it for good.
+- **A membership delta that moves ownership owes a full `room:state`.**
+  Protocol >= 2 clients get `room:member-joined` / `room:member-left`, which edit
+  the recipient's member list and nothing else — their cached `sharedVideo` still
+  names whoever the last full state named. `leaveRoom` publishes an extra
+  `room_state_updated` when `needsRoomStateResync`, and the join path does the
+  same when the joiner turns out to own the share in the bootstrap state it was
+  just sent. Neither check may be replaced by a shortcut that reasons about
+  `joinedAt` ordering: that value is stamped by whichever node handled the join,
+  so it is a cross-node clock comparison and can reorder members. The tenure
+  rule exists to keep ownership from reshuffling on every arrival, nothing more.
+- **No `room:state` may be published for a leave until `onRoomLeft` has settled
+  _successfully_.** That hook clears the session out of the room index, and
+  `getRoomStateByCode` reads the index, not the member map — so a state built
+  while the write is still queued, or after it failed, contains the member who
+  just left and hands them the share straight back. `runRoomLeftHook` is awaited
+  and reports whether it succeeded; the app's implementation awaits
+  `runtimeStore.flush`. `room:member-left` is exempt and still goes out on
+  failure: it reads no state, so a dirty index cannot corrupt it.
+  Two paths beyond an explicit leave need the same treatment, and both are easy
+  to miss because the leave is not visible in them:
+  - A member switching rooms leaves the old one inside `createRoomForSession` /
+    `joinRoomForSession`, which publish nothing of their own — so both handler
+    branches release the old room themselves.
+  - Those same calls leave the old room _before_ they can fail (room full, bad
+    join token, admission lock timeout, code collision). `enterRoom` releases the
+    old room on that path too, guarded on `session.roomCode` having actually
+    changed, or a failure that never got as far as leaving would broadcast a
+    room the member never left.
+
 ## Engineering Constraints
 
 - Repository-wide contribution and refactoring constraints are defined in [CONTRIBUTING.md](./CONTRIBUTING.md).

@@ -446,19 +446,41 @@ end
 return removed
 `;
 
+/**
+ * Best-effort housekeeping: drop a room that has no sessions and no members
+ * from the active-room set. Never fails its caller.
+ *
+ * It rides along at the end of operations whose REAL work is something else —
+ * removing one session from one room's index — and those operations now report
+ * whether that work landed. Letting a transient failure here reject the whole
+ * thing said "the index was not cleaned" about a write that had already
+ * succeeded, and the leave path answered by withholding the `room:state` the
+ * room was owed (#235 review).
+ *
+ * Swallowing is safe because a stale entry is collected anyway: `deleteRoom`
+ * purges `<prefix>rooms` when the room is torn down, and it retries through
+ * `pendingRuntimeTeardowns`. Nothing correctness-bearing reads this set —
+ * `hasRoomResidue` treats a stale entry as "code still dirty" and simply picks
+ * another room code.
+ */
 async function cleanupEmptyRoomIndex(
   redis: RedisClient,
   prefix: string,
   roomCode: string,
+  onError: (error: unknown) => void,
 ): Promise<void> {
-  await redis.eval(
-    CLEANUP_EMPTY_ROOM_LUA,
-    3,
-    roomSessionsKey(prefix, roomCode),
-    `${prefix}rooms`,
-    roomMembersKey(prefix, roomCode),
-    roomCode,
-  );
+  try {
+    await redis.eval(
+      CLEANUP_EMPTY_ROOM_LUA,
+      3,
+      roomSessionsKey(prefix, roomCode),
+      `${prefix}rooms`,
+      roomMembersKey(prefix, roomCode),
+      roomCode,
+    );
+  } catch (error) {
+    onError(error);
+  }
 }
 
 export async function createRedisRuntimeStore(
@@ -627,6 +649,18 @@ export async function createRedisRuntimeStore(
     });
   }
 
+  /** Reports a swallowed housekeeping failure without failing its operation. */
+  function reportEmptyRoomCleanupFailure(error: unknown): void {
+    logPendingOperationError(
+      {
+        operationName: "cleanup_empty_room_index",
+        pendingCount: pendingOperations.size,
+        reason: "failed",
+      },
+      error,
+    );
+  }
+
   /** Collect identities past their retention. Lazy — called on token reads/writes. */
   async function pruneExpiredMemberTokens(code: string): Promise<void> {
     await redis.eval(
@@ -640,11 +674,18 @@ export async function createRedisRuntimeStore(
     );
   }
 
+  /**
+   * Returns the chained promise with its REAL outcome, so a caller that acts on
+   * whether the write landed can await it. `trackOperation` deliberately
+   * swallows the rejection for backpressure accounting, and `flush` waits on
+   * those swallowed copies with `Promise.allSettled` — so awaiting the queue
+   * says only that it drained, never that the write succeeded (#235 review).
+   */
   function queueSessionOperation(
     sessionId: string,
     operationName: string,
     operation: () => Promise<void>,
-  ): void {
+  ): Promise<void> {
     ensurePendingCapacity(operationName);
     const previous = sessionOperationChains.get(sessionId) ?? Promise.resolve();
     const next = previous
@@ -657,6 +698,7 @@ export async function createRedisRuntimeStore(
       });
     sessionOperationChains.set(sessionId, next);
     void trackOperation(operationName, next);
+    return next;
   }
 
   const store = {
@@ -753,7 +795,12 @@ export async function createRedisRuntimeStore(
 
         await transaction.exec();
         if (session.roomCode) {
-          await cleanupEmptyRoomIndex(redis, keyPrefix, session.roomCode);
+          await cleanupEmptyRoomIndex(
+            redis,
+            keyPrefix,
+            session.roomCode,
+            reportEmptyRoomCleanupFailure,
+          );
         }
         purgedCount += 1;
       }
@@ -775,58 +822,81 @@ export async function createRedisRuntimeStore(
         }
         await transaction.exec();
         if (roomCode) {
-          await cleanupEmptyRoomIndex(redis, keyPrefix, roomCode);
+          await cleanupEmptyRoomIndex(
+            redis,
+            keyPrefix,
+            roomCode,
+            reportEmptyRoomCleanupFailure,
+          );
         }
       });
     },
     markSessionJoinedRoom(sessionId: string, roomCode: string) {
       ensurePendingCapacity("mark_session_joined_room");
-      localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
-      queueSessionOperation(sessionId, "mark_session_joined_room", async () => {
-        const previousRoomCode =
-          (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
-        const roomCodeToLeave = getPreviousRoomToLeave(
-          previousRoomCode,
-          roomCode,
-        );
-        const transaction = redis.multi();
-        if (roomCodeToLeave) {
-          transaction.srem(
-            roomSessionsKey(keyPrefix, roomCodeToLeave),
-            sessionId,
+      void localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
+      return queueSessionOperation(
+        sessionId,
+        "mark_session_joined_room",
+        async () => {
+          const previousRoomCode =
+            (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
+          const roomCodeToLeave = getPreviousRoomToLeave(
+            previousRoomCode,
+            roomCode,
           );
-        }
-        transaction.hset(
-          sessionKey(keyPrefix, sessionId),
-          "roomCode",
-          roomCode,
-        );
-        transaction.sadd(roomSessionsKey(keyPrefix, roomCode), sessionId);
-        transaction.sadd(`${keyPrefix}rooms`, roomCode);
-        await transaction.exec();
-        if (roomCodeToLeave) {
-          await cleanupEmptyRoomIndex(redis, keyPrefix, roomCodeToLeave);
-        }
-      });
+          const transaction = redis.multi();
+          if (roomCodeToLeave) {
+            transaction.srem(
+              roomSessionsKey(keyPrefix, roomCodeToLeave),
+              sessionId,
+            );
+          }
+          transaction.hset(
+            sessionKey(keyPrefix, sessionId),
+            "roomCode",
+            roomCode,
+          );
+          transaction.sadd(roomSessionsKey(keyPrefix, roomCode), sessionId);
+          transaction.sadd(`${keyPrefix}rooms`, roomCode);
+          await transaction.exec();
+          if (roomCodeToLeave) {
+            await cleanupEmptyRoomIndex(
+              redis,
+              keyPrefix,
+              roomCodeToLeave,
+              reportEmptyRoomCleanupFailure,
+            );
+          }
+        },
+      );
     },
     markSessionLeftRoom(sessionId: string, roomCode?: string | null) {
       ensurePendingCapacity("mark_session_left_room");
-      localRuntimeStore.markSessionLeftRoom(sessionId, roomCode);
-      queueSessionOperation(sessionId, "mark_session_left_room", async () => {
-        const targetRoomCode = resolveRoomCodeToLeave(
-          (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null,
-          roomCode,
-        );
-        if (!targetRoomCode) {
-          return;
-        }
-        await redis
-          .multi()
-          .hset(sessionKey(keyPrefix, sessionId), "roomCode", "")
-          .srem(roomSessionsKey(keyPrefix, targetRoomCode), sessionId)
-          .exec();
-        await cleanupEmptyRoomIndex(redis, keyPrefix, targetRoomCode);
-      });
+      void localRuntimeStore.markSessionLeftRoom(sessionId, roomCode);
+      return queueSessionOperation(
+        sessionId,
+        "mark_session_left_room",
+        async () => {
+          const targetRoomCode = resolveRoomCodeToLeave(
+            (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null,
+            roomCode,
+          );
+          if (!targetRoomCode) {
+            return;
+          }
+          await redis
+            .multi()
+            .hset(sessionKey(keyPrefix, sessionId), "roomCode", "")
+            .srem(roomSessionsKey(keyPrefix, targetRoomCode), sessionId)
+            .exec();
+          await cleanupEmptyRoomIndex(
+            redis,
+            keyPrefix,
+            targetRoomCode,
+            reportEmptyRoomCleanupFailure,
+          );
+        },
+      );
     },
     recordEvent(event: string, timestamp?: number) {
       localRuntimeStore.recordEvent(event, timestamp);
@@ -1060,7 +1130,11 @@ export async function createRedisRuntimeStore(
       // reconnect can reclaim this `memberId` (#234) — but it goes on its own
       // clock, so a room that never empties still releases the people who left
       // it. The script starts that clock only while a token is actually there.
-      void trackOperation(
+      // `trackAwaitedOperation` rather than `trackOperation`: it registers the
+      // write for backpressure exactly the same way, but hands back the REAL
+      // outcome instead of the error-swallowed copy, so `durable` can reject
+      // (#235 review).
+      const durable = trackAwaitedOperation(
         "remove_member",
         redis.eval(
           REMOVE_MEMBER_LUA,
@@ -1072,8 +1146,13 @@ export async function createRedisRuntimeStore(
           session?.id ?? "",
           String(now() + memberTokenRetentionMs),
         ),
-      );
-      return removal;
+      ).then(() => undefined);
+      // Marks `durable` handled without consuming it: callers that DO await it
+      // still see the rejection, while the reaper and the join-rollback — which
+      // decide nothing from this write — no longer turn a Redis hiccup into an
+      // unhandled rejection.
+      void durable.catch(() => undefined);
+      return { ...removal, durable };
     },
     evictMemberToken(
       code: string,

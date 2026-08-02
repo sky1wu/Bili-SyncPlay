@@ -174,3 +174,106 @@ test("cross-node room broadcasts sync join, shared video, playback updates, and 
     await kit.closeAll();
   }
 });
+
+test("cross-node share ownership moves to a remaining member when the sharer leaves", async (t) => {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // The #235 path end to end, against a real Redis: the sharer leaves, and the
+  // member who stays must be told — with a full `room:state`, since their
+  // member delta would not touch the cached `sharedVideo` — that the share is
+  // now theirs. It also pins the ordering the review caught: the leaver's room
+  // index entry has to be gone before that state is built, or they reappear in
+  // the snapshot and win the share straight back.
+  const kit = await createMultiNodeTestKit(redisUrl);
+  const nodeA = await kit.startRoomNode("node-a");
+  const nodeB = await kit.startRoomNode("node-b");
+  const sharer = await connectClient(nodeA.wsUrl);
+  const stayer = await connectClient(nodeB.wsUrl);
+  const sharerCollector = createMessageCollector(sharer);
+  const stayerCollector = createMessageCollector(stayer);
+
+  try {
+    sharer.send(
+      JSON.stringify({
+        type: "room:create",
+        payload: { displayName: "Alice", protocolVersion: PROTOCOL_VERSION },
+      }),
+    );
+    const created = await sharerCollector.next("room:created");
+    await sharerCollector.next("room:state");
+    const createdPayload = created.payload as {
+      roomCode: string;
+      joinToken: string;
+      memberToken: string;
+      memberId: string;
+    };
+
+    stayer.send(
+      JSON.stringify({
+        type: "room:join",
+        payload: {
+          roomCode: createdPayload.roomCode,
+          joinToken: createdPayload.joinToken,
+          displayName: "Bob",
+          protocolVersion: PROTOCOL_VERSION,
+        },
+      }),
+    );
+    const joined = await stayerCollector.next("room:joined");
+    await stayerCollector.next("room:state");
+    await sharerCollector.next("room:member-joined");
+    const stayerMemberId = (joined.payload as { memberId: string }).memberId;
+
+    sharer.send(
+      JSON.stringify({
+        type: "video:share",
+        payload: {
+          memberToken: createdPayload.memberToken,
+          video: {
+            videoId: "BV1xx411c7mD",
+            url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+            title: "Shared Episode",
+          },
+        },
+      }),
+    );
+    const sharedState = await stayerCollector.next("room:state");
+    assert.equal(
+      (sharedState.payload as { sharedVideo?: { sharedByMemberId?: string } })
+        .sharedVideo?.sharedByMemberId,
+      createdPayload.memberId,
+    );
+
+    sharer.send(
+      JSON.stringify({
+        type: "room:leave",
+        payload: { memberToken: createdPayload.memberToken },
+      }),
+    );
+
+    await stayerCollector.next("room:member-left");
+    const handoverState = await stayerCollector.next("room:state");
+    const handoverPayload = handoverState.payload as {
+      sharedVideo?: { sharedByMemberId?: string; sharedByDisplayName?: string };
+      members: Array<{ id: string; name: string }>;
+    };
+    assert.deepEqual(
+      handoverPayload.members.map((member) => member.id),
+      [stayerMemberId],
+    );
+    assert.equal(
+      handoverPayload.sharedVideo?.sharedByMemberId,
+      stayerMemberId,
+      "the member who stayed must own the share, not the id that just left",
+    );
+    assert.equal(handoverPayload.sharedVideo?.sharedByDisplayName, "Bob");
+  } finally {
+    await closeClient(sharer);
+    await closeClient(stayer);
+    await kit.closeAll();
+  }
+});

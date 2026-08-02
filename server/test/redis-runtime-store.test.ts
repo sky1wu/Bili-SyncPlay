@@ -1544,3 +1544,100 @@ test("redis runtime store stops reserving a code whose blocked and dedup entries
     await store.close();
   }
 });
+
+test("redis runtime store reports a failed room-index cleanup to the caller", async () => {
+  // `markSessionLeftRoom` is the one session write whose caller acts on the
+  // answer: a `room:state` published while the index still lists the session
+  // hands the share back to the member who just left (#235 review). `flush`
+  // cannot carry that answer — it waits on the error-swallowed copies
+  // `trackOperation` keeps for backpressure accounting, so it reports only that
+  // the queue drained.
+  const fakeRedis = {
+    ...createFakeRedisClient([Promise.reject(new Error("index write failed"))]),
+    async hgetall() {
+      return { id: "session-dirty", roomCode: "ROOMDT" };
+    },
+    async eval() {
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:dirty:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    await assert.rejects(
+      store.markSessionLeftRoom("session-dirty", "ROOMDT"),
+      /index write failed/,
+    );
+    // The asymmetry the fix rests on: draining the queue looks like success.
+    await store.flush?.();
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store confirms the index removal even when empty-room cleanup fails", async () => {
+  // The transaction that removes this session from the room index is the write
+  // the caller acts on; the empty-room cleanup that follows is housekeeping. A
+  // transient failure in the latter used to reject the whole operation, so the
+  // leave path read "the index was not cleaned" about a write that had already
+  // landed and withheld the `room:state` the room was owed (#235 review).
+  let cleanupAttempts = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async hgetall() {
+      return { id: "session-aux", roomCode: "ROOMAX" };
+    },
+    async eval() {
+      cleanupAttempts += 1;
+      throw new Error("cleanup script failed");
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:aux:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    await store.markSessionLeftRoom("session-aux", "ROOMAX");
+    assert.ok(cleanupAttempts > 0, "the cleanup must actually have been tried");
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store reports a failed join-index write to the caller", async () => {
+  // Mirror image of the leave side: the join's own bootstrap `room:state` is
+  // rebuilt from the index this write maintains, so a write that has not landed
+  // produces a state missing the member who just joined — and the ownership
+  // decision taken from it is wrong in the one case it exists for, the stored
+  // sharer reconnecting (#235 review). `flush` cannot report it.
+  const fakeRedis = {
+    ...createFakeRedisClient([Promise.reject(new Error("join write failed"))]),
+    async hgetall() {
+      return { id: "session-join", roomCode: "" };
+    },
+    async eval() {
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:join:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    await assert.rejects(
+      store.markSessionJoinedRoom("session-join", "ROOMJN"),
+      /join write failed/,
+    );
+    await store.flush?.();
+  } finally {
+    await store.close();
+  }
+});

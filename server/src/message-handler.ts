@@ -64,6 +64,7 @@ export function createMessageHandler(options: {
       room: { code: string } | null;
       notifyRoom?: boolean;
       memberRemoved?: boolean;
+      needsRoomStateResync?: boolean;
     }>;
     shareVideoForSession: (
       session: Session,
@@ -117,7 +118,14 @@ export function createMessageHandler(options: {
     roomCode: string,
     previousRoomCode: string | null,
   ) => void | Promise<void>;
-  onRoomLeft?: (session: Session, roomCode: string) => void;
+  /**
+   * Awaited, unlike the fire-and-forget hook it used to be. Its implementation
+   * clears the session out of the room index, and a `room:state` published
+   * before that write lands is rebuilt from an index that still lists the
+   * leaver — who then reappears in the snapshot and can win the share back
+   * (#235 review). Anything published after a leave must wait for this.
+   */
+  onRoomLeft?: (session: Session, roomCode: string) => void | Promise<void>;
   now?: () => number;
 }): {
   handleClientMessage: (
@@ -160,9 +168,21 @@ export function createMessageHandler(options: {
     }
   }
 
-  function runRoomLeftHook(session: Session, roomCode: string): void {
+  /**
+   * Returns whether the hook actually completed. Callers need it because the
+   * failure it swallows is the room-index write not landing, and a `room:state`
+   * rebuilt from an uncleaned index contains the member who just left — who then
+   * wins the share straight back (#235 review). Publishing that state is worse
+   * than publishing nothing: it corrupts the roster too, and nothing is
+   * scheduled to correct it afterwards.
+   */
+  async function runRoomLeftHook(
+    session: Session,
+    roomCode: string,
+  ): Promise<boolean> {
     try {
-      options.onRoomLeft?.(session, roomCode);
+      await options.onRoomLeft?.(session, roomCode);
+      return true;
     } catch (error) {
       logEvent("room_left_hook_failed", {
         sessionId: session.id,
@@ -172,16 +192,33 @@ export function createMessageHandler(options: {
         result: "error",
         error: error instanceof Error ? error.message : String(error),
       });
+      return false;
     }
   }
+
+  /**
+   * Reports who the sent state named as share owner. The join path needs it to
+   * decide whether the room owes everybody else a resync (#235): adding a member
+   * can only move the share if the new member wins it, so "did this joiner end
+   * up owning the share?" is the whole question — and this state has already
+   * been resolved against the live member list, so it answers it without a
+   * second read or a second copy of the rule.
+   *
+   * `"unknown"` is a separate outcome from an owner of `undefined`, which would
+   * otherwise read as "this room has no shared video" and skip the resync on a
+   * transient store error — exactly when the returning sharer's room needs it
+   * (#235 review).
+   */
+  type RoomStateSendOutcome =
+    { known: true; sharedOwnerId: string | undefined } | { known: false };
 
   async function sendRoomStateToSession(
     session: Session,
     memberToken: string,
     messageType: ClientMessage["type"],
-  ): Promise<void> {
+  ): Promise<RoomStateSendOutcome> {
     if (!hasAttachedSocket(session)) {
-      return;
+      return { known: false };
     }
     try {
       const state = await roomService.getRoomStateForSession(
@@ -190,7 +227,7 @@ export function createMessageHandler(options: {
         messageType,
       );
       if (!hasAttachedSocket(session)) {
-        return;
+        return { known: false };
       }
       // Aged at the send, not at the read: `getRoomStateForSession` awaits the
       // store, and the room kept playing through it.
@@ -198,6 +235,10 @@ export function createMessageHandler(options: {
         type: "room:state",
         payload: withPlaybackAge(state, now()),
       });
+      return {
+        known: true,
+        sharedOwnerId: state.sharedVideo?.sharedByMemberId,
+      };
     } catch (error) {
       logEvent("room_state_bootstrap_failed", {
         sessionId: session.id,
@@ -210,6 +251,7 @@ export function createMessageHandler(options: {
             ? error.reason
             : "room_state_bootstrap_failed",
       });
+      return { known: false };
     }
   }
 
@@ -371,13 +413,22 @@ export function createMessageHandler(options: {
     const roomCode = session.roomCode;
     const memberId = session.memberId ?? session.id;
     const displayName = session.displayName;
-    const { room, notifyRoom, memberRemoved } =
+    const { room, notifyRoom, memberRemoved, needsRoomStateResync } =
       await roomService.leaveRoomForSession(session, reason);
     if (!roomCode || (!room && !notifyRoom)) {
       return;
     }
-    runRoomLeftHook(session, roomCode);
+    const roomIndexCleaned = await runRoomLeftHook(session, roomCode);
+    // Two independent questions, so two independent gates. `memberRemoved` is
+    // THIS node's local removal result, while `needsRoomStateResync` came out of
+    // the shared view — a session replaced on another node clears no local seat
+    // yet still changes who the election picks, and folding the resync into the
+    // delta's early return dropped exactly that case (#235 review).
+    const publishResync = needsRoomStateResync === true && roomIndexCleaned;
     if (!memberRemoved && !notifyRoom) {
+      if (publishResync) {
+        await publishSharedOwnerResync(session, roomCode);
+      }
       return;
     }
 
@@ -394,6 +445,121 @@ export function createMessageHandler(options: {
         remoteAddress: session.remoteAddress,
         origin: session.origin,
       },
+    );
+
+    // `room_member_left` goes out either way: it carries no state read, so an
+    // uncleaned index cannot corrupt it, and it still drops the member from
+    // every roster. The full state is the one that must not be built on an
+    // index we failed to clean (#235 review).
+    if (publishResync) {
+      await publishSharedOwnerResync(session, roomCode);
+    }
+  }
+
+  /**
+   * Follow a membership delta with a full `room:state` because the share
+   * changed hands (#235).
+   *
+   * `room_state_updated` rather than a bespoke event: the consumer already
+   * answers it by rebuilding and broadcasting the room state, and that rebuild
+   * is where ownership is resolved (`roomStateFromSessions`). Sent AFTER the
+   * delta so the authoritative state is the last word — the two ride the same
+   * channel, so their order survives.
+   */
+  async function publishSharedOwnerResync(
+    session: Session,
+    roomCode: string,
+    reason = "shared_owner_resync_broadcast_failed",
+  ): Promise<void> {
+    await firePublishRoomEvent(
+      {
+        type: "room_state_updated",
+        roomCode,
+      },
+      {
+        reason,
+        sessionId: session.id,
+        remoteAddress: session.remoteAddress,
+        origin: session.origin,
+      },
+    );
+  }
+
+  /**
+   * Runs a create/join and makes sure the room being left is released even when
+   * it fails.
+   *
+   * Both service calls leave the current room FIRST and can throw afterwards —
+   * room full, bad join token, admission lock timeout, code collision. The
+   * caller's release then never ran, so the old room kept a ghost session in its
+   * index: it still listed the member, and that ghost could win the share
+   * election (#235 review). The session's own `roomCode` is the evidence that
+   * the leave happened, since the service clears it as part of leaving.
+   */
+  async function enterRoom<T>(
+    session: Session,
+    previous: {
+      roomCode: string;
+      memberId: string;
+      displayName: string;
+    } | null,
+    enter: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await enter();
+    } catch (error) {
+      if (previous && session.roomCode !== previous.roomCode) {
+        await releasePreviousRoom(session, previous);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * A member switching rooms leaves the old one through `createRoomForSession` /
+   * `joinRoomForSession`, which call `leaveCurrentRoom` internally and publish
+   * nothing — so the old room is told neither that the member is gone nor that
+   * the share may have moved with them (#235 review).
+   *
+   * The identity is passed in because the caller captured it BEFORE the switch —
+   * by now `session.memberId` names the new room's seat.
+   *
+   * Both events go out even when the index write failed, which is where this
+   * differs from an explicit leave. A switcher's session hash already names the
+   * NEW room, so `roomStateFromSessions` drops it from the old room's roster on
+   * its own and the state is correct regardless. Withholding it instead lost the
+   * announcement permanently: nothing afterwards carries the old room code, so
+   * there is no retry (#235 review). `leaveRoom` keeps its gate because a leaver
+   * ends up with no room code at all, which reads as missing information rather
+   * than as residue — a state published there really could put them back.
+   *
+   * Unconditional otherwise: the internal leave's verdict never reaches here,
+   * and a switch is rare enough that one broadcast is cheaper than plumbing it
+   * out.
+   */
+  async function releasePreviousRoom(
+    session: Session,
+    previous: { roomCode: string; memberId: string; displayName: string },
+  ): Promise<void> {
+    await runRoomLeftHook(session, previous.roomCode);
+    await firePublishRoomEvent(
+      {
+        type: "room_member_left",
+        roomCode: previous.roomCode,
+        memberId: previous.memberId,
+        displayName: previous.displayName,
+      },
+      {
+        reason: "room_switch_member_left_broadcast_failed",
+        sessionId: session.id,
+        remoteAddress: session.remoteAddress,
+        origin: session.origin,
+      },
+    );
+    await publishSharedOwnerResync(
+      session,
+      previous.roomCode,
+      "room_switch_resync_broadcast_failed",
     );
   }
 
@@ -496,6 +662,15 @@ export function createMessageHandler(options: {
       switch (message.type) {
         case "room:create": {
           const previousRoomCode = session.roomCode;
+          // Captured before the service call: entering the new room overwrites
+          // `memberId`, and the old room's delta needs the seat that is leaving.
+          const previousRoom = previousRoomCode
+            ? {
+                roomCode: previousRoomCode,
+                memberId: session.memberId ?? session.id,
+                displayName: session.displayName,
+              }
+            : null;
           if (
             !consumeFixedWindow(
               session.rateLimitState.roomCreate,
@@ -518,12 +693,17 @@ export function createMessageHandler(options: {
             return;
           }
 
-          const { room, memberToken } = await roomService.createRoomForSession(
+          const { room, memberToken } = await enterRoom(
             session,
-            message.payload?.displayName,
+            previousRoom,
+            () =>
+              roomService.createRoomForSession(
+                session,
+                message.payload?.displayName,
+              ),
           );
-          if (previousRoomCode && previousRoomCode !== room.code) {
-            runRoomLeftHook(session, previousRoomCode);
+          if (previousRoom && previousRoom.roomCode !== room.code) {
+            await releasePreviousRoom(session, previousRoom);
           }
           await runRoomJoinedHook(session, room.code, previousRoomCode);
           send(socket, {
@@ -550,6 +730,15 @@ export function createMessageHandler(options: {
         }
         case "room:join": {
           const previousRoomCode = session.roomCode;
+          // Captured before the service call: entering the new room overwrites
+          // `memberId`, and the old room's delta needs the seat that is leaving.
+          const previousRoom = previousRoomCode
+            ? {
+                roomCode: previousRoomCode,
+                memberId: session.memberId ?? session.id,
+                displayName: session.displayName,
+              }
+            : null;
           if (
             !consumeFixedWindow(
               session.rateLimitState.roomJoin,
@@ -573,15 +762,20 @@ export function createMessageHandler(options: {
           }
 
           await measureMessageHandling("room:join", async () => {
-            const { room, memberToken } = await roomService.joinRoomForSession(
+            const { room, memberToken } = await enterRoom(
               session,
-              message.payload.roomCode,
-              message.payload.joinToken,
-              message.payload.displayName,
-              message.payload.memberToken,
+              previousRoom,
+              () =>
+                roomService.joinRoomForSession(
+                  session,
+                  message.payload.roomCode,
+                  message.payload.joinToken,
+                  message.payload.displayName,
+                  message.payload.memberToken,
+                ),
             );
-            if (previousRoomCode && previousRoomCode !== room.code) {
-              runRoomLeftHook(session, previousRoomCode);
+            if (previousRoom && previousRoom.roomCode !== room.code) {
+              await releasePreviousRoom(session, previousRoom);
             }
             await runRoomJoinedHook(session, room.code, previousRoomCode);
             const joinedRoomCode = room.code;
@@ -596,7 +790,11 @@ export function createMessageHandler(options: {
                 serverProtocolVersion: CURRENT_PROTOCOL_VERSION,
               },
             });
-            await sendRoomStateToSession(session, memberToken, message.type);
+            const bootstrapState = await sendRoomStateToSession(
+              session,
+              memberToken,
+              message.type,
+            );
             if (
               session.roomCode !== joinedRoomCode ||
               session.memberId !== joinedMemberId
@@ -626,6 +824,35 @@ export function createMessageHandler(options: {
                 origin: session.origin,
               },
             );
+            // This joiner owns the share, so everyone else is still pointing at
+            // whoever owned it a moment ago (#235). Usually it means the stored
+            // sharer came back, but the test is deliberately "did the joiner end
+            // up owning it" rather than "is the joiner the stored sharer": a
+            // join can only move the share by winning it, and asking the state
+            // we just sent keeps that answer free of any assumption about how
+            // the election ranks members.
+            //
+            // An unknown answer resyncs too. The same reasoning as the leave
+            // path: we could not work out whether the share moved, and silence
+            // leaves the room pointing at a stand-in with nothing scheduled to
+            // correct it.
+            //
+            // So does re-entering the room the session was already in. That path
+            // skips `releasePreviousRoom` — rightly, since nobody left — but the
+            // service still leaves and rejoins internally, which re-stamps
+            // `joinedAt` and can issue a fresh `memberId`. Either is enough to
+            // hand the share to another member who was already seated, and the
+            // check above stays silent because this joiner did not end up owning
+            // it (#235 review). We cannot compare against the pre-rejoin owner
+            // from here, so this path resyncs unconditionally; it costs one
+            // broadcast on a redundant join from an already-joined session.
+            if (
+              !bootstrapState.known ||
+              bootstrapState.sharedOwnerId === joinedMemberId ||
+              previousRoom?.roomCode === joinedRoomCode
+            ) {
+              await publishSharedOwnerResync(session, joinedRoomCode);
+            }
             logEvent("room_joined", {
               sessionId: session.id,
               roomCode: joinedRoomCode,

@@ -78,6 +78,16 @@ export async function createSharedAdminHttpBootstrap(args: {
     intervalMs: args.persistenceConfig.nodeHeartbeatIntervalMs,
     now: args.now,
     logEvent: args.logEvent,
+    // A dead node's members vanish without anyone publishing their departure,
+    // so the rooms they were in have to be told to rebuild — otherwise a share
+    // owned by one of those seats is still cached by every survivor (#235).
+    publishRoomStateUpdate: (roomCode) =>
+      args.publishRoomEvent({
+        type: "room_state_updated",
+        roomCode,
+        sourceInstanceId: args.persistenceConfig.instanceId,
+        emittedAt: args.now(),
+      }),
   });
 
   const { adminRouter, close: closeAdminServices } = await createAdminServices({

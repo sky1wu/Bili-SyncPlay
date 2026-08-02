@@ -14,7 +14,7 @@ import {
   createInMemoryRuntimeStore,
   type RuntimeStore,
 } from "../src/runtime-store.js";
-import type { LogEvent, Session } from "../src/types.js";
+import type { ActiveRoom, LogEvent, Session } from "../src/types.js";
 
 function createSession(id: string): Session {
   const config = getDefaultSecurityConfig();
@@ -665,6 +665,10 @@ test("room service still notifies remaining members when socket-detached leave h
 
   assert.equal(result.room, null);
   assert.equal(result.notifyRoom, true);
+  // The read failed before the election could run, so whether this member held
+  // the share is unknowable here. Ask for the full state rather than leave the
+  // rest of the room pointing at somebody who is gone (#235).
+  assert.equal(result.needsRoomStateResync, true);
   // Runtime reflects the leave; joiner is still in the room.
   assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
   assert.ok(activeRooms.getRoom(created.room.code)?.members.has("joiner"));
@@ -1139,13 +1143,13 @@ test("room service flushes pending runtime store writes before exposing updated 
       stagedSessionsById.clear();
     },
     unregisterSession() {},
-    markSessionJoinedRoom(sessionId, roomCode) {
+    async markSessionJoinedRoom(sessionId, roomCode) {
       const staged = stagedSessionsById.get(sessionId);
       if (staged) {
         staged.roomCode = roomCode;
       }
     },
-    markSessionLeftRoom() {},
+    async markSessionLeftRoom() {},
     recordEvent() {},
     getSession() {
       return null;
@@ -4540,5 +4544,403 @@ test("leave does not schedule expiry when the shared room still has members", as
   assert.equal(
     (await roomStore.getRoom(created.room.code))?.expiresAt ?? null,
     null,
+  );
+});
+
+test("the room keeps exactly one sharer after the sharer leaves", async () => {
+  // The #235 scenario: three members, the sharer leaves, and the two who stay
+  // must resolve to exactly one owner between them — zero means nobody advances
+  // the room, two means both auto-share the next episode.
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM35",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+
+  // Ids ordered against tenure on purpose: the successor must be the member who
+  // has been here longest, not the one with the smallest id. A rule that sorted
+  // on id would pick `aaa-late` and this stays green either way otherwise.
+  currentTime = 2_000;
+  const early = createSession("zzz-early");
+  await service.joinRoomForSession(
+    early,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  currentTime = 3_000;
+  const late = createSession("aaa-late");
+  await service.joinRoomForSession(
+    late,
+    created.room.code,
+    created.room.joinToken,
+    "Carol",
+  );
+
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+  const sharerMemberId = sharer.memberId;
+
+  currentTime = 4_000;
+  const leave = await service.leaveRoomForSession(sharer, "client-request");
+  // The remaining members only hear `room:member-left`, which edits their member
+  // list and nothing else, so the leave has to announce that a full `room:state`
+  // is owed.
+  assert.equal(leave.needsRoomStateResync, true);
+
+  const state = await service.getRoomStateByCode(created.room.code);
+  assert.deepEqual(
+    state?.members.map((member) => member.id).sort(),
+    [late.memberId, early.memberId].sort(),
+  );
+  assert.equal(state?.sharedVideo?.sharedByMemberId, early.memberId);
+  assert.equal(state?.sharedVideo?.sharedByDisplayName, "Bob");
+
+  // The persisted room is untouched: ownership is derived at every read so the
+  // original sharer stays the preferred owner.
+  const persisted = await roomStore.getRoom(created.room.code);
+  assert.equal(persisted?.sharedVideo?.sharedByMemberId, sharerMemberId);
+  assert.equal(persisted?.sharedVideo?.sharedByDisplayName, "Alice");
+});
+
+test("a bystander leaving does not move the share", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM36",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  currentTime = 2_000;
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  currentTime = 3_000;
+  const leave = await service.leaveRoomForSession(guest, "client-request");
+
+  assert.equal(leave.needsRoomStateResync, false);
+  const state = await service.getRoomStateByCode(created.room.code);
+  assert.equal(state?.sharedVideo?.sharedByMemberId, sharer.memberId);
+});
+
+test("the sharer reclaims the share on reconnect", async () => {
+  // The stand-in only holds the share while the sharer is away. #237 keeps the
+  // memberToken alive across a disconnect, so a suspended service worker coming
+  // back must get its room back rather than lose it for good — which is what a
+  // persisted transfer would have done.
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM37",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  const sharerMemberId = sharer.memberId;
+  currentTime = 2_000;
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  currentTime = 3_000;
+  await service.leaveRoomForSession(sharer, "disconnect");
+  assert.equal(
+    (await service.getRoomStateByCode(created.room.code))?.sharedVideo
+      ?.sharedByMemberId,
+    guest.memberId,
+  );
+
+  currentTime = 4_000;
+  const reconnected = createSession("sharer-reconnect");
+  await service.joinRoomForSession(
+    reconnected,
+    created.room.code,
+    created.room.joinToken,
+    "Alice",
+    created.memberToken,
+  );
+
+  assert.equal(reconnected.memberId, sharerMemberId);
+  assert.equal(
+    (await service.getRoomStateByCode(created.room.code))?.sharedVideo
+      ?.sharedByMemberId,
+    sharerMemberId,
+  );
+});
+
+test("an unreadable shared member view still asks for a resync", async () => {
+  // The election cannot run without the shared member list, and silence is the
+  // worse default: a room left pointing at a member who is gone has nothing
+  // scheduled to correct it, while an unnecessary broadcast costs one message
+  // (#235 review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let sharedViewFails = false;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    resolveActiveRoom: async (roomCode) => {
+      if (sharedViewFails) {
+        throw new Error("transient shared runtime read failure");
+      }
+      return activeRooms.getRoom(roomCode);
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM38",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  currentTime = 2_000;
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  currentTime = 3_000;
+  sharedViewFails = true;
+  const leave = await service.leaveRoomForSession(guest, "client-request");
+
+  assert.equal(leave.needsRoomStateResync, true);
+});
+
+test("an unconfirmed member removal still asks for a resync", async () => {
+  // The member hash and the session index are separate writes. When the member
+  // removal fails but the index cleanup succeeds, the shared view still lists
+  // the leaver — so the election says nothing moved — while the `room:state`
+  // clients eventually get is built from the index and no longer contains them.
+  // The two disagree exactly where it matters, so an unconfirmed removal is
+  // treated like an unreadable view (#235 review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let removalFails = false;
+  const runtimeStore = {
+    ...activeRooms,
+    removeMember: (code: string, memberId: string, session?: Session) => {
+      const removal = activeRooms.removeMember(code, memberId, session);
+      return removalFails
+        ? {
+            ...removal,
+            durable: Promise.reject(new Error("member write failed")),
+          }
+        : removal;
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: runtimeStore,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM39",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  currentTime = 2_000;
+  const guest = createSession("guest");
+  await service.joinRoomForSession(
+    guest,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  // A bystander leaves, so a confirmed removal would report no handover at all.
+  currentTime = 3_000;
+  removalFails = true;
+  const leave = await service.leaveRoomForSession(guest, "client-request");
+
+  assert.equal(leave.needsRoomStateResync, true);
+});
+
+test("an unreadable shared member view is not treated as an empty room", async () => {
+  // This node's last member leaving is not the room emptying — the paragraph
+  // above `roomEmpty` says so — but the fallback reinstated exactly that on the
+  // one path where nothing can contradict it. The expiry then lands on a room
+  // other nodes are still using, and the same `!roomEmpty` guard swallows the
+  // resync that would have told them (#235 review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let sharedViewFails = false;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore,
+    activeRooms,
+    resolveActiveRoom: async (roomCode) => {
+      if (sharedViewFails) {
+        throw new Error("transient shared runtime read failure");
+      }
+      return activeRooms.getRoom(roomCode);
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM40",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  // The only member this node knows about leaves, so the local view says empty.
+  currentTime = 2_000;
+  sharedViewFails = true;
+  const leave = await service.leaveRoomForSession(sharer, "client-request");
+
+  assert.equal(leave.needsRoomStateResync, true);
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt ?? null,
+    null,
+    "a room whose membership is unknown must not be scheduled for expiry",
+  );
+});
+
+test("an unconfirmed removal of the last member still empties the room", async () => {
+  // The member write is queued, so an unconfirmed one leaves this leave's own
+  // seat in the shared view. Counting it kept the room "occupied": no
+  // `expiresAt` was written, and nothing afterwards collects the room, its
+  // member map or its tokens (#235 review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let removalFails = false;
+  let staleMembers: ActiveRoom | null = null;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      removeMember: (code: string, memberId: string, session?: Session) => {
+        // Snapshot the pre-removal view, which is what a failed write leaves
+        // the shared store holding.
+        const room = activeRooms.getRoom(code);
+        staleMembers = room
+          ? { ...room, members: new Map(room.members) }
+          : null;
+        const removal = activeRooms.removeMember(code, memberId, session);
+        return removalFails
+          ? {
+              ...removal,
+              durable: Promise.reject(new Error("member write failed")),
+            }
+          : removal;
+      },
+    },
+    resolveActiveRoom: async (roomCode) =>
+      removalFails ? staleMembers : activeRooms.getRoom(roomCode),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM43",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  currentTime = 2_000;
+  removalFails = true;
+  await service.leaveRoomForSession(owner, "disconnect");
+
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt,
+    7_000,
+    "the room the leaver just emptied must still be scheduled for expiry",
   );
 });

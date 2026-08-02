@@ -98,11 +98,16 @@ export function createMirroredRuntimeStore(
       localRuntimeStore.unregisterSession,
       sharedRuntimeStore.unregisterSession,
     ),
-    markSessionJoinedRoom: mirrorVoidWrite(
+    // Awaited for the same reason as `markSessionLeftRoom`: the join's own
+    // bootstrap `room:state` is rebuilt from the index this write maintains.
+    markSessionJoinedRoom: mirrorAwaitedWrite(
       localRuntimeStore.markSessionJoinedRoom,
       sharedRuntimeStore.markSessionJoinedRoom,
     ),
-    markSessionLeftRoom: mirrorVoidWrite(
+    // Awaited, not fire-and-forget: callers act on whether the index write
+    // landed, and `mirrorVoidWrite` drops the promise that carries the answer
+    // (#235 review).
+    markSessionLeftRoom: mirrorAwaitedWrite(
       localRuntimeStore.markSessionLeftRoom,
       sharedRuntimeStore.markSessionLeftRoom,
     ),
@@ -135,10 +140,23 @@ export function createMirroredRuntimeStore(
     releaseMessageSlot: readShared(sharedRuntimeStore.releaseMessageSlot),
     acquireRoomLock: readShared(sharedRuntimeStore.acquireRoomLock),
     releaseRoomLock: readShared(sharedRuntimeStore.releaseRoomLock),
-    removeMember: mirrorLocalResult(
-      localRuntimeStore.removeMember,
-      sharedRuntimeStore.removeMember,
-    ),
+    // The local result decides membership (see `leaveCurrentRoom`), but the
+    // SHARED store owns the durable write — so its `durable` has to ride along
+    // rather than be dropped, or the caller cannot tell whether the member view
+    // it reads next reflects this removal (#235 review).
+    removeMember: (code, memberId, session) => {
+      const localRemoval = localRuntimeStore.removeMember(
+        code,
+        memberId,
+        session,
+      );
+      const sharedRemoval = sharedRuntimeStore.removeMember(
+        code,
+        memberId,
+        session,
+      );
+      return { ...localRemoval, durable: sharedRemoval.durable };
+    },
     evictMemberToken: mirrorAwaitedWrite(
       localRuntimeStore.evictMemberToken,
       sharedRuntimeStore.evictMemberToken,
