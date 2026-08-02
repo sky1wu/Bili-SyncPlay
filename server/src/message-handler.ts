@@ -32,6 +32,11 @@ type RoomEventBusPublishInput<T> = T extends unknown
 
 /** RFC 6455 "internal error": the server could not put the session back. */
 const CLOSE_CODE_JOIN_ROLLBACK_FAILED = 1011;
+/**
+ * How long a refused join waits for its own rollback before answering the
+ * client anyway. The rollback keeps running, ordered on the session's key.
+ */
+const JOIN_ROLLBACK_TIMEOUT_MS = 5_000;
 
 export function createMessageHandler(options: {
   config: {
@@ -136,6 +141,11 @@ export function createMessageHandler(options: {
    * cannot see is worse than refusing the join, which the client simply retries
    * (#242).
    */
+  /**
+   * How long a refused join waits for its own rollback before answering the
+   * client anyway. Injectable so tests do not pay it in wall-clock time.
+   */
+  joinRollbackTimeoutMs?: number;
   onRoomJoined?: (
     session: Session,
     roomCode: string,
@@ -224,7 +234,42 @@ export function createMessageHandler(options: {
     try {
       // The RETURNED verdict, not merely "it did not throw": the cleanup is
       // skipped on two paths that resolve normally (#242 review).
-      rolledBack = await leaveRoom(session, "disconnect");
+      //
+      // Bounded, because the rollback's own index write queues behind the join
+      // write's command — and a command that never answers neither resolves nor
+      // rejects. Waiting on it left the client parked on a join that had
+      // already failed, with the error and the socket close unreachable (#242
+      // review). Timing out means the same thing a failed rollback means: the
+      // seat did not provably come back, so the socket goes. The rollback is
+      // NOT cancelled; it stays ordered on the session's key and completes
+      // behind the scenes.
+      const rollback = leaveRoom(session, "disconnect");
+      rollback.catch(() => undefined);
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const verdict = await Promise.race([
+        rollback,
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(
+            () => resolve("timeout"),
+            options.joinRollbackTimeoutMs ?? JOIN_ROLLBACK_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      if (verdict === "timeout") {
+        logEvent("room_join_rollback_timeout", {
+          sessionId: session.id,
+          roomCode,
+          remoteAddress: session.remoteAddress,
+          origin: session.origin,
+          result: "timeout",
+          timeoutMs: options.joinRollbackTimeoutMs ?? JOIN_ROLLBACK_TIMEOUT_MS,
+        });
+      } else {
+        rolledBack = verdict;
+      }
     } catch (error) {
       logEvent("room_join_rollback_failed", {
         sessionId: session.id,

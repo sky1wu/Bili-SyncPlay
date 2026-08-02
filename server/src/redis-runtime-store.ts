@@ -691,7 +691,12 @@ export async function createRedisRuntimeStore(
   function ensurePendingCapacity(operationName: string): void {
     if (
       pendingOperations.size < maxPendingOperations &&
-      heldCommandCapacity.size < maxPendingOperations
+      heldCommandCapacity.size < maxPendingOperations &&
+      // Commands that outlived their cap count too. Tracking them only for
+      // draining let a join whose generation read timed out release its pending
+      // slot and start another read every timeout window, past the configured
+      // cap without limit (#242 review).
+      commandPacer.trackedCount() < maxPendingOperations
     ) {
       return;
     }
@@ -914,8 +919,18 @@ export async function createRedisRuntimeStore(
     sessionId: string,
     operationName: string,
     operation: () => Promise<void>,
+    /**
+     * Runs once, synchronously, immediately after admission — for work that
+     * must happen at ENQUEUE time rather than per attempt, and that starts a
+     * Redis command of its own. Putting it here rather than in the caller is
+     * what keeps admission the single point where capacity is checked, so a
+     * write cannot be refused because of a command it started itself (#242
+     * review).
+     */
+    onAdmitted?: () => void,
   ): Promise<void> {
     ensurePendingCapacity(operationName);
+    onAdmitted?.();
     const startedAt = performance.now();
     const outcome = sessionWriteQueue.enqueue({
       key: sessionId,
@@ -1109,7 +1124,6 @@ export async function createRedisRuntimeStore(
       });
     },
     markSessionJoinedRoom(sessionId: string, roomCode: string) {
-      ensurePendingCapacity("mark_session_joined_room");
       void localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
       // Read HERE, at the moment the join is made — not inside the operation
       // body, and not per attempt.
@@ -1126,48 +1140,53 @@ export async function createRedisRuntimeStore(
       // later, for the same reason: a second read is a second chance to pin the
       // wrong instance. The join is refused and the client retries it, which is
       // the trade this path already makes for the index write itself.
-      const pinnedGeneration = commandPacer
-        .capAttempt(
-          redis.get(roomGenerationKey(keyPrefix, roomCode)),
-          pendingOperationTimeoutMs,
-          () =>
-            new Error(`Timed out reading the generation of room ${roomCode}.`),
-        )
-        .then((generation) => {
-          // The tombstone is the teardown's answer to "this code is dead", so
-          // pinning it would make the script's comparison SUCCEED and rebuild
-          // the indexes of a room that no longer exists. Two ways in, and the
-          // Lua guard only ever covered the first: a pin taken BEFORE the
-          // teardown no longer matches the key afterwards, but a pin taken
-          // AFTER it reads the tombstone and matches itself. It also covers the
-          // recycling window — a new occupant that has passed the residue check
-          // but not yet stamped its generation still has the tombstone in place
-          // (#242 review).
-          if (generation === ROOM_GENERATION_TOMBSTONE) {
+      let pinnedGeneration!: Promise<string>;
+      const pinGeneration = (): void => {
+        pinnedGeneration = commandPacer
+          .capAttempt(
+            redis.get(roomGenerationKey(keyPrefix, roomCode)),
+            pendingOperationTimeoutMs,
+            () =>
+              new Error(
+                `Timed out reading the generation of room ${roomCode}.`,
+              ),
+          )
+          .then((generation) => {
+            // The tombstone is the teardown's answer to "this code is dead", so
+            // pinning it would make the script's comparison SUCCEED and rebuild
+            // the indexes of a room that no longer exists. Two ways in, and the
+            // Lua guard only ever covered the first: a pin taken BEFORE the
+            // teardown no longer matches the key afterwards, but a pin taken
+            // AFTER it reads the tombstone and matches itself. It also covers the
+            // recycling window — a new occupant that has passed the residue check
+            // but not yet stamped its generation still has the tombstone in place
+            // (#242 review).
+            if (generation === ROOM_GENERATION_TOMBSTONE) {
+              throw new NonRetryableWriteError(
+                `Room ${roomCode} was torn down before the join index write was pinned.`,
+                "room_deleted",
+              );
+            }
+            // An absent generation pins as `""`, which a room that predates #237
+            // still matches.
+            return generation ?? "";
+          })
+          .catch((error: unknown) => {
+            // Verdicts pass through: this handler is here for the READ failing,
+            // and re-wrapping would relabel "the room is gone" as "we could not
+            // read the generation".
+            if (error instanceof NonRetryableWriteError) {
+              throw error;
+            }
             throw new NonRetryableWriteError(
-              `Room ${roomCode} was torn down before the join index write was pinned.`,
-              "room_deleted",
+              `Could not pin the generation of room ${roomCode}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+              "room_generation_unreadable",
             );
-          }
-          // An absent generation pins as `""`, which a room that predates #237
-          // still matches.
-          return generation ?? "";
-        })
-        .catch((error: unknown) => {
-          // Verdicts pass through: this handler is here for the READ failing,
-          // and re-wrapping would relabel "the room is gone" as "we could not
-          // read the generation".
-          if (error instanceof NonRetryableWriteError) {
-            throw error;
-          }
-          throw new NonRetryableWriteError(
-            `Could not pin the generation of room ${roomCode}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-            "room_generation_unreadable",
-          );
-        });
-      pinnedGeneration.catch(() => undefined);
+          });
+        pinnedGeneration.catch(() => undefined);
+      };
       return queueSessionOperation(
         sessionId,
         "mark_session_joined_room",
@@ -1231,6 +1250,7 @@ export async function createRedisRuntimeStore(
             );
           }
         },
+        pinGeneration,
       );
     },
     markSessionLeftRoom(sessionId: string, roomCode?: string | null) {
@@ -1272,6 +1292,12 @@ export async function createRedisRuntimeStore(
           await redis
             .multi()
             .hset(sessionKey(keyPrefix, sessionId), record)
+            // The registration's OTHER side effect. Writing the full hash was
+            // only half of it: `listClusterSessions`, the connection counts and
+            // the per-instance purge all enumerate this set, and a superseded
+            // registration left the connection missing from every one of them
+            // until its next successful join (#242 review).
+            .sadd(`${keyPrefix}sessions`, sessionId)
             .srem(roomSessionsKey(keyPrefix, targetRoomCode), sessionId)
             .exec();
           await cleanupEmptyRoomIndex(

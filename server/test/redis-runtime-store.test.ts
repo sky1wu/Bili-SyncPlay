@@ -2892,3 +2892,50 @@ test("redis runtime store does not let one session's removal supersede another's
     await store.close();
   }
 });
+
+test("redis runtime store counts an unanswered generation read against capacity", async () => {
+  // Tracking it only for draining let a join whose generation read timed out
+  // release its pending slot and start another read every timeout window, past
+  // the configured cap without limit (#242 review).
+  let releaseRead: (() => void) | null = null;
+  let reads = 0;
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    get() {
+      reads += 1;
+      return new Promise<string | null>((resolve) => {
+        releaseRead = () => resolve("gen-1");
+      });
+    },
+    async hgetall() {
+      return {};
+    },
+    async eval() {
+      return 1;
+    },
+  };
+
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:read-capacity:",
+    redisClient: fakeRedis,
+    maxPendingOperations: 1,
+    pendingOperationTimeoutMs: 20,
+    writeRetry: { maxAttempts: 1 },
+  });
+
+  try {
+    const first = store.markSessionJoinedRoom("session-r1", "ROOMR1");
+    await assert.rejects(first, /Timed out reading the generation/);
+    assert.equal(reads, 1);
+
+    // The read is still out there, so the slot it occupies is not free.
+    assert.throws(
+      () => store.markSessionJoinedRoom("session-r2", "ROOMR2"),
+      /backpressure/,
+    );
+    assert.equal(reads, 1, "and no second read was started");
+  } finally {
+    (releaseRead as (() => void) | null)?.();
+    await store.close();
+  }
+});

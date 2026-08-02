@@ -246,9 +246,23 @@ export function createDurableWriteQueue(
       previous?.supersede();
 
       let superseded = false;
-      const outcome = (previous?.settled ?? Promise.resolve()).then(() =>
-        runWithRetries(request, () => superseded),
-      );
+      const previousSettled = previous?.settled ?? Promise.resolve();
+      const outcome = (async () => {
+        // The caller is answered as soon as the queue is told to stop, even
+        // while still queued behind a key whose command has not come back.
+        // Waiting on `previousSettled` alone put every queued write out of
+        // reach of the stop check below, so `close()` sat on outcomes that
+        // could never settle and the shutdown step was guaranteed to overrun
+        // (#242 review). The KEY chain still waits — ordering is unchanged.
+        await Promise.race([previousSettled, pacer.whenStopped()]);
+        if (pacer.stopped()) {
+          throw new Error(
+            `Durable write ${request.operationName} for ${request.key} was dropped: the queue is shutting down.`,
+          );
+        }
+        await previousSettled;
+        return runWithRetries(request, () => superseded);
+      })();
       const reported = outcome.then(
         () => undefined,
         (error: unknown) => {
@@ -266,6 +280,11 @@ export function createDurableWriteQueue(
       // The chain is released only once the underlying commands have really
       // finished — see `settle`. The caller still gets `outcome` on time.
       const settled = reported
+        .then(() => previousSettled)
+        .then(
+          () => undefined,
+          () => undefined,
+        )
         .then(() => request.settle?.())
         .then(
           () => undefined,

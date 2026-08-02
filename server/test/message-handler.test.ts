@@ -3061,10 +3061,13 @@ test("a join whose rollback succeeds leaves the connection alone", async () => {
 async function runAbortedJoin(options: {
   leaveResult?: { room: { code: string } | null; notifyRoom?: boolean };
   leaveThrows?: boolean;
+  leaveNeverSettles?: boolean;
   roomLeftHookFails?: boolean;
-}): Promise<{ closes: number[]; errors: string[] }> {
+  joinRollbackTimeoutMs?: number;
+}): Promise<{ closes: number[]; errors: string[]; events: string[] }> {
   const closes: number[] = [];
   const errors: string[] = [];
+  const events: string[] = [];
   const session = createSession("member-1");
   (
     session.socket as unknown as { close: (c: number, r: string) => void }
@@ -3085,6 +3088,11 @@ async function runAbortedJoin(options: {
         return { room: { code: "ROOM01" }, memberToken: "member-token-1" };
       },
       async leaveRoomForSession() {
+        if (options.leaveNeverSettles) {
+          // The rollback's own index write is queued behind a command that
+          // never answers: it neither resolves nor rejects.
+          await new Promise<void>(() => {});
+        }
         if (options.leaveThrows) {
           throw new Error("leave persistence failed");
         }
@@ -3106,13 +3114,16 @@ async function runAbortedJoin(options: {
         throw new Error("unreachable");
       },
     },
-    logEvent() {},
+    logEvent(event) {
+      events.push(event);
+    },
     send() {},
     sendError(_socket, code) {
       errors.push(code);
     },
     async publishRoomEvent() {},
     instanceId: "node-a",
+    joinRollbackTimeoutMs: options.joinRollbackTimeoutMs,
     async onRoomJoined() {
       throw new Error("runtime index unavailable");
     },
@@ -3132,7 +3143,7 @@ async function runAbortedJoin(options: {
     },
   });
   await handler.flushPendingPublishes();
-  return { closes, errors };
+  return { closes, errors, events };
 }
 
 test("an aborted join drops the socket when the leave call throws", async () => {
@@ -3163,4 +3174,18 @@ test("an aborted join whose rollback cleaned the index keeps the connection", as
   const { closes, errors } = await runAbortedJoin({});
   assert.deepEqual(errors, ["internal_error"]);
   assert.deepEqual(closes, [], "the client may retry on the same socket");
+});
+
+test("an aborted join answers the client when its rollback never settles", async () => {
+  // The rollback's index write queues behind the join write's command, and a
+  // command that never answers neither resolves nor rejects — so the error and
+  // the socket close were unreachable and the client sat on a join that had
+  // already failed (#242 review).
+  const { closes, errors, events } = await runAbortedJoin({
+    leaveNeverSettles: true,
+    joinRollbackTimeoutMs: 30,
+  });
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [1011]);
+  assert.ok(events.includes("room_join_rollback_timeout"));
 });

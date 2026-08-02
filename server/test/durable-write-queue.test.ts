@@ -373,3 +373,52 @@ test("durable write queue waits for the abandoned command before it retries", as
 
   assert.equal(peak, 1, `one live command per write at a time, saw ${peak}`);
 });
+
+test("durable write queue answers queued writes as soon as it is told to stop", async () => {
+  // A write queued behind a key whose command never comes back was out of reach
+  // of the stop check: `close()` then sat on an outcome that could never settle
+  // and the shutdown step was guaranteed to overrun (#242 review).
+  // `maxAttempts: 1`, so the first write is ANSWERED while its command is still
+  // out; with retries it would be blocked on that same command by design.
+  const queue = createDurableWriteQueue({
+    maxAttempts: 1,
+    sleep: () => Promise.resolve(),
+  });
+  let releaseCommand: (() => void) | null = null;
+  const command = new Promise<void>((resolve) => {
+    releaseCommand = resolve;
+  });
+
+  const first = queue.enqueue({
+    key: "session-a",
+    operationName: "first",
+    run: async () => {
+      // Stands in for the raced attempt timeout: answered, command still out.
+      throw new Error("attempt timed out");
+    },
+    settle: () => command,
+  });
+  first.catch(() => undefined);
+  await assert.rejects(first, /timed out/);
+
+  let secondRan = false;
+  const second = queue.enqueue({
+    key: "session-a",
+    operationName: "second",
+    run: async () => {
+      secondRan = true;
+    },
+  });
+  second.catch(() => undefined);
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(secondRan, false, "it is queued behind the live command");
+
+  queue.stopRetrying();
+  // Answered immediately, without waiting for the command that will not answer.
+  await assert.rejects(second, /shutting down/);
+  assert.equal(secondRan, false, "and it must not run either");
+
+  (releaseCommand as (() => void) | null)?.();
+  await queue.drain();
+});

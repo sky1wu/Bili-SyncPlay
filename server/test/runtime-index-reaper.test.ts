@@ -1200,6 +1200,7 @@ test("runtime index reaper treats a refused member removal as unconfirmed", asyn
   // resync record — while the stale member binding was still in Redis and its
   // token retention had never been armed (#242 review).
   const published: string[] = [];
+  const removalCalls: string[] = [];
   const deadSession = createSession("session-refused", "offline-node");
   deadSession.roomCode = "ROOM51";
   deadSession.memberId = "member-refused";
@@ -1228,13 +1229,20 @@ test("runtime index reaper treats a refused member removal as unconfirmed", asyn
       sweeps += 1;
       return sweeps > 1 ? [] : [deadSession];
     },
-    removeMember() {
-      return {
-        room: null,
-        roomEmpty: false,
-        removed: true,
-        durable: Promise.reject(new Error("remove member refused")),
-      };
+    removeMember(code, memberId, session) {
+      removalCalls.push(`${code}:${memberId}:${session?.id ?? ""}`);
+      if (removalCalls.length >= 2) {
+        // Re-issued from the arguments the reaper kept: this one lands.
+        return {
+          room: null,
+          roomEmpty: false,
+          removed: true,
+          durable: Promise.resolve(),
+        };
+      }
+      const durable = Promise.reject(new Error("remove member refused"));
+      void durable.catch(() => undefined);
+      return { room: null, roomEmpty: false, removed: true, durable };
     },
     async markSessionLeftRoom() {},
     unregisterSession() {},
@@ -1260,12 +1268,21 @@ test("runtime index reaper treats a refused member removal as unconfirmed", asyn
     await reaper.sweep();
     assert.deepEqual(published, ["ROOM51", "ROOM51"], "the record survived");
 
-    // And it stays held. The binding is still in Redis with no retention clock
-    // armed, so `hasRoomResidue` keeps the code reserved and a state built now
-    // would still name the dead seat — releasing the latch here dropped the
-    // record while all of that was true (#242 review).
+    // The refusal is RE-ISSUED from the arguments the reaper kept — the session
+    // is already out of `listClusterSessions`, so nothing else could rediscover
+    // it. Only once that lands does the record clear.
+    assert.deepEqual(removalCalls, [
+      "ROOM51:member-refused:session-refused",
+      "ROOM51:member-refused:session-refused",
+    ]);
     await reaper.sweep();
     assert.deepEqual(published, ["ROOM51", "ROOM51", "ROOM51"]);
+    await reaper.sweep();
+    assert.deepEqual(
+      published,
+      ["ROOM51", "ROOM51", "ROOM51"],
+      "the re-issued removal landed, so the record is finally dropped",
+    );
   } finally {
     await reaper.stop();
   }

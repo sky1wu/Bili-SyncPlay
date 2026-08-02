@@ -1,6 +1,6 @@
 import { createRetryPacer } from "./retry-pacer.js";
 import { clampTimerIntervalMs } from "./timers.js";
-import type { LogEvent } from "./types.js";
+import type { LogEvent, Session } from "./types.js";
 import type { RuntimeStore } from "./runtime-store.js";
 
 /**
@@ -136,6 +136,21 @@ export function createRuntimeIndexReaper(options: {
    * record from either (#242 review).
    */
   const resyncAwaitingWrites = new Map<string, Promise<void>>();
+  /**
+   * Removals that were refused, keyed by room, with everything needed to issue
+   * them again.
+   *
+   * `unregisterSession` has already taken the session out of
+   * `listClusterSessions` by the time a removal is known to have failed, so no
+   * later sweep can rediscover it — the comment that claimed otherwise was
+   * simply wrong (#242 review). Without this the member binding stays in Redis
+   * with no retention clock armed, `hasRoomResidue` keeps the code reserved for
+   * good, and the resync record republishes every sweep without ever clearing.
+   */
+  const failedRemovals = new Map<
+    string,
+    { memberId: string; session: Session }
+  >();
 
   function rememberResync(roomCode: string): void {
     const isNew = !roomsAwaitingResync.has(roomCode);
@@ -305,17 +320,36 @@ export function createRuntimeIndexReaper(options: {
     }
     entries.forEach(([roomCode], index) => {
       if (settled[index]?.status === "rejected") {
-        // Held: the member binding is still in Redis with no retention clock
-        // armed, so `hasRoomResidue` keeps the code reserved and a state built
-        // now would still name the dead seat. Releasing the latch here dropped
-        // the record while all of that was true (#242 review). The removal is
-        // re-issued below, on the next sweep that can see the room.
         options.logEvent?.("runtime_index_member_removal_failed", {
           roomCode,
           result: "error",
         });
+        const pending = failedRemovals.get(roomCode);
+        if (!pending) {
+          // Nothing left to re-issue, so holding the latch would only
+          // republish for ever.
+          resyncAwaitingWrites.delete(roomCode);
+          return;
+        }
+        // Issue it again from the arguments we kept, and let the latch wait on
+        // THAT. The session it names is gone from the cluster index, so this is
+        // the only handle on the removal that still exists.
+        const retry = options.runtimeStore.removeMember(
+          roomCode,
+          pending.memberId,
+          pending.session,
+        );
+        const durable = retry.durable ?? Promise.resolve();
+        void durable.then(
+          () => {
+            failedRemovals.delete(roomCode);
+          },
+          () => undefined,
+        );
+        resyncAwaitingWrites.set(roomCode, durable);
         return;
       }
+      failedRemovals.delete(roomCode);
       resyncAwaitingWrites.delete(roomCode);
     });
   }
@@ -374,6 +408,20 @@ export function createRuntimeIndexReaper(options: {
           // separately so a rejection before `Promise.all` reads it stays quiet.
           void removal.durable.catch(() => undefined);
           memberRemovals.push(removal.durable);
+          // Kept so a refusal can be re-issued: by the time we learn about it,
+          // `unregisterSession` has removed the only other handle on it.
+          const roomCode = session.roomCode;
+          const memberId = session.memberId;
+          failedRemovals.set(roomCode, { memberId, session });
+          void removal.durable.then(
+            () => {
+              const held = failedRemovals.get(roomCode);
+              if (held?.session === session) {
+                failedRemovals.delete(roomCode);
+              }
+            },
+            () => undefined,
+          );
         }
       }
       if (session.roomCode) {
