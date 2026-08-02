@@ -8,6 +8,17 @@ export function createRuntimeIndexReaper(options: {
   intervalMs: number;
   now?: () => number;
   logEvent?: LogEvent;
+  /**
+   * Announce that a room this sweep touched needs rebuilding.
+   *
+   * A node that died took its members' seats with it and published nothing —
+   * nobody left as far as the surviving clients are concerned. When one of those
+   * seats held the share, every client still names it as `sharedByMemberId` and
+   * the room stops advancing (#235 review). Once the indexes are cleaned, one
+   * `room_state_updated` per affected room is enough: the state it triggers is
+   * rebuilt from the live member list and resolves ownership on the way out.
+   */
+  publishRoomStateUpdate?: (roomCode: string) => Promise<void>;
 }) {
   const now = options.now ?? Date.now;
   let timer: NodeJS.Timeout | null = null;
@@ -32,6 +43,7 @@ export function createRuntimeIndexReaper(options: {
 
     const sessions = await options.runtimeStore.listClusterSessions();
     let cleanedSessions = 0;
+    const roomsToResync = new Set<string>();
     for (const session of sessions) {
       if (!session.instanceId || !offlineInstanceIds.has(session.instanceId)) {
         continue;
@@ -44,17 +56,37 @@ export function createRuntimeIndexReaper(options: {
         );
       }
       if (session.roomCode) {
-        // Swallowed on purpose: this reaper sweeps every stale session in one
-        // pass, and one unwritable index entry must not abandon the rest. It
-        // publishes nothing, so unlike the leave path it has no decision riding
-        // on the answer — the next pass retries.
-        await options.runtimeStore
-          .markSessionLeftRoom(session.id, session.roomCode)
-          .catch(() => undefined);
+        // A failed index write only costs this room its announcement: one
+        // unwritable entry must not abandon the rest of the sweep, and a
+        // `room:state` rebuilt from an index that still lists the dead session
+        // would put it straight back into the roster. The next pass retries.
+        const roomCode = session.roomCode;
+        const indexCleaned = await options.runtimeStore
+          .markSessionLeftRoom(session.id, roomCode)
+          .then(() => true)
+          .catch(() => false);
+        if (indexCleaned) {
+          roomsToResync.add(roomCode);
+        }
       }
 
       options.runtimeStore.unregisterSession(session.id);
       cleanedSessions += 1;
+    }
+
+    // After the whole sweep, so a room that lost several members to the same
+    // dead node is announced once rather than once per seat.
+    for (const roomCode of roomsToResync) {
+      try {
+        await options.publishRoomStateUpdate?.(roomCode);
+      } catch (error) {
+        // The sweep's own work is done and must not be undone by a bus hiccup.
+        options.logEvent?.("runtime_index_resync_publish_failed", {
+          roomCode,
+          result: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
 
     const remainingSessions = await options.runtimeStore.listClusterSessions();

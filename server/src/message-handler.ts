@@ -833,9 +833,20 @@ export function createMessageHandler(options: {
             // path: we could not work out whether the share moved, and silence
             // leaves the room pointing at a stand-in with nothing scheduled to
             // correct it.
+            //
+            // So does re-entering the room the session was already in. That path
+            // skips `releasePreviousRoom` — rightly, since nobody left — but the
+            // service still leaves and rejoins internally, which re-stamps
+            // `joinedAt` and can issue a fresh `memberId`. Either is enough to
+            // hand the share to another member who was already seated, and the
+            // check above stays silent because this joiner did not end up owning
+            // it (#235 review). We cannot compare against the pre-rejoin owner
+            // from here, so this path resyncs unconditionally; it costs one
+            // broadcast on a redundant join from an already-joined session.
             if (
               !bootstrapState.known ||
-              bootstrapState.sharedOwnerId === joinedMemberId
+              bootstrapState.sharedOwnerId === joinedMemberId ||
+              previousRoom?.roomCode === joinedRoomCode
             ) {
               await publishSharedOwnerResync(session, joinedRoomCode);
             }

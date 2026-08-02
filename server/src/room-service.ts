@@ -993,10 +993,34 @@ export function createRoomService(options: {
       // only local member and calls the room empty — then writes an `expiresAt`
       // over the one the new node's join had just cleared, and the reaper
       // eventually deletes a room that still has members (#237 review).
-      const sharedRoom = await resolveActiveRoom(roomCode).catch(() => null);
-      roomEmpty = sharedRoom
-        ? sharedRoom.members.size === 0
-        : removal.roomEmpty;
+      // A successful read that finds no active room means the room IS empty; a
+      // failed read means nothing at all. Collapsing both into `null` is what
+      // let an unreadable view fall back to `removal.roomEmpty` — reinstating
+      // the very thing the paragraph above describes, on the one path where
+      // nothing can contradict it: the expiry lands on a room other nodes are
+      // still using, and the same `!roomEmpty` guard swallows the resync that
+      // would have told them (#235 review).
+      const sharedView = await resolveActiveRoom(roomCode).then(
+        (room) => ({ readable: true as const, room }),
+        () => ({ readable: false as const, room: null }),
+      );
+      const sharedRoom = sharedView.room;
+      // Unknown counts as non-empty. That can strand a genuinely empty room
+      // without an `expiresAt`, which is the trade this file already makes in
+      // the catch below: an orphan is recoverable, an erased live room is not.
+      roomEmpty = sharedView.readable
+        ? (sharedRoom?.members.size ?? 0) === 0
+        : false;
+      if (!sharedView.readable) {
+        logEvent("room_leave_orphan_possible", {
+          sessionId: session.id,
+          roomCode,
+          remoteAddress: session.remoteAddress,
+          origin: session.origin,
+          provider: persistence.provider,
+          reason: "shared_member_view_unreadable",
+        });
+      }
 
       // Derived from the member list this leave already loaded, so it adds no
       // store read. An unreadable shared view means we cannot run the election

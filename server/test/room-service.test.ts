@@ -4836,3 +4836,54 @@ test("an unconfirmed member removal still asks for a resync", async () => {
 
   assert.equal(leave.needsRoomStateResync, true);
 });
+
+test("an unreadable shared member view is not treated as an empty room", async () => {
+  // This node's last member leaving is not the room emptying — the paragraph
+  // above `roomEmpty` says so — but the fallback reinstated exactly that on the
+  // one path where nothing can contradict it. The expiry then lands on a room
+  // other nodes are still using, and the same `!roomEmpty` guard swallows the
+  // resync that would have told them (#235 review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  let sharedViewFails = false;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore,
+    activeRooms,
+    resolveActiveRoom: async (roomCode) => {
+      if (sharedViewFails) {
+        throw new Error("transient shared runtime read failure");
+      }
+      return activeRooms.getRoom(roomCode);
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOM40",
+  });
+
+  const sharer = createSession("sharer");
+  const created = await service.createRoomForSession(sharer, "Alice");
+  await service.shareVideoForSession(
+    sharer,
+    created.memberToken,
+    createSharedVideo(),
+  );
+
+  // The only member this node knows about leaves, so the local view says empty.
+  currentTime = 2_000;
+  sharedViewFails = true;
+  const leave = await service.leaveRoomForSession(sharer, "client-request");
+
+  assert.equal(leave.needsRoomStateResync, true);
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt ?? null,
+    null,
+    "a room whose membership is unknown must not be scheduled for expiry",
+  );
+});

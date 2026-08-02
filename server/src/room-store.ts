@@ -220,11 +220,25 @@ export function roomStateFromSessions(
     memberId: string | null;
     displayName: string;
     joinedAt?: number | null;
+    roomCode?: string | null;
   }>,
 ): RoomStoreRoomState {
   const members = new Map<string, { id: string; name: string }>();
   const candidates: SharedVideoOwnerCandidate[] = [];
   for (const session of sessions) {
+    // A session that says it is somewhere else is index residue, not a member.
+    // Removing a session from a room's index is the ONE write keyed on the old
+    // room code, and nothing afterwards remembers that code — a switch whose
+    // cleanup failed leaves the id in the old room's set forever, and the
+    // session it loads then rejoins that roster and can win the share back
+    // (#235 review). The session's own `roomCode` settles it, and it is
+    // maintained by every path that moves a session between rooms.
+    //
+    // Only a session that ANSWERS the question is dropped: an absent `roomCode`
+    // is missing information, not evidence of residue.
+    if (session.roomCode != null && session.roomCode !== room.code) {
+      continue;
+    }
     const memberId = session.memberId ?? session.id;
     members.set(memberId, {
       id: memberId,

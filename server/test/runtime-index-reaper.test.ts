@@ -139,3 +139,72 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
     await runtimeStore.close();
   }
 });
+
+test("runtime index reaper tells the rooms it emptied to rebuild", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // A node that dies takes its members' seats with it and publishes nothing, so
+  // as far as the survivors are concerned nobody left. When one of those seats
+  // held the share, every client still names it as `sharedByMemberId` and the
+  // room stops advancing (#235 review).
+  let currentTime = 1_000;
+  const keyPrefix = createKeyPrefix();
+  const runtimeStore = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+  });
+  const publishedRooms: string[] = [];
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => currentTime,
+    publishRoomStateUpdate: async (roomCode) => {
+      publishedRooms.push(roomCode);
+    },
+  });
+
+  const first = createSession("session-dead-1", "offline-node");
+  const second = createSession("session-dead-2", "offline-node");
+
+  try {
+    for (const [index, session] of [first, second].entries()) {
+      runtimeStore.registerSession(session);
+      runtimeStore.markSessionJoinedRoom(session.id, "ROOM41");
+      session.roomCode = "ROOM41";
+      session.memberId = `member-dead-${index}`;
+      session.memberToken = `token-dead-${index}`;
+      runtimeStore.registerSession(session);
+      runtimeStore.addMember(
+        "ROOM41",
+        session.memberId,
+        session,
+        session.memberToken,
+      );
+    }
+    await runtimeStore.heartbeatNode({
+      instanceId: "offline-node",
+      version: "test-version",
+      startedAt: 100,
+      lastHeartbeatAt: currentTime,
+      staleAt: currentTime + 50,
+      expiresAt: currentTime + 100,
+      connectionCount: 2,
+      activeRoomCount: 1,
+      activeMemberCount: 2,
+      health: "ok",
+    });
+
+    currentTime += 200;
+    assert.equal(await reaper.sweep(), 2);
+
+    // Once per room, not once per seat: both members sat in the same room.
+    assert.deepEqual(publishedRooms, ["ROOM41"]);
+  } finally {
+    await reaper.stop();
+    await runtimeStore.close();
+  }
+});

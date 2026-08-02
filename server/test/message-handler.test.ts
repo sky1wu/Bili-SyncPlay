@@ -2209,14 +2209,48 @@ test("creating a room tells the room being left", async () => {
   assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-OLD"]);
 });
 
-test("staying in the same room publishes no switch resync", async () => {
+test("re-entering the same room resyncs it but announces no departure", async () => {
+  // Nobody left, so no `room:member-left` — but the service still leaves and
+  // rejoins internally, which re-stamps `joinedAt` and can issue a fresh
+  // `memberId`. Either can hand the share to a member who was already seated,
+  // and the owner check stays silent because this joiner did not end up owning
+  // it (#235 review).
   const published: string[] = [];
+  const publishedRooms: string[] = [];
   const session = createSession("member-1", {
     roomCode: "ROOM01",
     memberId: "member-1",
     memberToken: "member-token-1",
   });
-  const handler = createSharedOwnerHandler({ published });
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    bootstrapSharedByMemberId: "member-elsewhere",
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      displayName: "Alice",
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_joined", "room_state_updated"]);
+  assert.deepEqual(publishedRooms, ["ROOM01", "ROOM01"]);
+});
+
+test("a first join into a room resyncs nothing on the joiner's behalf", async () => {
+  // The session was not in any room, so there is no re-entry and this joiner
+  // does not own the share — the room learns of them through the delta alone.
+  const published: string[] = [];
+  const session = createSession("member-1");
+  const handler = createSharedOwnerHandler({
+    published,
+    bootstrapSharedByMemberId: "member-elsewhere",
+  });
 
   await handler.handleClientMessage(session, {
     type: "room:join",
