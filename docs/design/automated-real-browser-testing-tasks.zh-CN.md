@@ -332,8 +332,8 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：M3、M4
 - **需求**：REQ-G01、REQ-N001、REQ-N002
-- **工作**：在 Ubuntu runner 安装锁定 Chromium，先 smoke 后运行完整 P0/P1 分域矩阵和 admin-ui 真实客户端场景；与现有 verify 并行。M2 阶段若先接入 CI，只能使用独立且非 required 的 `browser-e2e-smoke` 检查名；最终完整门禁使用 `browser-e2e`，两者不得复用检查上下文。
-- **验收**：干净 CI 环境从 `npm ci` 开始可运行；权威优先级表中的场景和 admin-ui E2E 任一缺失或失败时 job 非零；smoke 失败时长矩阵跳过但安全 artifact 仍上传；job 总 timeout 明确。
+- **工作**：在 Ubuntu runner 安装锁定 Chromium；最终 `browser-e2e` 在同一 job 配置锁定版本的 Redis service、`redis-cli ping` 健康检查和 job-scoped `REDIS_URL`，由 run coordinator 为 `E2E-308` 创建并清理唯一 key 前缀，不得依赖并行 `redis-integration` job 的 service。随后先跑 smoke，再运行完整 P0/P1 分域矩阵和 admin-ui 真实客户端场景；与现有 verify 并行。M2 阶段若先接入 CI，只能使用独立且非 required 的 `browser-e2e-smoke` 检查名，该较小范围无需启动 Redis；最终完整门禁使用 `browser-e2e`，两者不得复用检查上下文。
+- **验收**：干净 CI 环境从 `npm ci` 开始能启动并通过 Redis 健康检查、注入连接地址、执行 `E2E-308` 并清理登记的 key 前缀；Redis 启动、健康检查、连接或清理失败时 job 非零。权威优先级表中的场景和 admin-ui E2E 任一缺失或失败时 job 非零；smoke 失败时长矩阵跳过但安全 artifact 仍上传；job 总 timeout 明确。
 - **估算**：1～2 天
 
 ### E2E-502：实现变更分类

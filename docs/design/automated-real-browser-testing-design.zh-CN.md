@@ -399,6 +399,7 @@ Ownership  = none | owner | peer
 
 - Ubuntu GitHub-hosted runner。
 - `npm ci` 后安装与锁定版本匹配的 Playwright Chromium。
+- 最终 `browser-e2e` 在同一 job 内通过 GitHub Actions service 启动锁定版本的 Redis，并配置 `redis-cli ping` 健康检查；不得依赖并行 `redis-integration` job 的 service。健康后才把 job-scoped `REDIS_URL` 传给 run coordinator，由 coordinator 为 `REQ-F037` 生成唯一 key 前缀、登记并清理该前缀；service 容器由 Actions 随 job 回收。Redis 启动、健康检查、连接或前缀清理失败都使 job 非零。只覆盖 M2 的非 required `browser-e2e-smoke` 可以不启动 Redis。
 - 构建 protocol、server、extension、admin-ui 和 e2e 类型。
 - 先跑 P0 smoke；失败则立即上传 artifact，不继续跑长矩阵。
 - smoke 通过后运行确定性分域场景和 admin-ui 真实客户端治理场景。
