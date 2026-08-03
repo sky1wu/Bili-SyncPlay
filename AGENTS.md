@@ -321,6 +321,21 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   START the next record bounds nothing when the bus hangs instead of rejecting.
   Sweeps also no longer overlap: they share that set, and `stop()` awaits only
   the sweep it knows about.
+  What creates a record is the other half of this: a room is announced only
+  once THAT session's cleanup writes are confirmed, and the session record is
+  what makes a retry possible at all. The sweep's steps are ordered by what
+  they destroy — the member removal needs `roomCode` and `memberId`,
+  `markSessionLeftRoom` blanks `roomCode`, `unregisterSession` deletes the
+  record — so each runs only after the previous one is confirmed, and a step
+  that did not land (failed, capped, or cut short by `stop`) leaves the record
+  untouched for the next sweep to redo from the top. Every step is idempotent,
+  which is what makes redoing it free. #235 answered this the other way — it
+  announced regardless, since `unregisterSession` cleaned the same key anyway
+  and gating "left the next pass nothing to retry" — and that reasoning only
+  held while the sweep unregistered unconditionally. `unregisterSession` is the
+  one write nothing gates on, because it returns `void` (so `confirmWrites` is
+  the only place its outcome is visible) and because failing it leaves the room
+  index already clean and merely re-runs a no-op next sweep.
 
 ## Engineering Constraints
 

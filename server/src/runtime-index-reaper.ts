@@ -56,11 +56,11 @@ const SHUTDOWN_RESYNC_CONCURRENCY = 8;
  */
 const RESYNC_PUBLISH_TIMEOUT_MS = 2_000;
 /**
- * Caps the sweep's own wait on one session's index write.
+ * Caps the sweep's own wait on ONE of a session's cleanup writes.
  *
  * The write keeps going — the store retries it on its own budget — but the
  * sweep must not inherit that budget, or one unreachable session holds `stop()`
- * past the whole shutdown step.
+ * past the whole shutdown step and starves the dead node's other sessions.
  */
 const SESSION_INDEX_WRITE_TIMEOUT_MS = 2_000;
 
@@ -241,6 +241,61 @@ export function createRuntimeIndexReaper(options: {
     }
   }
 
+  /**
+   * Await one cleanup write and say whether it really landed.
+   *
+   * The sweep's steps are ordered by what they destroy: the member removal
+   * needs the session's `roomCode` and `memberId`, the index removal needs its
+   * `roomCode`, and `unregisterSession` throws the whole record away. That
+   * record is the ONLY trail back to this work — once it is gone
+   * `listClusterSessions` stops returning the session and no later sweep can
+   * rediscover the room. So each step runs only after the previous one is
+   * confirmed, and a step that did not land leaves the record untouched for the
+   * next sweep to redo from the top. Every one of them is idempotent.
+   *
+   * Capped, because a write that never answers must not hold the OTHER
+   * sessions of a dead node hostage; the write itself keeps going on the
+   * store's own retry budget. A cap that expires is simply "not confirmed" —
+   * which is now a safe answer rather than a reason to compensate.
+   */
+  async function confirmCleanupWrite(
+    write: Promise<void>,
+    session: { id: string },
+    step: string,
+  ): Promise<boolean> {
+    const settled = pacer
+      .capAttempt(
+        write,
+        SESSION_INDEX_WRITE_TIMEOUT_MS,
+        () =>
+          new Error(
+            `Runtime index reaper gave up waiting for the ${step} of ${session.id}.`,
+          ),
+      )
+      .then(
+        () => true,
+        (error: unknown) => {
+          // Retries are exhausted or the cap expired. Either way this session
+          // keeps its record and its place in the cluster index, so saying so
+          // is all that is left to do here.
+          options.logEvent?.("runtime_index_cleanup_unconfirmed", {
+            sessionId: session.id,
+            step,
+            result: "error",
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return false;
+        },
+      );
+    await Promise.race([settled, pacer.whenStopped()]);
+    // Stopping is not a verdict on the write. Treating it as "unconfirmed"
+    // hands the session to the next instance intact, which is exactly what a
+    // half-finished cleanup needs — the alternative was announcing a room
+    // rebuilt from an index this sweep had not finished cleaning, and that
+    // announcement is one-shot (#242 review).
+    return pacer.stopped() ? false : await settled;
+  }
+
   async function sweep(): Promise<number> {
     if (!options.enabled) {
       return 0;
@@ -263,8 +318,6 @@ export function createRuntimeIndexReaper(options: {
     const sessions = await options.runtimeStore.listClusterSessions();
     let cleanedSessions = 0;
     const roomsToResync = new Set<string>();
-    /** Durable results of this sweep's member removals; see the push below. */
-    const memberRemovals: Array<Promise<void>> = [];
     for (const session of sessions) {
       if (pacer.stopped()) {
         // The same rule as the confirmation wait below: stopping is the only
@@ -290,91 +343,78 @@ export function createRuntimeIndexReaper(options: {
           session.memberId,
           session,
         );
-        // The removal's own durable write is NOT part of `confirmWrites`, which
-        // only ever sees the session write queue. Publishing before it lands
-        // announces a state rebuilt from a member map that still holds the dead
-        // seat (#242 review).
-        if (removal.durable) {
-          // The REAL outcome goes into the confirmation set — swallowing it
-          // here turned a refused `REMOVE_MEMBER_LUA` into a confirmed write,
-          // so the sweep published and then dropped the room's only resync
-          // record while the stale member binding was still in Redis and its
-          // token retention had never been armed (#242 review). Marked handled
-          // separately so a rejection before `Promise.all` reads it stays quiet.
-          void removal.durable.catch(() => undefined);
-          memberRemovals.push(removal.durable);
+        // Confirmed BEFORE anything else touches this session, because
+        // `markSessionLeftRoom` blanks the record's `roomCode` and
+        // `unregisterSession` deletes the record outright — and a retry of this
+        // removal needs both `roomCode` and `memberId` to exist. Running ahead
+        // of it left the stale member binding in Redis with its token retention
+        // never armed, nothing to rediscover it from, and `hasRoomResidue`
+        // keeping the code reserved for good (#242 review).
+        if (
+          removal.durable &&
+          !(await confirmCleanupWrite(
+            removal.durable,
+            session,
+            "member removal",
+          ))
+        ) {
+          continue;
         }
       }
       if (session.roomCode) {
-        // Swallowed, and NOT used to gate the announcement. One unwritable entry
-        // must not abandon the rest of the sweep, and gating on it lost the
-        // announcement for good: `unregisterSession` below deletes the session
-        // hash and SREMs the same room-sessions key on its own, so the room ends
-        // up clean either way — while the session disappears from
-        // `listClusterSessions`, leaving the next pass nothing to retry (#235
-        // review). In the rare case both writes fail, announcing is still no
-        // worse than silence: the rebuilt state names the dead member, which is
-        // exactly what every client already caches.
-        // Capped, and by the reaper's own stop signal. This is the sweep's
-        // only direct `await` on a store write, and the store's write queue
-        // runs its FULL normal retry budget — five attempts of up to the
-        // pending-operation timeout each, per session, serially. One
-        // unreachable session was therefore enough to hold `stop()` past its
-        // step budget, because `stop` waits for the sweep in flight before its
-        // own bounded pass ever starts (#242 review).
-        await Promise.race([
-          pacer
-            .capAttempt(
-              options.runtimeStore.markSessionLeftRoom(
-                session.id,
-                session.roomCode,
-              ),
-              SESSION_INDEX_WRITE_TIMEOUT_MS,
-              () =>
-                new Error(
-                  `Runtime index reaper gave up waiting for the index write of ${session.id}.`,
-                ),
-            )
-            .catch(() => undefined),
-          pacer.whenStopped(),
-        ]);
+        // Gates the announcement, because the announcement is one-shot: it is
+        // dropped as soon as the publish succeeds, so spending it on a state
+        // rebuilt from an index this write has not cleaned strands the room
+        // pointing at the dead member for good. The #235-era reasoning for
+        // announcing anyway — "`unregisterSession` cleans the same key, and
+        // gating leaves the next pass nothing to retry" — only held because
+        // this sweep unregistered regardless; it no longer does.
+        if (
+          !(await confirmCleanupWrite(
+            options.runtimeStore.markSessionLeftRoom(
+              session.id,
+              session.roomCode,
+            ),
+            session,
+            "index write",
+          ))
+        ) {
+          continue;
+        }
         roomsToResync.add(session.roomCode);
       }
 
+      // Last, and only now: this is what makes the session unrediscoverable.
       options.runtimeStore.unregisterSession(session.id);
       cleanedSessions += 1;
     }
 
-    // Both cleanups are queued writes, so the announcement has to wait for them
-    // to drain — otherwise the consumer rebuilds `room:state` from an index that
-    // still lists the sessions this sweep just reaped.
+    // Everything the announcement depends on was confirmed per session above.
+    // What is left over is `unregisterSession`, and it alone: the contract
+    // returns `void`, so a store-wide confirmation is the only place its
+    // outcome is visible at all.
+    //
+    // It gates nothing, and may not — `markSessionLeftRoom` already SREM'd this
+    // session out of the room index, so a failed unregister leaves the room
+    // clean and only the session hash behind. The next sweep still finds that
+    // hash in the cluster index, sees an empty `roomCode`, and unregisters it
+    // again. That is the whole difference from the writes above, which are
+    // gated precisely BECAUSE failing to redo them costs the room its one-shot
+    // announcement (#242 review).
     //
     // `confirmWrites` rather than `flush` where the store offers it: draining
-    // says only that the queue emptied, and this sweep is about to announce a
-    // state rebuilt from those very writes (#242). It does NOT gate the
-    // announcement — see the `markSessionLeftRoom` comment above for why
-    // announcing is still better than silence — but an unconfirmed sweep is
-    // worth saying out loud.
-    // Waited for, not merely sampled. The 2s cap this used to carry was itself
-    // the first patch — put there for the shutdown budget — and everything
-    // above it (the latch map, the re-confirmation pass, the re-issued removal)
-    // existed to compensate for giving up early. A sweep is a background timer
-    // task with no deadline of its own, and the writes it waits on are already
-    // bounded by the store's retry budget, so it can simply wait. Shutdown is
-    // the only thing that cuts it short, and `stop`'s own bounded pass takes
-    // the records from there (#242).
+    // says only that the queue emptied, so a failed write drains exactly like a
+    // successful one. Waited for, not merely sampled — the 2s cap this used to
+    // carry was itself the first patch, put there for the shutdown budget, and
+    // the latch map and re-confirmation pass above it existed to compensate for
+    // giving up early. A sweep is a background timer task with no deadline of
+    // its own; shutdown is the only thing that cuts it short (#242).
     const confirmation = options.runtimeStore.confirmWrites
-      ? Promise.all([
-          options.runtimeStore.confirmWrites(),
-          ...memberRemovals,
-        ]).then(() => undefined)
+      ? options.runtimeStore.confirmWrites()
       : (options.runtimeStore.flush?.() ?? Promise.resolve());
     void confirmation.catch(() => undefined);
     await Promise.race([
       confirmation.catch((error: unknown) => {
-        // Retries are exhausted, so no later announcement can clean the index
-        // either — only saying so is left. The record still goes out: silence
-        // leaves every client naming a member who is gone.
         options.logEvent?.("runtime_index_writes_unconfirmed", {
           result: "error",
           error: error instanceof Error ? error.message : String(error),

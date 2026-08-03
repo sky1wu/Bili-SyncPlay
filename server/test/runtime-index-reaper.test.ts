@@ -212,14 +212,19 @@ test("runtime index reaper tells the rooms it emptied to rebuild", async (t) => 
   }
 });
 
-test("runtime index reaper announces the room even when the index write fails", async () => {
-  // Gating the announcement on that write lost it for good: `unregisterSession`
-  // deletes the session hash and SREMs the same room-sessions key on its own, so
-  // the room ends up clean either way — while the session disappears from
-  // `listClusterSessions`, leaving the next pass nothing to retry (#235 review).
+test("runtime index reaper leaves the session alone when its index write fails", async () => {
+  // The announcement is one-shot, so spending it on a room whose index this
+  // sweep has not cleaned strands that room for good. #235 answered this by
+  // announcing anyway, on the grounds that `unregisterSession` deletes the
+  // session hash regardless and gating would leave the next pass nothing to
+  // retry. The session record IS the retry trail — so the sweep now stops
+  // short of destroying it, and the next sweep redoes the whole cleanup
+  // (#242 review).
   const published: string[] = [];
   let flushed = 0;
   const reaped: string[] = [];
+  const events: string[] = [];
+  let indexWriteFailures = 1;
   const deadSession = createSession("session-unwritable", "offline-node");
   deadSession.roomCode = "ROOM42";
   deadSession.memberId = "member-unwritable";
@@ -242,13 +247,18 @@ test("runtime index reaper announces the room even when the index write fails", 
       ];
     },
     async listClusterSessions() {
+      // The session is still in the cluster index precisely because the sweep
+      // did not unregister it.
       return reaped.length > 0 ? [] : [deadSession];
     },
     removeMember() {
       return { room: null, roomEmpty: false, removed: true };
     },
     async markSessionLeftRoom() {
-      throw new Error("index write failed");
+      if (indexWriteFailures > 0) {
+        indexWriteFailures -= 1;
+        throw new Error("index write failed");
+      }
     },
     unregisterSession(sessionId: string) {
       reaped.push(sessionId);
@@ -266,12 +276,21 @@ test("runtime index reaper announces the room even when the index write fails", 
     runtimeStore,
     intervalMs: 50,
     now: () => 1_000,
+    logEvent: (event) => {
+      events.push(event);
+    },
     publishRoomStateUpdate: async (roomCode) => {
       published.push(roomCode);
     },
   });
 
   try {
+    assert.equal(await reaper.sweep(), 0, "nothing was cleaned");
+    assert.deepEqual(reaped, [], "the retry trail must survive");
+    assert.deepEqual(published, [], "and the one-shot announcement with it");
+    assert.ok(events.includes("runtime_index_cleanup_unconfirmed"));
+
+    // Next sweep: the write lands, and only now is the session destroyed.
     assert.equal(await reaper.sweep(), 1);
     assert.deepEqual(reaped, ["session-unwritable"]);
     assert.deepEqual(published, ["ROOM42"]);
@@ -282,6 +301,174 @@ test("runtime index reaper announces the room even when the index write fails", 
   } finally {
     await reaper.stop();
   }
+});
+
+test("runtime index reaper retries a member removal that never landed", async () => {
+  // `removeMember`'s durable write can exhaust its retries. Unregistering the
+  // session anyway took the room code and member id with it, so nothing could
+  // ever re-issue the removal: the stale binding stayed in Redis with its token
+  // retention never armed, and `hasRoomResidue` kept the code reserved for good
+  // (#242 review).
+  const published: string[] = [];
+  const reaped: string[] = [];
+  const removals: Array<[string, string]> = [];
+  const leftRoom: string[] = [];
+  let removalFailures = 1;
+  const deadSession = createSession("session-stuckremoval", "offline-node");
+  deadSession.roomCode = "ROOM56";
+  deadSession.memberId = "member-stuckremoval";
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return [
+        {
+          instanceId: "offline-node",
+          version: "test",
+          startedAt: 0,
+          lastHeartbeatAt: 0,
+          staleAt: 0,
+          expiresAt: 0,
+          connectionCount: 1,
+          activeRoomCount: 1,
+          activeMemberCount: 1,
+          health: "offline" as const,
+        },
+      ];
+    },
+    async listClusterSessions() {
+      return reaped.length > 0 ? [] : [deadSession];
+    },
+    removeMember(code: string, memberId: string) {
+      removals.push([code, memberId]);
+      if (removalFailures > 0) {
+        removalFailures -= 1;
+        return {
+          room: null,
+          roomEmpty: false,
+          removed: true,
+          durable: Promise.reject(new Error("member removal exhausted")),
+        };
+      }
+      return {
+        room: null,
+        roomEmpty: false,
+        removed: true,
+        durable: Promise.resolve(),
+      };
+    },
+    async markSessionLeftRoom(sessionId: string) {
+      leftRoom.push(sessionId);
+    },
+    unregisterSession(sessionId: string) {
+      reaped.push(sessionId);
+    },
+    async purgeNodeStatus() {},
+    async confirmWrites() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async (roomCode) => {
+      published.push(roomCode);
+    },
+  });
+
+  try {
+    assert.equal(await reaper.sweep(), 0);
+    assert.deepEqual(
+      leftRoom,
+      [],
+      "blanking the room code destroys what a retry needs",
+    );
+    assert.deepEqual(reaped, []);
+    assert.deepEqual(published, []);
+
+    assert.equal(await reaper.sweep(), 1);
+    assert.deepEqual(removals, [
+      ["ROOM56", "member-stuckremoval"],
+      ["ROOM56", "member-stuckremoval"],
+    ]);
+    assert.deepEqual(reaped, ["session-stuckremoval"]);
+    assert.deepEqual(published, ["ROOM56"]);
+  } finally {
+    await reaper.stop();
+  }
+});
+
+test("runtime index reaper does not announce a room it stopped halfway through", async () => {
+  // Stop resolves the wait immediately, and the sweep used to carry on to
+  // `roomsAwaitingResync` from there — where `stop()`'s own final pass
+  // broadcasts it at once. The cleanup writes then land AFTER the broadcast,
+  // and with the session unregistered nothing can rediscover the room: every
+  // other node keeps a state built from the dirty index for good (#242 review).
+  const published: string[] = [];
+  const reaped: string[] = [];
+  const deadSession = createSession("session-stopmid", "offline-node");
+  deadSession.roomCode = "ROOM57";
+  deadSession.memberId = "member-stopmid";
+  let releaseWrite: (() => void) | null = null;
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      return [
+        {
+          instanceId: "offline-node",
+          version: "test",
+          startedAt: 0,
+          lastHeartbeatAt: 0,
+          staleAt: 0,
+          expiresAt: 0,
+          connectionCount: 1,
+          activeRoomCount: 1,
+          activeMemberCount: 1,
+          health: "offline" as const,
+        },
+      ];
+    },
+    async listClusterSessions() {
+      return [deadSession];
+    },
+    removeMember() {
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    markSessionLeftRoom() {
+      // Outstanding when the stop signal arrives — the write is on its way,
+      // just not answered yet.
+      return new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+    },
+    unregisterSession(sessionId: string) {
+      reaped.push(sessionId);
+    },
+    async purgeNodeStatus() {},
+    async confirmWrites() {},
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async (roomCode) => {
+      published.push(roomCode);
+    },
+  });
+
+  const swept = reaper.sweep();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(releaseWrite, "the index write really was outstanding");
+
+  // `stop` runs its own final publish pass; the room must not be in it.
+  await reaper.stop();
+  await swept;
+  (releaseWrite as (() => void) | null)?.();
+
+  assert.deepEqual(published, [], "no announcement off an uncleaned index");
+  assert.deepEqual(reaped, [], "and the session stays for the next instance");
 });
 
 test("runtime index reaper keeps a failed announcement until it is published", async () => {
