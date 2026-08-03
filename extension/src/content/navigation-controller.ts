@@ -363,17 +363,33 @@ export function createNavigationController(args: {
       // shared URL changes. Bounded by `sharedVideoNaturalEndWindowMs` — which
       // must outlast Bilibili's next-video countdown, NOT the pause hold: the two
       // answer different questions, and equating them expired the marker before
-      // every countdown-driven autoplay. The URL equality is what actually keeps
-      // a stale end from reclassifying an unrelated navigation (it must still
-      // name the current `activeSharedUrl`, and any shared-url change clears it);
-      // the window only bounds a same-URL replay. This is the `navFromShared`
-      // half (it recognises a season-page autoplay even when no gesture is
-      // involved), so it deliberately does NOT depend on the gesture.
+      // every countdown-driven autoplay.
+      //
+      // Three things bound it, and the third is what makes the wide window safe:
+      //   - the marker must still name the current `activeSharedUrl` (any
+      //     shared-url change or room teardown clears it outright);
+      //   - the window bounds a same-URL replay;
+      //   - NO user gesture may postdate the natural end. `hadRecentUserGesture`
+      //     alone is not enough here: it only looks back `userGestureGraceMs`
+      //     (~1.2s), so a manual episode click whose SPA navigation resolves more
+      //     slowly than that would land inside this window with the gesture
+      //     already forgotten — and the sharer would auto-share the user's own
+      //     detour to the whole room (a non-sharer would be force-paused). The end
+      //     timestamp is the right reference because it is the instant autoplay
+      //     was decided: anything the user pressed after it is evidence THEY chose
+      //     the destination. The countdown itself produces no gesture — only
+      //     discrete input (pointer/touch/keydown/popstate) refreshes
+      //     `lastUserGestureAt`, never pointer movement or scrolling — so passive
+      //     viewing, the case #236 is about, is unaffected. A user who does click
+      //     something during the countdown loses the auto-share and shares
+      //     manually; erring toward not hijacking the room is this file's
+      //     established trade (see `navigatedFromSharedVideo` below).
       const navigatedFromSharedVideoEnd =
         activeSharedUrl !== null &&
         args.runtimeState.sharedVideoNaturalEndUrl === activeSharedUrl &&
         now - args.runtimeState.sharedVideoNaturalEndAt <
-          args.sharedVideoNaturalEndWindowMs;
+          args.sharedVideoNaturalEndWindowMs &&
+        lastUserGestureAt <= args.runtimeState.sharedVideoNaturalEndAt;
       // Classify as the shared video's autoplay only on *provable* evidence that
       // the advance came from the room's shared video:
       //   - a durable natural-end marker for it (`navigatedFromSharedVideoEnd`), or
@@ -397,19 +413,18 @@ export function createNavigationController(args: {
             previousNormalizedPageUrl === previousPendingAutoShareTargetUrl));
       // The ONLY recent gesture that should not block autoplay classification is
       // a seek-to-end: the sharer dragged to the last seconds and let the video
-      // auto-advance. Two conditions together:
-      //   - the end itself was recorded as preceded by a seek
-      //     (`sharedVideoNaturalEndAfterSeek`), so a manual click that records no
-      //     fresh seek — even one the watcher polls just after the old video
-      //     fires `ended` — does not qualify; and
-      //   - no gesture postdates the natural end (`lastUserGestureAt <=
-      //     sharedVideoNaturalEndAt`), so a click on another episode *after* a
-      //     genuine seek-to-end (the flag is still set from that earlier end)
-      //     stays a manual navigation rather than reusing the stale flag.
+      // auto-advance. The end itself must have been recorded as preceded by a seek
+      // (`sharedVideoNaturalEndAfterSeek`), so a manual click that records no
+      // fresh seek — even one the watcher polls just after the old video fires
+      // `ended` — does not qualify.
+      // "No gesture postdates the natural end" is the other half of this, and it
+      // now lives in `navigatedFromSharedVideoEnd` above, which this requires: a
+      // click on another episode *after* a genuine seek-to-end (the flag is still
+      // set from that earlier end) fails the marker itself, so it can no longer
+      // reach this check at all.
       const recentGestureIsSeekToEnd =
         navigatedFromSharedVideoEnd &&
-        args.runtimeState.sharedVideoNaturalEndAfterSeek &&
-        lastUserGestureAt <= args.runtimeState.sharedVideoNaturalEndAt;
+        args.runtimeState.sharedVideoNaturalEndAfterSeek;
       const shouldTreatAsAutoplay =
         (!hadRecentUserGesture || recentGestureIsSeekToEnd) &&
         navigatedFromSharedVideo &&
