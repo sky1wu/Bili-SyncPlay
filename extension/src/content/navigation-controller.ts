@@ -54,6 +54,8 @@ export function createNavigationController(args: {
   attachPlaybackListeners: () => void;
   getVideoElement: () => HTMLVideoElement | null;
   pauseVideo: (video: HTMLVideoElement) => void;
+  /** Resumes a video this controller's own arrival hold paused. */
+  playVideo: (video: HTMLVideoElement) => Promise<void>;
   hydrateRoomState: () => Promise<void>;
   activatePauseHold: (durationMs?: number) => void;
   scheduleAutoShareNextVideo?: (input: {
@@ -243,6 +245,17 @@ export function createNavigationController(args: {
     // autoplay off a share whose `activeSharedUrl` is still the unstable route.
     const previousResolvedSharedVideoUrl =
       args.runtimeState.resolvedSharedVideoUrl;
+    // The page the playback binding force-paused as a "load paused" arrival,
+    // captured before `resetUserGestureState` below clears it. The binding acts on
+    // the `play` event, which fires the instant the player swaps videos — long
+    // before this watcher (a 400ms poll, and on a festival page it cannot even
+    // look at the address bar) gets to classify the navigation. So by the time the
+    // sharer branch below decides "this is the room's own autoplay-next", the
+    // video it is about to auto-share has ALREADY been paused. Remembering which
+    // URL that hold was armed for is what lets the branch undo it, and only it:
+    // any other pause (the user's own, a buffer stall) leaves this pointing
+    // elsewhere or null.
+    const previousAutoplayHoldUrl = args.runtimeState.nonSharerAutoplayHoldUrl;
     lastObservedPageUrl = nextPageUrl;
     lastObservedNormalizedPageUrl = nextNormalizedPageUrl;
     args.clearFestivalSnapshot();
@@ -483,6 +496,37 @@ export function createNavigationController(args: {
 
       if (shouldTreatAsAutoplay && isLocalSharedSource) {
         args.runtimeState.explicitNonSharedPlaybackUrl = nextNormalizedPageUrl;
+        // Undo the binding's "load paused" hold on this very page. Authorizing the
+        // URL (above) only stops a FUTURE pause; the one that already happened
+        // must be reverted here, or the sharer auto-shares a paused video ~900ms
+        // later and the whole room stops on it — the tab is the room's source, so
+        // nobody is left playing.
+        //
+        // Gated on the hold naming this exact page, so it can only ever revert a
+        // pause this controller's own arrival caused. `shouldTreatAsAutoplay`
+        // already excludes a recent user gesture, so a manual pause cannot be
+        // standing here either — and a pause the user makes AFTER this point sets
+        // no hold and is untouched.
+        // The hold naming this page is the whole condition. Whether the element
+        // is still paused only decides if `play()` is worth calling: the intent
+        // and the hold are ours either way, so they are released regardless (a
+        // hold left standing would have the binding re-pause the very next
+        // `play`).
+        if (previousAutoplayHoldUrl === nextNormalizedPageUrl) {
+          args.runtimeState.intendedPlayState = "playing";
+          args.runtimeState.pauseHoldUntil = 0;
+          const heldVideo = args.getVideoElement();
+          if (heldVideo?.paused) {
+            args.debugLog(
+              `Resumed sharer autoplay-next after load-pause hold ${nextNormalizedPageUrl}`,
+            );
+            void args.playVideo(heldVideo).catch(() => {
+              args.debugLog(
+                `Could not resume sharer autoplay-next ${nextNormalizedPageUrl}; the room will follow the paused state`,
+              );
+            });
+          }
+        }
         // Advance FROM the room's confirmed shared video (`activeSharedUrl`), not
         // the page we navigated from. A multi-part / chained autoplay that outruns
         // room confirmation (A→B→C→D before any `room:state` returns) can't replay

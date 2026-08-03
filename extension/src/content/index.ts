@@ -8,7 +8,7 @@ import { createAutoShareNextController } from "./auto-share-next-controller";
 import { runtimeSendMessage } from "./content-messaging";
 import { createFestivalBridgeController } from "./festival-bridge";
 import { startUserGestureTracking } from "./gesture-tracker";
-import { getVideoElement, pauseVideo } from "./player-binding";
+import { getVideoElement, pauseVideo, playVideo } from "./player-binding";
 import { createContentStateStore } from "./content-store";
 import { createNavigationController } from "./navigation-controller";
 import { startNavigationSignalListener } from "./navigation-signal";
@@ -198,6 +198,7 @@ const navigationController = createNavigationController({
     playbackBindingController.attachPlaybackListeners(),
   getVideoElement,
   pauseVideo,
+  playVideo,
   hydrateRoomState: () => syncController.hydrateRoomState(),
   activatePauseHold,
   scheduleAutoShareNextVideo: (input) =>
