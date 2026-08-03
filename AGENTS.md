@@ -131,6 +131,37 @@ background path touches room state or playback timing.
   `expireBootstrapRoomStateWait` each carry this check; a new delivery path needs
   its own.
 
+- **A marker that stands for "the user did not cause this" needs a
+  gesture-postdates veto, not a recency window.** `lastUserGestureAt` is the only
+  evidence the content script has that a navigation/pause was user-driven, and
+  "recent" is the wrong question to ask of it: `userGestureGraceMs` is ~1.2s, so
+  any marker whose own window is wider than that has a gap where the user's
+  gesture is already forgotten while the marker still reads as fresh. Compare the
+  gesture against the marker's own reference instant instead — that instant is
+  when the non-user behaviour was decided, so anything the user pressed after it
+  is proof they chose the outcome. Every site in
+  `playback-binding-controller` already pairs its window this way
+  (`lastUserGestureAt > lastForcedPauseAt`, `lastUserGestureAt <= lastAction.at`);
+  `navigatedFromSharedVideoEnd` was the one exception, and #236 is what widening
+  its window to 10s exposed — a manual episode click whose SPA navigation
+  resolved slower than the grace was auto-shared to the whole room. Note the
+  veto is only safe because `lastUserGestureAt` is refreshed by DISCRETE input
+  (`gesture-tracker.ts`: pointerdown/mousedown/click/touchstart/keydown/popstate)
+  and never by pointer movement or scrolling — a tracker that recorded either
+  would turn passive viewing into a veto and silently disable the marker.
+
+- **A window constant that two behaviours share is two constants.**
+  `INITIAL_ROOM_STATE_PAUSE_HOLD_MS` was both "how long we suppress a page-load
+  autoplay" and "how long a natural-end marker stays valid" (#236). Nothing
+  connected the two, so the second was silently pinned to a value chosen for the
+  first — and 3s is shorter than Bilibili's ~5s next-video countdown, which made
+  the marker expire before every autoplay it existed to catch. When a constant is
+  read by a second call site asking a different question, split it and state what
+  each value is measured against. Values that a regression test must assert
+  against live in `extension/src/content/timing-constants.ts`, not in
+  `content/index.ts`: a test that re-types the number passes just as happily
+  after someone edits the shipped one.
+
 ### Share ownership is derived, and deltas do not carry it
 
 `sharedVideo.sharedByMemberId` is written once, at `video:share`, and is a
