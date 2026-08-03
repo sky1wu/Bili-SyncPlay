@@ -22,6 +22,13 @@ import {
 export interface PlaybackBindingController {
   start(): void;
   attachPlaybackListeners(): void;
+  /**
+   * The navigation watcher's entry point: binds the new page's element AND
+   * discards playback context that belonged to the previous page. Distinct from
+   * {@link attachPlaybackListeners}, which the bind poll calls against the same
+   * element several times a second and must therefore stay side-effect-free.
+   */
+  attachPlaybackListenersAfterNavigation(): void;
   destroy(): void;
 }
 
@@ -1333,6 +1340,19 @@ export function createPlaybackBindingController(args: {
       }
     },
     attachPlaybackListeners,
+    attachPlaybackListenersAfterNavigation() {
+      // A navigation swaps the media even when the `<video>` survives (bangumi
+      // keeps one element across episodes), so a seek still awaiting its `seeked`
+      // belongs to a video that no longer exists. Its `seeked` may yet arrive and
+      // would otherwise be recorded as an explicit seek on the NEW page, credited
+      // to the previous page's gesture — enough for `guardUnexpectedResume` to
+      // block a play the new page should be allowed. `boundNewElement` cannot
+      // stand in for this: the element is frequently the same one.
+      // `lastForcedPauseAt` cannot either — `resetUserGestureState` zeroes it as
+      // part of the same navigation, so the guard on it is wide open here.
+      inFlightSeek = null;
+      attachPlaybackListeners();
+    },
     destroy() {
       if (videoBindingTimer !== null) {
         window.clearInterval(videoBindingTimer);

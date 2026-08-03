@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SharedVideo } from "@bili-syncplay/protocol";
-import { createContentRuntimeState } from "../src/content/runtime-state";
+import {
+  createContentRuntimeState,
+  resetUserGestureState,
+} from "../src/content/runtime-state";
 import { installClockStubs } from "./clock-stubs";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
 import { createRoomStateController } from "../src/content/room-state-controller";
@@ -3320,6 +3323,56 @@ test("playback binding controller keeps an in-flight seek across a re-bind poll 
       runtimeState.lastExplicitUserAction?.gestureAt,
       1_000,
       "and keeps the gesture that started it",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller drops an in-flight seek across a navigation on the same element", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  let now = 1_000;
+  runtimeState.lastUserGestureAt = 1_000;
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
+
+  const controller = createEchoHarness(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+
+    now = 1_010;
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    // The page navigates. Bangumi keeps ONE `<video>` across episodes, so the
+    // element is unchanged and `boundNewElement` stays false — but the media it
+    // holds is a different video, and the seek awaiting its `seeked` belongs to
+    // the one that is gone. The navigation path also runs `resetUserGestureState`,
+    // which zeroes `lastForcedPauseAt`, so that guard cannot catch this either.
+    now = 2_000;
+    resetUserGestureState(runtimeState);
+    controller.attachPlaybackListenersAfterNavigation();
+
+    // The user then does something on the NEW page. This is what makes the stale
+    // seek observable at all: with no gesture here the recording gate would
+    // refuse everything and the bug would hide.
+    now = 2_050;
+    runtimeState.lastUserGestureAt = 2_050;
+    runtimeState.lastUserGestureInPlayerAt = 2_050;
+    now = 2_060;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    assert.equal(runtimeState.lastExplicitUserAction?.kind, "pause");
+
+    // The previous page's `seeked` finally lands.
+    dom.video.paused = false;
+    now = 2_100;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.equal(
+      runtimeState.lastExplicitUserAction?.kind,
+      "pause",
+      "the previous page's seek is not resurrected over the new page's action",
     );
   } finally {
     dom.restore();
