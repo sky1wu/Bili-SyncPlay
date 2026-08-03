@@ -7,6 +7,7 @@ import {
 } from "../src/redis-runtime-store.js";
 import { NonRetryableWriteError } from "../src/durable-write-queue.js";
 import type { AttachedSession, Session } from "../src/types.js";
+import { seatSession, settleRuntimeWrites } from "./runtime-seat-helpers.js";
 
 const REDIS_URL = process.env.REDIS_URL;
 
@@ -162,14 +163,20 @@ test("redis runtime store shares room sessions and member token state across ins
   const sessionB = createSession("session-b");
 
   try {
-    storeA.registerSession(sessionA);
-    storeB.registerSession(sessionB);
-    storeA.markSessionJoinedRoom(sessionA.id, "ROOM01");
-    storeB.markSessionJoinedRoom(sessionB.id, "ROOM01");
-    storeA.addMember("ROOM01", "member-a", sessionA, "token-a");
-    storeB.addMember("ROOM01", "member-b", sessionB, "token-b");
-
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    // Both stores seat through the barrier rather than a sleep. The reads below
+    // are cross-instance, so what they need is the WRITER's queue drained — a
+    // fixed 25ms bought that on an idle machine and nothing at all on a loaded
+    // CI runner (#247).
+    await seatSession(storeA, sessionA, {
+      roomCode: "ROOM01",
+      memberId: "member-a",
+      memberToken: "token-a",
+    });
+    await seatSession(storeB, sessionB, {
+      roomCode: "ROOM01",
+      memberId: "member-b",
+      memberToken: "token-b",
+    });
 
     const room = await storeA.getRoom("ROOM01");
     assert.ok(room);
@@ -187,17 +194,22 @@ test("redis runtime store shares room sessions and member token state across ins
       "member-b",
     );
 
-    storeA.blockMemberToken("ROOM01", "token-a", currentTime + 500);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    // `blockMemberToken` settles once the block is durable, so awaiting it is
+    // the barrier the sleep was standing in for.
+    await storeA.blockMemberToken("ROOM01", "token-a", currentTime + 500);
     assert.equal(await storeB.isMemberTokenBlocked("ROOM01", "token-a"), true);
 
     currentTime += 600;
     assert.equal(await storeB.isMemberTokenBlocked("ROOM01", "token-a"), false);
 
-    await storeA.removeMember("ROOM01", "member-a", sessionA);
-    storeA.markSessionLeftRoom(sessionA.id, "ROOM01");
+    // `removeMember` answers synchronously and hands its durable write back on
+    // the side; `markSessionLeftRoom` reports its own outcome. Both are waited
+    // for, then the queue behind `unregisterSession` is drained.
+    const removal = storeA.removeMember("ROOM01", "member-a", sessionA);
+    await removal.durable;
+    await storeA.markSessionLeftRoom(sessionA.id, "ROOM01");
     storeA.unregisterSession(sessionA.id);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await settleRuntimeWrites(storeA);
 
     const roomAfterRemoval = await storeB.getRoom("ROOM01");
     assert.ok(roomAfterRemoval);
