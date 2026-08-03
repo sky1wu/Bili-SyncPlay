@@ -10,6 +10,7 @@ import {
 } from "./sync-guards";
 import type {
   ContentRuntimeState,
+  ExplicitUserAction,
   ExplicitUserActionKind,
   LocalPlaybackEventSource,
 } from "./runtime-state";
@@ -79,6 +80,16 @@ export function createPlaybackBindingController(args: {
   let videoBindingTimer: number | null = null;
   let pauseBufferUpgradeTimerId: number | null = null;
   let sharerEndedFlushTimerId: number | null = null;
+  /**
+   * The seek a `seeking` opened and whose `seeked` has not arrived yet, with the
+   * gesture that authorized it. This is the seek's real lifecycle: inferring it
+   * from "the last recorded action happens to be a seek" breaks as soon as any
+   * event lands in between (an episode click makes the old element emit `pause`),
+   * and inferring it from elapsed time is a guess the decoder is free to defeat.
+   * Cleared when the listeners are (re)attached — a seek in flight on the
+   * previous element has nothing to do with the new one.
+   */
+  let inFlightSeek: { startedAt: number; gestureAt: number } | null = null;
   const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   const scheduleUpgradeTimer = (cb: () => void, ms: number): number | null => {
     if (
@@ -284,18 +295,20 @@ export function createPlaybackBindingController(args: {
   }
 
   /**
-   * @param completesSeek Whether this call is the `seeked` that finishes a seek
-   * rather than the `seeking` that starts one. A `seeked` never begins a seek, so
-   * it must not re-attribute one to whatever the user has pressed in the
-   * meantime — the decoder decides when it fires, and it can be arbitrarily late.
-   * Only the starting event reads a fresh gesture.
+   * @param inheritGestureAt The gesture to attribute this action to instead of
+   * the latest one. Passed by `seeked`, which completes the seek that `seeking`
+   * began and so belongs to THAT gesture: the decoder decides when it fires, so
+   * anything the user pressed in between must not be able to claim the seek.
+   * @returns the recorded action, or `null` when nothing was recorded (an echo,
+   * or no gesture authorizing it) — `seeking` uses this to decide whether a seek
+   * is genuinely in flight.
    */
   function rememberExplicitUserAction(
     kind: ExplicitUserActionKind,
-    completesSeek = false,
-  ) {
+    inheritGestureAt?: number,
+  ): ExplicitUserAction | null {
     if (isProgrammaticEventEcho(kind)) {
-      return;
+      return null;
     }
     if (
       monotonicNow() - args.runtimeState.lastUserGestureAt <
@@ -315,30 +328,15 @@ export function createPlaybackBindingController(args: {
         args.runtimeState.lastUserGestureAt <=
           args.runtimeState.lastExplicitUserAction.gestureAt
       ) {
-        return;
+        return null;
       }
       const previousAction = args.runtimeState.lastExplicitUserAction;
-      // A `seeked` completes the seek that a `seeking` began; it never starts
-      // one. So it keeps that seek's authorizing gesture instead of reading
-      // whatever the user has pressed since — a click on another episode while
-      // the decoder is still working would otherwise become the seek's gesture,
-      // and the end that follows would be credited as a seek-to-end (#236).
-      // Deliberately NOT bounded by how long the decoder took: an elapsed-time
-      // test is a guess at the seek's lifecycle, and a `seeked` that takes longer
-      // than `userGestureGraceMs` is still the same seek. The forced-pause guard
-      // stays, because a forced pause does invalidate the seek that preceded it.
-      const completesInFlightSeek =
-        completesSeek &&
-        previousAction?.kind === "seek" &&
-        previousAction.at > args.runtimeState.lastForcedPauseAt;
-      args.runtimeState.lastExplicitUserAction = {
+      const action: ExplicitUserAction = {
         kind,
         at: monotonicNow(),
-        gestureAt:
-          completesInFlightSeek && previousAction !== null
-            ? previousAction.gestureAt
-            : args.runtimeState.lastUserGestureAt,
+        gestureAt: inheritGestureAt ?? args.runtimeState.lastUserGestureAt,
       };
+      args.runtimeState.lastExplicitUserAction = action;
       if (kind === "seek") {
         // One gesture produces `seeking` AND `seeked`, and the `seeking`
         // broadcast in between writes `intendedPlayState` back to `playing`.
@@ -349,8 +347,8 @@ export function createPlaybackBindingController(args: {
         // gesture starts a NEW seek even inside the grace window — inheriting
         // the old origin there would let a `buffering` start survive into a
         // scrub of the now-paused video and force it to `playing`.
-        // Kept elapsed-time-based, deliberately NOT merged with
-        // `completesInFlightSeek` above: this one guards a play-state snapshot
+        // Kept elapsed-time-based, deliberately NOT merged with the seek
+        // lifecycle the caller tracks: this one guards a play-state snapshot
         // against rapid scrubbing, so treating two seeks seconds apart as one
         // would be wrong here even though it is right for the gesture.
         const continuesInFlightSeek =
@@ -364,7 +362,9 @@ export function createPlaybackBindingController(args: {
       } else {
         args.runtimeState.explicitSeekOriginPlayState = null;
       }
+      return action;
     }
+    return null;
   }
 
   /**
@@ -964,6 +964,9 @@ export function createPlaybackBindingController(args: {
     if (!video) {
       return;
     }
+    // A seek left in flight on the previous element can never be completed now,
+    // and letting it survive would hand its gesture to the next `seeked`.
+    inFlightSeek = null;
 
     const guardUnexpectedResume = () => {
       const currentVideo = args.getSharedVideo();
@@ -1198,14 +1201,38 @@ export function createPlaybackBindingController(args: {
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "seek");
         }
-        rememberExplicitUserAction("seek");
+        // Only a `seeking` opens a seek, so only it may claim a fresh gesture.
+        // Whether the action was recorded at all IS the lifecycle: an echo or an
+        // unauthorized event leaves nothing in flight, and the `seeked` that
+        // follows then has no seek to complete.
+        const started = rememberExplicitUserAction("seek");
+        inFlightSeek = started
+          ? { startedAt: started.at, gestureAt: started.gestureAt }
+          : null;
         scheduleBroadcast(video, "seeking");
       },
       onSeeked: () => {
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "seek");
         }
-        rememberExplicitUserAction("seek", true);
+        const pending = inFlightSeek;
+        inFlightSeek = null;
+        // A `seeked` with nothing in flight records NOTHING. Falling back to a
+        // fresh seek was the remaining hole: an episode click makes the old
+        // element emit `pause`, which overwrites the seek action, and the late
+        // `seeked` would then re-open a seek attributed to that click — crediting
+        // the end that follows as a seek-to-end and auto-sharing the user's own
+        // destination to the room (#236). Declining to record is also the safe
+        // direction for the genuinely untracked cases (a `seeking` suppressed as
+        // an echo, or listeners attached mid-seek): the seek simply goes
+        // uncredited, which costs a convenience and never moves the room.
+        // A forced pause invalidates the seek it interrupted, same as elsewhere.
+        if (
+          pending &&
+          pending.startedAt > args.runtimeState.lastForcedPauseAt
+        ) {
+          rememberExplicitUserAction("seek", pending.gestureAt);
+        }
         scheduleBroadcast(video, "seeked", 120);
       },
       onRateChange: () => {

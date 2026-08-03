@@ -3231,15 +3231,31 @@ test("playback binding controller does not credit a seek whose seeked event land
       "the seek is credited to the drag that started it",
     );
 
-    // The user clicks another episode while `seeked` is still pending.
+    // The user clicks another episode while `seeked` is still pending, and the
+    // old element emits the `pause` that click causes. That `pause` overwrites
+    // the recorded seek action — which is why "the last action happens to be a
+    // seek" cannot stand in for the seek's lifecycle.
     now = 1_500;
     runtimeState.lastUserGestureAt = 1_500;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    assert.equal(
+      runtimeState.lastExplicitUserAction?.kind,
+      "pause",
+      "the click's pause replaced the seek record",
+    );
 
     // Deliberately past `userGestureGraceMs` (1_200) since `seeking` at 1_010:
     // how long the decoder takes says nothing about whether this is still the
     // same seek, and an elapsed-time test would hand the seek to the click here.
+    dom.video.paused = false;
     now = 2_400;
     dom.listeners.get("seeked")?.(new Event("seeked"));
+    assert.equal(
+      runtimeState.lastExplicitUserAction?.kind,
+      "seek",
+      "the completing event still records the seek it finishes",
+    );
     assert.equal(
       runtimeState.lastExplicitUserAction?.gestureAt,
       1_000,
@@ -3256,6 +3272,36 @@ test("playback binding controller does not credit a seek whose seeked event land
     assert.equal(runtimeState.sharedVideoNaturalEndAfterSeek, false);
   } finally {
     dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller records nothing for a seeked with no seek in flight", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  let now = 5_000;
+  // No `seeking` was ever recorded — the listeners attached mid-seek, or it was
+  // suppressed as a programmatic echo. The only gesture around is an unrelated
+  // recent click. Opening a fresh seek here would credit that click with a seek
+  // it never made, and every "was a seek the last thing the user did?" reader
+  // (including the natural-end flag) would then answer yes.
+  runtimeState.lastUserGestureAt = 4_900;
+  runtimeState.lastUserGestureInPlayerAt = 4_900;
+
+  const controller = createEchoHarness(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+
+    now = 5_000;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.equal(
+      runtimeState.lastExplicitUserAction,
+      null,
+      "a seeked that completes nothing must not invent a seek",
+    );
+  } finally {
     dom.restore();
   }
 });
