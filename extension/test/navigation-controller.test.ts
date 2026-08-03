@@ -3211,3 +3211,75 @@ test("navigation controller leaves a paused autoplay-next alone when no load-pau
     windowHarness.restore();
   }
 });
+
+test("navigation controller resumes the sharer's autoplay-next before the binding's queued pause lands", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVa?cid=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+
+  let resolved: string | null = null;
+  const video: MutablePausedVideoStub = {
+    paused: false,
+  } as MutablePausedVideoStub;
+  let playCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    sharedVideoNaturalEndWindowMs: 1_500,
+    getCurrentPageUrl: () => FESTIVAL_ROUTE,
+    normalizeVideoPageUrl: normalizeFestivalPageUrl,
+    getResolvedVideoUrl: () => resolved,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => video,
+    playVideo: async () => {
+      playCalls += 1;
+      video.paused = false;
+    },
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1";
+    windowHarness.intervals[0]?.();
+
+    // The binding armed the hold on the `play` event but performs the pause in a
+    // `setTimeout`, which has NOT run yet — the element still reads as playing.
+    // Deciding by `video.paused` here loses the race: the queued pause lands
+    // right after and stops the video with nothing left to revert it.
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVb&cid=2";
+    video.paused = false;
+    runtimeState.intendedPlayState = "paused";
+    runtimeState.pauseHoldUntil = 11_500;
+    runtimeState.nonSharerAutoplayHoldUrl =
+      "https://www.bilibili.com/video/BVb?cid=2";
+
+    windowHarness.intervals[0]?.();
+
+    assert.equal(playCalls, 1);
+    assert.equal(runtimeState.intendedPlayState, "playing");
+    assert.equal(runtimeState.pauseHoldUntil, 0);
+    // What makes the queued pause a no-op when it fires.
+    assert.equal(
+      runtimeState.explicitNonSharedPlaybackUrl,
+      "https://www.bilibili.com/video/BVb?cid=2",
+    );
+  } finally {
+    windowHarness.restore();
+  }
+});

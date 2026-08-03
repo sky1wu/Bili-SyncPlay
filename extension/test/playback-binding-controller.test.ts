@@ -4344,3 +4344,76 @@ test("playback binding controller re-pauses a remote-stopped video on a page you
     dom.restore();
   }
 });
+
+test("playback binding controller drops a queued load-pause once the url gets authorized", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  const nonSharedUrl = "https://www.bilibili.com/video/BVother?p=1";
+  let pauseCalls = 0;
+  let queuedPause: (() => void) | null = null;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVother:p1",
+      url: nonSharedUrl,
+      title: "Other Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 20_000,
+  });
+
+  try {
+    // Hold the pause instead of running it, so the navigation controller's
+    // classification can land in between — exactly the window it polls in.
+    Object.assign(globalThis.window, {
+      setTimeout: (handler: () => void) => {
+        queuedPause = handler;
+        return 1;
+      },
+    });
+    dom.video.pause = () => {
+      pauseCalls += 1;
+      dom.video.paused = true;
+    };
+    dom.video.paused = false;
+
+    controller.attachPlaybackListeners();
+    dom.listeners.get("play")?.(new Event("play"));
+    await Promise.resolve();
+
+    assert.equal(runtimeState.nonSharerAutoplayHoldUrl, nonSharedUrl);
+    assert.ok(queuedPause, "the pause is queued, not immediate");
+
+    // The navigation controller classified this as the sharer's own
+    // autoplay-next and authorized the url.
+    runtimeState.explicitNonSharedPlaybackUrl = nonSharedUrl;
+    queuedPause?.();
+
+    assert.equal(pauseCalls, 0);
+    assert.equal(dom.video.paused, false);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});

@@ -507,16 +507,21 @@ export function createNavigationController(args: {
         // already excludes a recent user gesture, so a manual pause cannot be
         // standing here either — and a pause the user makes AFTER this point sets
         // no hold and is untouched.
-        // The hold naming this page is the whole condition. Whether the element
-        // is still paused only decides if `play()` is worth calling: the intent
-        // and the hold are ours either way, so they are released regardless (a
-        // hold left standing would have the binding re-pause the very next
-        // `play`).
+        // The hold naming this page is the whole condition — deliberately NOT
+        // "and the element is currently paused". The binding arms the hold
+        // synchronously on `play` but performs the pause in a `setTimeout`, so
+        // whether it has landed by the time we get here is a race we lose about
+        // as often as we win: reading `paused` picks the wrong branch on the
+        // half where the pause is still queued, and the queued pause then stops
+        // a video we just declared playing. `play()` on an already-playing
+        // element is a no-op, so calling it unconditionally costs nothing and
+        // covers both halves; the queued pause is handled on its own side, by
+        // re-checking `explicitNonSharedPlaybackUrl` before it fires.
         if (previousAutoplayHoldUrl === nextNormalizedPageUrl) {
           args.runtimeState.intendedPlayState = "playing";
           args.runtimeState.pauseHoldUntil = 0;
           const heldVideo = args.getVideoElement();
-          if (heldVideo?.paused) {
+          if (heldVideo) {
             args.debugLog(
               `Resumed sharer autoplay-next after load-pause hold ${nextNormalizedPageUrl}`,
             );

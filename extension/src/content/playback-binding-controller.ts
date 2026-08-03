@@ -760,6 +760,22 @@ export function createPlaybackBindingController(args: {
       "Forced pause for non-shared video autoplay (in room, load paused)",
     );
     window.setTimeout(() => {
+      // Re-check the premise before acting on it. This hold is decided on the
+      // `play` event, but the navigation controller — the only layer that can
+      // tell a sharer's own autoplay-next from an arrival at someone else's
+      // video — classifies on a 400ms poll and can land in between. When it
+      // does, it authorizes this URL and undoes the hold; an unconditional
+      // pause here would then re-stop the very video the room is about to be
+      // advanced to, with nothing left to revert it (the classification for
+      // this navigation has already run).
+      if (
+        args.runtimeState.explicitNonSharedPlaybackUrl === normalizedCurrentUrl
+      ) {
+        args.debugLog(
+          `Dropped load-pause hold for ${normalizedCurrentUrl}; it was authorized before the pause landed`,
+        );
+        return;
+      }
       pauseVideo(video);
     }, 0);
     return true;
