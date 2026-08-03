@@ -24,6 +24,7 @@ This directory keeps project documentation that is useful after the first README
 ## Reference / 参考
 
 - [Protocol reference](./reference/protocol.md) / [协议参考](./reference/protocol.zh-CN.md)
+- [Runtime invariants](./reference/invariants.md) / [运行时不变量](./reference/invariants.zh-CN.md)
 - [Security environment variables](./reference/security-env.md) / [安全相关环境变量](./reference/security-env.zh-CN.md)
 - [Admin panel and API](./reference/admin-api.md) / [管理面板与 API](./reference/admin-api.zh-CN.md)
 
