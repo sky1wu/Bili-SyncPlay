@@ -10,7 +10,7 @@ import { createInMemoryRoomStore } from "../src/room-store.js";
 
 const ALLOWED_ORIGIN = "chrome-extension://allowed-extension";
 const SWEEP_INTERVAL_MS = 25;
-const SCRAPE_DEADLINE_MS = 5_000;
+const SCRAPE_DEADLINE_MS = 15_000;
 
 /**
  * The reaper and the collector each have their own unit tests; this one exists
@@ -64,10 +64,14 @@ test("a reaper sweep inside a running server moves the reclaimed-rooms counter",
   }
 
   try {
-    assert.equal(await scrapeReclaimedRooms(), 0);
-
+    // No "starts at 0" assertion: the reaper is already sweeping by the time
+    // createSyncServer returns, so that would race a 25ms timer — and lose on a
+    // loaded CI runner. The counter starting at 0 is asserted where it is
+    // actually deterministic, in the collector's own test. Here the claim is
+    // that this room's collection reaches /metrics, and only this server's
+    // reaper can move this server's counter.
     const deadline = Date.now() + SCRAPE_DEADLINE_MS;
-    let reclaimed = 0;
+    let reclaimed = await scrapeReclaimedRooms();
     while (reclaimed === 0 && Date.now() < deadline) {
       await delay(SWEEP_INTERVAL_MS);
       reclaimed = await scrapeReclaimedRooms();
