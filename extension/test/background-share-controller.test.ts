@@ -3,6 +3,7 @@ import test from "node:test";
 import { PROTOCOL_VERSION } from "@bili-syncplay/protocol";
 import { createBackgroundRuntimeState } from "../src/background/runtime-state";
 import { createShareController } from "../src/background/share-controller";
+import { setLocaleForTests } from "../src/shared/i18n";
 import { installClockStubs, installFakeSelfTimers } from "./clock-stubs";
 
 // Node < 22 has no global WebSocket; production `isSocketWritable` reads
@@ -399,32 +400,37 @@ test("background share controller reports missing member token without queuing a
   harness.runtimeState.connection.connected = true;
   harness.runtimeState.room.roomCode = "ROOM01";
   harness.runtimeState.room.memberToken = null;
+  setLocaleForTests("en-US");
 
-  const result = await harness.controller.queueOrSendSharedVideo(
-    {
-      video: {
-        videoId: "BV199W9zEEcH",
-        url: "https://www.bilibili.com/video/BV199W9zEEcH",
-        title: "New Video",
+  try {
+    const result = await harness.controller.queueOrSendSharedVideo(
+      {
+        video: {
+          videoId: "BV199W9zEEcH",
+          url: "https://www.bilibili.com/video/BV199W9zEEcH",
+          title: "New Video",
+        },
+        playback: null,
       },
-      playback: null,
-    },
-    123,
-  );
+      123,
+    );
 
-  assert.deepEqual(result, {
-    ok: false,
-    error: "Member token is missing. Rejoin the room.",
-  });
-  assert.deepEqual(harness.rememberedSharedTabs, [
-    {
-      tabId: 123,
-      videoUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
-    },
-  ]);
-  assert.deepEqual(harness.sendToServerCalls, []);
-  assert.equal(harness.runtimeState.share.pendingLocalShareUrl, null);
-  assert.equal(harness.notifyAllCalls, 0);
+    assert.deepEqual(result, {
+      ok: false,
+      error: "Member token is missing. Rejoin the room.",
+    });
+    assert.deepEqual(harness.rememberedSharedTabs, [
+      {
+        tabId: 123,
+        videoUrl: "https://www.bilibili.com/video/BV199W9zEEcH",
+      },
+    ]);
+    assert.deepEqual(harness.sendToServerCalls, []);
+    assert.equal(harness.runtimeState.share.pendingLocalShareUrl, null);
+    assert.equal(harness.notifyAllCalls, 0);
+  } finally {
+    setLocaleForTests(null);
+  }
 });
 
 const PENDING_SHARE_VIDEO = {

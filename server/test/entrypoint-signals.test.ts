@@ -10,12 +10,22 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { createServer, type Server as NetServer, type Socket } from "node:net";
 import { dirname, resolve } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const START_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 30_000;
+
+function skipWhenWindows(t: TestContext): boolean {
+  if (process.platform !== "win32") {
+    return false;
+  }
+  t.skip(
+    "SIGTERM graceful-shutdown assertions require POSIX signal semantics.",
+  );
+  return true;
+}
 
 async function reserveFreePort(): Promise<number> {
   const probe = createServer();
@@ -188,7 +198,10 @@ async function assertGracefulStop(
   }
 }
 
-test("the server entry point exits gracefully on SIGTERM", async () => {
+test("the server entry point exits gracefully on SIGTERM", async (t) => {
+  if (skipWhenWindows(t)) {
+    return;
+  }
   const port = await reserveFreePort();
   await assertGracefulStop(
     "server/src/index.ts",
@@ -201,7 +214,10 @@ test("the server entry point exits gracefully on SIGTERM", async () => {
   );
 });
 
-test("a SIGTERM during startup does not hang the process", async () => {
+test("a SIGTERM during startup does not hang the process", async (t) => {
+  if (skipWhenWindows(t)) {
+    return;
+  }
   // ROOM_STORE_PROVIDER=redis makes startup await `redis.connect()`. Pointing
   // it at a socket that accepts and never answers wedges the entry point inside
   // `await createSyncServer(...)`, which is exactly where the handlers used to
@@ -257,7 +273,10 @@ test("a SIGTERM during startup does not hang the process", async () => {
   }
 });
 
-test("the global admin entry point exits gracefully on SIGTERM", async () => {
+test("the global admin entry point exits gracefully on SIGTERM", async (t) => {
+  if (skipWhenWindows(t)) {
+    return;
+  }
   const port = await reserveFreePort();
   await assertGracefulStop(
     "server/src/global-admin-index.ts",
