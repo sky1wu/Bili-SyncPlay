@@ -18,6 +18,10 @@ import { createPlaybackBindingController } from "./playback-binding-controller";
 import { createRoomStateController } from "./room-state-controller";
 import { createShareController } from "./share-controller";
 import { createSyncController } from "./sync-controller";
+import {
+  INITIAL_ROOM_STATE_PAUSE_HOLD_MS,
+  SHARED_VIDEO_NATURAL_END_WINDOW_MS,
+} from "./timing-constants";
 import { createToastCoordinatorState, createToastPresenter } from "./toast";
 import { reportCurrentUser } from "./user-reporter";
 
@@ -35,7 +39,6 @@ const toastPresenter = createToastPresenter();
 
 const LOCAL_INTENT_GUARD_MS = 1200;
 const PAUSE_HOLD_MS = 1200;
-const INITIAL_ROOM_STATE_PAUSE_HOLD_MS = 3000;
 const REMOTE_ECHO_SUPPRESSION_MS = 700;
 const REMOTE_PLAY_TRANSITION_GUARD_MS = 1800;
 const REMOTE_FOLLOW_PLAYING_WINDOW_MS = 3000;
@@ -176,6 +179,7 @@ const navigationController = createNavigationController({
   intervalMs: NAVIGATION_WATCH_INTERVAL_MS,
   userGestureGraceMs: USER_GESTURE_GRACE_MS,
   initialRoomStatePauseHoldMs: INITIAL_ROOM_STATE_PAUSE_HOLD_MS,
+  sharedVideoNaturalEndWindowMs: SHARED_VIDEO_NATURAL_END_WINDOW_MS,
   getCurrentPageUrl: () => window.location.href.split("#")[0],
   normalizeVideoPageUrl: (url) => normalizeSharedVideoUrl(url),
   // Festival pages keep a fixed `/festival/<id>` route in the address bar while

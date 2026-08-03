@@ -24,6 +24,16 @@ export function createNavigationController(args: {
   intervalMs: number;
   userGestureGraceMs: number;
   initialRoomStatePauseHoldMs: number;
+  /**
+   * How long a recorded shared-video natural end stays usable as evidence that
+   * the navigation which follows is that video's autoplay-next. Deliberately
+   * independent of {@link initialRoomStatePauseHoldMs}: that one bounds how long
+   * a page-load autoplay is suppressed, this one has to outlast Bilibili's
+   * next-video countdown (~5s between `ended` and the SPA navigation). Sharing
+   * the pause hold's 3s made the marker expire before every countdown-driven
+   * autoplay, which silently disabled the season-page branch it exists for.
+   */
+  sharedVideoNaturalEndWindowMs: number;
   getCurrentPageUrl: () => string;
   normalizeVideoPageUrl: (url: string) => string | null;
   /**
@@ -350,15 +360,20 @@ export function createNavigationController(args: {
       // The durable `sharedVideoNaturalEnd*` timestamp is used (not the
       // broadcast-suppression markers) because the gate clears those eagerly —
       // often before this watcher runs — whereas this one survives until the
-      // shared URL changes. Bounded by the hold window so a stale end cannot turn
-      // a later unrelated navigation into a misclassified autoplay. This is the
-      // `navFromShared` half (it recognises a season-page autoplay even when no
-      // gesture is involved), so it deliberately does NOT depend on the gesture.
+      // shared URL changes. Bounded by `sharedVideoNaturalEndWindowMs` — which
+      // must outlast Bilibili's next-video countdown, NOT the pause hold: the two
+      // answer different questions, and equating them expired the marker before
+      // every countdown-driven autoplay. The URL equality is what actually keeps
+      // a stale end from reclassifying an unrelated navigation (it must still
+      // name the current `activeSharedUrl`, and any shared-url change clears it);
+      // the window only bounds a same-URL replay. This is the `navFromShared`
+      // half (it recognises a season-page autoplay even when no gesture is
+      // involved), so it deliberately does NOT depend on the gesture.
       const navigatedFromSharedVideoEnd =
         activeSharedUrl !== null &&
         args.runtimeState.sharedVideoNaturalEndUrl === activeSharedUrl &&
         now - args.runtimeState.sharedVideoNaturalEndAt <
-          args.initialRoomStatePauseHoldMs;
+          args.sharedVideoNaturalEndWindowMs;
       // Classify as the shared video's autoplay only on *provable* evidence that
       // the advance came from the room's shared video:
       //   - a durable natural-end marker for it (`navigatedFromSharedVideoEnd`), or
