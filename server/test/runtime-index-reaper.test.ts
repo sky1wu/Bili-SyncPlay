@@ -90,6 +90,15 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
       health: "ok",
     });
 
+    // The seat writes above are write-behind: they update this node's own maps
+    // synchronously and queue the shared write behind them. Reading the cluster
+    // index back without flushing races that queue — and the failure is silent
+    // and partial, because the queue drains in order: the session write lands
+    // (so `listClusterSessions` is right) while the room-index write is still
+    // pending (so `countClusterActiveRooms` reads 0). Flush is the ordering
+    // barrier for "my own writes must be visible to the read I am about to do".
+    await runtimeStore.flush?.();
+
     assert.equal((await runtimeStore.listClusterSessions()).length, 1);
     assert.equal(await runtimeStore.countClusterActiveRooms(), 1);
 
@@ -200,6 +209,11 @@ test("runtime index reaper tells the rooms it emptied to rebuild", async (t) => 
       activeMemberCount: 2,
       health: "ok",
     });
+
+    // Same write-behind barrier as the test above: the sweep reads the cluster
+    // index, so the seats must have actually landed in it or it finds nothing to
+    // clean and returns 0.
+    await runtimeStore.flush?.();
 
     currentTime += 200;
     assert.equal(await reaper.sweep(), 2);
