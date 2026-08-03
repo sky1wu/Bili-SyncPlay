@@ -51,12 +51,13 @@ export interface ExplicitUserAction {
    * input, and a seek lags a lot: `seeking` fires at once but `seeked` waits for
    * the decoder, so `at` gets re-stamped on the follow-up event — potentially
    * past an unrelated gesture the user made in between. Anything asking "was a
-   * seek the last thing the user DID?" must read this, not `at`; `at` re-stamped
-   * past an episode click made `sharedVideoNaturalEndAfterSeek` claim a seek the
-   * user had already superseded (#236).
+   * seek the last thing the user DID?" must read this, not `at` — `at` gets
+   * re-stamped past an episode click the user made in between, and every reader
+   * of it then reports a seek the user had already superseded (#236).
    *
-   * Inherited by the follow-up events of one seek (see `continuesInFlightSeek`),
-   * so the whole seek keeps pointing at the gesture that began it.
+   * Inherited by the `seeked` that completes a seek (the binding controller
+   * tracks that seek's lifetime), so the whole seek keeps pointing at the gesture
+   * that began it.
    */
   gestureAt: number;
 }
@@ -262,16 +263,6 @@ export interface ContentRuntimeState {
    */
   sharedVideoNaturalEndUrl: string | null;
   sharedVideoNaturalEndAt: number;
-  /**
-   * Whether the most recent shared-video natural end was preceded by a user
-   * *seek* (the sharer dragging to the last seconds) rather than reached with no
-   * recent interaction or a non-seek gesture. Captured at the natural end —
-   * before the next page's `play` can overwrite the action state — so the
-   * navigation controller can relax the recent-gesture gate *only* for a genuine
-   * seek-to-end → autoplay, not for a manual click on another episode that the
-   * watcher happens to poll just after the old video fires `ended`.
-   */
-  sharedVideoNaturalEndAfterSeek: boolean;
   festivalSnapshot: FestivalVideoSnapshot | null;
   /**
    * Timestamp of the most recent `waiting`/`stalled` event from the local
@@ -383,7 +374,6 @@ export function createContentRuntimeState(): ContentRuntimeState {
     sharerEndedSuppressionArmedAt: 0,
     sharedVideoNaturalEndUrl: null,
     sharedVideoNaturalEndAt: 0,
-    sharedVideoNaturalEndAfterSeek: false,
     festivalSnapshot: null,
     lastBufferSignalAt: 0,
     lastVideoElementBoundAt: 0,

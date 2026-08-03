@@ -494,24 +494,6 @@ export function createPlaybackBindingController(args: {
     args.runtimeState.sharedVideoNaturalEndUrl =
       args.runtimeState.activeSharedUrl;
     args.runtimeState.sharedVideoNaturalEndAt = monotonicNow();
-    // Whether this end was reached right after an in-video seek (seek-to-end),
-    // captured now while the old page's action state is still intact (the next
-    // page's `play` has not yet overwritten it). The navigation controller only
-    // relaxes the recent-gesture gate for this case — a manual click on another
-    // episode does not record a fresh seek, so it stays a manual navigation.
-    //
-    // Compared against the seek's authorizing GESTURE, never against `at`. `at`
-    // is when the media event arrived, and `seeked` arrives late: a click on
-    // another episode between `seeking` and `seeked` keeps the gesture window
-    // warm, so the follow-up event re-stamps `at` past that click and an `at`
-    // comparison then reports "a seek was the last thing the user did" about a
-    // user who had already chosen to navigate away. The sharer would auto-share
-    // that private choice to the whole room (#236).
-    const lastAction = args.runtimeState.lastExplicitUserAction;
-    args.runtimeState.sharedVideoNaturalEndAfterSeek = Boolean(
-      lastAction?.kind === "seek" &&
-      args.runtimeState.lastUserGestureAt <= lastAction.gestureAt,
-    );
   }
 
   function isLocalSharedSource(): boolean {

@@ -284,11 +284,8 @@ export function createNavigationController(args: {
     // never of the runtime state.
     const naturalEndUrl = args.runtimeState.sharedVideoNaturalEndUrl;
     const naturalEndAt = args.runtimeState.sharedVideoNaturalEndAt;
-    const naturalEndAfterSeek =
-      args.runtimeState.sharedVideoNaturalEndAfterSeek;
     args.runtimeState.sharedVideoNaturalEndUrl = null;
     args.runtimeState.sharedVideoNaturalEndAt = 0;
-    args.runtimeState.sharedVideoNaturalEndAfterSeek = false;
 
     const activeSharedUrl = args.runtimeState.activeSharedUrl;
     // The stable anchor for the room's share. Normally `activeSharedUrl`, but when
@@ -401,28 +398,28 @@ export function createNavigationController(args: {
       // is the span to veto over. It subsumes "recent with respect to now" and
       // removes `now` from this test entirely.
       //
-      // Within that span exactly ONE gesture is compatible with an autoplay: the
-      // seek that produced the end itself. That is this file's existing rule (see
-      // `recentGestureIsSeekToEnd`) — it was just being applied over the 1.2s
-      // grace instead of over the window the marker actually lives for. Both
-      // clauses of the exception are load-bearing:
-      //   - `sharedVideoNaturalEndAfterSeek`, so a plain click shortly BEFORE the
-      //     video ended (the user picking the next episode as it finishes, with
-      //     `ended` firing after the click) is not waved through;
-      //   - `lastUserGestureAt <= sharedVideoNaturalEndAt`, so a click AFTER the
-      //     end cannot reuse a seek flag left set by that earlier end.
-      // The cost is a false negative: a user who clicks anything at all in the
-      // seconds around the end loses this auto-share and shares manually. That is
-      // the direction this file already errs in ("we err on the side of not
-      // hijacking the room", below), and it does not touch #236's actual case —
-      // passive viewing produces no gesture, since only discrete input
+      // Within that span EVERY gesture refutes it. There is deliberately no
+      // exception for the seek that produced the end, even though such a seek is
+      // genuinely compatible with an autoplay: telling that seek apart from a
+      // manual episode click is not something the available signals can do.
+      // Both are discrete input, and the timestamps interleave either way — a
+      // click can land between `seeking` and `seeked`, and a drag's own release
+      // `click` postdates the `pointerdown` that started it. Five review rounds
+      // of #236 went into an exception that kept alternating between admitting a
+      // manual click (the sharer pushes their private choice to the whole room)
+      // and rejecting a real seek-to-end (the room silently stops advancing);
+      // each fix for one direction opened the other.
+      //
+      // So the rule is the simple one, and the cost is stated rather than
+      // engineered around: a sharer who drags to the last seconds must share the
+      // next episode manually, once. #236's actual case is untouched — passive
+      // viewing produces no gesture at all, since only discrete input
       // (pointer/touch/keydown/popstate) refreshes `lastUserGestureAt`, never
-      // pointer movement or scrolling.
+      // pointer movement or scrolling. Erring toward not hijacking the room is
+      // this file's established trade (see `navigatedFromSharedVideo` below).
       const gestureRefutesNaturalEnd =
         lastUserGestureAt > 0 &&
-        lastUserGestureAt >=
-          naturalEndAt - args.sharedVideoNaturalEndWindowMs &&
-        !(naturalEndAfterSeek && lastUserGestureAt <= naturalEndAt);
+        lastUserGestureAt >= naturalEndAt - args.sharedVideoNaturalEndWindowMs;
       // Four things bound the marker, and the last two are what make the wide
       // window safe:
       //   - the marker must still name the current `activeSharedUrl` (any
@@ -457,17 +454,14 @@ export function createNavigationController(args: {
         (previousNormalizedPageUrl !== null &&
           (previousNormalizedPageUrl === effectiveSharedUrl ||
             previousNormalizedPageUrl === previousPendingAutoShareTargetUrl));
-      // Lets a seek-to-end through the `hadRecentUserGesture` gate below: the
-      // sharer dragged to the last seconds and let the video auto-advance, so the
-      // gesture is still warm at the navigation. Which gestures are compatible
-      // with an autoplay is decided once, in `gestureRefutesNaturalEnd` above —
-      // a marker that survived alongside a gesture can only have survived because
-      // that gesture WAS the seek that produced the end. So this adds no test of
-      // its own beyond naming that case; it is not an independent relaxation.
-      const recentGestureIsSeekToEnd =
-        navigatedFromSharedVideoEnd && naturalEndAfterSeek;
+      // No gesture exemption exists any more. It used to let a seek-to-end
+      // through this gate, but `gestureRefutesNaturalEnd` now refuses the marker
+      // for ANY gesture in its window — and a gesture recent enough to satisfy
+      // `hadRecentUserGesture` (~1.2s) is necessarily inside that window (~10s),
+      // so a surviving marker already implies no recent gesture. The two
+      // conditions cannot disagree, which is why this is a plain `&&`.
       const shouldTreatAsAutoplay =
-        (!hadRecentUserGesture || recentGestureIsSeekToEnd) &&
+        !hadRecentUserGesture &&
         navigatedFromSharedVideo &&
         activeSharedUrl !== null &&
         nextNormalizedPageUrl !== null;
@@ -582,7 +576,7 @@ export function createNavigationController(args: {
       args.debugLog(
         `Nav decision to ${nextPageUrl}: ${navOutcome} ` +
           `[autoplay=${shouldTreatAsAutoplay} localSharer=${isLocalSharedSource} ` +
-          `navFromShared=${navigatedFromSharedVideo} navFromSharedEnd=${navigatedFromSharedVideoEnd} seekToEnd=${recentGestureIsSeekToEnd} recentGesture=${hadRecentUserGesture} ` +
+          `navFromShared=${navigatedFromSharedVideo} navFromSharedEnd=${navigatedFromSharedVideoEnd} gestureRefutedEnd=${gestureRefutesNaturalEnd} recentGesture=${hadRecentUserGesture} ` +
           `prevPage=${previousNormalizedPageUrl} activeShared=${activeSharedUrl} ` +
           `prevAutoShareTarget=${previousPendingAutoShareTargetUrl}]`,
       );

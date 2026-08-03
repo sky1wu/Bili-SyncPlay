@@ -132,7 +132,7 @@ background path touches room state or playback timing.
   its own.
 
 - **A marker that stands for "the user did not cause this" must ask about
-  gestures over ITS OWN window, and admit only the gesture that produced it.**
+  gestures over ITS OWN window, and must not carve out exceptions.**
   `lastUserGestureAt` is the only evidence the content script has that a
   navigation/pause was user-driven, and `userGestureGraceMs` (~1.2s) is the wrong
   span to ask over: any marker whose window is wider has a gap where the user's
@@ -148,25 +148,29 @@ background path touches room state or playback timing.
   and `now` drops out of the test entirely. Its lower bound is load-bearing in
   the other direction: without it, pressing play at the start of a 24-minute
   episode would veto that episode's autoplay forever.
-  Within that span, treat EVERY gesture as refuting the marker except the one
-  the marker itself was born from. `gestureRefutesNaturalEnd` is the worked
-  example, and both clauses of its exception cost a review round:
-  `sharedVideoNaturalEndAfterSeek` (else a plain click shortly BEFORE the video
-  ended — `ended` firing after the click — is waved through) AND
-  `lastUserGestureAt <= sharedVideoNaturalEndAt` (else a click AFTER the end
-  reuses a seek flag left set by that earlier end). A postdates-only veto looks
-  sufficient and is not: #236 tried it, and the pre-end click walked straight
-  through. Note the whole scheme is only safe because `lastUserGestureAt` is
-  refreshed by DISCRETE input (`gesture-tracker.ts`:
+  **Within that span every gesture refutes the marker, with no exception**, even
+  though some gestures genuinely are compatible with it — a sharer's drag to the
+  last seconds really does end in an autoplay. #236 spent five review rounds
+  trying to admit exactly that one gesture, and each fix alternated the failure:
+  admit a manual episode click (the sharer pushes a private choice to the whole
+  room), then reject a real seek-to-end (the room silently stops advancing). The
+  signals cannot separate them — both are discrete input, a click can land
+  between `seeking` and `seeked`, and a drag's own release `click` postdates the
+  `pointerdown` that began it. The rule is therefore the blunt one, and the cost
+  is written down as a test
+  ("...the accepted cost of having no gesture exception"): a sharer who drags to
+  the end shares the next episode manually, once. Re-introducing the exception
+  re-opens the alternation.
+  The whole scheme is only safe because `lastUserGestureAt` is refreshed by
+  DISCRETE input (`gesture-tracker.ts`:
   pointerdown/mousedown/click/touchstart/keydown/popstate) and never by pointer
   movement or scrolling — a tracker that recorded either would turn passive
-  viewing into a veto and silently disable the marker. The cost is a false
-  negative (a user who clicks anything near the end loses that auto-share), which
-  is the direction this code errs in on purpose: "we err on the side of not
-  hijacking the room".
-  The sibling sites in `playback-binding-controller` pair their windows the same
-  way (`lastUserGestureAt > lastForcedPauseAt`, `lastUserGestureAt <=
-lastAction.at`); `navigatedFromSharedVideoEnd` was the one that did not.
+  viewing into a veto and silently disable the marker.
+  **A one-shot marker must be consumed, not merely bounded.** The evidence that
+  refutes it is shorter-lived than the marker itself (`resetUserGestureState`
+  zeroes `lastUserGestureAt` on every navigation), so a marker that outlives the
+  navigation it explains gets a second chance with its objector gone. Read it
+  into locals and clear it at the top of the handler.
 
 - **A window constant that two behaviours share is two constants.**
   `INITIAL_ROOM_STATE_PAUSE_HOLD_MS` was both "how long we suppress a page-load

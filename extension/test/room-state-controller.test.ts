@@ -183,7 +183,6 @@ function seedNaturalEndMarker(
   runtimeState.activeSharedByMemberId = "self";
   runtimeState.sharedVideoNaturalEndUrl = sharedUrl;
   runtimeState.sharedVideoNaturalEndAt = 9_000;
-  runtimeState.sharedVideoNaturalEndAfterSeek = true;
 }
 
 function assertNaturalEndMarkerCleared(
@@ -199,11 +198,6 @@ function assertNaturalEndMarkerCleared(
     runtimeState.sharedVideoNaturalEndAt,
     0,
     `${context} must clear the natural-end timestamp`,
-  );
-  assert.equal(
-    runtimeState.sharedVideoNaturalEndAfterSeek,
-    false,
-    `${context} must clear the seek-to-end flag`,
   );
 }
 
