@@ -257,7 +257,6 @@ test("allows explicit user actions to bypass programmatic suppression", () => {
       lastExplicitUserAction: {
         kind: "seek",
         at: 10_000,
-        gestureAt: 10_000,
       },
       now: 10_100,
       userGestureGraceMs: 1_200,
@@ -295,7 +294,6 @@ test("allows explicit user seek to bypass the remote playing window", () => {
     lastExplicitUserAction: {
       kind: "seek",
       at: 12_250,
-      gestureAt: 12_250,
     },
     now: 12_300,
     userGestureGraceMs: 1_200,
@@ -314,7 +312,6 @@ test("allows canplay and playing to bypass the remote playing window after an ex
     lastExplicitUserAction: {
       kind: "seek",
       at: 12_250,
-      gestureAt: 12_250,
     },
     now: 12_300,
     userGestureGraceMs: 1_200,
@@ -328,7 +325,6 @@ test("allows canplay and playing to bypass the remote playing window after an ex
     lastExplicitUserAction: {
       kind: "seek",
       at: 12_250,
-      gestureAt: 12_250,
     },
     now: 12_300,
     userGestureGraceMs: 1_200,
@@ -529,7 +525,6 @@ test("does not let an explicit action from before the apply window bypass suppre
     lastExplicitUserAction: {
       kind: "seek",
       at: 9_700,
-      gestureAt: 9_700,
     },
     now: 10_100,
     userGestureGraceMs: 1_200,
@@ -560,11 +555,7 @@ test("a ratechange-scoped window does not swallow the seek that opened it", () =
     eventSource: "seeking" as const,
     // Swallowed by `isProgrammaticEventEcho`, so the record is still the stale
     // ratechange from before the seek and cannot bypass the guard.
-    lastExplicitUserAction: {
-      kind: "ratechange" as const,
-      at: 9_000,
-      gestureAt: 9_000,
-    },
+    lastExplicitUserAction: { kind: "ratechange" as const, at: 9_000 },
     now: 10_005,
     userGestureGraceMs: 1_200,
   };

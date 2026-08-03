@@ -10,7 +10,6 @@ import {
 } from "./sync-guards";
 import type {
   ContentRuntimeState,
-  ExplicitUserAction,
   ExplicitUserActionKind,
   LocalPlaybackEventSource,
 } from "./runtime-state";
@@ -22,13 +21,6 @@ import {
 export interface PlaybackBindingController {
   start(): void;
   attachPlaybackListeners(): void;
-  /**
-   * The navigation watcher's entry point: binds the new page's element AND
-   * discards playback context that belonged to the previous page. Distinct from
-   * {@link attachPlaybackListeners}, which the bind poll calls against the same
-   * element several times a second and must therefore stay side-effect-free.
-   */
-  attachPlaybackListenersAfterNavigation(): void;
   destroy(): void;
 }
 
@@ -87,16 +79,6 @@ export function createPlaybackBindingController(args: {
   let videoBindingTimer: number | null = null;
   let pauseBufferUpgradeTimerId: number | null = null;
   let sharerEndedFlushTimerId: number | null = null;
-  /**
-   * The seek a `seeking` opened and whose `seeked` has not arrived yet, with the
-   * gesture that authorized it. This is the seek's real lifecycle: inferring it
-   * from "the last recorded action happens to be a seek" breaks as soon as any
-   * event lands in between (an episode click makes the old element emit `pause`),
-   * and inferring it from elapsed time is a guess the decoder is free to defeat.
-   * Cleared when the listeners are (re)attached — a seek in flight on the
-   * previous element has nothing to do with the new one.
-   */
-  let inFlightSeek: { startedAt: number; gestureAt: number } | null = null;
   const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   const scheduleUpgradeTimer = (cb: () => void, ms: number): number | null => {
     if (
@@ -201,12 +183,7 @@ export function createPlaybackBindingController(args: {
       return null;
     }
 
-    // "Without a new gesture" is asked of the seek's authorizing GESTURE, not of
-    // `at`: `at` moves to the `seeked` event, which can arrive after the user has
-    // already pressed something else, and the comparison would then report no new
-    // gesture about a user who just made one. The freshness check above keeps
-    // using `at` — that one really is about the event.
-    return args.runtimeState.lastUserGestureAt <= explicitAction.gestureAt
+    return args.runtimeState.lastUserGestureAt <= explicitAction.at
       ? explicitAction.at
       : null;
   };
@@ -301,49 +278,30 @@ export function createPlaybackBindingController(args: {
     }
   }
 
-  /**
-   * @param inheritGestureAt The gesture to attribute this action to instead of
-   * the latest one. Passed by `seeked`, which completes the seek that `seeking`
-   * began and so belongs to THAT gesture: the decoder decides when it fires, so
-   * anything the user pressed in between must not be able to claim the seek.
-   * @returns the recorded action, or `null` when nothing was recorded (an echo,
-   * or no gesture authorizing it) — `seeking` uses this to decide whether a seek
-   * is genuinely in flight.
-   */
-  function rememberExplicitUserAction(
-    kind: ExplicitUserActionKind,
-    inheritGestureAt?: number,
-  ): ExplicitUserAction | null {
+  function rememberExplicitUserAction(kind: ExplicitUserActionKind) {
     if (isProgrammaticEventEcho(kind)) {
-      return null;
+      return;
     }
     if (
       monotonicNow() - args.runtimeState.lastUserGestureAt <
         args.userGestureGraceMs &&
       args.runtimeState.lastUserGestureAt > args.runtimeState.lastForcedPauseAt
     ) {
-      // A `play` that is merely the tail of the seek the user is still making —
-      // not a new intent — so it must not overwrite the seek action. Bounded by
-      // the seek EVENT's freshness (`at`) but attributed by the seek's GESTURE
-      // (`gestureAt`): if the user pressed play after a slow `seeked`, that is a
-      // new intent and comparing against `at` would swallow it.
       if (
         kind === "play" &&
         args.runtimeState.lastExplicitUserAction?.kind === "seek" &&
         monotonicNow() - args.runtimeState.lastExplicitUserAction.at <
           args.userGestureGraceMs &&
         args.runtimeState.lastUserGestureAt <=
-          args.runtimeState.lastExplicitUserAction.gestureAt
+          args.runtimeState.lastExplicitUserAction.at
       ) {
-        return null;
+        return;
       }
       const previousAction = args.runtimeState.lastExplicitUserAction;
-      const action: ExplicitUserAction = {
+      args.runtimeState.lastExplicitUserAction = {
         kind,
         at: monotonicNow(),
-        gestureAt: inheritGestureAt ?? args.runtimeState.lastUserGestureAt,
       };
-      args.runtimeState.lastExplicitUserAction = action;
       if (kind === "seek") {
         // One gesture produces `seeking` AND `seeked`, and the `seeking`
         // broadcast in between writes `intendedPlayState` back to `playing`.
@@ -354,10 +312,6 @@ export function createPlaybackBindingController(args: {
         // gesture starts a NEW seek even inside the grace window — inheriting
         // the old origin there would let a `buffering` start survive into a
         // scrub of the now-paused video and force it to `playing`.
-        // Kept elapsed-time-based, deliberately NOT merged with the seek
-        // lifecycle the caller tracks: this one guards a play-state snapshot
-        // against rapid scrubbing, so treating two seeks seconds apart as one
-        // would be wrong here even though it is right for the gesture.
         const continuesInFlightSeek =
           previousAction?.kind === "seek" &&
           previousAction.at > args.runtimeState.lastForcedPauseAt &&
@@ -369,9 +323,7 @@ export function createPlaybackBindingController(args: {
       } else {
         args.runtimeState.explicitSeekOriginPlayState = null;
       }
-      return action;
     }
-    return null;
   }
 
   /**
@@ -707,16 +659,13 @@ export function createPlaybackBindingController(args: {
     // When the browser auto-seeks to a resume point and then auto-plays,
     // the play event is browser-initiated, not an explicit user play gesture.
     // Only block when the seek belongs to the CURRENT gesture
-    // (`lastUserGestureAt <= gestureAt`), meaning no newer user gesture has
-    // occurred since the seek. Compared against the seek's gesture and not `at`,
-    // which moves to the `seeked` event: a play the user asked for after a slow
-    // seek would otherwise look like it belonged to that seek and get guarded
-    // back into a pause.
+    // (lastUserGestureAt <= seek time), meaning no newer user gesture
+    // has occurred since the seek.
     const lastAction = args.runtimeState.lastExplicitUserAction;
     if (
       lastAction?.kind === "seek" &&
       monotonicNow() - lastAction.at < args.userGestureGraceMs &&
-      args.runtimeState.lastUserGestureAt <= lastAction.gestureAt
+      args.runtimeState.lastUserGestureAt <= lastAction.at
     ) {
       return false;
     }
@@ -1187,38 +1136,14 @@ export function createPlaybackBindingController(args: {
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "seek");
         }
-        // Only a `seeking` opens a seek, so only it may claim a fresh gesture.
-        // Whether the action was recorded at all IS the lifecycle: an echo or an
-        // unauthorized event leaves nothing in flight, and the `seeked` that
-        // follows then has no seek to complete.
-        const started = rememberExplicitUserAction("seek");
-        inFlightSeek = started
-          ? { startedAt: started.at, gestureAt: started.gestureAt }
-          : null;
+        rememberExplicitUserAction("seek");
         scheduleBroadcast(video, "seeking");
       },
       onSeeked: () => {
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "seek");
         }
-        const pending = inFlightSeek;
-        inFlightSeek = null;
-        // A `seeked` with nothing in flight records NOTHING. Falling back to a
-        // fresh seek was the remaining hole: an episode click makes the old
-        // element emit `pause`, which overwrites the seek action, and the late
-        // `seeked` would then re-open a seek attributed to that click — crediting
-        // the end that follows as a seek-to-end and auto-sharing the user's own
-        // destination to the room (#236). Declining to record is also the safe
-        // direction for the genuinely untracked cases (a `seeking` suppressed as
-        // an echo, or listeners attached mid-seek): the seek simply goes
-        // uncredited, which costs a convenience and never moves the room.
-        // A forced pause invalidates the seek it interrupted, same as elsewhere.
-        if (
-          pending &&
-          pending.startedAt > args.runtimeState.lastForcedPauseAt
-        ) {
-          rememberExplicitUserAction("seek", pending.gestureAt);
-        }
+        rememberExplicitUserAction("seek");
         scheduleBroadcast(video, "seeked", 120);
       },
       onRateChange: () => {
@@ -1285,15 +1210,6 @@ export function createPlaybackBindingController(args: {
       // whose paused state we never observed transitioning. The pause
       // classifiers use this timestamp to avoid reporting either as a user pause.
       args.runtimeState.lastVideoElementBoundAt = monotonicNow();
-      // A seek in flight on the PREVIOUS element can never be completed now, and
-      // letting it survive would hand its gesture to the next `seeked`. This must
-      // stay inside the `boundNewElement` guard: `start()` re-runs
-      // `attachPlaybackListeners` every `videoBindIntervalMs` against the SAME
-      // element, so clearing unconditionally would drop the record of any seek
-      // that outlives one poll — which is most of them — and the seek-to-end
-      // autoplay this whole mechanism exists to recognise would stop being
-      // credited.
-      inFlightSeek = null;
       // This poll is the one place that learns a `<video>` exists. Hydration
       // used to discover it by polling `document.querySelector("video")` on its
       // own 350ms timer — the same query this loop already runs at 250ms — and
@@ -1322,19 +1238,6 @@ export function createPlaybackBindingController(args: {
       }
     },
     attachPlaybackListeners,
-    attachPlaybackListenersAfterNavigation() {
-      // A navigation swaps the media even when the `<video>` survives (bangumi
-      // keeps one element across episodes), so a seek still awaiting its `seeked`
-      // belongs to a video that no longer exists. Its `seeked` may yet arrive and
-      // would otherwise be recorded as an explicit seek on the NEW page, credited
-      // to the previous page's gesture — enough for `guardUnexpectedResume` to
-      // block a play the new page should be allowed. `boundNewElement` cannot
-      // stand in for this: the element is frequently the same one.
-      // `lastForcedPauseAt` cannot either — `resetUserGestureState` zeroes it as
-      // part of the same navigation, so the guard on it is wide open here.
-      inFlightSeek = null;
-      attachPlaybackListeners();
-    },
     destroy() {
       if (videoBindingTimer !== null) {
         window.clearInterval(videoBindingTimer);

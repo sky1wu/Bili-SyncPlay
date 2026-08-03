@@ -2050,7 +2050,6 @@ test("navigation controller clears stale gesture state on in-room navigation", (
   runtimeState.lastExplicitUserAction = {
     kind: "play",
     at: 9999,
-    gestureAt: 9999,
   } satisfies ExplicitUserAction;
 
   let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";

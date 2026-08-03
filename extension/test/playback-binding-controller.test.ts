@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SharedVideo } from "@bili-syncplay/protocol";
-import {
-  createContentRuntimeState,
-  resetUserGestureState,
-} from "../src/content/runtime-state";
+import { createContentRuntimeState } from "../src/content/runtime-state";
 import { installClockStubs } from "./clock-stubs";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
 import { createRoomStateController } from "../src/content/room-state-controller";
@@ -109,7 +106,6 @@ test("playback binding controller forwards ratechange event source", async () =>
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "ratechange",
       at: 1_100,
-      gestureAt: 1_000,
     });
   } finally {
     dom.restore();
@@ -234,7 +230,6 @@ test("playback binding controller preserves explicit seek intent across immediat
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 1_100,
-      gestureAt: 1_000,
     });
   } finally {
     dom.restore();
@@ -840,7 +835,6 @@ test("playback binding controller allows manual play after a newer gesture follo
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "play",
       at: 1_200,
-      gestureAt: 1_180,
     });
   } finally {
     dom.restore();
@@ -3100,246 +3094,6 @@ test("playback binding controller suppresses the natural-end pause broadcast for
   }
 });
 
-test("playback binding controller does not credit a seek whose seeked event lands after a newer gesture", async () => {
-  const dom = installDomStub();
-  const runtimeState = createContentRuntimeState();
-  const sharedUrl = "https://www.bilibili.com/video/BVshared";
-  runtimeState.activeRoomCode = "ROOM42";
-  runtimeState.activeSharedUrl = sharedUrl;
-  runtimeState.pendingRoomStateHydration = false;
-  runtimeState.localMemberId = "member-1";
-  runtimeState.activeSharedByMemberId = "member-1";
-  runtimeState.intendedPlayState = "playing";
-  // The sharer dragged to the last seconds and then, while `seeked` was still
-  // pending on the decoder, clicked another episode. Their latest intent is the
-  // CLICK, so this end must not be credited as a seek-to-end — otherwise the
-  // navigation controller's seek exception waves the manual destination through
-  // and the sharer auto-shares their own detour to the whole room (#236).
-  // Driven through the real listeners because the defect lived in how
-  // `rememberExplicitUserAction` stamps a follow-up seek event: it re-stamped
-  // `at` past the click, and an `at` comparison then read as "a seek was the
-  // last thing the user did".
-  let now = 1_000;
-  runtimeState.lastUserGestureAt = 1_000; // the drag
-  runtimeState.lastUserGestureInPlayerAt = 1_000;
-  const originalPause = dom.video.pause;
-
-  const controller = createPlaybackBindingController({
-    runtimeState,
-    videoBindIntervalMs: 250,
-    userGestureGraceMs: 1_200,
-    initialRoomStatePauseHoldMs: 3_000,
-    bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
-    videoRebindBufferSignalMs: 1_000,
-    getSharedVideo: () => ({
-      videoId: "BVshared",
-      url: sharedUrl,
-      title: "Shared Video",
-      sharedByMemberId: "member-1",
-    }),
-    hasRecentRemoteStopIntent: () => false,
-    normalizeUrl: (url) => url ?? null,
-    getLastBroadcastAt: () => 0,
-    broadcastPlayback: async () => {},
-    cancelActiveSoftApply: () => {},
-    maintainActiveSoftApply: () => {},
-    applyPendingPlaybackApplication: () => {},
-    activatePauseHold: () => {},
-    debugLog: () => {},
-    getMonotonicNow: () => now,
-  });
-
-  dom.video.pause = () => {
-    dom.video.paused = true;
-    return Promise.resolve();
-  };
-
-  try {
-    controller.attachPlaybackListeners();
-
-    now = 1_010;
-    dom.listeners.get("seeking")?.(new Event("seeking"));
-    assert.equal(
-      runtimeState.lastExplicitUserAction?.gestureAt,
-      1_000,
-      "the seek is credited to the drag that started it",
-    );
-
-    // The user clicks another episode while `seeked` is still pending, and the
-    // old element emits the `pause` that click causes. That `pause` overwrites
-    // the recorded seek action — which is why "the last action happens to be a
-    // seek" cannot stand in for the seek's lifecycle.
-    now = 1_500;
-    runtimeState.lastUserGestureAt = 1_500;
-    dom.video.paused = true;
-    dom.listeners.get("pause")?.(new Event("pause"));
-    assert.equal(
-      runtimeState.lastExplicitUserAction?.kind,
-      "pause",
-      "the click's pause replaced the seek record",
-    );
-
-    // Deliberately past `userGestureGraceMs` (1_200) since `seeking` at 1_010:
-    // how long the decoder takes says nothing about whether this is still the
-    // same seek, and an elapsed-time test would hand the seek to the click here.
-    dom.video.paused = false;
-    now = 2_400;
-    dom.listeners.get("seeked")?.(new Event("seeked"));
-    assert.equal(
-      runtimeState.lastExplicitUserAction?.kind,
-      "seek",
-      "the completing event still records the seek it finishes",
-    );
-    assert.equal(
-      runtimeState.lastExplicitUserAction?.gestureAt,
-      1_000,
-      "the completing event keeps the seek's own gesture, not the click",
-    );
-
-    now = 2_600;
-    (dom.video as { ended?: boolean }).ended = true;
-    dom.video.paused = true;
-    dom.listeners.get("pause")?.(new Event("pause"));
-    await Promise.resolve();
-
-    assert.equal(runtimeState.sharedVideoNaturalEndUrl, sharedUrl);
-  } finally {
-    dom.video.pause = originalPause;
-    dom.restore();
-  }
-});
-
-test("playback binding controller keeps an in-flight seek across a re-bind poll of the same element", () => {
-  const dom = installDomStub();
-  const runtimeState = createContentRuntimeState();
-  let now = 1_000;
-  runtimeState.lastUserGestureAt = 1_000;
-  runtimeState.lastUserGestureInPlayerAt = 1_000;
-
-  const controller = createEchoHarness(runtimeState, () => now);
-
-  try {
-    controller.attachPlaybackListeners();
-
-    now = 1_010;
-    dom.listeners.get("seeking")?.(new Event("seeking"));
-
-    // `start()` re-runs `attachPlaybackListeners` every `videoBindIntervalMs`
-    // against the SAME element, and most seeks outlive one poll. Clearing the
-    // in-flight seek on every pass rather than only when a NEW element is bound
-    // would drop it here, and the seek-to-end autoplay would stop being credited
-    // — breaking the very case the marker exists for.
-    now = 1_300;
-    controller.attachPlaybackListeners();
-
-    // A buffering pause overwrites the recorded seek, so only the in-flight
-    // record can restore it. Without this the assertions below would pass on the
-    // `seeking` action alone and would not notice the poll dropping anything.
-    now = 1_400;
-    dom.video.paused = true;
-    dom.listeners.get("pause")?.(new Event("pause"));
-    assert.equal(runtimeState.lastExplicitUserAction?.kind, "pause");
-
-    dom.video.paused = false;
-    now = 1_600;
-    dom.listeners.get("seeked")?.(new Event("seeked"));
-
-    assert.equal(
-      runtimeState.lastExplicitUserAction?.kind,
-      "seek",
-      "the seek survives the re-bind poll and is restored by its seeked",
-    );
-    assert.equal(
-      runtimeState.lastExplicitUserAction?.gestureAt,
-      1_000,
-      "and keeps the gesture that started it",
-    );
-  } finally {
-    dom.restore();
-  }
-});
-
-test("playback binding controller drops an in-flight seek across a navigation on the same element", () => {
-  const dom = installDomStub();
-  const runtimeState = createContentRuntimeState();
-  let now = 1_000;
-  runtimeState.lastUserGestureAt = 1_000;
-  runtimeState.lastUserGestureInPlayerAt = 1_000;
-
-  const controller = createEchoHarness(runtimeState, () => now);
-
-  try {
-    controller.attachPlaybackListeners();
-
-    now = 1_010;
-    dom.listeners.get("seeking")?.(new Event("seeking"));
-
-    // The page navigates. Bangumi keeps ONE `<video>` across episodes, so the
-    // element is unchanged and `boundNewElement` stays false — but the media it
-    // holds is a different video, and the seek awaiting its `seeked` belongs to
-    // the one that is gone. The navigation path also runs `resetUserGestureState`,
-    // which zeroes `lastForcedPauseAt`, so that guard cannot catch this either.
-    now = 2_000;
-    resetUserGestureState(runtimeState);
-    controller.attachPlaybackListenersAfterNavigation();
-
-    // The user then does something on the NEW page. This is what makes the stale
-    // seek observable at all: with no gesture here the recording gate would
-    // refuse everything and the bug would hide.
-    now = 2_050;
-    runtimeState.lastUserGestureAt = 2_050;
-    runtimeState.lastUserGestureInPlayerAt = 2_050;
-    now = 2_060;
-    dom.video.paused = true;
-    dom.listeners.get("pause")?.(new Event("pause"));
-    assert.equal(runtimeState.lastExplicitUserAction?.kind, "pause");
-
-    // The previous page's `seeked` finally lands.
-    dom.video.paused = false;
-    now = 2_100;
-    dom.listeners.get("seeked")?.(new Event("seeked"));
-
-    assert.equal(
-      runtimeState.lastExplicitUserAction?.kind,
-      "pause",
-      "the previous page's seek is not resurrected over the new page's action",
-    );
-  } finally {
-    dom.restore();
-  }
-});
-
-test("playback binding controller records nothing for a seeked with no seek in flight", () => {
-  const dom = installDomStub();
-  const runtimeState = createContentRuntimeState();
-  let now = 5_000;
-  // No `seeking` was ever recorded — the listeners attached mid-seek, or it was
-  // suppressed as a programmatic echo. The only gesture around is an unrelated
-  // recent click. Opening a fresh seek here would credit that click with a seek
-  // it never made, and every "was a seek the last thing the user did?" reader
-  // (including the natural-end flag) would then answer yes.
-  runtimeState.lastUserGestureAt = 4_900;
-  runtimeState.lastUserGestureInPlayerAt = 4_900;
-
-  const controller = createEchoHarness(runtimeState, () => now);
-
-  try {
-    controller.attachPlaybackListeners();
-
-    now = 5_000;
-    dom.listeners.get("seeked")?.(new Event("seeked"));
-
-    assert.equal(
-      runtimeState.lastExplicitUserAction,
-      null,
-      "a seeked that completes nothing must not invent a seek",
-    );
-  } finally {
-    dom.restore();
-  }
-});
-
 test("playback binding controller flushes the sharer's terminal paused state when no autoplay-next follows", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
@@ -3872,7 +3626,6 @@ test("playback binding controller still records a gesture made during a programm
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 5_100,
-      gestureAt: 5_050,
     });
   } finally {
     dom.restore();
@@ -3897,7 +3650,6 @@ test("playback binding controller records user actions normally once the apply w
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 6_000,
-      gestureAt: 5_900,
     });
   } finally {
     dom.restore();
@@ -3926,7 +3678,6 @@ test("playback binding controller gives a same-tick gesture to the user, not the
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 5_100,
-      gestureAt: 5_000,
     });
   } finally {
     dom.restore();
@@ -4011,7 +3762,6 @@ test("a user seek that cancels an active rate catch-up is still recorded", async
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 1_100,
-      gestureAt: 1_000,
     });
 
     await Promise.resolve();
@@ -4065,7 +3815,6 @@ test("a user pause that cancels an active rate catch-up is still recorded", () =
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "pause",
       at: 1_100,
-      gestureAt: 1_000,
     });
     assert.deepEqual(runtimeState.lastExplicitPlaybackAction, {
       playState: "paused",
@@ -4407,7 +4156,6 @@ test("records explicit user actions on the monotonic clock by default", async ()
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "ratechange",
       at: 1_100,
-      gestureAt: 1_000,
     });
     assert.deepEqual(events, ["ratechange"]);
   } finally {
@@ -4468,7 +4216,6 @@ test("playback binding controller does not treat any recent gesture as a rate ta
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "ratechange",
       at: 5_000,
-      gestureAt: 4_500,
     });
     assert.deepEqual(reasons, []);
   } finally {

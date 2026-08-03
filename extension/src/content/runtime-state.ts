@@ -45,21 +45,6 @@ export type ExplicitUserActionKind = "play" | "pause" | "seek" | "ratechange";
 export interface ExplicitUserAction {
   kind: ExplicitUserActionKind;
   at: number;
-  /**
-   * The user gesture that authorized this action, as opposed to {@link at} which
-   * is when the media EVENT arrived. The two differ whenever the element lags the
-   * input, and a seek lags a lot: `seeking` fires at once but `seeked` waits for
-   * the decoder, so `at` gets re-stamped on the follow-up event — potentially
-   * past an unrelated gesture the user made in between. Anything asking "was a
-   * seek the last thing the user DID?" must read this, not `at` — `at` gets
-   * re-stamped past an episode click the user made in between, and every reader
-   * of it then reports a seek the user had already superseded (#236).
-   *
-   * Inherited by the `seeked` that completes a seek (the binding controller
-   * tracks that seek's lifetime), so the whole seek keeps pointing at the gesture
-   * that began it.
-   */
-  gestureAt: number;
 }
 
 export interface ProgrammaticPlaybackSignature {

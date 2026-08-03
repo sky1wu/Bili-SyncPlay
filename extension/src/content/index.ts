@@ -195,7 +195,7 @@ const navigationController = createNavigationController({
     festivalBridge.clearSnapshot();
   },
   attachPlaybackListeners: () =>
-    playbackBindingController.attachPlaybackListenersAfterNavigation(),
+    playbackBindingController.attachPlaybackListeners(),
   getVideoElement,
   pauseVideo,
   hydrateRoomState: () => syncController.hydrateRoomState(),
