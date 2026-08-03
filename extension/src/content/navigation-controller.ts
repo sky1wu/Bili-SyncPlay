@@ -1,4 +1,5 @@
 import {
+  hasGestureBeenRecorded,
   resetUserGestureState,
   type ContentRuntimeState,
 } from "./runtime-state";
@@ -299,11 +300,11 @@ export function createNavigationController(args: {
         ? (previousResolvedSharedVideoUrl ?? activeSharedUrl)
         : activeSharedUrl;
     const now = monotonicNow();
-    // Captured before `resetUserGestureState` below zeroes it, so the
+    // Captured before `resetUserGestureState` below clears it, so the
     // natural-end check can tell whether a gesture postdates the natural end.
     const lastUserGestureAt = args.runtimeState.lastUserGestureAt;
     const hadRecentUserGesture =
-      lastUserGestureAt > 0 &&
+      hasGestureBeenRecorded(lastUserGestureAt) &&
       now - lastUserGestureAt <= args.userGestureGraceMs;
     // We can only positively confirm the navigated page is a *different*
     // (non-shared) video when the room's shared URL and the navigated page URL
@@ -418,7 +419,7 @@ export function createNavigationController(args: {
       // pointer movement or scrolling. Erring toward not hijacking the room is
       // this file's established trade (see `navigatedFromSharedVideo` below).
       const gestureRefutesNaturalEnd =
-        lastUserGestureAt > 0 &&
+        hasGestureBeenRecorded(lastUserGestureAt) &&
         lastUserGestureAt >= naturalEndAt - args.sharedVideoNaturalEndWindowMs;
       // Four things bound the marker, and the last two are what make the wide
       // window safe:

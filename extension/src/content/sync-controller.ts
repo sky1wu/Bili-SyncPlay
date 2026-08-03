@@ -38,6 +38,7 @@ import {
 } from "./sync-guards";
 import { createSoftApplyController } from "./soft-apply-controller";
 import { createPendingLocalOverrideController } from "./pending-local-override";
+import { hasGestureBeenRecorded } from "./runtime-state";
 import type {
   ContentRuntimeState,
   LocalPlaybackEventSource,
@@ -223,7 +224,11 @@ export function createSyncController(args: {
       `intendedState=${args.runtimeState.intendedPlayState}`,
       `intendedRate=${args.runtimeState.intendedPlaybackRate.toFixed(2)}`,
       `explicitAction=${explicitAction?.kind ?? "none"}@${explicitAction?.at ?? 0}`,
-      `lastGestureAt=${args.runtimeState.lastUserGestureAt}`,
+      `lastGestureAt=${
+        hasGestureBeenRecorded(args.runtimeState.lastUserGestureAt)
+          ? args.runtimeState.lastUserGestureAt
+          : "never"
+      }`,
       `pendingOverride=${pending ? `${pending.kind}:${pending.seq}@${pending.url}` : "none"}`,
       `remoteFollow=${args.runtimeState.remoteFollowPlayingUrl ?? "none"}@${args.runtimeState.remoteFollowPlayingUntil}`,
       `suppressedRemote=${suppressed ? `${suppressed.playState}@${suppressed.url}` : "none"}`,

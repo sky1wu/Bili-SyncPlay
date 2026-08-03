@@ -1,5 +1,28 @@
 import type { PlaybackState, RoomState } from "@bili-syncplay/protocol";
 
+/**
+ * "This never happened" for a gesture timestamp measured on the content
+ * script's MONOTONIC clock (`performance.now()`, zero at document start).
+ *
+ * It cannot be `0`. Every reader of these fields asks an elapsed-time question
+ * — `now - at >= graceMs` ("no recent gesture") or `now - at < graceMs` ("a
+ * gesture just happened") — and under the epoch clock these fields used before
+ * #231/#233 the `0` sentinel answered both correctly, because `Date.now() - 0`
+ * is ~56 years. On the monotonic clock `0` is *document start*, so for the
+ * first `graceMs` of every page `now - 0 < graceMs`: every guard reads "the
+ * user just did something" and the whole load-paused protection is off exactly
+ * when a fresh page is autoplaying. `-Infinity` restores "infinitely long ago"
+ * under both polarities, and stays correct however the guard is phrased.
+ *
+ * Use {@link hasGestureBeenRecorded} rather than `at > 0` to test for presence.
+ */
+export const GESTURE_NEVER_AT = Number.NEGATIVE_INFINITY;
+
+/** Whether a gesture timestamp holds a real observation (see {@link GESTURE_NEVER_AT}). */
+export function hasGestureBeenRecorded(at: number): boolean {
+  return Number.isFinite(at);
+}
+
 export interface FestivalVideoSnapshot {
   videoId: string;
   url: string;
@@ -82,6 +105,10 @@ export interface ContentRuntimeState {
   intendedPlaybackRate: number;
   lastLocalIntentAt: number;
   lastLocalIntentPlayState: PlaybackState["playState"] | null;
+  /**
+   * Timestamp of the most recent document-level user gesture.
+   * {@link GESTURE_NEVER_AT} means never.
+   */
   lastUserGestureAt: number;
   /**
    * Timestamp of the most recent user gesture that lands inside the video player
@@ -90,6 +117,7 @@ export interface ContentRuntimeState {
    * popup that the document-level `lastUserGestureAt` also records. Used to
    * authorize manual playback of a non-shared video on a "load paused" page so a
    * stray gesture cannot wave the page-load autoplay through.
+   * {@link GESTURE_NEVER_AT} means never.
    */
   lastUserGestureInPlayerAt: number;
   /**
@@ -100,7 +128,8 @@ export interface ContentRuntimeState {
    * "load paused" pages, so speed keys must not feed it.
    *
    * This is the only positive evidence that something other than our own rate
-   * catch-up moved `playbackRate`; see `isRateControlGesture`. `0` means never.
+   * catch-up moved `playbackRate`; see `isRateControlGesture`.
+   * {@link GESTURE_NEVER_AT} means never.
    */
   lastRateControlGestureAt: number;
   lastExplicitPlaybackAction: ExplicitPlaybackAction | null;
@@ -297,9 +326,9 @@ export interface ContentRuntimeState {
  * into treating browser-initiated playback as a user action.
  */
 export function resetUserGestureState(state: ContentRuntimeState): void {
-  state.lastUserGestureAt = 0;
-  state.lastUserGestureInPlayerAt = 0;
-  state.lastRateControlGestureAt = 0;
+  state.lastUserGestureAt = GESTURE_NEVER_AT;
+  state.lastUserGestureInPlayerAt = GESTURE_NEVER_AT;
+  state.lastRateControlGestureAt = GESTURE_NEVER_AT;
   state.lastExplicitPlaybackAction = null;
   state.lastExplicitUserAction = null;
   state.explicitSeekOriginPlayState = null;
@@ -326,9 +355,9 @@ export function createContentRuntimeState(): ContentRuntimeState {
     intendedPlaybackRate: 1,
     lastLocalIntentAt: 0,
     lastLocalIntentPlayState: null,
-    lastUserGestureAt: 0,
-    lastUserGestureInPlayerAt: 0,
-    lastRateControlGestureAt: 0,
+    lastUserGestureAt: GESTURE_NEVER_AT,
+    lastUserGestureInPlayerAt: GESTURE_NEVER_AT,
+    lastRateControlGestureAt: GESTURE_NEVER_AT,
     lastExplicitPlaybackAction: null,
     explicitNonSharedPlaybackUrl: null,
     suppressedLocalEndPauseUrl: null,
