@@ -198,8 +198,10 @@ decides something has to know which of the two questions it is asking (#242):
   after the session does not, because session ids are never reused.
 - **Every retry budget is sized against the shutdown step that drains it.**
   `close_shared_runtime_store` and `flush_pending_room_event_publishes` carry
-  explicit timeouts, and an overrun is recorded as a FAILED step — so a shutdown
-  that merely waited out a retry exits the process non-zero. `close()` calls
+  explicit timeouts, and an overrun is logged at error level and reported as a
+  degraded step — so a shutdown that merely waited out a retry abandons writes it
+  could have landed (it does not exit non-zero; see the DEGRADED rule two bullets
+  down). `close()` calls
   `stopRetrying()` first, which cuts the backoffs in flight short AND drops
   writes that have not started, leaving at most ONE in-flight attempt; the step
   budget must exceed that attempt's own timeout. Raising `maxAttempts` or a
@@ -289,7 +291,7 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   against its own deadline, and it sets `stopping` BEFORE awaiting the sweep in
   flight so that sweep's serial drain gives way instead of running the whole
   backlog first. Bounding only the second one leaves the budget just as blown.
-  An overrun step is recorded as a failure AND lets the bus close under
+  An overrun step is logged loudly AND lets the bus close under
   in-flight publishes, which then delete their records as if they had landed.
   Each publish is capped on its own too: a deadline that only decides whether to
   START the next record bounds nothing when the bus hangs instead of rejecting.
