@@ -131,24 +131,42 @@ background path touches room state or playback timing.
   `expireBootstrapRoomStateWait` each carry this check; a new delivery path needs
   its own.
 
-- **A marker that stands for "the user did not cause this" needs a
-  gesture-postdates veto, not a recency window.** `lastUserGestureAt` is the only
-  evidence the content script has that a navigation/pause was user-driven, and
-  "recent" is the wrong question to ask of it: `userGestureGraceMs` is ~1.2s, so
-  any marker whose own window is wider than that has a gap where the user's
-  gesture is already forgotten while the marker still reads as fresh. Compare the
-  gesture against the marker's own reference instant instead — that instant is
-  when the non-user behaviour was decided, so anything the user pressed after it
-  is proof they chose the outcome. Every site in
-  `playback-binding-controller` already pairs its window this way
-  (`lastUserGestureAt > lastForcedPauseAt`, `lastUserGestureAt <= lastAction.at`);
-  `navigatedFromSharedVideoEnd` was the one exception, and #236 is what widening
-  its window to 10s exposed — a manual episode click whose SPA navigation
-  resolved slower than the grace was auto-shared to the whole room. Note the
-  veto is only safe because `lastUserGestureAt` is refreshed by DISCRETE input
-  (`gesture-tracker.ts`: pointerdown/mousedown/click/touchstart/keydown/popstate)
-  and never by pointer movement or scrolling — a tracker that recorded either
-  would turn passive viewing into a veto and silently disable the marker.
+- **A marker that stands for "the user did not cause this" must ask about
+  gestures over ITS OWN window, and admit only the gesture that produced it.**
+  `lastUserGestureAt` is the only evidence the content script has that a
+  navigation/pause was user-driven, and `userGestureGraceMs` (~1.2s) is the wrong
+  span to ask over: any marker whose window is wider has a gap where the user's
+  gesture is already forgotten while the marker still reads as fresh. The
+  question is "could this gesture be what caused what I am seeing now?", so the
+  span must be the marker's window — once it is willing to wait 10s for a
+  countdown it owes the same patience to a slow-resolving SPA click.
+  **Anchor that span on the marker's instant, not on `now`.** Ageing the gesture
+  from `now` while the marker ages from its own timestamp leaves a sliver at the
+  tail where the marker is still valid and the gesture has just aged out. The
+  marker is valid for events in `[mark, mark + window]`, and a gesture that could
+  have caused any of them lies in `[mark - window, now]` — so that is the span,
+  and `now` drops out of the test entirely. Its lower bound is load-bearing in
+  the other direction: without it, pressing play at the start of a 24-minute
+  episode would veto that episode's autoplay forever.
+  Within that span, treat EVERY gesture as refuting the marker except the one
+  the marker itself was born from. `gestureRefutesNaturalEnd` is the worked
+  example, and both clauses of its exception cost a review round:
+  `sharedVideoNaturalEndAfterSeek` (else a plain click shortly BEFORE the video
+  ended — `ended` firing after the click — is waved through) AND
+  `lastUserGestureAt <= sharedVideoNaturalEndAt` (else a click AFTER the end
+  reuses a seek flag left set by that earlier end). A postdates-only veto looks
+  sufficient and is not: #236 tried it, and the pre-end click walked straight
+  through. Note the whole scheme is only safe because `lastUserGestureAt` is
+  refreshed by DISCRETE input (`gesture-tracker.ts`:
+  pointerdown/mousedown/click/touchstart/keydown/popstate) and never by pointer
+  movement or scrolling — a tracker that recorded either would turn passive
+  viewing into a veto and silently disable the marker. The cost is a false
+  negative (a user who clicks anything near the end loses that auto-share), which
+  is the direction this code errs in on purpose: "we err on the side of not
+  hijacking the room".
+  The sibling sites in `playback-binding-controller` pair their windows the same
+  way (`lastUserGestureAt > lastForcedPauseAt`, `lastUserGestureAt <=
+lastAction.at`); `navigatedFromSharedVideoEnd` was the one that did not.
 
 - **A window constant that two behaviours share is two constants.**
   `INITIAL_ROOM_STATE_PAUSE_HOLD_MS` was both "how long we suppress a page-load

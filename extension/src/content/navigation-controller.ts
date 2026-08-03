@@ -375,6 +375,16 @@ export function createNavigationController(args: {
       // and the sharer auto-shared the user's own detour to the whole room (a
       // non-sharer got force-paused).
       //
+      // Both spans are anchored to `sharedVideoNaturalEndAt`, NOT to `now`. Ageing
+      // the gesture from `now` while the marker ages from the end leaves a sliver
+      // where the marker is still valid and the gesture has just aged out (click at
+      // 1s, `ended` at 2s, navigation at 11.5s: marker 9.5s old and live, gesture
+      // 10.5s old and forgotten) — the same manual click walks through again. The
+      // marker is valid for navigations in `[end, end + window]`, and a gesture
+      // that could have caused any of those lies in `[end - window, now]`, so that
+      // is the span to veto over. It subsumes "recent with respect to now" and
+      // removes `now` from this test entirely.
+      //
       // Within that span exactly ONE gesture is compatible with an autoplay: the
       // seek that produced the end itself. That is this file's existing rule (see
       // `recentGestureIsSeekToEnd`) — it was just being applied over the 1.2s
@@ -394,7 +404,9 @@ export function createNavigationController(args: {
       // pointer movement or scrolling.
       const gestureRefutesNaturalEnd =
         lastUserGestureAt > 0 &&
-        now - lastUserGestureAt < args.sharedVideoNaturalEndWindowMs &&
+        lastUserGestureAt >=
+          args.runtimeState.sharedVideoNaturalEndAt -
+            args.sharedVideoNaturalEndWindowMs &&
         !(
           args.runtimeState.sharedVideoNaturalEndAfterSeek &&
           lastUserGestureAt <= args.runtimeState.sharedVideoNaturalEndAt
