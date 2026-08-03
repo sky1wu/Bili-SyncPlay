@@ -603,3 +603,83 @@ test("share controller falls back to the element rate with no catch-up running",
     dom.restore();
   }
 });
+
+test("stops falling back to the frozen festival address bar once a snapshot has resolved", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/festival/MyMuji?bvid=BVfrozen",
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+  // The festival snapshot resolves the video actually playing, then goes away —
+  // the navigation controller clears it on every autoplay-next so the bridge
+  // re-resolves. During that window the address bar still names the video the
+  // page was OPENED with, which is not what is playing.
+  let snapshot: {
+    videoId: string;
+    url: string;
+    title: string;
+    updatedAt: number;
+    pathname?: string;
+  } | null = {
+    videoId: "BVplaying:2",
+    url: "https://www.bilibili.com/video/BVplaying?cid=2",
+    title: "Playing Video",
+    updatedAt: 1_000,
+    pathname: "/festival/MyMuji",
+  };
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => snapshot,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVplaying?cid=2",
+    );
+
+    snapshot = null;
+
+    // Answering `null` ("not known yet") is what routes callers to their
+    // unresolved-identity paths. Answering `/video/BVfrozen` instead reads as a
+    // different, non-shared video and gets the page force-paused.
+    assert.equal(controller.getSharedVideo(), null);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("still resolves the festival address bar before any snapshot has resolved", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/festival/MyMuji?bvid=BVshared&cid=99",
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVshared?cid=99",
+    );
+  } finally {
+    dom.restore();
+  }
+});

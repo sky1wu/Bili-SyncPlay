@@ -5,6 +5,7 @@ import {
   resolvePageSharedVideo,
 } from "./page-video";
 import type { ContentRuntimeState } from "./runtime-state";
+import { isAddressBarOpaqueVideoUrl } from "./video-identity";
 
 export interface ShareController {
   getSharedVideo(): SharedVideo | null;
@@ -188,6 +189,31 @@ export function createShareController(args: {
     });
   }
 
+  /**
+   * The address-bar-opaque pathname whose in-player identity a snapshot has
+   * already resolved at least once. From that point on the address bar's frozen
+   * `?bvid=` is known to be stale for this page — see
+   * {@link PageVideoSource.addressBarIdentityRefuted}. Keyed by pathname so
+   * leaving the page (a different festival, or any other route) starts over.
+   */
+  let snapshotResolvedPathname: string | null = null;
+
+  function rememberSnapshotResolved(pathname: string, pageUrl: string): void {
+    if (isAddressBarOpaqueVideoUrl(pageUrl)) {
+      snapshotResolvedPathname = normalizeCachedPagePathname(pathname);
+    }
+  }
+
+  function hasRefutedAddressBarIdentity(
+    pathname: string,
+    pageUrl: string,
+  ): boolean {
+    return (
+      isAddressBarOpaqueVideoUrl(pageUrl) &&
+      snapshotResolvedPathname === normalizeCachedPagePathname(pathname)
+    );
+  }
+
   function getSharedVideo(): SharedVideo | null {
     const festivalSnapshot = args.getFestivalSnapshot();
     const pathname = window.location.pathname;
@@ -206,6 +232,9 @@ export function createShareController(args: {
             title: festivalSnapshot.title,
           }
         : null;
+    if (matchingFestivalSnapshot) {
+      rememberSnapshotResolved(pathname, pageUrl);
+    }
     return resolvePageSharedVideo({
       pageUrl,
       pathname,
@@ -214,20 +243,30 @@ export function createShareController(args: {
       currentPartTitle: currentPart.title,
       pageSnapshot: matchingFestivalSnapshot,
       festivalSnapshot: matchingFestivalSnapshot,
+      addressBarIdentityRefuted: hasRefutedAddressBarIdentity(
+        pathname,
+        pageUrl,
+      ),
     });
   }
 
   async function refreshFestivalSnapshot(
     maxAgeMs = args.festivalSnapshotTtlMs,
   ): Promise<SharedVideo | null> {
+    const pathname = window.location.pathname;
+    const pageUrl = window.location.href.split("#")[0];
     const nextSnapshot = await args.refreshFestivalBridge({
-      pathname: window.location.pathname,
-      pageUrl: window.location.href.split("#")[0],
+      pathname,
+      pageUrl,
       maxAgeMs,
     });
     if (!nextSnapshot) {
       return null;
     }
+    // Recorded here as well as in `getSharedVideo`: a refresh is the
+    // authoritative resolution, and it can happen while no caller is reading the
+    // cached snapshot — the address bar is stale from this moment on either way.
+    rememberSnapshotResolved(pathname, pageUrl);
     args.debugLog(
       `Page video snapshot detected id=${nextSnapshot.videoId} title=${nextSnapshot.title} url=${nextSnapshot.url}`,
     );
