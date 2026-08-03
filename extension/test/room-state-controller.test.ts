@@ -169,3 +169,77 @@ test("leaving a room clears the hydration backoff for the next one", () => {
     "and the new room still gets its bootstrap retry",
   );
 });
+
+// The natural-end marker's validity window is wider than Bilibili's next-video
+// countdown (`SHARED_VIDEO_NATURAL_END_WINDOW_MS`, #236), so what keeps a stale
+// end from being read as the new room's autoplay is that leaving/switching wipes
+// it — not that it expires quickly. These two guard that wipe at the real entry
+// point; without them the room-scoped cleanup could stop clearing these fields
+// and only an integration-level bug would reveal it.
+function seedNaturalEndMarker(
+  runtimeState: ReturnType<typeof createContentRuntimeState>,
+): void {
+  runtimeState.activeSharedUrl = sharedUrl;
+  runtimeState.activeSharedByMemberId = "self";
+  runtimeState.sharedVideoNaturalEndUrl = sharedUrl;
+  runtimeState.sharedVideoNaturalEndAt = 9_000;
+}
+
+function assertNaturalEndMarkerCleared(
+  runtimeState: ReturnType<typeof createContentRuntimeState>,
+  context: string,
+): void {
+  assert.equal(
+    runtimeState.sharedVideoNaturalEndUrl,
+    null,
+    `${context} must clear the natural-end URL`,
+  );
+  assert.equal(
+    runtimeState.sharedVideoNaturalEndAt,
+    0,
+    `${context} must clear the natural-end timestamp`,
+  );
+}
+
+test("switching rooms clears the shared video's natural-end marker", () => {
+  const harness = createController([]);
+
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM01",
+    connected: true,
+    memberId: "self",
+    rttMs: 10,
+  });
+  seedNaturalEndMarker(harness.runtimeState);
+  harness.runtimeState.hasReceivedInitialRoomState = true;
+
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM02",
+    connected: true,
+    memberId: "self",
+    rttMs: 10,
+  });
+
+  assertNaturalEndMarkerCleared(harness.runtimeState, "a room switch");
+});
+
+test("leaving a room clears the shared video's natural-end marker", () => {
+  const harness = createController([]);
+
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM01",
+    connected: true,
+    memberId: "self",
+    rttMs: 10,
+  });
+  seedNaturalEndMarker(harness.runtimeState);
+
+  harness.controller.handleSyncStatus({
+    roomCode: null,
+    connected: true,
+    memberId: null,
+    rttMs: null,
+  });
+
+  assertNaturalEndMarkerCleared(harness.runtimeState, "leaving a room");
+});

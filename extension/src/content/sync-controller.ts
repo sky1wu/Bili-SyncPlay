@@ -352,7 +352,6 @@ export function createSyncController(args: {
     args.runtimeState.sharerEndedSuppressionArmedAt = 0;
     args.runtimeState.sharedVideoNaturalEndUrl = null;
     args.runtimeState.sharedVideoNaturalEndAt = 0;
-    args.runtimeState.sharedVideoNaturalEndAfterSeek = false;
     args.debugLog(`Reset playback sync state: ${reason}`);
   }
 

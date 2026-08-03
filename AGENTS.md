@@ -131,6 +131,59 @@ background path touches room state or playback timing.
   `expireBootstrapRoomStateWait` each carry this check; a new delivery path needs
   its own.
 
+- **A marker that stands for "the user did not cause this" must ask about
+  gestures over ITS OWN window, and must not carve out exceptions.**
+  `lastUserGestureAt` is the only evidence the content script has that a
+  navigation/pause was user-driven, and `userGestureGraceMs` (~1.2s) is the wrong
+  span to ask over: any marker whose window is wider has a gap where the user's
+  gesture is already forgotten while the marker still reads as fresh. The
+  question is "could this gesture be what caused what I am seeing now?", so the
+  span must be the marker's window — once it is willing to wait 10s for a
+  countdown it owes the same patience to a slow-resolving SPA click.
+  **Anchor that span on the marker's instant, not on `now`.** Ageing the gesture
+  from `now` while the marker ages from its own timestamp leaves a sliver at the
+  tail where the marker is still valid and the gesture has just aged out. The
+  marker is valid for events in `[mark, mark + window]`, and a gesture that could
+  have caused any of them lies in `[mark - window, now]` — so that is the span,
+  and `now` drops out of the test entirely. Its lower bound is load-bearing in
+  the other direction: without it, pressing play at the start of a 24-minute
+  episode would veto that episode's autoplay forever.
+  **Within that span every gesture refutes the marker, with no exception**, even
+  though some gestures genuinely are compatible with it — a sharer's drag to the
+  last seconds really does end in an autoplay. #236 spent five review rounds
+  trying to admit exactly that one gesture, and each fix alternated the failure:
+  admit a manual episode click (the sharer pushes a private choice to the whole
+  room), then reject a real seek-to-end (the room silently stops advancing). The
+  signals cannot separate them — both are discrete input, a click can land
+  between `seeking` and `seeked`, and a drag's own release `click` postdates the
+  `pointerdown` that began it. The rule is therefore the blunt one, and the cost
+  is written down as a test
+  ("...the accepted cost of having no gesture exception"): a sharer who drags to
+  the end shares the next episode manually, once. Re-introducing the exception
+  re-opens the alternation.
+  The whole scheme is only safe because `lastUserGestureAt` is refreshed by
+  DISCRETE input (`gesture-tracker.ts`:
+  pointerdown/mousedown/click/touchstart/keydown/popstate) and never by pointer
+  movement or scrolling — a tracker that recorded either would turn passive
+  viewing into a veto and silently disable the marker.
+  **A one-shot marker must be consumed, not merely bounded.** The evidence that
+  refutes it is shorter-lived than the marker itself (`resetUserGestureState`
+  zeroes `lastUserGestureAt` on every navigation), so a marker that outlives the
+  navigation it explains gets a second chance with its objector gone. Read it
+  into locals and clear it at the top of the handler.
+
+- **A window constant that two behaviours share is two constants.**
+  `INITIAL_ROOM_STATE_PAUSE_HOLD_MS` was both "how long we suppress a page-load
+  autoplay" and "how long a natural-end marker stays valid" (#236). Nothing
+  connected the two, so the second was silently pinned to a value chosen for the
+  first — and 3s is shorter than Bilibili's ~5s next-video countdown, which made
+  the marker expire before every autoplay it existed to catch. When a constant is
+  read by a second call site asking a different question, split it and state what
+  each value is measured against. Values that a regression test must assert
+  against live in `extension/src/content/timing-constants.ts`, not in
+  `content/index.ts`: a test that re-types the number passes just as happily
+  after someone edits the shipped one.
+
 ### Share ownership is derived, and deltas do not carry it
 
 `sharedVideo.sharedByMemberId` is written once, at `video:share`, and is a
