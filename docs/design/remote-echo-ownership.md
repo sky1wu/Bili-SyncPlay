@@ -408,7 +408,7 @@ this document.
 
 - [PR #220](https://github.com/sky1wu/Bili-SyncPlay/pull/220) — server side: a steady tick
   no longer refreshes the playback veto window
-- "Playback timing invariants" in `AGENTS.md`. Note the split this design needs on top of
+- "Playback timing invariants" in [`docs/reference/invariants.md`](../reference/invariants.md#playback-timing-invariants). Note the split this design needs on top of
   that rule: `appliedAtLocal` is a **wall-clock** instant used only for ordering against
   gesture timestamps (which live in the same domain), while every _duration_ — the backstop
   age — is measured on `appliedAtMonotonic` / `performance.now()`. Neither is ever mixed

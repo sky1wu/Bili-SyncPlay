@@ -338,7 +338,7 @@ Phase 1 的一次实现写完后被撤回：四轮评审共提出 11 条问题�
 
 - [PR #220](https://github.com/sky1wu/Bili-SyncPlay/pull/220) —— 服务端侧：steady tick
   不再刷新播放否决窗口
-- `AGENTS.md` 的「Playback timing invariants」。注意本设计在那条规则之上还需要拆分：
+- [`docs/reference/invariants.zh-CN.md`](../reference/invariants.zh-CN.md) 的「播放计时不变量」。注意本设计在那条规则之上还需要拆分：
   `appliedAtLocal` 是**墙钟**时刻，只用于与手势时间戳（同域）比较先后；而一切**时长**
   ——兜底 age——都用 `appliedAtMonotonic` / `performance.now()` 计量。两者都不与
   `serverTime` 混用。

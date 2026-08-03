@@ -95,7 +95,7 @@ Membership changes are version-gated (`MEMBER_DELTA_PROTOCOL_VERSION = 2` in `se
 Two rules keep it sound, neither of which the type system enforces:
 
 - **Computed at every send, never stored.** An age is only true at the instant it is sent; a stored one is a timestamp in disguise. That is why it lives on the `room:state` payload (`RoomStatePayload`) rather than inside `PlaybackState`, which the server persists and clients send back in `playback:update`.
-- **A duration, never a timestamp.** A duration is safe across two disagreeing clocks — the receiver only adds it to an anchor of its own. A timestamp would force the receiver to subtract a server time from a local one, which measures the clock disagreement rather than elapsed time (see the playback timing invariants in [AGENTS.md](../../AGENTS.md)).
+- **A duration, never a timestamp.** A duration is safe across two disagreeing clocks — the receiver only adds it to an anchor of its own. A timestamp would force the receiver to subtract a server time from a local one, which measures the clock disagreement rather than elapsed time (see the [playback timing invariants](./invariants.md#playback-timing-invariants)).
 
 Receivers subtract it from the message's local arrival time to get the anchor the position is extrapolated from (`extension/src/background/clock-sync.ts`), ignoring values that are absent (legacy server), negative, or implausibly large. Absent means "assume current", the pre-#212 behaviour.
 
