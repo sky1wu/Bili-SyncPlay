@@ -3235,15 +3235,18 @@ test("playback binding controller does not credit a seek whose seeked event land
     now = 1_500;
     runtimeState.lastUserGestureAt = 1_500;
 
-    now = 1_700;
+    // Deliberately past `userGestureGraceMs` (1_200) since `seeking` at 1_010:
+    // how long the decoder takes says nothing about whether this is still the
+    // same seek, and an elapsed-time test would hand the seek to the click here.
+    now = 2_400;
     dom.listeners.get("seeked")?.(new Event("seeked"));
     assert.equal(
       runtimeState.lastExplicitUserAction?.gestureAt,
       1_000,
-      "the follow-up event keeps the seek's own gesture, not the click",
+      "the completing event keeps the seek's own gesture, not the click",
     );
 
-    now = 1_900;
+    now = 2_600;
     (dom.video as { ended?: boolean }).ended = true;
     dom.video.paused = true;
     dom.listeners.get("pause")?.(new Event("pause"));
