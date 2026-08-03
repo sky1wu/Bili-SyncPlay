@@ -4944,3 +4944,89 @@ test("an unconfirmed removal of the last member still empties the room", async (
     "the room the leaver just emptied must still be scheduled for expiry",
   );
 });
+
+test("room service meters a reaper sweep by rooms, not by sweeps", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const reclaimed: number[] = [];
+  const codes = ["ROOM01", "ROOM02"];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    metricsCollector: {
+      recordRoomsExpiredDeleted: (roomCount) => reclaimed.push(roomCount),
+    },
+    now: () => currentTime,
+    createRoomCode: () => codes.shift() ?? "ROOM99",
+  });
+
+  for (const id of ["owner-1", "owner-2"]) {
+    const owner = createSession(id);
+    await service.createRoomForSession(owner, "Alice");
+    await service.leaveRoomForSession(owner);
+  }
+
+  currentTime = 7_000;
+  assert.equal(await service.deleteExpiredRooms(), 2);
+
+  // One sweep, two rooms. The reaper's log event fires once here, which is why
+  // counting it cannot be compared against room creations.
+  assert.deepEqual(reclaimed, [2]);
+});
+
+test("room service meters a room reclaimed by the lazy read path", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const reclaimed: number[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    metricsCollector: {
+      recordRoomsExpiredDeleted: (roomCount) => reclaimed.push(roomCount),
+    },
+    now: () => currentTime,
+    createRoomCode: () => "ROOM01",
+  });
+
+  const owner = createSession("owner");
+  const { room } = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+
+  // Someone comes back after the TTL but before the next sweep: the read
+  // deletes the room itself, and the reaper never sees that code again.
+  currentTime = 7_000;
+  await assert.rejects(
+    service.joinRoomForSession(
+      createSession("latecomer"),
+      room.code,
+      room.joinToken,
+      "Bob",
+    ),
+  );
+
+  assert.equal(await roomStore.getRoom(room.code), null);
+  assert.deepEqual(reclaimed, [1]);
+  // The sweep that follows must not count the same room a second time.
+  assert.equal(await service.deleteExpiredRooms(), 0);
+  assert.deepEqual(reclaimed, [1, 0]);
+});

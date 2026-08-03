@@ -19,6 +19,10 @@ export function createRoomReaper(options: {
     try {
       const deletedCount = await options.deleteExpiredRooms(now());
       if (deletedCount > 0) {
+        // Once per sweep, not once per room: this event answers "is the reaper
+        // still collecting", and its `deletedCount` field does not survive into
+        // events_total. The room count is metered in `room-service`, which is
+        // also where the lazy read-path expiry lives.
         options.logEvent("room_expired_deleted", {
           deletedCount,
           result: "ok",

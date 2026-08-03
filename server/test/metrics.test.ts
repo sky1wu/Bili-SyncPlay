@@ -215,6 +215,65 @@ test("metrics collector renders event counters, histograms, and redis failure co
   );
 });
 
+test("metrics collector counts reclaimed rooms apart from reaper sweeps", async () => {
+  const metrics = createMetricsCollector({
+    runtimeStore: createInMemoryRuntimeStore(() => 0),
+    roomStore: {
+      async countRooms() {
+        return 0;
+      },
+    },
+  });
+
+  // Pre-seeded to 0 so "the reaper has not collected anything yet" is
+  // distinguishable from "metric absent" — the difference between a young
+  // process and a wedged reaper.
+  assert.match(
+    await metrics.render(),
+    /^bili_syncplay_rooms_expired_deleted_total 0$/m,
+  );
+
+  // Two sweeps, five rooms. The event counter these panels used to read says
+  // 2 for exactly this history, which is why the room count needs its own
+  // series before it can be rated against room_created_total.
+  metrics.recordEvent("room_expired_deleted");
+  metrics.recordRoomsExpiredDeleted(3);
+  metrics.recordEvent("room_expired_deleted");
+  metrics.recordRoomsExpiredDeleted(2);
+
+  const rendered = await metrics.render();
+  assert.match(rendered, /^bili_syncplay_rooms_expired_deleted_total 5$/m);
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_events_total{event="room_expired_deleted"} 2',
+    ),
+    true,
+  );
+});
+
+test("metrics collector refuses room counts that would rewind the counter", async () => {
+  const metrics = createMetricsCollector({
+    runtimeStore: createInMemoryRuntimeStore(() => 0),
+    roomStore: {
+      async countRooms() {
+        return 0;
+      },
+    },
+  });
+
+  metrics.recordRoomsExpiredDeleted(4);
+  for (const bogus of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    metrics.recordRoomsExpiredDeleted(bogus);
+  }
+
+  // A counter that moves backwards or lands on NaN makes every rate() over it
+  // useless, so a nonsense sweep result is dropped rather than added.
+  assert.match(
+    await metrics.render(),
+    /^bili_syncplay_rooms_expired_deleted_total 4$/m,
+  );
+});
+
 test("metrics collector can rebind to the effective runtime store", async () => {
   const localRuntimeStore = createInMemoryRuntimeStore(() => 0);
   const sharedRuntimeStore = createInMemoryRuntimeStore(() => 0);

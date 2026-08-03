@@ -173,6 +173,7 @@ export async function createSyncServer(
       ),
     generateToken,
     logEvent,
+    metricsCollector,
     now,
   });
 

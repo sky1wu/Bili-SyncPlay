@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ActiveRoomRegistry } from "./active-room-registry.js";
+import type { MetricsCollector } from "./admin/metrics.js";
 import {
   normalizeBilibiliUrl,
   type ClientMessage,
@@ -139,6 +140,12 @@ export function createRoomService(options: {
   createRoomCode?: () => string;
   generateToken: () => string;
   logEvent: LogEvent;
+  /**
+   * Meters rooms reclaimed because they expired. Both expiry paths live in this
+   * file, so this is the only layer that sees all of them; the reaper's log
+   * event fires once per sweep and cannot answer "how many rooms".
+   */
+  metricsCollector?: Pick<MetricsCollector, "recordRoomsExpiredDeleted">;
   now?: () => number;
   resolveActiveRoom?: (roomCode: string) => Promise<ActiveRoom | null>;
   resolveMemberIdByToken?: (
@@ -507,6 +514,10 @@ export function createRoomService(options: {
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
       await roomStore.deleteRoom(code);
+      // Counted here as well as in the sweep: a room read between its expiry
+      // instant and the next pass dies on this path instead, and leaving it out
+      // would make reclamations look like they trail room creations forever.
+      options.metricsCollector?.recordRoomsExpiredDeleted(1);
       // Same helper as the reaper: it refuses to tear down a code that has
       // already been recycled, and queues a failed teardown for retry.
       await collectRuntimeStateForDeletedRooms([code]);
@@ -1882,6 +1893,10 @@ export function createRoomService(options: {
 
     async deleteExpiredRooms(currentTime = now()) {
       const deletedCodes = await roomStore.deleteExpiredRooms(currentTime);
+      // Only this pass's own codes. The backlog below is runtime cleanup owed
+      // for rooms whose persisted record died in an earlier pass — counting it
+      // would meter the same room twice.
+      options.metricsCollector?.recordRoomsExpiredDeleted(deletedCodes.length);
       // Retries first, then this pass's own codes. The reaper is the only path
       // that deletes a room nobody touches again, so it is also the only chance
       // to collect the runtime state that outlives it — member tokens survive a

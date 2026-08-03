@@ -104,6 +104,12 @@ export type MetricsCollector = {
   observeRedisRoomEventBusPublishDuration: (durationMs: number) => void;
   observeRedisRoomEventBusPublishFailure: () => void;
   recordRoomEventPublishDropped: (eventType: RoomEventType) => void;
+  /**
+   * Rooms collected by one expiry sweep. Counts ROOMS; the sibling
+   * `events_total{event="room_expired_deleted"}` counts SWEEPS, because the
+   * reaper logs once per pass no matter how many rooms that pass removed.
+   */
+  recordRoomsExpiredDeleted: (roomCount: number) => void;
   render: () => Promise<string>;
 };
 
@@ -207,6 +213,10 @@ export function createMetricsCollector(options: {
   };
   const roomEventPublishDroppedCounter: CounterMetric = {
     help: "Total room event publishes dropped after backpressure timeout, grouped by event type",
+    samples: new Map(),
+  };
+  const roomsExpiredDeletedCounter: CounterMetric = {
+    help: "Total rooms deleted by the expiry reaper",
     samples: new Map(),
   };
   const messageDurationHistogram: HistogramMetric = {
@@ -458,6 +468,15 @@ export function createMetricsCollector(options: {
         "bili_syncplay_room_joined_total",
         ensureCounterSample(eventCounter, { event: "room_joined" }).value,
       ),
+      // Rooms, not sweeps: events_total{event="room_expired_deleted"} counts
+      // reaper passes that collected at least one room, which is a different
+      // unit from room_created_total and must not be rated against it.
+      "# HELP bili_syncplay_rooms_expired_deleted_total Total rooms deleted by the expiry reaper",
+      "# TYPE bili_syncplay_rooms_expired_deleted_total counter",
+      formatMetricLine(
+        "bili_syncplay_rooms_expired_deleted_total",
+        ensureCounterSample(roomsExpiredDeletedCounter, {}).value,
+      ),
       "# HELP bili_syncplay_ws_connection_rejected_total Total rejected websocket upgrades",
       "# TYPE bili_syncplay_ws_connection_rejected_total counter",
       formatMetricLine(
@@ -608,6 +627,15 @@ export function createMetricsCollector(options: {
       incrementCounter(roomEventPublishDroppedCounter, {
         event_type: eventType,
       });
+    },
+    recordRoomsExpiredDeleted(roomCount) {
+      // A counter that ever moves backwards breaks every rate() over it, so a
+      // sweep that reports something other than a whole positive number is
+      // dropped rather than added.
+      if (!Number.isInteger(roomCount) || roomCount <= 0) {
+        return;
+      }
+      incrementCounter(roomsExpiredDeletedCounter, {}, roomCount);
     },
     render,
   };
