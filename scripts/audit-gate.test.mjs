@@ -5,10 +5,25 @@ import {
   collectAuditFindings,
   evaluateAuditGate,
   formatNpmAuditErrorMessage,
+  getNpmAuditInvocation,
   normalizeAllowlist,
 } from "./audit-gate.mjs";
 
 const NOW = new Date("2026-04-24T12:00:00.000Z");
+
+test("getNpmAuditInvocation runs npm through Node on Windows", () => {
+  assert.deepEqual(
+    getNpmAuditInvocation("win32", "C:\\node\\node.exe", "C:\\npm\\npm-cli.js"),
+    {
+      command: "C:\\node\\node.exe",
+      prefixArgs: ["C:\\npm\\npm-cli.js"],
+    },
+  );
+  assert.deepEqual(getNpmAuditInvocation("linux"), {
+    command: "npm",
+    prefixArgs: [],
+  });
+});
 
 function createAuditReport() {
   return {

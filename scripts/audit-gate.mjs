@@ -320,10 +320,35 @@ function loadJsonFile(filePath, fallback) {
   return JSON.parse(content);
 }
 
+export function getNpmAuditInvocation(
+  platform = process.platform,
+  nodeExecutable = process.execPath,
+  npmExecPath = process.env.npm_execpath,
+) {
+  if (platform !== "win32") {
+    return { command: "npm", prefixArgs: [] };
+  }
+
+  return {
+    command: nodeExecutable,
+    prefixArgs: [
+      npmExecPath ??
+        path.join(
+          path.dirname(nodeExecutable),
+          "node_modules",
+          "npm",
+          "bin",
+          "npm-cli.js",
+        ),
+    ],
+  };
+}
+
 function runNpmAudit(auditLevel) {
+  const { command, prefixArgs } = getNpmAuditInvocation();
   const result = spawnSync(
-    "npm",
-    ["audit", "--json", `--audit-level=${auditLevel}`],
+    command,
+    [...prefixArgs, "audit", "--json", `--audit-level=${auditLevel}`],
     {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
