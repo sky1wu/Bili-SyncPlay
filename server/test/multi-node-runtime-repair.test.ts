@@ -74,6 +74,7 @@ test("offline node sessions are reaped from the global room view after heartbeat
       ghostSession,
       ghostSession.memberToken ?? "offline-member-token",
     );
+    await runtimeStore.flush?.();
     await runtimeStore.heartbeatNode({
       instanceId: "node-crashed",
       version: "0.9.0-node-crashed-test",
