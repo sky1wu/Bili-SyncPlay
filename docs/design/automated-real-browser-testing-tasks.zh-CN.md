@@ -42,7 +42,7 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 | PR 2  | `packages/e2e`、资源生命周期、页面夹具、最小扩展启动测试                     | 双客户端房间旅程           |
 | PR 3  | P0 双客户端 create/join/share/play/seek/rate/pause/leave                     | 页面全矩阵、管理后台       |
 | PR 4  | Popup 与五种页面/导航场景                                                    | 生命周期故障、管理后台     |
-| PR 5  | 播放、缓冲、回声、并发、重连和所有权场景                                     | CI required check          |
+| PR 5  | 播放、缓冲、回声、并发、重连、所有权和 reaper 故障场景                       | CI required check          |
 | PR 6  | 管理后台真实客户端治理 E2E                                                   | Windows/Firefox            |
 | PR 7  | GitHub-hosted `browser-e2e`、artifact、追踪、完整套件 soak 与 required check | 真实 Bilibili              |
 | PR 8  | 受保护 Windows runner、Chrome/Edge、WSL 跨时钟                               | Firefox、登录账号          |
@@ -291,6 +291,14 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **工作**：验证 toast、分享按钮拖动、popover toggle、全屏挂载/退出；精细坐标仍留给现有组件测试。
 - **验收**：浏览器级用例只断言关键可见性、可操作性和设置结果，不建立大面积脆弱截图基线。
 - **估算**：2～3 天
+
+### E2E-308：runtime index reaper 一次性通告重试
+
+- **依赖**：E2E-305、E2E-306
+- **需求**：REQ-F037
+- **工作**：增加使用唯一 Redis key 前缀的双节点 server/runtime store fixture；让存活浏览器客户端与离线节点成员进入同一房间，通过可控租约触发 reaper 清理，并令事件总线只拒收首次清理通告。随后保持房间空闲，触发下一次 sweep，验证它在“没有离线节点”提前返回前重试保留记录。
+- **验收**：首次通告失败、后续扫描已无法重新发现该房间且没有 share/playback/profile/成员操作或页面刷新时，存活客户端仍最终移除幽灵成员并获得完整房间态中的正确所有者；临时停用保留记录重试后，用例必须因成员或所有者持续陈旧而失败。Redis、端口、租约时钟和进程均按 run 隔离并在失败时留存诊断。
+- **估算**：2～4 天
 
 ## 8. M4：管理后台 E2E
 
