@@ -66,7 +66,7 @@ export async function cleanupSessionAfterClose(options: {
   code: number;
   reason: Buffer;
   messageHandler: {
-    leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<void>;
+    leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<unknown>;
   };
   runtimeStore: Pick<RuntimeStore, "unregisterSession">;
   securityPolicy: {
@@ -216,7 +216,7 @@ export function createWsConnectionHandler(args: {
       session: Session,
       message: ClientMessage,
     ) => Promise<void>;
-    leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<void>;
+    leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<unknown>;
   };
   logEvent: LogEvent;
   pendingSessionCleanup: Set<Promise<void>>;
@@ -249,7 +249,7 @@ export function createWsConnectionHandler(args: {
     };
 
     args.securityPolicy.incrementConnectionCount(session.remoteAddress);
-    args.runtimeStore.registerSession(session);
+    void args.runtimeStore.registerSession(session);
     args.wsHeartbeat?.track(socket, session);
     args.logEvent("ws_connection_accepted", {
       sessionId: session.id,

@@ -84,12 +84,20 @@ export function createMirroredRuntimeStore(
   sharedRuntimeStore: RuntimeStore,
 ): RuntimeStore {
   return {
-    registerSession: mirrorVoidWrite(
-      localRuntimeStore.registerSession,
-      sharedRuntimeStore.registerSession,
-    ),
+    // Local-first, unlike the awaited writes: every read in this file goes to
+    // the local mirror, so the session has to be visible here before anything
+    // can look for it. The shared promise is RETURNED rather than dropped —
+    // `mirrorVoidWrite` would throw the durable outcome away, which is how a
+    // failed registration used to become invisible (#242).
+    registerSession: (session) => {
+      localRuntimeStore.registerSession(session);
+      return sharedRuntimeStore.registerSession(session);
+    },
     flush: sharedRuntimeStore.flush
       ? readShared(sharedRuntimeStore.flush)
+      : undefined,
+    confirmWrites: sharedRuntimeStore.confirmWrites
+      ? readShared(sharedRuntimeStore.confirmWrites)
       : undefined,
     purgeSessionsByInstance: sharedRuntimeStore.purgeSessionsByInstance
       ? readShared(sharedRuntimeStore.purgeSessionsByInstance)

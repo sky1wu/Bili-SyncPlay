@@ -356,7 +356,7 @@ export function createRoomService(options: {
     }
 
     session.displayName = nextDisplayName;
-    runtimeStore.registerSession?.(session);
+    void runtimeStore.registerSession?.(session);
     return true;
   }
 
@@ -417,7 +417,10 @@ export function createRoomService(options: {
       args.snapshot.memberToken,
     );
     restoreJoinedSession(args.session, args.snapshot);
-    await runtimeStore.flush?.();
+    // Swallowed here alone: this runs while an earlier failure is being
+    // compensated, and letting the barrier's own rejection escape would replace
+    // the error the caller is reporting (#242 review).
+    await runtimeStore.flush?.().catch(() => undefined);
 
     logEvent("room_leave_recovered", {
       sessionId: args.session.id,
@@ -1423,7 +1426,10 @@ export function createRoomService(options: {
           // leftover binding is harmless either way: the client whose join failed
           // reclaims the same memberId when it retries with the same token, which
           // is what we want.
-          await runtimeStore.flush?.();
+          //
+          // Swallowed: we are already unwinding a failed join and about to
+          // rethrow its error.
+          await runtimeStore.flush?.().catch(() => undefined);
 
           const currentRuntimeSession =
             (await resolveActiveRoom(joinedRoom.code))?.members.get(
@@ -1440,7 +1446,7 @@ export function createRoomService(options: {
               previousRuntimeSession,
               joinIdentity.memberToken,
             );
-            await runtimeStore.flush?.();
+            await runtimeStore.flush?.().catch(() => undefined);
           }
           throw error;
         }

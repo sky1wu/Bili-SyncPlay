@@ -19,8 +19,40 @@ type TimedEvent = {
 const COUNTER_WINDOW_MS = 60_000;
 
 export type RuntimeStore = {
-  registerSession: (session: Session) => void;
+  /**
+   * Record the full session snapshot. The returned promise, where the store has
+   * a durable step, settles once that write is confirmed and REJECTS when it is
+   * not.
+   *
+   * Nothing is obliged to await it — the join path deliberately does not, see
+   * `markSessionJoinedRoom` — but a silently swallowed outcome was how a lost
+   * registration used to leave a session hash that later writes only ever
+   * patched a single field into, which `loadSession` reads as "no such session"
+   * (#242).
+   */
+  registerSession: (session: Session) => void | Promise<void>;
+  /**
+   * The queue has EMPTIED. Says nothing about whether the writes in it landed:
+   * it waits on error-swallowed copies, so a failed write drains exactly like a
+   * successful one.
+   *
+   * Use it when the point is ordering — "my own writes are visible to the read I
+   * am about to do". When the point is durability, use
+   * {@link RuntimeStore.confirmWrites}; conflating the two is what let #235's
+   * fixes be built on unconfirmed data (#242).
+   */
   flush?: () => Promise<void>;
+  /**
+   * Every queued session write has been CONFIRMED; rejects with an
+   * `AggregateError` naming the ones that were not.
+   *
+   * Store-wide, not per session: it answers "is the shared view of this node's
+   * sessions complete", which is the question a sweep or a shutdown asks. A
+   * caller that only needs its OWN write confirmed should await that write —
+   * `registerSession`, `markSessionJoinedRoom` and `markSessionLeftRoom` all
+   * report their real outcome.
+   */
+  confirmWrites?: () => Promise<void>;
   purgeSessionsByInstance?: (instanceId: string) => Promise<number>;
   unregisterSession: (sessionId: string) => void;
   /**
@@ -29,6 +61,14 @@ export type RuntimeStore = {
    * bootstrap `room:state` is rebuilt from this index, so a write that has not
    * landed produces a state missing the member who just joined, and every
    * ownership decision taken from it is wrong (#235 review).
+   *
+   * It also re-writes the WHOLE session record, not just the room code. A store
+   * with a durable step cannot assume `registerSession` landed, and a join that
+   * patched only `roomCode` on top of a missing registration produced a session
+   * hash with no `id` — which reads back as no session at all, so the joiner was
+   * absent from every state built from the shared view (#242). Folding the two
+   * into one write means the join either seats the member completely or not at
+   * all, and a lost registration heals at the next join.
    */
   markSessionJoinedRoom: (sessionId: string, roomCode: string) => Promise<void>;
   /**

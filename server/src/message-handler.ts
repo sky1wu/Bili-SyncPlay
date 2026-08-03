@@ -12,12 +12,14 @@ import {
   WINDOW_MINUTE_MS,
 } from "./rate-limit.js";
 import {
+  INTERNAL_SERVER_ERROR_MESSAGE,
   MEMBER_TOKEN_INVALID_MESSAGE,
   RATE_LIMITED_MESSAGE,
   UNSUPPORTED_PROTOCOL_VERSION_MESSAGE,
   MIN_PROTOCOL_VERSION,
   CURRENT_PROTOCOL_VERSION,
 } from "./messages.js";
+import { createPendingResyncQueue } from "./pending-resync-queue.js";
 import { RoomServiceError, type LeaveRoomReason } from "./room-service.js";
 import { withPlaybackAge } from "./room-state-age.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
@@ -27,6 +29,14 @@ import type { LogEvent, SendError, SendMessage, Session } from "./types.js";
 type RoomEventBusPublishInput<T> = T extends unknown
   ? Omit<T, "sourceInstanceId" | "emittedAt">
   : never;
+
+/** RFC 6455 "internal error": the server could not put the session back. */
+const CLOSE_CODE_JOIN_ROLLBACK_FAILED = 1011;
+/**
+ * How long a refused join waits for its own rollback before answering the
+ * client anyway. The rollback keeps running, ordered on the session's key.
+ */
+const JOIN_ROLLBACK_TIMEOUT_MS = 5_000;
 
 export function createMessageHandler(options: {
   config: {
@@ -113,6 +123,29 @@ export function createMessageHandler(options: {
   maxPendingPublishes?: number;
   backpressureWaitMs?: number;
   publishTimeoutMs?: number;
+  /**
+   * Retry policy for the share-ownership resync, the one broadcast in this file
+   * that nothing else repeats. See `pending-resync-queue`.
+   */
+  sharedOwnerResyncRetry?: {
+    initialRetryDelayMs?: number;
+    maxRetryDelayMs?: number;
+    sleep?: (delayMs: number) => Promise<void>;
+  };
+  /**
+   * Rejecting ABORTS the join. Its implementation puts the session into the room
+   * index, and everything the join sends next is read back off that index: the
+   * bootstrap `room:state` would be missing the member who just joined, and the
+   * ownership decision taken from it is then wrong in the one case it exists
+   * for — the stored sharer reconnecting (#235). Seating a member the room
+   * cannot see is worse than refusing the join, which the client simply retries
+   * (#242).
+   */
+  /**
+   * How long a refused join waits for its own rollback before answering the
+   * client anyway. Injectable so tests do not pay it in wall-clock time.
+   */
+  joinRollbackTimeoutMs?: number;
   onRoomJoined?: (
     session: Session,
     roomCode: string,
@@ -137,8 +170,8 @@ export function createMessageHandler(options: {
    * must pass `"disconnect"`: the client still holds its `memberToken` and
    * will present it on the next join to reclaim the same `memberId` (#234).
    */
-  leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<void>;
-  flushPendingPublishes: () => Promise<void>;
+  leaveRoom: (session: Session, reason?: LeaveRoomReason) => Promise<boolean>;
+  flushPendingPublishes: (options?: { final?: boolean }) => Promise<void>;
 } {
   const { config, roomService, logEvent, send, sendError } = options;
   const now = options.now ?? Date.now;
@@ -148,13 +181,21 @@ export function createMessageHandler(options: {
   const backpressureWaitMs = options.backpressureWaitMs ?? 5_000;
   const publishTimeoutMs = options.publishTimeoutMs ?? 5_000;
 
+  /**
+   * Returns whether the session was actually seated. A `false` here used to be
+   * swallowed and the join carried on regardless: the member was absent from
+   * the room index, so the bootstrap state they were handed did not contain
+   * them, and the stored sharer reconnecting into that room was handed a
+   * stand-in owner with no full state to follow (#242).
+   */
   async function runRoomJoinedHook(
     session: Session,
     roomCode: string,
     previousRoomCode: string | null,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await options.onRoomJoined?.(session, roomCode, previousRoomCode);
+      return true;
     } catch (error) {
       logEvent("room_join_hook_failed", {
         sessionId: session.id,
@@ -165,6 +206,110 @@ export function createMessageHandler(options: {
         result: "error",
         error: error instanceof Error ? error.message : String(error),
       });
+      return false;
+    }
+  }
+
+  /**
+   * Undo a join whose index write never landed.
+   *
+   * `applyJoinedSessionState` and `addMember` have both already taken effect by
+   * the time the hook runs, so refusing the join means unwinding them — and
+   * `leaveRoom` is the one path that does that completely: it drops the member,
+   * clears the session's room state, releases the room's own bookkeeping and
+   * publishes whatever the departure owes.
+   *
+   * `"disconnect"`, not `"client-request"`: the member's identity has to
+   * survive so the client's retry reclaims the same `memberId` with the token it
+   * was never given. It has none yet — the join is refused before `room:joined`
+   * is sent — so on a first join it simply comes back as a new member, while a
+   * RECONNECTING member keeps the seat the whole ownership rule depends on.
+   */
+  async function abortJoin(
+    session: Session,
+    roomCode: string,
+    socket: WebSocket,
+  ): Promise<void> {
+    let rolledBack = false;
+    try {
+      // The RETURNED verdict, not merely "it did not throw": the cleanup is
+      // skipped on two paths that resolve normally (#242 review).
+      //
+      // Bounded, because the rollback's own index write queues behind the join
+      // write's command — and a command that never answers neither resolves nor
+      // rejects. Waiting on it left the client parked on a join that had
+      // already failed, with the error and the socket close unreachable (#242
+      // review). Timing out means the same thing a failed rollback means: the
+      // seat did not provably come back, so the socket goes. The rollback is
+      // NOT cancelled; it stays ordered on the session's key and completes
+      // behind the scenes.
+      const rollback = leaveRoom(session, "disconnect");
+      rollback.catch(() => undefined);
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const verdict = await Promise.race([
+        rollback,
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(
+            () => resolve("timeout"),
+            options.joinRollbackTimeoutMs ?? JOIN_ROLLBACK_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      if (verdict === "timeout") {
+        logEvent("room_join_rollback_timeout", {
+          sessionId: session.id,
+          roomCode,
+          remoteAddress: session.remoteAddress,
+          origin: session.origin,
+          result: "timeout",
+          timeoutMs: options.joinRollbackTimeoutMs ?? JOIN_ROLLBACK_TIMEOUT_MS,
+        });
+      } else {
+        rolledBack = verdict;
+      }
+    } catch (error) {
+      logEvent("room_join_rollback_failed", {
+        sessionId: session.id,
+        roomCode,
+        remoteAddress: session.remoteAddress,
+        origin: session.origin,
+        result: "error",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    logEvent("room_join_aborted", {
+      sessionId: session.id,
+      roomCode,
+      remoteAddress: session.remoteAddress,
+      origin: session.origin,
+      result: "rejected",
+      reason: "room_index_write_failed",
+      rolledBack,
+    });
+    sendError(socket, "internal_error", INTERNAL_SERVER_ERROR_MESSAGE);
+    if (rolledBack) {
+      return;
+    }
+    // The seat did not come back. `leaveCurrentRoom` RESTORES the member when
+    // its own persistence fails and the socket is still open, so telling the
+    // client the join failed while the server still holds it as a member leaves
+    // the two disagreeing — and that connection can go on sharing and driving
+    // playback from a seat the shared index never received (#242 review).
+    //
+    // Dropping the socket is the only honest end: `cleanupSessionAfterClose`
+    // runs the leave again with no socket to restore into, and unregisters the
+    // session either way.
+    if (
+      hasAttachedSocket(session) &&
+      session.socket.readyState === session.socket.OPEN
+    ) {
+      session.socket.close(
+        CLOSE_CODE_JOIN_ROLLBACK_FAILED,
+        "join_rollback_failed",
+      );
     }
   }
 
@@ -400,23 +545,54 @@ export function createMessageHandler(options: {
     });
   }
 
-  async function flushPendingPublishes(): Promise<void> {
-    while (pendingPublishes.size > 0) {
-      await Promise.allSettled(Array.from(pendingPublishes));
+  /**
+   * Drains the retrying resync records too, not just the one-shot wrappers.
+   * Shutdown calls this before the bus is torn down, and a record left behind
+   * is the one broadcast nothing else will ever re-send (#242).
+   *
+   * `final` marks the shutdown call. Without it the drain is unbounded in the
+   * time it takes: records retry until the bus takes them, which is the point
+   * of the queue and no bound at all for a shutdown step (#242 review).
+   */
+  async function flushPendingPublishes(options?: {
+    final?: boolean;
+  }): Promise<void> {
+    if (options?.final) {
+      sharedOwnerResyncQueue.stopRetrying();
+    }
+    while (pendingPublishes.size > 0 || sharedOwnerResyncQueue.size() > 0) {
+      await Promise.allSettled([
+        ...Array.from(pendingPublishes),
+        sharedOwnerResyncQueue.drain(),
+      ]);
     }
   }
 
+  /**
+   * Returns whether the session is provably out of the room's index.
+   *
+   * `abortJoin` acts on it, so the three ways the cleanup can be skipped all
+   * have to answer `false` — not just the one that throws (#242 review):
+   * the service call rejecting, the early return that never reaches the hook,
+   * and the hook itself reporting failure.
+   */
   async function leaveRoom(
     session: Session,
     reason: LeaveRoomReason = "client-request",
-  ): Promise<void> {
+  ): Promise<boolean> {
     const roomCode = session.roomCode;
     const memberId = session.memberId ?? session.id;
     const displayName = session.displayName;
     const { room, notifyRoom, memberRemoved, needsRoomStateResync } =
       await roomService.leaveRoomForSession(session, reason);
-    if (!roomCode || (!room && !notifyRoom)) {
-      return;
+    if (!roomCode) {
+      // In no room to begin with; there is nothing to have failed.
+      return true;
+    }
+    if (!room && !notifyRoom) {
+      // The service released the room but this path never runs the hook, so
+      // `markSessionLeftRoom` never went out and the index still lists us.
+      return false;
     }
     const roomIndexCleaned = await runRoomLeftHook(session, roomCode);
     // Two independent questions, so two independent gates. `memberRemoved` is
@@ -427,9 +603,9 @@ export function createMessageHandler(options: {
     const publishResync = needsRoomStateResync === true && roomIndexCleaned;
     if (!memberRemoved && !notifyRoom) {
       if (publishResync) {
-        await publishSharedOwnerResync(session, roomCode);
+        publishSharedOwnerResync(roomCode);
       }
-      return;
+      return roomIndexCleaned;
     }
 
     await firePublishRoomEvent(
@@ -452,8 +628,9 @@ export function createMessageHandler(options: {
     // every roster. The full state is the one that must not be built on an
     // index we failed to clean (#235 review).
     if (publishResync) {
-      await publishSharedOwnerResync(session, roomCode);
+      publishSharedOwnerResync(roomCode);
     }
+    return roomIndexCleaned;
   }
 
   /**
@@ -465,24 +642,51 @@ export function createMessageHandler(options: {
    * is where ownership is resolved (`roomStateFromSessions`). Sent AFTER the
    * delta so the authoritative state is the last word — the two ride the same
    * channel, so their order survives.
+   *
+   * Retried, unlike every other publish in this file, because it is the only
+   * ONE-SHOT one. The rest are re-sent by the next `video:share` /
+   * `playback:update` / `profile:update`, so dropping one costs a moment. This
+   * one goes out precisely because the room has stopped advancing, so nothing
+   * follows it to correct it, and an idle room never sends `sync:request`
+   * either — the user has to reload the page (#242).
    */
-  async function publishSharedOwnerResync(
-    session: Session,
-    roomCode: string,
-    reason = "shared_owner_resync_broadcast_failed",
-  ): Promise<void> {
-    await firePublishRoomEvent(
-      {
+  const sharedOwnerResyncQueue = createPendingResyncQueue({
+    ...options.sharedOwnerResyncRetry,
+    attemptTimeoutMs: publishTimeoutMs,
+    publish: (roomCode) =>
+      options.publishRoomEvent({
         type: "room_state_updated",
         roomCode,
-      },
-      {
-        reason,
-        sessionId: session.id,
-        remoteAddress: session.remoteAddress,
-        origin: session.origin,
-      },
-    );
+        sourceInstanceId: options.instanceId,
+        emittedAt: now(),
+      }),
+    onAttemptFailed: ({ roomCode, attempt, delayMs, error }) => {
+      logEvent("shared_owner_resync_retry_scheduled", {
+        roomCode,
+        attempt,
+        delayMs,
+        result: "error",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
+    onBacklog: ({ roomCode, pendingRooms }) => {
+      logEvent("shared_owner_resync_backlog", {
+        roomCode,
+        pendingRooms,
+        result: "degraded",
+        reason: "shared_owner_resync_publish_backlog",
+      });
+    },
+  });
+
+  /**
+   * Returns immediately, exactly like `firePublishRoomEvent`: the leave and join
+   * handlers would otherwise block on the bus for up to `publishTimeoutMs`, and
+   * `firePublishRoomEvent` was written not to await its wrapper for that very
+   * reason. The retry lives inside the queue instead.
+   */
+  function publishSharedOwnerResync(roomCode: string): void {
+    sharedOwnerResyncQueue.request(roomCode);
   }
 
   /**
@@ -509,7 +713,15 @@ export function createMessageHandler(options: {
       return await enter();
     } catch (error) {
       if (previous && session.roomCode !== previous.roomCode) {
-        await releasePreviousRoom(session, previous);
+        // Gated: the create/join FAILED, so no later write will re-stamp this
+        // session's room code. If the hook could not clear the index, a state
+        // built from it still lists the switcher and hands them the share back
+        // (#242 review).
+        const indexCleaned = await releasePreviousRoom(session, previous);
+        publishPreviousRoomResync(previous, "", {
+          seated: false,
+          indexCleaned,
+        });
       }
       throw error;
     }
@@ -524,24 +736,24 @@ export function createMessageHandler(options: {
    * The identity is passed in because the caller captured it BEFORE the switch —
    * by now `session.memberId` names the new room's seat.
    *
-   * Both events go out even when the index write failed, which is where this
-   * differs from an explicit leave. A switcher's session hash already names the
-   * NEW room, so `roomStateFromSessions` drops it from the old room's roster on
-   * its own and the state is correct regardless. Withholding it instead lost the
-   * announcement permanently: nothing afterwards carries the old room code, so
-   * there is no retry (#235 review). `leaveRoom` keeps its gate because a leaver
-   * ends up with no room code at all, which reads as missing information rather
-   * than as residue — a state published there really could put them back.
+   * `room_member_left` goes out even when the index write failed — it carries no
+   * state read, so a dirty index cannot corrupt it, and withholding it lost the
+   * announcement permanently since nothing afterwards carries the old room code
+   * (#235 review).
    *
-   * Unconditional otherwise: the internal leave's verdict never reaches here,
-   * and a switch is rare enough that one broadcast is cheaper than plumbing it
-   * out.
+   * The full `room:state` does NOT, and that is what changed in #242. The old
+   * reasoning was that "a switcher's session hash already names the NEW room, so
+   * `roomStateFromSessions` drops it from the old room's roster on its own" —
+   * but that hash is written by `onRoomLeft`'s own `registerSession`, so when the
+   * hook fails the hash can still name the OLD room and the state hands the
+   * switcher straight back into it, share and all. Returning the verdict lets
+   * each caller publish it where it is provably safe; see the call sites.
    */
   async function releasePreviousRoom(
     session: Session,
     previous: { roomCode: string; memberId: string; displayName: string },
-  ): Promise<void> {
-    await runRoomLeftHook(session, previous.roomCode);
+  ): Promise<boolean> {
+    const indexCleaned = await runRoomLeftHook(session, previous.roomCode);
     await firePublishRoomEvent(
       {
         type: "room_member_left",
@@ -556,11 +768,32 @@ export function createMessageHandler(options: {
         origin: session.origin,
       },
     );
-    await publishSharedOwnerResync(
-      session,
-      previous.roomCode,
-      "room_switch_resync_broadcast_failed",
-    );
+    return indexCleaned;
+  }
+
+  /**
+   * Publish the old room's full `room:state` — but only where the switcher
+   * provably cannot come back into it.
+   *
+   * Two ways to know that. `seated` means `runRoomJoinedHook` succeeded, and
+   * its write re-stamps the whole session record under the NEW room code, so
+   * the old room's rebuild drops this session as index residue whatever
+   * `onRoomLeft` managed to write. `indexCleaned` means `onRoomLeft` itself
+   * landed. Either is enough; neither is optional, because a state built on an
+   * index nobody cleared hands the leaver their share straight back (#242
+   * review).
+   */
+  function publishPreviousRoomResync(
+    previousRoom: { roomCode: string } | null,
+    joinedRoomCode: string,
+    outcome: { seated: boolean; indexCleaned: boolean },
+  ): void {
+    if (!previousRoom || previousRoom.roomCode === joinedRoomCode) {
+      return;
+    }
+    if (outcome.seated || outcome.indexCleaned) {
+      publishSharedOwnerResync(previousRoom.roomCode);
+    }
   }
 
   function handleRateLimitedMessage(
@@ -702,10 +935,32 @@ export function createMessageHandler(options: {
                 message.payload?.displayName,
               ),
           );
+          let previousRoomIndexCleaned = false;
           if (previousRoom && previousRoom.roomCode !== room.code) {
-            await releasePreviousRoom(session, previousRoom);
+            previousRoomIndexCleaned = await releasePreviousRoom(
+              session,
+              previousRoom,
+            );
           }
-          await runRoomJoinedHook(session, room.code, previousRoomCode);
+          const seated = await runRoomJoinedHook(
+            session,
+            room.code,
+            previousRoomCode,
+          );
+          if (!seated) {
+            await abortJoin(session, room.code, socket);
+            // The refused join is the NEW room's problem; the old room is still
+            // owed its state, and a clean index is the licence to send it.
+            publishPreviousRoomResync(previousRoom, room.code, {
+              seated,
+              indexCleaned: previousRoomIndexCleaned,
+            });
+            return;
+          }
+          publishPreviousRoomResync(previousRoom, room.code, {
+            seated,
+            indexCleaned: previousRoomIndexCleaned,
+          });
           send(socket, {
             type: "room:created",
             payload: {
@@ -774,10 +1029,30 @@ export function createMessageHandler(options: {
                   message.payload.memberToken,
                 ),
             );
+            let previousRoomIndexCleaned = false;
             if (previousRoom && previousRoom.roomCode !== room.code) {
-              await releasePreviousRoom(session, previousRoom);
+              previousRoomIndexCleaned = await releasePreviousRoom(
+                session,
+                previousRoom,
+              );
             }
-            await runRoomJoinedHook(session, room.code, previousRoomCode);
+            const seated = await runRoomJoinedHook(
+              session,
+              room.code,
+              previousRoomCode,
+            );
+            if (!seated) {
+              await abortJoin(session, room.code, socket);
+              publishPreviousRoomResync(previousRoom, room.code, {
+                seated,
+                indexCleaned: previousRoomIndexCleaned,
+              });
+              return;
+            }
+            publishPreviousRoomResync(previousRoom, room.code, {
+              seated,
+              indexCleaned: previousRoomIndexCleaned,
+            });
             const joinedRoomCode = room.code;
             const joinedMemberId = session.memberId ?? session.id;
             const joinedDisplayName = session.displayName;
@@ -851,7 +1126,7 @@ export function createMessageHandler(options: {
               bootstrapState.sharedOwnerId === joinedMemberId ||
               previousRoom?.roomCode === joinedRoomCode
             ) {
-              await publishSharedOwnerResync(session, joinedRoomCode);
+              publishSharedOwnerResync(joinedRoomCode);
             }
             logEvent("room_joined", {
               sessionId: session.id,
@@ -878,7 +1153,11 @@ export function createMessageHandler(options: {
             );
             return;
           }
-          await measureMessageHandling("room:leave", () => leaveRoom(session));
+          await measureMessageHandling("room:leave", async () => {
+            // The verdict is for `abortJoin`; an explicit leave already gates
+            // its own publishing on it inside `leaveRoom`.
+            await leaveRoom(session);
+          });
           return;
         }
         case "profile:update": {

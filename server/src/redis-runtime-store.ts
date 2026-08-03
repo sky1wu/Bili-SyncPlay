@@ -13,6 +13,13 @@ import {
   getPreviousRoomToLeave,
   resolveRoomCodeToLeave,
 } from "./runtime-store-state.js";
+import { createRetryPacer } from "./retry-pacer.js";
+import {
+  createDurableWriteQueue,
+  NonRetryableWriteError,
+  type DurableWriteQueueOptions,
+  type DurableWriteRequest,
+} from "./durable-write-queue.js";
 
 type RedisMulti = {
   sadd: (...args: string[]) => RedisMulti;
@@ -56,10 +63,15 @@ type RedisClient = {
   get: (key: string) => Promise<string | null>;
 };
 
-type PendingOperationLogContext = {
+/**
+ * Exported so the bootstrap's logging hook shares this exact union rather than
+ * re-declaring it: a structurally identical copy diverges silently the moment a
+ * new reason is added here.
+ */
+export type PendingOperationLogContext = {
   operationName: string;
   pendingCount: number;
-  reason: "backpressure" | "timeout" | "failed";
+  reason: "backpressure" | "timeout" | "failed" | "retry";
 };
 
 type RedisRuntimeSession = {
@@ -86,6 +98,16 @@ type RuntimeStoreOptions = {
   now?: () => number;
   maxPendingOperations?: number;
   pendingOperationTimeoutMs?: number;
+  /**
+   * Retry policy for the queued session writes. Bounded on purpose: a room code
+   * that has been recycled must not inherit an ancient write, and the writes are
+   * ordered per session, so a queue that retried forever would also stall every
+   * later write for that session. See `durable-write-queue`.
+   */
+  writeRetry?: Pick<
+    DurableWriteQueueOptions,
+    "maxAttempts" | "initialRetryDelayMs" | "maxRetryDelayMs" | "sleep"
+  >;
   redisClient?: RedisClient;
   onPendingOperationError?: (
     context: PendingOperationLogContext,
@@ -100,6 +122,7 @@ type RuntimeStoreOptions = {
 const RUNTIME_STORE_METHOD_NAMES = [
   "registerSession",
   "flush",
+  "confirmWrites",
   "unregisterSession",
   "markSessionJoinedRoom",
   "markSessionLeftRoom",
@@ -215,6 +238,27 @@ function nodeStatusKey(prefix: string, instanceId: string): string {
   return `${prefix}node:${instanceId}`;
 }
 
+/**
+ * What a teardown leaves in the generation key instead of deleting it.
+ *
+ * Deleting made "this room was torn down" indistinguishable from "this room
+ * never had a generation", so a join that pinned `""` against a legacy room
+ * matched just as well after the room was deleted — and rebuilt the indexes of
+ * a room whose persisted record was gone, stranding the code with them (#242
+ * review). Generations are UUIDs, so this value can never be mistaken for one.
+ *
+ * It does NOT expire. A TTL would have to outlive every write that could still
+ * be holding the old pin, and nothing bounds those: a session chain waits on a
+ * command that was never cancelled, and that command ends when Redis answers,
+ * not when a timer says so. A tombstone that lapsed first would let the join's
+ * `""` pin match an absent key all over again, which is the whole hazard (#242
+ * review). What reclaims it instead is the next occupant: `markRoomGeneration`
+ * overwrites the key, so the cost is one short string per room code that has
+ * been deleted and not yet reused. Deliberately NOT counted by
+ * `hasRoomResidue`, so a tombstone never keeps a code reserved.
+ */
+const ROOM_GENERATION_TOMBSTONE = "deleted";
+
 const DEFAULT_MAX_PENDING_OPERATIONS = 256;
 const DEFAULT_PENDING_OPERATION_TIMEOUT_MS = 5_000;
 // Floor TTL applied only when the caller's expiresAt is already non-positive
@@ -235,6 +279,36 @@ function serializeSession(session: Session): RedisRuntimeSession {
     joinedAt: session.joinedAt,
     invalidMessageCount: session.invalidMessageCount,
   };
+}
+
+/**
+ * The complete session record as Redis hash fields.
+ *
+ * Shared by `registerSession` and the join write so the two cannot describe a
+ * session differently — a join that wrote a strict subset was how a lost
+ * registration turned into a permanently unreadable session hash (#242).
+ */
+function sessionHashRecord(
+  session: Session,
+  roomCodeOverride?: string,
+): Record<string, string> {
+  const serialized = serializeSession(session);
+  return {
+    id: serialized.id,
+    instanceId: encodeNullable(serialized.instanceId),
+    remoteAddress: encodeNullable(serialized.remoteAddress),
+    origin: encodeNullable(serialized.origin),
+    roomCode: roomCodeOverride ?? encodeNullable(serialized.roomCode),
+    memberId: encodeNullable(serialized.memberId),
+    displayName: serialized.displayName,
+    memberToken: encodeNullable(serialized.memberToken),
+    joinedAt: serialized.joinedAt === null ? "" : String(serialized.joinedAt),
+    invalidMessageCount: String(serialized.invalidMessageCount),
+  };
+}
+
+function flattenHashRecord(record: Record<string, string>): string[] {
+  return Object.entries(record).flat();
 }
 
 function deserializeSession(fields: Record<string, string>): Session | null {
@@ -318,7 +392,7 @@ end
 for index = 3, #KEYS do
   redis.call("DEL", KEYS[index])
 end
-redis.call("DEL", KEYS[1])
+redis.call("SET", KEYS[1], ARGV[3])
 redis.call("SREM", KEYS[2], ARGV[2])
 return 1
 `;
@@ -369,6 +443,54 @@ return 0
 
 const MARK_ROOM_GENERATION_LUA = `
 redis.call("SET", KEYS[1], ARGV[1])
+return 1
+`;
+
+/**
+ * Seat a session in a room: full session record, session index, room index.
+ *
+ * One script rather than a transaction, for two reasons that only matter once
+ * the write can be RETRIED (#242):
+ *
+ * - **The whole session record travels with it.** `registerSession` is a
+ *   separate queued write and can have failed; a join that patched only
+ *   `roomCode` on top of that left a hash with no \`id\`, which `loadSession`
+ *   reads as no session at all — so the joiner was missing from every state
+ *   built off the shared view, and the stored sharer's reconnect handed the
+ *   share to a stand-in. Writing the full record makes the join self-healing.
+ * - **It is conditional on the room generation.** Room codes are recycled, so a
+ *   retry of this write must never land on the room that took the code over in
+ *   the meantime. Reading the generation and writing under it in one script is
+ *   what makes the check sound: a read-then-write from the client leaves a
+ *   window that the recycle can fit through — the same reasoning as
+ *   \`DELETE_ROOM_LUA\` (#237 review).
+ *
+ * \`ARGV[1]\` is the generation the caller pinned before its FIRST attempt — an
+ * empty string for a room that predates generations, which matches only an
+ * absent key. Every attempt carries it, so even the first is protected against
+ * a recycle that happens between reading it and writing.
+ *
+ * KEYS: 1 generation, 2 session hash, 3 sessions set, 4 room sessions,
+ * 5 rooms set, 6 (optional) previous room sessions.
+ * ARGV: 1 expected generation, 2 sessionId, 3 roomCode, 4.. hash field/value pairs.
+ */
+export const JOIN_ROOM_INDEX_LUA = `
+if (redis.call("GET", KEYS[1]) or "") ~= ARGV[1] then
+  return 0
+end
+if #KEYS >= 6 then
+  redis.call("SREM", KEYS[6], ARGV[2])
+end
+local fields = {}
+for index = 4, #ARGV do
+  fields[#fields + 1] = ARGV[index]
+end
+if #fields > 0 then
+  redis.call("HSET", KEYS[2], unpack(fields))
+end
+redis.call("SADD", KEYS[3], ARGV[2])
+redis.call("SADD", KEYS[4], ARGV[2])
+redis.call("SADD", KEYS[5], ARGV[3])
 return 1
 `;
 
@@ -503,9 +625,47 @@ export async function createRedisRuntimeStore(
   const metricsCollector = options.metricsCollector;
   const localRuntimeStore = createInMemoryRuntimeStore(now);
   const pendingOperations = new Set<Promise<unknown>>();
-  const sessionOperationChains = new Map<string, Promise<void>>();
+  /**
+   * One entry per queued write, released only once every command it started has
+   * really finished. Checked alongside `pendingOperations` rather than merged
+   * into it: `flush` must keep meaning "the queue drained" and must not start
+   * waiting on a command nobody can cancel.
+   */
+  const heldCommandCapacity = new Set<Promise<void>>();
 
   await redis.connect();
+
+  /**
+   * Every session-scoped write goes through here: ordered per session, retried
+   * with backoff, and confirmable. Before #242 a queued write got one attempt
+   * and its failure was swallowed, so a blip silently cost the write.
+   */
+  /**
+   * Caps each Redis command and remembers the ones that outlive their cap.
+   *
+   * Only the cap and the tracking are used — the retry SCHEDULE belongs to
+   * `sessionWriteQueue`, which drives the retries. Sharing the primitive is
+   * what keeps "a timeout is not a cancel" from having a fourth private
+   * implementation here (#242 review).
+   */
+  const commandPacer = createRetryPacer({
+    initialDelayMs: pendingOperationTimeoutMs,
+    maxDelayMs: pendingOperationTimeoutMs,
+  });
+
+  const sessionWriteQueue = createDurableWriteQueue({
+    ...options.writeRetry,
+    onRetryScheduled: (info) => {
+      logPendingOperationError(
+        {
+          operationName: info.operationName,
+          pendingCount: pendingOperations.size,
+          reason: "retry",
+        },
+        info.error,
+      );
+    },
+  });
 
   function logPendingOperationError(
     context: PendingOperationLogContext,
@@ -529,7 +689,15 @@ export async function createRedisRuntimeStore(
   }
 
   function ensurePendingCapacity(operationName: string): void {
-    if (pendingOperations.size < maxPendingOperations) {
+    if (
+      pendingOperations.size < maxPendingOperations &&
+      heldCommandCapacity.size < maxPendingOperations &&
+      // Commands that outlived their cap count too. Tracking them only for
+      // draining let a join whose generation read timed out release its pending
+      // slot and start another read every timeout window, past the configured
+      // cap without limit (#242 review).
+      commandPacer.trackedCount() < maxPendingOperations
+    ) {
       return;
     }
     const error = new Error(
@@ -675,60 +843,200 @@ export async function createRedisRuntimeStore(
   }
 
   /**
-   * Returns the chained promise with its REAL outcome, so a caller that acts on
-   * whether the write landed can await it. `trackOperation` deliberately
-   * swallows the rejection for backpressure accounting, and `flush` waits on
-   * those swallowed copies with `Promise.allSettled` — so awaiting the queue
-   * says only that it drained, never that the write succeeded (#235 review).
+   * Returns the queued write's REAL outcome, so a caller that acts on whether it
+   * landed can await it. `trackOperation` deliberately swallows the rejection
+   * for backpressure accounting, and `flush` waits on those swallowed copies
+   * with `Promise.allSettled` — so awaiting the queue says only that it drained,
+   * never that the write succeeded (#235 review). `confirmWrites` is the one
+   * that answers the second question (#242).
+   *
+   * The retries themselves live in `sessionWriteQueue`; this wrapper only adds
+   * the backpressure accounting and the failure log. `trackAwaitedOperation` is
+   * deliberately not reused: its timeout would fire mid-backoff and report a
+   * write failed while the queue was still working on it.
    */
+  /**
+   * Caps ONE attempt, not the whole write.
+   *
+   * A hung Redis command has to stop pinning a pending slot, which is what the
+   * old per-operation timeout did — but there it also ended the write, so a
+   * command that was merely slow landed afterwards with the caller already told
+   * it had failed. Applied per attempt it becomes a retry trigger instead: every
+   * queued write here is idempotent (`HSET`/`SADD`/`SREM`, and an `EVAL` guarded
+   * by the room generation), so re-running one that secretly landed changes
+   * nothing (#242).
+   */
+  function withAttemptTimeout(
+    operationName: string,
+    operation: () => Promise<void>,
+  ): Required<Pick<DurableWriteRequest, "run" | "settle">> {
+    // Every command this write ever started, error-swallowed. The timeout races
+    // a command, it cannot abort one, so a "failed" attempt may still be on its
+    // way to Redis — and the queue must not hand this session's key to the
+    // compensating write until it has landed (#242 review).
+    const started: Array<Promise<void>> = [];
+    const run = async () => {
+      const command = operation();
+      const answered = command.then(
+        () => undefined,
+        () => undefined,
+      );
+      started.push(answered);
+      // Capacity is held per COMMAND, released as each one answers — not when
+      // the caller was answered. A write whose attempts all timed out rejects
+      // long before its commands stop running, and freeing the slot there let
+      // the next session's write take it and leave one more uncancellable
+      // command behind, so the configured cap stopped bounding anything (#242
+      // review).
+      heldCommandCapacity.add(answered);
+      void answered.finally(() => {
+        heldCommandCapacity.delete(answered);
+      });
+      await commandPacer.capAttempt(command, pendingOperationTimeoutMs, () => {
+        const error = new Error(
+          `Redis runtime store operation timed out: ${operationName}.`,
+        );
+        logPendingOperationError(
+          {
+            operationName,
+            pendingCount: pendingOperations.size,
+            reason: "timeout",
+          },
+          error,
+        );
+        return error;
+      });
+    };
+    return {
+      run,
+      settle: async () => {
+        await Promise.all(started);
+      },
+    };
+  }
+
   function queueSessionOperation(
     sessionId: string,
     operationName: string,
     operation: () => Promise<void>,
+    /**
+     * Runs once, synchronously, immediately after admission — for work that
+     * must happen at ENQUEUE time rather than per attempt, and that starts a
+     * Redis command of its own. Putting it here rather than in the caller is
+     * what keeps admission the single point where capacity is checked, so a
+     * write cannot be refused because of a command it started itself (#242
+     * review).
+     */
+    onAdmitted?: () => void,
   ): Promise<void> {
     ensurePendingCapacity(operationName);
-    const previous = sessionOperationChains.get(sessionId) ?? Promise.resolve();
-    const next = previous
-      .catch(() => {})
-      .then(operation)
-      .finally(() => {
-        if (sessionOperationChains.get(sessionId) === next) {
-          sessionOperationChains.delete(sessionId);
-        }
-      });
-    sessionOperationChains.set(sessionId, next);
-    void trackOperation(operationName, next);
-    return next;
+    onAdmitted?.();
+    const startedAt = performance.now();
+    const outcome = sessionWriteQueue.enqueue({
+      key: sessionId,
+      operationName,
+      ...withAttemptTimeout(operationName, operation),
+    });
+    const settled = outcome.catch(() => undefined);
+    pendingOperations.add(settled);
+    void settled.finally(() => {
+      pendingOperations.delete(settled);
+      metricsCollector?.observeRedisRuntimeStoreDuration(
+        operationName,
+        performance.now() - startedAt,
+      );
+    });
+
+    const reported = outcome.catch((error: unknown) => {
+      metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
+      logPendingOperationError(
+        {
+          operationName,
+          pendingCount: pendingOperations.size,
+          reason: "failed",
+        },
+        error,
+      );
+      throw error;
+    });
+    // `reported` is a NEW promise, so the queue's own handled-marker does not
+    // cover it. Callers that drop it — `unregisterSession`, and any test that
+    // fires a write without awaiting — would otherwise crash the process on an
+    // unhandled rejection. Marking it here rather than at each call site is
+    // what keeps a future fire-and-forget caller safe by default.
+    void reported.catch(() => undefined);
+    return reported;
   }
 
   const store = {
     registerSession(session: Session) {
-      ensurePendingCapacity("register_session");
       localRuntimeStore.registerSession(session);
-      const serialized = serializeSession(session);
-      void trackOperation(
+      // Queued like every other session write, so it is ordered against them and
+      // retried on failure instead of dropped. The returned promise carries the
+      // real outcome; nothing is obliged to await it, and `queueSessionOperation`
+      // already marks the rejection handled (#242).
+      const record = sessionHashRecord(session);
+      const outcome = queueSessionOperation(
+        session.id,
         "register_session",
-        redis
-          .multi()
-          .sadd(`${keyPrefix}sessions`, session.id)
-          .hset(sessionKey(keyPrefix, session.id), {
-            id: serialized.id,
-            instanceId: encodeNullable(serialized.instanceId),
-            remoteAddress: encodeNullable(serialized.remoteAddress),
-            origin: encodeNullable(serialized.origin),
-            roomCode: encodeNullable(serialized.roomCode),
-            memberId: encodeNullable(serialized.memberId),
-            displayName: serialized.displayName,
-            memberToken: encodeNullable(serialized.memberToken),
-            joinedAt:
-              serialized.joinedAt === null ? "" : String(serialized.joinedAt),
-            invalidMessageCount: String(serialized.invalidMessageCount),
-          })
-          .exec(),
+        async () => {
+          await redis
+            .multi()
+            .sadd(`${keyPrefix}sessions`, session.id)
+            .hset(sessionKey(keyPrefix, session.id), record)
+            .exec();
+        },
       );
+      return outcome;
     },
     async flush() {
       await Promise.allSettled(Array.from(pendingOperations));
+      // The key releases too, bounded. `pendingOperations` holds the CALLERS'
+      // answers, and an attempt that timed out answered long before its command
+      // did — so `flush` could return while the session's key was still held
+      // and the very next read or broadcast saw stale data. A profile update
+      // publishes `room_state_updated` immediately, and a `registerSession`
+      // landing after it has no second event to correct the display name (#242
+      // review).
+      //
+      // Bounded because the command cannot be cancelled — but the bound
+      // REJECTS. Resolving on it would report the barrier held when it had not,
+      // which is the failure mode this whole method exists to prevent: the
+      // caller goes on to read or broadcast from an index the write never
+      // reached (#242 review). Callers that cannot act on it swallow it
+      // explicitly at their own call site.
+      // Deliberately NOT through `commandPacer`. This wait is a pure ordering
+      // barrier, not a Redis command — routing it through the tracker made
+      // every concurrent `flush` register as another unanswered command, so a
+      // single slow write could be amplified by its waiters until unrelated
+      // registrations hit backpressure (#242 review).
+      let barrier: ReturnType<typeof setTimeout> | null = null;
+      try {
+        await Promise.race([
+          sessionWriteQueue.drain(),
+          new Promise<never>((_resolve, reject) => {
+            barrier = setTimeout(() => {
+              reject(
+                new Error(
+                  "Redis runtime store flush timed out before the session keys were released.",
+                ),
+              );
+            }, pendingOperationTimeoutMs);
+          }),
+        ]);
+      } finally {
+        if (barrier !== null) {
+          clearTimeout(barrier);
+        }
+      }
+    },
+    /**
+     * Unlike `flush`, this REPORTS. `flush` waits on error-swallowed copies, so
+     * a failed write drains exactly like a successful one; callers that need to
+     * know the shared view is complete have to ask this instead (#242).
+     */
+    async confirmWrites() {
+      await sessionWriteQueue.confirm();
     },
     async purgeSessionsByInstance(instanceId: string) {
       await store.flush();
@@ -832,33 +1140,123 @@ export async function createRedisRuntimeStore(
       });
     },
     markSessionJoinedRoom(sessionId: string, roomCode: string) {
-      ensurePendingCapacity("mark_session_joined_room");
       void localRuntimeStore.markSessionJoinedRoom(sessionId, roomCode);
+      // Read HERE, at the moment the join is made — not inside the operation
+      // body, and not per attempt.
+      //
+      // Room codes are recycled, and the guard only works if the pinned value
+      // predates any recycle of the room instance this join is for. The body
+      // does not run until the session's chain drains, which is unbounded: a
+      // prior write for the same session may still be retrying. Pinning in
+      // there would read whatever generation existed by then — including the
+      // NEW occupant's, after which the Lua check passes and this join seats
+      // its session in a room it never joined (#242 review, #237).
+      //
+      // A failed read makes the write non-retryable rather than re-reading it
+      // later, for the same reason: a second read is a second chance to pin the
+      // wrong instance. The join is refused and the client retries it, which is
+      // the trade this path already makes for the index write itself.
+      let pinnedGeneration!: Promise<string>;
+      const pinGeneration = (): void => {
+        pinnedGeneration = commandPacer
+          .capAttempt(
+            redis.get(roomGenerationKey(keyPrefix, roomCode)),
+            pendingOperationTimeoutMs,
+            () =>
+              new Error(
+                `Timed out reading the generation of room ${roomCode}.`,
+              ),
+          )
+          .then((generation) => {
+            // The tombstone is the teardown's answer to "this code is dead", so
+            // pinning it would make the script's comparison SUCCEED and rebuild
+            // the indexes of a room that no longer exists. Two ways in, and the
+            // Lua guard only ever covered the first: a pin taken BEFORE the
+            // teardown no longer matches the key afterwards, but a pin taken
+            // AFTER it reads the tombstone and matches itself. It also covers the
+            // recycling window — a new occupant that has passed the residue check
+            // but not yet stamped its generation still has the tombstone in place
+            // (#242 review).
+            if (generation === ROOM_GENERATION_TOMBSTONE) {
+              throw new NonRetryableWriteError(
+                `Room ${roomCode} was torn down before the join index write was pinned.`,
+                "room_deleted",
+              );
+            }
+            // An absent generation pins as `""`, which a room that predates #237
+            // still matches.
+            return generation ?? "";
+          })
+          .catch((error: unknown) => {
+            // Verdicts pass through: this handler is here for the READ failing,
+            // and re-wrapping would relabel "the room is gone" as "we could not
+            // read the generation".
+            if (error instanceof NonRetryableWriteError) {
+              throw error;
+            }
+            throw new NonRetryableWriteError(
+              `Could not pin the generation of room ${roomCode}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+              "room_generation_unreadable",
+            );
+          });
+        pinnedGeneration.catch(() => undefined);
+      };
       return queueSessionOperation(
         sessionId,
         "mark_session_joined_room",
         async () => {
-          const previousRoomCode =
-            (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null;
+          // Sequential, not `Promise.all`. Starting the session read in
+          // parallel meant that when the pin rejected first — a tombstone, a
+          // failed read, a timeout — the outer operation rejected while that
+          // `HGETALL` was still running, in no tracking set and waited for by
+          // nobody: repeated failing joins could accumulate Redis commands past
+          // the backpressure cap and `close()` would quit under them (#242
+          // review). Costs one round trip on a path that is not hot.
+          const expectedGeneration = await pinnedGeneration;
+          const storedSession = await loadSession(redis, keyPrefix, sessionId);
+          const localSession = localRuntimeStore.getSession(sessionId);
           const roomCodeToLeave = getPreviousRoomToLeave(
-            previousRoomCode,
+            storedSession?.roomCode ?? null,
             roomCode,
           );
-          const transaction = redis.multi();
-          if (roomCodeToLeave) {
-            transaction.srem(
-              roomSessionsKey(keyPrefix, roomCodeToLeave),
-              sessionId,
+          // The local mirror is this node's own live session, so it is the
+          // authority on every field but the room code. Falling back to what
+          // Redis already has keeps a re-seat from blanking a record we cannot
+          // reconstruct; an empty record would be worse than a stale one.
+          const record = localSession
+            ? sessionHashRecord(localSession, roomCode)
+            : storedSession
+              ? sessionHashRecord(storedSession, roomCode)
+              : { id: sessionId, roomCode };
+          const keys = [
+            roomGenerationKey(keyPrefix, roomCode),
+            sessionKey(keyPrefix, sessionId),
+            `${keyPrefix}sessions`,
+            roomSessionsKey(keyPrefix, roomCode),
+            `${keyPrefix}rooms`,
+            ...(roomCodeToLeave
+              ? [roomSessionsKey(keyPrefix, roomCodeToLeave)]
+              : []),
+          ];
+          const applied = await redis.eval(
+            JOIN_ROOM_INDEX_LUA,
+            keys.length,
+            ...keys,
+            expectedGeneration,
+            sessionId,
+            roomCode,
+            ...flattenHashRecord(record),
+          );
+          if (Number(applied) !== 1) {
+            // Not retryable: a generation only ever moves forward, so no later
+            // attempt can find its way back to the room this write was for.
+            throw new NonRetryableWriteError(
+              `Room ${roomCode} changed hands before the join index write landed.`,
+              "room_generation_changed",
             );
           }
-          transaction.hset(
-            sessionKey(keyPrefix, sessionId),
-            "roomCode",
-            roomCode,
-          );
-          transaction.sadd(roomSessionsKey(keyPrefix, roomCode), sessionId);
-          transaction.sadd(`${keyPrefix}rooms`, roomCode);
-          await transaction.exec();
           if (roomCodeToLeave) {
             await cleanupEmptyRoomIndex(
               redis,
@@ -868,11 +1266,18 @@ export async function createRedisRuntimeStore(
             );
           }
         },
+        pinGeneration,
       );
     },
     markSessionLeftRoom(sessionId: string, roomCode?: string | null) {
       ensurePendingCapacity("mark_session_left_room");
       void localRuntimeStore.markSessionLeftRoom(sessionId, roomCode);
+      // No generation guard, unlike its join sibling: every write here is keyed
+      // by THIS session's id, and session ids are never reused. A retry that
+      // lands after the code has been recycled removes a session the new room
+      // never had and blanks a room code on a hash the new room does not own —
+      // both no-ops. Only the join ADDS the session to a room, which is the
+      // write a recycled code could turn into a ghost member (#242).
       return queueSessionOperation(
         sessionId,
         "mark_session_left_room",
@@ -884,9 +1289,31 @@ export async function createRedisRuntimeStore(
           if (!targetRoomCode) {
             return;
           }
+          // The WHOLE record, not just `roomCode`. This write supersedes any
+          // earlier one for the same session, and a strict subset superseding
+          // a full `registerSession` that had failed left the hash missing
+          // every other field — a renamed member's `displayName` never landed
+          // and `confirm()` still reported success (#242 review). Writing the
+          // full snapshot makes the supersession sound, exactly as it does for
+          // the join.
+          //
+          // `roomCode` is still blanked unconditionally, which is this write's
+          // established meaning ("this session left"). A switcher is blanked
+          // for the moment between here and its join write, exactly as before;
+          // that write re-stamps the whole record anyway.
+          const localSession = localRuntimeStore.getSession(sessionId);
+          const record = localSession
+            ? sessionHashRecord(localSession, "")
+            : { roomCode: "" };
           await redis
             .multi()
-            .hset(sessionKey(keyPrefix, sessionId), "roomCode", "")
+            .hset(sessionKey(keyPrefix, sessionId), record)
+            // The registration's OTHER side effect. Writing the full hash was
+            // only half of it: `listClusterSessions`, the connection counts and
+            // the per-instance purge all enumerate this set, and a superseded
+            // registration left the connection missing from every one of them
+            // until its next successful join (#242 review).
+            .sadd(`${keyPrefix}sessions`, sessionId)
             .srem(roomSessionsKey(keyPrefix, targetRoomCode), sessionId)
             .exec();
           await cleanupEmptyRoomIndex(
@@ -1130,28 +1557,40 @@ export async function createRedisRuntimeStore(
       // reconnect can reclaim this `memberId` (#234) — but it goes on its own
       // clock, so a room that never empties still releases the people who left
       // it. The script starts that clock only while a token is actually there.
-      // `trackAwaitedOperation` rather than `trackOperation`: it registers the
-      // write for backpressure exactly the same way, but hands back the REAL
-      // outcome instead of the error-swallowed copy, so `durable` can reject
-      // (#235 review).
-      const durable = trackAwaitedOperation(
+      // Through the write queue, like every other durable write. It used to get
+      // ONE attempt: a transient error made `durable` reject for good, the
+      // member binding stayed in Redis with no retention clock armed, and the
+      // reaper grew a latch to compensate for a failure a retry would have
+      // healed (#242 review). Keyed by the member AND the session that is being
+      // removed. Not by the member alone: `REMOVE_MEMBER_LUA` is guarded on
+      // `session.id`, so a removal for a DIFFERENT session succeeds by doing
+      // nothing — and if it superseded a still-retrying removal for the session
+      // that actually holds the binding, that binding stayed and its retention
+      // clock was never armed. Supersession is only sound when the newer write
+      // covers the older one, which two differently-guarded removals never do.
+      // Not by the session alone either: a session's own writes must not queue
+      // behind a removal of somebody else's seat.
+      //
+      // `durable` still reports the REAL outcome, so a caller that acts on it
+      // (`leaveCurrentRoom` elects the next share owner) sees a rejection, and
+      // `queueSessionOperation` already marks it handled for the callers that
+      // decide nothing from it.
+      const durable = queueSessionOperation(
+        `member:${code}:${memberId}:${session?.id ?? ""}`,
         "remove_member",
-        redis.eval(
-          REMOVE_MEMBER_LUA,
-          3,
-          roomMembersKey(keyPrefix, code),
-          roomMemberTokensKey(keyPrefix, code),
-          roomMemberTokenExpiryKey(keyPrefix, code),
-          memberId,
-          session?.id ?? "",
-          String(now() + memberTokenRetentionMs),
-        ),
-      ).then(() => undefined);
-      // Marks `durable` handled without consuming it: callers that DO await it
-      // still see the rejection, while the reaper and the join-rollback — which
-      // decide nothing from this write — no longer turn a Redis hiccup into an
-      // unhandled rejection.
-      void durable.catch(() => undefined);
+        async () => {
+          await redis.eval(
+            REMOVE_MEMBER_LUA,
+            3,
+            roomMembersKey(keyPrefix, code),
+            roomMemberTokensKey(keyPrefix, code),
+            roomMemberTokenExpiryKey(keyPrefix, code),
+            memberId,
+            session?.id ?? "",
+            String(now() + memberTokenRetentionMs),
+          );
+        },
+      );
       return { ...removal, durable };
     },
     evictMemberToken(
@@ -1271,6 +1710,7 @@ export async function createRedisRuntimeStore(
             ...keys,
             expectedGeneration === undefined ? "*" : (expectedGeneration ?? ""),
             code,
+            ROOM_GENERATION_TOMBSTONE,
           );
         })(),
       ).then((applied) => {
@@ -1282,7 +1722,20 @@ export async function createRedisRuntimeStore(
       });
     },
     async close() {
+      // Let outstanding writes finish the attempt they are on and give up
+      // rather than back off again: the shutdown step that calls this gets a
+      // few seconds, and spending the whole retry budget here on writes that a
+      // dead Redis was never going to accept would record the step as failed
+      // and exit the process non-zero (#242).
+      sessionWriteQueue.stopRetrying();
       await Promise.allSettled(Array.from(pendingOperations));
+      // `pendingOperations` holds the CALLERS' answers, and a write that timed
+      // out answered long before its command did. Quitting on that alone closes
+      // the connection under commands still in flight, which is the same
+      // "a timeout is not a cancel" gap `settle` closes for the session chain —
+      // so wait for the chain releases too, bounded so a dead Redis cannot
+      // stretch the close step (#242 review).
+      await commandPacer.settleTracked(pendingOperationTimeoutMs);
       await redis.quit();
     },
     async heartbeatNode(status: ClusterNodeStatus) {

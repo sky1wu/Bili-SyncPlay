@@ -252,7 +252,13 @@ test("message handler keeps room:create successful when bootstrap state fails", 
   assert.ok(events.includes("room_created"));
 });
 
-test("message handler keeps room:create successful when room join hook fails", async () => {
+test("message handler aborts room:create when the room join hook fails", async () => {
+  // The hook puts the session into the room index, and everything the create
+  // sends next is read back off that index. Carrying on used to seat a member
+  // the room could not see: their bootstrap state was missing them, and a
+  // stored sharer reconnecting into that room got a stand-in owner with no full
+  // state to follow (#242).
+  const leaveReasons: (string | undefined)[] = [];
   const sent: string[] = [];
   const errors: string[] = [];
   const events: string[] = [];
@@ -274,7 +280,8 @@ test("message handler keeps room:create successful when room join hook fails", a
       async joinRoomForSession() {
         throw new Error("unreachable");
       },
-      async leaveRoomForSession() {
+      async leaveRoomForSession(_session, reason) {
+        leaveReasons.push(reason);
         return { room: null };
       },
       async shareVideoForSession() {
@@ -316,10 +323,14 @@ test("message handler keeps room:create successful when room join hook fails", a
     payload: { displayName: "Alice" },
   });
 
-  assert.deepEqual(sent, ["room:created", "room:state"]);
-  assert.deepEqual(errors, []);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(errors, ["internal_error"]);
   assert.ok(events.includes("room_join_hook_failed"));
-  assert.ok(events.includes("room_created"));
+  assert.ok(events.includes("room_join_aborted"));
+  assert.equal(events.includes("room_created"), false);
+  // `"disconnect"`, so a reconnecting member keeps the identity the whole
+  // ownership rule depends on.
+  assert.deepEqual(leaveReasons, ["disconnect"]);
 });
 
 test("message handler skips room state publish when playback update is ignored", async () => {
@@ -1382,7 +1393,11 @@ test("message handler keeps room:join successful when bootstrap state fails", as
   assert.ok(events.includes("room_joined"));
 });
 
-test("message handler keeps room:join successful when room join hook fails", async () => {
+test("message handler aborts room:join when the room join hook fails", async () => {
+  // Mirror of the create path: a joiner the room index never received is
+  // missing from every state built off the shared view, so refusing the join —
+  // which the client simply retries — beats seating them (#242).
+  const leaveReasons: (string | undefined)[] = [];
   const sent: string[] = [];
   const errors: string[] = [];
   const events: string[] = [];
@@ -1404,7 +1419,8 @@ test("message handler keeps room:join successful when room join hook fails", asy
           memberToken: "member-token-2",
         };
       },
-      async leaveRoomForSession() {
+      async leaveRoomForSession(_session, reason) {
+        leaveReasons.push(reason);
         return { room: null };
       },
       async shareVideoForSession() {
@@ -1451,12 +1467,16 @@ test("message handler keeps room:join successful when room join hook fails", asy
       protocolVersion: 2,
     },
   });
+  await handler.flushPendingPublishes();
 
-  assert.deepEqual(sent, ["room:joined", "room:state"]);
-  assert.deepEqual(errors, []);
-  assert.deepEqual(published, ["room_member_joined"]);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(errors, ["internal_error"]);
+  // Nothing is announced: the room never gained this member.
+  assert.deepEqual(published, []);
   assert.ok(events.includes("room_join_hook_failed"));
-  assert.ok(events.includes("room_joined"));
+  assert.ok(events.includes("room_join_aborted"));
+  assert.equal(events.includes("room_joined"), false);
+  assert.deepEqual(leaveReasons, ["disconnect"]);
 });
 
 test("message handler keeps room:join successful when member joined publish fails", async () => {
@@ -1944,6 +1964,7 @@ function createSharedOwnerHandler(options: {
   publishedRooms?: string[];
   enterRoomFails?: boolean;
   roomLeftHookFails?: boolean;
+  roomJoinedHookFails?: boolean;
 }) {
   return createMessageHandler({
     config: CONFIG,
@@ -2037,6 +2058,10 @@ function createSharedOwnerHandler(options: {
     },
     onRoomJoined() {
       options.hookOrder?.push("room-joined-hook");
+      if (options.roomJoinedHookFails) {
+        // Stands in for the room-index write failing, which refuses the join.
+        throw new Error("runtime index unavailable");
+      }
     },
   });
 }
@@ -2542,4 +2567,625 @@ test("switching rooms tells the old room even when the index cleanup fails", asy
     "room_member_joined",
   ]);
   assert.deepEqual(publishedRooms, ["ROOM-OLD", "ROOM-OLD", "ROOM-NEW"]);
+});
+
+test("a shared-owner resync that the bus rejects is retried until it lands", async () => {
+  // The one broadcast nothing else repeats. It goes out precisely because the
+  // room stopped advancing, so no later `video:share` / `playback:update`
+  // corrects a dropped one, and an idle room never sends `sync:request` either
+  // — the user would have to reload the page (#242).
+  const published: string[] = [];
+  let resyncFailures = 2;
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        return {
+          room: { code: "ROOM01" },
+          memberRemoved: true,
+          needsRoomStateResync: true,
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    async publishRoomEvent(message) {
+      if (message.type === "room_state_updated" && resyncFailures > 0) {
+        resyncFailures -= 1;
+        throw new Error("bus rejected");
+      }
+      published.push(message.type);
+    },
+    instanceId: "node-a",
+    sharedOwnerResyncRetry: {
+      initialRetryDelayMs: 1,
+      sleep: () => Promise.resolve(),
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+});
+
+test("shutdown drains the retrying shared-owner resync, not just the one-shot publishes", async () => {
+  // `flushPendingPublishes` runs before the bus is torn down. A resync record
+  // left behind is the broadcast nothing will ever re-send (#242).
+  const published: string[] = [];
+  let resyncFailures = 1;
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        return {
+          room: { code: "ROOM01" },
+          memberRemoved: true,
+          needsRoomStateResync: true,
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    async publishRoomEvent(message) {
+      if (message.type === "room_state_updated" && resyncFailures > 0) {
+        resyncFailures -= 1;
+        throw new Error("bus rejected");
+      }
+      published.push(message.type);
+    },
+    instanceId: "node-a",
+    sharedOwnerResyncRetry: {
+      initialRetryDelayMs: 30,
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  // The retry is still parked in its backoff at this point.
+  assert.deepEqual(published, ["room_member_left"]);
+
+  await handler.flushPendingPublishes();
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+});
+
+test("the final publish flush does not let a resync record open a second batch", async () => {
+  // `flush_pending_room_event_publishes` is sized for one retry budget. A
+  // request that arrived mid-batch earns a fresh one at runtime, which at
+  // shutdown is two budgets in a step sized for one (#242 review).
+  const published: string[] = [];
+  let releaseFirstResync: (() => void) | null = null;
+  const session = createSession("member-1", {
+    roomCode: "ROOM01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async leaveRoomForSession(currentSession) {
+        currentSession.roomCode = null;
+        return {
+          room: { code: "ROOM01" },
+          memberRemoved: true,
+          needsRoomStateResync: true,
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent() {},
+    send() {},
+    sendError() {},
+    publishRoomEvent(message) {
+      published.push(message.type);
+      if (message.type === "room_state_updated" && !releaseFirstResync) {
+        return new Promise<void>((resolve) => {
+          releaseFirstResync = resolve;
+        });
+      }
+      return Promise.resolve();
+    },
+    instanceId: "node-a",
+    sharedOwnerResyncRetry: {
+      initialRetryDelayMs: 1,
+      sleep: () => Promise.resolve(),
+    },
+  });
+
+  // Two leaves: the second asks for a resync while the first one's publish is
+  // still in flight, which is what would earn the extra batch.
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+  session.roomCode = "ROOM01";
+  session.memberId = "member-1";
+  await handler.handleClientMessage(session, {
+    type: "room:leave",
+    payload: { memberToken: "member-token-1" },
+  });
+
+  const flushed = handler.flushPendingPublishes({ final: true });
+  (releaseFirstResync as (() => void) | null)?.();
+  await flushed;
+
+  assert.equal(
+    published.filter((type) => type === "room_state_updated").length,
+    1,
+    "the wind-down must not open a second resync batch",
+  );
+});
+
+test("a room switch withholds the old room's full state until the join write re-stamps the session", async () => {
+  // #235 published it unconditionally on the reasoning that "a switcher's
+  // session hash already names the NEW room". That hash is written by
+  // `onRoomLeft`'s own `registerSession`, so when the hook fails it can still
+  // name the OLD room, and the state hands the switcher back in — share and all
+  // (#242 review). Publishing after the JOIN hook makes it safe unconditionally:
+  // that write re-stamps the whole session record under the new room code.
+  const order: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR01",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createSharedOwnerHandler({
+    published: [],
+    publishedRooms: [],
+    joinedRoomCode: "NEWR01",
+    hookOrder: order,
+    roomLeftHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "NEWR01",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  // The leave hook ran and failed; the join hook then re-stamped the record.
+  assert.deepEqual(order, ["room-left-hook", "room-joined-hook"]);
+});
+
+test("a create that fails after leaving withholds the old room's state when the index is dirty", async () => {
+  // Nothing re-stamps this session: the create failed, so it is in no room and
+  // no later write carries the old code. A state built from an index the hook
+  // could not clear still lists the switcher (#242 review).
+  const published: string[] = [];
+  const publishedRooms: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR02",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    enterRoomFails: true,
+    roomLeftHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:create",
+    payload: { displayName: "Alice" },
+  });
+  await handler.flushPendingPublishes();
+
+  // The delta still goes out — it reads no state, so a dirty index cannot
+  // corrupt it — but the full state does not.
+  assert.deepEqual(published, ["room_member_left"]);
+  assert.deepEqual(publishedRooms, ["OLDR02"]);
+});
+
+test("a create that fails after leaving still resyncs the old room when the index was cleared", async () => {
+  const published: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR03",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createSharedOwnerHandler({
+    published,
+    enterRoomFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:create",
+    payload: { displayName: "Alice" },
+  });
+  await handler.flushPendingPublishes();
+
+  assert.deepEqual(published, ["room_member_left", "room_state_updated"]);
+});
+
+test("a rolled-back room switch still resyncs the old room it cleanly left", async () => {
+  // The refused join is the NEW room's problem. The old room was cleanly left,
+  // so it is still owed its full state — and if the leaver held the share,
+  // silence there means every client keeps a `sharedByMemberId` naming them and
+  // the room stops advancing (#242 review).
+  const published: string[] = [];
+  const publishedRooms: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR04",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    joinedRoomCode: "NEWR04",
+    roomJoinedHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "NEWR04",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  // The abort's own leave announces the NEW room; what matters here is that the
+  // OLD room got its full state as well as its delta.
+  const oldRoomEvents = published.filter(
+    (_type, index) => publishedRooms[index] === "OLDR04",
+  );
+  assert.deepEqual(oldRoomEvents, ["room_member_left", "room_state_updated"]);
+});
+
+test("a rolled-back room switch stays silent when the old room was not cleanly left", async () => {
+  const published: string[] = [];
+  const session = createSession("member-1", {
+    roomCode: "OLDR05",
+    memberId: "member-1",
+    memberToken: "member-token-1",
+  });
+
+  const publishedRooms: string[] = [];
+  const handler = createSharedOwnerHandler({
+    published,
+    publishedRooms,
+    joinedRoomCode: "NEWR05",
+    roomJoinedHookFails: true,
+    roomLeftHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "NEWR05",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  // Neither hook landed, so nothing can vouch for the old room's index.
+  const oldRoomEvents = published.filter(
+    (_type, index) => publishedRooms[index] === "OLDR05",
+  );
+  assert.deepEqual(oldRoomEvents, ["room_member_left"]);
+});
+
+test("a join whose rollback fails drops the socket instead of claiming it was aborted", async () => {
+  // `leaveCurrentRoom` RESTORES the member when its own persistence fails and
+  // the socket is still open. Telling the client the join failed while the
+  // server still holds it as a member leaves the two disagreeing, and that
+  // connection can go on driving playback from a seat the shared index never
+  // received (#242 review).
+  const errors: string[] = [];
+  const closes: Array<{ code: number; reason: string }> = [];
+  const events: string[] = [];
+  const session = createSession("member-1");
+  (
+    session.socket as unknown as { close: (c: number, r: string) => void }
+  ).close = (code, reason) => {
+    closes.push({ code, reason });
+  };
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = "ROOM01";
+        currentSession.memberId = "member-1";
+        currentSession.memberToken = "member-token-1";
+        return { room: { code: "ROOM01" }, memberToken: "member-token-1" };
+      },
+      async leaveRoomForSession() {
+        // The rollback cannot complete: the member stays seated.
+        throw new Error("leave persistence failed");
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent(event) {
+      events.push(event);
+    },
+    send() {},
+    sendError(_socket, code) {
+      errors.push(code);
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+    async onRoomJoined() {
+      throw new Error("runtime index unavailable");
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.ok(events.includes("room_join_rollback_failed"));
+  assert.deepEqual(closes, [{ code: 1011, reason: "join_rollback_failed" }]);
+});
+
+test("a join whose rollback succeeds leaves the connection alone", async () => {
+  const closes: number[] = [];
+  const session = createSession("member-1");
+  (
+    session.socket as unknown as { close: (c: number, r: string) => void }
+  ).close = (code) => {
+    closes.push(code);
+  };
+
+  const handler = createSharedOwnerHandler({
+    published: [],
+    roomJoinedHookFails: true,
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+
+  // The seat came back, so the client may simply retry on the same socket.
+  assert.deepEqual(closes, []);
+});
+
+/**
+ * `abortJoin` must treat all three ways the rollback can fail to clean the room
+ * index the same. Only one of them throws; the other two resolve normally, and
+ * my first fix only covered the throwing one (#242 review).
+ */
+async function runAbortedJoin(options: {
+  leaveResult?: { room: { code: string } | null; notifyRoom?: boolean };
+  leaveThrows?: boolean;
+  leaveNeverSettles?: boolean;
+  roomLeftHookFails?: boolean;
+  joinRollbackTimeoutMs?: number;
+}): Promise<{ closes: number[]; errors: string[]; events: string[] }> {
+  const closes: number[] = [];
+  const errors: string[] = [];
+  const events: string[] = [];
+  const session = createSession("member-1");
+  (
+    session.socket as unknown as { close: (c: number, r: string) => void }
+  ).close = (code) => {
+    closes.push(code);
+  };
+
+  const handler = createMessageHandler({
+    config: CONFIG,
+    roomService: {
+      async createRoomForSession() {
+        throw new Error("unreachable");
+      },
+      async joinRoomForSession(currentSession) {
+        currentSession.roomCode = "ROOM01";
+        currentSession.memberId = "member-1";
+        currentSession.memberToken = "member-token-1";
+        return { room: { code: "ROOM01" }, memberToken: "member-token-1" };
+      },
+      async leaveRoomForSession() {
+        if (options.leaveNeverSettles) {
+          // The rollback's own index write is queued behind a command that
+          // never answers: it neither resolves nor rejects.
+          await new Promise<void>(() => {});
+        }
+        if (options.leaveThrows) {
+          throw new Error("leave persistence failed");
+        }
+        return {
+          memberRemoved: true,
+          ...(options.leaveResult ?? { room: { code: "ROOM01" } }),
+        };
+      },
+      async shareVideoForSession() {
+        throw new Error("unreachable");
+      },
+      async updatePlaybackForSession() {
+        throw new Error("unreachable");
+      },
+      async updateProfileForSession() {
+        throw new Error("unreachable");
+      },
+      async getRoomStateForSession() {
+        throw new Error("unreachable");
+      },
+    },
+    logEvent(event) {
+      events.push(event);
+    },
+    send() {},
+    sendError(_socket, code) {
+      errors.push(code);
+    },
+    async publishRoomEvent() {},
+    instanceId: "node-a",
+    joinRollbackTimeoutMs: options.joinRollbackTimeoutMs,
+    async onRoomJoined() {
+      throw new Error("runtime index unavailable");
+    },
+    onRoomLeft() {
+      if (options.roomLeftHookFails) {
+        throw new Error("index cleanup failed");
+      }
+    },
+  });
+
+  await handler.handleClientMessage(session, {
+    type: "room:join",
+    payload: {
+      roomCode: "ROOM01",
+      joinToken: "join-token-1",
+      protocolVersion: 2,
+    },
+  });
+  await handler.flushPendingPublishes();
+  return { closes, errors, events };
+}
+
+test("an aborted join drops the socket when the leave call throws", async () => {
+  const { closes, errors } = await runAbortedJoin({ leaveThrows: true });
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [1011]);
+});
+
+test("an aborted join drops the socket when the room-left hook reports failure", async () => {
+  // Resolves normally — `runRoomLeftHook` swallows the error — so only the
+  // RETURNED verdict reveals that the index was never cleaned.
+  const { closes, errors } = await runAbortedJoin({ roomLeftHookFails: true });
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [1011]);
+});
+
+test("an aborted join drops the socket when the leave never reaches the hook", async () => {
+  // `!room && !notifyRoom` returns before `runRoomLeftHook` runs at all, so
+  // `markSessionLeftRoom` never went out and the index still lists the session.
+  const { closes, errors } = await runAbortedJoin({
+    leaveResult: { room: null },
+  });
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [1011]);
+});
+
+test("an aborted join whose rollback cleaned the index keeps the connection", async () => {
+  const { closes, errors } = await runAbortedJoin({});
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [], "the client may retry on the same socket");
+});
+
+test("an aborted join answers the client when its rollback never settles", async () => {
+  // The rollback's index write queues behind the join write's command, and a
+  // command that never answers neither resolves nor rejects — so the error and
+  // the socket close were unreachable and the client sat on a join that had
+  // already failed (#242 review).
+  const { closes, errors, events } = await runAbortedJoin({
+    leaveNeverSettles: true,
+    joinRollbackTimeoutMs: 30,
+  });
+  assert.deepEqual(errors, ["internal_error"]);
+  assert.deepEqual(closes, [1011]);
+  assert.ok(events.includes("room_join_rollback_timeout"));
 });

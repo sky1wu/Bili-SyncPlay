@@ -144,6 +144,17 @@ advances the room. Three rules keep it working, none enforced by a type:
   `room:state` build site must go through it. The persisted room keeps the
   original id on purpose: it is the _preferred_ owner, so a sharer whose socket
   merely blipped reclaims the share on reconnect instead of losing it for good.
+- **A full `room:state` may only be published where the index is provably
+  clean.** A room switch leaves the old room inside `createRoomForSession` /
+  `joinRoomForSession`, and `releasePreviousRoom` reports whether `onRoomLeft`
+  actually cleared the index. The `room_member_left` delta goes out regardless —
+  it reads no state — but the full state is published only where the switcher
+  cannot come back — `publishPreviousRoomResync` holds both licences: the join
+  was seated (its write re-stamps the whole session record under the NEW room
+  code) OR `onRoomLeft` itself landed. A refused join still owes the old room
+  its state on the second licence, since the rollback only unwinds the new room.
+  "The session hash already names the new room" is not something to assume: that
+  hash is written by `onRoomLeft` itself (#242).
 - **A membership delta that moves ownership owes a full `room:state`.**
   Protocol >= 2 clients get `room:member-joined` / `room:member-left`, which edit
   the recipient's member list and nothing else — their cached `sharedVideo` still
@@ -172,6 +183,159 @@ advances the room. Three rules keep it working, none enforced by a type:
     old room on that path too, guarded on `session.roomCode` having actually
     changed, or a failure that never got as far as leaving would broadcast a
     room the member never left.
+
+### The runtime store is write-behind, so "drained" never means "written"
+
+`registerSession`, `markSessionJoinedRoom`, `markSessionLeftRoom` and
+`unregisterSession` update this node's own maps synchronously and queue the
+shared write behind them. Everything downstream that writes, reads back, and
+decides something has to know which of the two questions it is asking (#242):
+
+- **`flush()` says the queue emptied. `confirmWrites()` says the writes landed.**
+  `flush` waits on error-swallowed copies, so a failed write drains exactly like
+  a successful one. Use `flush` when the point is ordering ("my own writes are
+  visible to the read I am about to do") and `confirmWrites` when the point is
+  durability. `confirmWrites` is store-wide and clears what it reports, so the
+  answer is "since you last asked"; a caller that only needs its OWN write
+  confirmed should await that write, since all four report their real outcome.
+- **Queued writes are retried with backoff, and a retry can outlive its room.**
+  `durable-write-queue` gives every queued write a bounded, backed-off retry
+  budget. That reopens the room-code recycling hazard #237 closed: a retry that
+  lands after the code changed hands would write into the new room. Only the
+  join write ADDS a session to a room, so only it needs the guard — and the pin
+  is read when `markSessionJoinedRoom` is CALLED, never inside the retryable
+  body: the body does not run until the session's chain drains, which is
+  unbounded, so a pin taken there can already name the code's NEXT occupant and
+  the check waves the write straight through. A mismatch is a
+  `NonRetryableWriteError` (a generation only moves forward, so no later attempt
+  can find its way back). An unreadable generation refuses the join rather than
+  re-reading later, since a second read is a second chance to pin the wrong
+  instance. An ABSENT generation still pins as `""`, which is why the teardown
+  leaves a TOMBSTONE in that key rather than deleting it: deleting made "torn
+  down" indistinguishable from "never stamped", so a pin of `""` matched the
+  room it was about to resurrect. The tombstone does NOT expire — a TTL would
+  have to outlive every write that could still be holding the old pin, and
+  nothing bounds those, so a lapsed tombstone lets a `""` pin match an absent
+  key all over again. What reclaims it is the next occupant's
+  `markRoomGeneration`. Pinning the tombstone ITSELF is refused, or a pin taken
+  after the teardown would match it. `hasRoomResidue` ignores the key, so a
+  tombstone never keeps a code reserved. A new write that seats or moves
+  anything by room code needs the same pin; one that only touches keys named
+  after the session does not, because session ids are never reused.
+- **Every retry budget is sized against the shutdown step that drains it.**
+  `close_shared_runtime_store` and `flush_pending_room_event_publishes` carry
+  explicit timeouts, and an overrun is recorded as a FAILED step — so a shutdown
+  that merely waited out a retry exits the process non-zero. `close()` calls
+  `stopRetrying()` first, which cuts the backoffs in flight short AND drops
+  writes that have not started, leaving at most ONE in-flight attempt; the step
+  budget must exceed that attempt's own timeout. Raising `maxAttempts` or a
+  delay means redoing that arithmetic.
+- **The retry timing lives in `retry-pacer`, not in each facility.** The
+  backoff schedule, the shutdown-cancellable wait, the per-attempt cap that
+  does not cancel the call, and the record of calls that outlived one are ONE
+  implementation shared by `durable-write-queue`, `pending-resync-queue`,
+  `runtime-index-reaper` and the store's command wrapper. They used to be four
+  hand-rolled copies, and six of #242's review findings were the same defect in
+  whichever copy the previous round had not touched. A new retrying facility
+  uses the pacer; it does not grow a fifth copy. What stays local is what
+  genuinely differs: ordering/supersession/confirmation, dedupe, and who decides
+  to retry.
+- **A shutdown step that ran out of its budget is DEGRADED, not failed.** Only
+  a step that threw exits the process non-zero (`graceful-shutdown.ts`). The
+  budgets exist because these steps wait on I/O this process cannot cancel, so
+  giving up on it is the designed outcome. Treating an overrun as a failure
+  turned every "what if this particular call hangs?" into a correctness claim —
+  a question with no last answer, because each bounded wait added to satisfy it
+  becomes a new call site to ask it about. Ten of #242's review findings were
+  that one question re-asked. Both outcomes are still logged at error level; a
+  drain that gives up must stay visible.
+- **A timeout answers the caller; it does not cancel the command.** This one
+  bites in three places, and fixing one of them is not fixing it:
+  - The session's key is released only once every command the write started has
+    really finished (`DurableWriteRequest.settle`). Releasing it when the caller
+    is answered lets the compensating write — queued on that same key — run
+    first, and the abandoned command then lands on top of its own rollback,
+    leaving a member the client was told does not exist and who can win the
+    share back. `drain` waits for those releases; `confirm` deliberately does
+    not, since a command still in flight has already reported its verdict.
+  - Nothing starts a second call while the first has not answered — not the
+    write queue, not `pending-resync-queue`, not the reaper's per-room publish.
+    Otherwise a hung dependency accumulates one live command per retry.
+  - Nothing that closes a connection or a bus does so under a live call:
+    `close()` drains the chain (bounded) before `quit`, and the resync drain
+    waits out its abandoned calls (bounded) before shutdown closes the bus.
+- **A retry is abandoned when a newer write for the same session is queued.**
+  Retrying past that point fights the newer write. This is only sound because
+  the join write re-writes the WHOLE session record rather than patching
+  `roomCode` — so a lost `registerSession` is repaired by the next join instead
+  of leaving a hash with no `id`, which `loadSession` reads as no session at
+  all. A new session write that carries a strict subset of the record must not
+  rely on an earlier one having landed.
+- **A join whose index write fails is aborted, not seated.** `runRoomJoinedHook`
+  reports failure and the handler rolls the join back through
+  `leaveRoom(session, "disconnect")` — `"disconnect"` so a reconnecting member
+  keeps the identity the ownership rule depends on. Everything a join sends next
+  is read back off the index this write maintains, so a member the room cannot
+  see is worse than a refused join the client retries. And if the ROLLBACK
+  fails, the socket is dropped: `leaveCurrentRoom` restores the member when its
+  own persistence fails and the socket is open, so reporting the join refused
+  while the server still holds the seat leaves the two disagreeing.
+
+### One-shot broadcasts need a retry trail; repeated ones do not
+
+Nearly every `room_state_updated` is re-sent by the next `video:share` /
+`playback:update` / `profile:update`, so dropping one costs a moment. Two are
+one-shot, and both lose the room permanently when the bus rejects them (#242):
+
+- The **share-ownership resync** (`publishSharedOwnerResync`) fires precisely
+  because the room stopped advancing, so nothing follows it, and an idle room
+  never sends `sync:request` either — only a page reload recovers. It goes
+  through `pending-resync-queue`, which retries with backoff behind a `request`
+  that returns immediately; `firePublishRoomEvent` deliberately does not await
+  its wrapper, and making the leave/join handlers block on the bus would be the
+  worse trade. A record retries until the bus takes it — a per-record attempt
+  budget is just a slower way to discard a notification nothing else will
+  re-send — so `drain` is unbounded by design and the shutdown call passes
+  `{ final: true }`, which calls `stopRetrying` first and leaves at most one
+  in-flight attempt to wait for. A record never starts a second publish while
+  its first has not answered: the attempt cap races the bus call, it does not
+  abort it, so an unbounded retry loop over a hung bus would otherwise pile up
+  one live Redis command per retry — the same "a timeout is not a cancel"
+  reasoning as the write queue's `settle`.
+- The **runtime index reaper's** announcement is the only thing that tells a
+  room a dead node's members are gone. Once the sweep has cleaned the indexes,
+  `listClusterSessions` no longer returns those sessions, so a later sweep has
+  nothing to rediscover the room from. The reaper keeps its own record set and
+  retries it at the START of every sweep — before the "no offline nodes" early
+  return — dropping a record only once the publish succeeds. Neither this queue
+  nor `pending-resync-queue` caps its backlog: evicting or refusing an
+  unpublished record loses exactly what they exist to keep, so a backlog is
+  logged, never shed. Because it is uncapped, every SHUTDOWN path over it has to
+  be bounded, and there are two: `stop()` drains with bounded concurrency
+  against its own deadline, and it sets `stopping` BEFORE awaiting the sweep in
+  flight so that sweep's serial drain gives way instead of running the whole
+  backlog first. Bounding only the second one leaves the budget just as blown.
+  An overrun step is recorded as a failure AND lets the bus close under
+  in-flight publishes, which then delete their records as if they had landed.
+  Each publish is capped on its own too: a deadline that only decides whether to
+  START the next record bounds nothing when the bus hangs instead of rejecting.
+  Sweeps also no longer overlap: they share that set, and `stop()` awaits only
+  the sweep it knows about.
+  What creates a record is the other half of this: a room is announced only
+  once THAT session's cleanup writes are confirmed, and the session record is
+  what makes a retry possible at all. The sweep's steps are ordered by what
+  they destroy — the member removal needs `roomCode` and `memberId`,
+  `markSessionLeftRoom` blanks `roomCode`, `unregisterSession` deletes the
+  record — so each runs only after the previous one is confirmed, and a step
+  that did not land (failed, capped, or cut short by `stop`) leaves the record
+  untouched for the next sweep to redo from the top. Every step is idempotent,
+  which is what makes redoing it free. #235 answered this the other way — it
+  announced regardless, since `unregisterSession` cleaned the same key anyway
+  and gating "left the next pass nothing to retry" — and that reasoning only
+  held while the sweep unregistered unconditionally. `unregisterSession` is the
+  one write nothing gates on, because it returns `void` (so `confirmWrites` is
+  the only place its outcome is visible) and because failing it leaves the room
+  index already clean and merely re-runs a no-op next sweep.
 
 ## Engineering Constraints
 

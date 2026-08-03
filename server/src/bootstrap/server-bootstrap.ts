@@ -17,7 +17,10 @@ import { createMirroredRuntimeStore } from "../mirrored-runtime-store.js";
 import { createRedisAdminCommandBus } from "../redis-admin-command-bus.js";
 import { createRedisRoomEventBus } from "../redis-room-event-bus.js";
 import { createRedisRoomStore } from "../redis-room-store.js";
-import { createRedisRuntimeStore } from "../redis-runtime-store.js";
+import {
+  createRedisRuntimeStore,
+  type PendingOperationLogContext,
+} from "../redis-runtime-store.js";
 import {
   getRedisAdminCommandChannelPrefix,
   getRedisAdminCommandResultChannelPrefix,
@@ -88,12 +91,6 @@ export type ServerBootstrapDependencies = {
   serviceVersion?: string;
   logLevel?: LogLevel;
   logSampling?: Record<string, number>;
-};
-
-type PendingOperationLogContext = {
-  operationName: string;
-  pendingCount: number;
-  reason: "backpressure" | "timeout" | "failed";
 };
 
 type BootstrapLoggingHooks = {
@@ -471,6 +468,13 @@ export function createSharedServerShutdownSteps(args: {
   if (args.runtimeStore) {
     steps.push({
       name: args.runtimeStoreStepName ?? "close_runtime_store",
+      // Must exceed ONE `pendingOperationTimeoutMs` (5s by default), which is
+      // what a wound-down write queue can still be holding: `close` stops the
+      // retries and drops writes that have not started, but a Redis command
+      // already in flight only ends when its own timeout fires. On the default
+      // step budget the two are equal and the step — which started first —
+      // times out and reports a failed shutdown (#242 review).
+      timeoutMs: DEFAULT_CLOSE_STEP_TIMEOUT_MS * 3,
       run: () =>
         hasClose(args.runtimeStore) ? args.runtimeStore.close() : undefined,
     });
