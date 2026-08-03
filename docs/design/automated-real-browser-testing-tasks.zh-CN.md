@@ -197,7 +197,7 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **依赖**：E2E-101
 - **需求**：REQ-G04、REQ-O003、需求规格第 5.1、9 节
 - **工作**：把需求规格第 5.1 节的操作键和权威断言策略展开为机器可读 operation catalog；每项包含唯一 `operationKey`、所属 requirement ID、priority、独立 `assertionPolicy`、非空 `requiredAssertionKeys`、断言键到类别的固定映射和 `requiredAssertionCategories`。实现共享断言 helper 和本地 coverage check，对权威策略、catalog 必需二元组、必要类别与本次实际通过证据做精确集合差；每条证据同时记录 `runId`、`scenarioId`、`attemptId` 和本次尝试内唯一的 `evidenceId`。后续 M2～M4 场景从首个用例起直接产出该证据，不在 M5 返工补 tag。
-- **验收**：任一展开键没有或重复匹配策略、catalog 漏键、多键、重复声明键、空 `requiredAssertionKeys`、策略/类别错配，或与第 5.1 节 priority/requirement/policy 映射漂移时检查失败。表驱动判别力测试分别删除 `playback.user.seek`、`admin.governance.disconnect-session.success`、任一必要 `assertionKey`、`playback.user.seek` 的 `peer-result` 和 `stability-window` 证据、`browser.exit.no-session-recovery` 的重启后 `initiator-visible` 证据，把 `ownership.owner-leave` 从 `peer-sync` 误标成 `local-visible`，并尝试用同操作的 `server-result` 补 `peer-result` 缺口；八种对照都必须失败。同需求兄弟操作、未知键、花括号/通配键、只写 tag/requirement ID、空测试、skip、未执行断言或同一次尝试内重复 `evidenceId` 均不能补缺。另有正向聚合测试让 P0 smoke、分域场景和一次诊断重试分别提交同一 `(operationKey, assertionKey)`：证据按 `scenarioId` / `attemptId` 保留、coverage 求并集且检查通过；若首次尝试或任一场景失败/skip，完整 job 仍失败。
+- **验收**：任一展开键没有或重复匹配策略、catalog 漏键、多键、重复声明键、空 `requiredAssertionKeys`、策略/类别错配，或与第 5.1 节 priority/requirement/policy 映射漂移时检查失败。表驱动判别力测试分别删除 `playback.user.seek`、`admin.governance.disconnect-session.success`、`admin.authorization.operator.server-success`、任一必要 `assertionKey`、`playback.user.seek` 的 `peer-result` 和 `stability-window` 证据、`browser.exit.no-session-recovery` 的重启后 `initiator-visible` 证据，把 `ownership.owner-leave` 从 `peer-sync` 误标成 `local-visible`，并尝试用同操作的 `server-result` 补 `peer-result` 缺口；九种对照都必须失败。同需求兄弟操作（包括 operator/admin 的授权成功）、未知键、花括号/通配键、只写 tag/requirement ID、空测试、skip、未执行断言或同一次尝试内重复 `evidenceId` 均不能补缺。另有正向聚合测试让 P0 smoke、分域场景和一次诊断重试分别提交同一 `(operationKey, assertionKey)`：证据按 `scenarioId` / `attemptId` 保留、coverage 求并集且检查通过；若首次尝试或任一场景失败/skip，完整 job 仍失败。
 - **估算**：2～3 天
 
 ## 6. M2：P0 双客户端 smoke
@@ -347,7 +347,7 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **依赖**：E2E-401
 - **需求**：REQ-F044
 - **工作**：参数化 viewer/operator/admin 的 UI 可见性；验证 viewer 直接调用治理 API 被服务端拒绝，并验证 operator、admin 的同一治理调用获授权。
-- **验收**：viewer 的隐藏按钮和直接 API 越权两层均有断言；operator、admin 的治理按钮可见且服务端请求成功，不构造当前权限模型中不存在的 operator 拒绝。
+- **验收**：viewer 的隐藏按钮和直接 API 越权两层均有断言；`admin.authorization.operator.server-success` 与 `admin.authorization.admin.server-success` 分别具备发起端可见和服务端成功证据，不能复用一个角色的请求补另一个角色，不构造当前权限模型中不存在的 operator 拒绝。
 - **估算**：1～2 天
 
 ## 9. M5：GitHub-hosted CI 硬门禁
