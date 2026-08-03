@@ -56,7 +56,7 @@ popup → background → WebSocket server → background → content script → 
 项目达到以下状态时，视为本能力建设完成：
 
 1. 拟设为 PR required check 的完整确定性 Chromium P0/P1 与 admin-ui 真实客户端套件连续运行 100 次，测试基础设施自身导致的失败不超过 1 次；产品缺陷导致的真实失败不计为基础设施不稳定。
-2. 第 5.1 节优先级表中的所有 P0、P1 操作均有自动化用例，且每条用例至少断言一个用户可见结果和一个跨端结果。
+2. 第 5.1 节优先级表中的所有 P0、P1 操作均有自动化用例，并具备符合其权威断言策略的实际证据；`peer-sync` 操作不得用服务端状态冒充接收端结果，`peer-sync-strict` 操作必须同时验证发起端、真实接收端和稳定窗口。
 3. Chrome/Edge/Firefox 核心 smoke 与真实站点 canary 均有最近 24 小时内的可见结果；发布时必须有目标发布产物对应的结果。
 4. 任一失败都能取得 Playwright trace 或对应浏览器驱动的等价诊断、截图、各上下文控制台日志、服务端日志以及场景元数据。
 5. 仓库文档明确区分“确定性浏览器 E2E 通过”“Windows 实机通过”“真实 B 站通过”，不再以一个笼统的 `E2E passed` 代替三者。
@@ -98,9 +98,9 @@ popup → background → WebSocket server → background → content script → 
 
 ## 5. 功能需求
 
-### 5.1 用户操作优先级
+### 5.1 用户操作优先级与稳定键
 
-本表是操作优先级的唯一权威输入；实施阶段的覆盖检查必须直接解析或等价复刻此映射，不得从场景名称猜测优先级。
+本节的优先级表和操作键表共同构成覆盖门禁的唯一权威输入；实施阶段必须直接解析或等价复刻此映射，不得从场景名称猜测优先级，也不得只用需求 ID 代替操作键。
 
 | 优先级 | 含义                         | 需求 ID                                                                                        |
 | ------ | ---------------------------- | ---------------------------------------------------------------------------------------------- |
@@ -108,6 +108,45 @@ popup → background → WebSocket server → background → content script → 
 | P1     | 确定性全量矩阵               | `REQ-F015`～`REQ-F017`、`REQ-F024`～`REQ-F028`、`REQ-F032`～`REQ-F037`、`REQ-F040`～`REQ-F044` |
 
 `REQ-F001`～`REQ-F006` 是测试编排约束，`REQ-F050`～`REQ-F054` 是浏览器/环境矩阵约束；它们仍须逐条追踪，但不属于用户操作优先级表。
+
+操作键使用小写点分名称并长期稳定。下表中的 `{a,b}` 表示必须展开成两个独立键；多组花括号取笛卡尔积。例如 `playback.user.{play,pause}` 展开为 `playback.user.play` 和 `playback.user.pause`。运行证据必须携带完全展开后的单个键，花括号、通配符、前缀或仅有需求 ID 的证据一律不计覆盖。
+
+| 需求 ID  | 必须独立核验的操作键展开式                                                                                                                                                                                              | 权威断言策略                                                                                                                                                                                                                              |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| REQ-F010 | `popup.server-url.{save-ws,save-wss,reject-invalid,reconnect-after-change}`                                                                                                                                             | `local-visible`：`popup.server-url.reject-invalid`；`server-roundtrip`：`popup.server-url.{save-ws,save-wss,reconnect-after-change}`                                                                                                      |
+| REQ-F011 | `room.{create,copy-invite,join-button,join-enter,leave}`                                                                                                                                                                | `local-visible`：`room.copy-invite`；`server-roundtrip`：`room.{create,join-button,join-enter,leave}`                                                                                                                                     |
+| REQ-F012 | `share.no-room.{confirm-create,cancel-create}`                                                                                                                                                                          | `local-visible`：`share.no-room.cancel-create`；`server-roundtrip`：`share.no-room.confirm-create`                                                                                                                                        |
+| REQ-F013 | `share.replace.{confirm,cancel}`                                                                                                                                                                                        | `local-visible`：`share.replace.cancel`；`peer-sync`：`share.replace.confirm`                                                                                                                                                             |
+| REQ-F014 | `share.open-shared-video`                                                                                                                                                                                               | `local-visible`                                                                                                                                                                                                                           |
+| REQ-F015 | `popup.page-share-button.{enable,disable,persist-popup,persist-reload}`                                                                                                                                                 | `local-visible`                                                                                                                                                                                                                           |
+| REQ-F016 | `clipboard.{copy-log,copy-invite}`                                                                                                                                                                                      | `local-visible`                                                                                                                                                                                                                           |
+| REQ-F017 | `popup.failure.{connecting-disabled,room-pending-disabled,invalid-invite,server-rejected}`                                                                                                                              | `server-roundtrip`：`popup.failure.server-rejected`；`local-visible`：`popup.failure.{connecting-disabled,room-pending-disabled,invalid-invite}`                                                                                          |
+| REQ-F020 | `page.{video,bangumi,festival,watchlater-list,watchlater-medialist}.{inject,resolve-identity,resolve-title,mount-share-button,share}`                                                                                   | `peer-sync`：`page.{video,bangumi,festival,watchlater-list,watchlater-medialist}.share`；`local-visible`：`page.{video,bangumi,festival,watchlater-list,watchlater-medialist}.{inject,resolve-identity,resolve-title,mount-share-button}` |
+| REQ-F021 | `playback.user.{play,pause,seek,set-rate}`                                                                                                                                                                              | `peer-sync-strict`                                                                                                                                                                                                                        |
+| REQ-F022 | `playback.remote-event.{play,pause,seeking,seeked,ratechange,waiting,stalled,canplay,playing,timeupdate,ended}`                                                                                                         | `peer-sync-strict`                                                                                                                                                                                                                        |
+| REQ-F023 | `playback.converge.{playing-state,playing-rate,playing-position,paused-position,seeked-position}`                                                                                                                       | `peer-sync-strict`                                                                                                                                                                                                                        |
+| REQ-F024 | `share.cross-video-open`、`playback.late-readiness.{metadata,canplay}`                                                                                                                                                  | `peer-sync`                                                                                                                                                                                                                               |
+| REQ-F025 | `navigation.auto-next.{owner-updates-share,peer-no-takeover}`                                                                                                                                                           | `peer-sync`                                                                                                                                                                                                                               |
+| REQ-F026 | `navigation.non-shared.{load-paused,manual-local-play,no-room-write}`                                                                                                                                                   | `peer-sync`                                                                                                                                                                                                                               |
+| REQ-F027 | `navigation.identity.{history-back,history-forward,spa,rapid-switch,multi-p,festival,watchlater-list,watchlater-medialist}`                                                                                             | `local-visible`                                                                                                                                                                                                                           |
+| REQ-F028 | `page-ui.{toast,share-button-drag,fullscreen-mount,settings-popover}`                                                                                                                                                   | `local-visible`                                                                                                                                                                                                                           |
+| REQ-F030 | `room.late-join.{shared-video,playback-age}`                                                                                                                                                                            | `peer-sync`：`room.late-join.shared-video`；`peer-sync-strict`：`room.late-join.playback-age`                                                                                                                                             |
+| REQ-F031 | `room.member.{join,leave}`、`room.reconnect.auto-reuse-identity`、`room.leave.explicit-no-reuse`                                                                                                                        | `peer-sync`：`room.member.{join,leave}`；`server-roundtrip`：`room.reconnect.auto-reuse-identity`、`room.leave.explicit-no-reuse`                                                                                                         |
+| REQ-F032 | `background.terminate.{recover-popup,recover-room,recover-message}`                                                                                                                                                     | `server-roundtrip`                                                                                                                                                                                                                        |
+| REQ-F033 | `recovery.{browser-offline-online,server-restart,tab-reload,shared-tab-close}`                                                                                                                                          | `peer-sync`                                                                                                                                                                                                                               |
+| REQ-F034 | `concurrency.{near-simultaneous-authority,reject-late-old-actor}`                                                                                                                                                       | `peer-sync`                                                                                                                                                                                                                               |
+| REQ-F035 | `ownership.{owner-leave,owner-reconnect,new-member-join,first-resync-publish-retry}`                                                                                                                                    | `peer-sync`                                                                                                                                                                                                                               |
+| REQ-F036 | `browser.exit.no-session-recovery`                                                                                                                                                                                      | `server-observed-visible`                                                                                                                                                                                                                 |
+| REQ-F037 | `reaper.failed-first-announcement.retry-converge`                                                                                                                                                                       | `peer-sync`                                                                                                                                                                                                                               |
+| REQ-F040 | `admin.auth.{login-success,login-failure,session-expire,logout}`                                                                                                                                                        | `server-roundtrip`                                                                                                                                                                                                                        |
+| REQ-F041 | `admin.page.{overview,config}.{load,refresh,error-retry}`、`admin.page.{rooms,events,audit}.{load,refresh,filter,paginate,error-retry}`                                                                                 | `server-roundtrip`                                                                                                                                                                                                                        |
+| REQ-F042 | `admin.governance.{close-room,expire-room,clear-shared-video,kick-member,disconnect-session}.{confirm,reason,success}`、`admin.governance.batch.{close-room,expire-room}.{confirm,reason,success,partial-failure}`      | `server-roundtrip`                                                                                                                                                                                                                        |
+| REQ-F043 | `admin.client-observe.{close-room,expire-room,clear-shared-video,kick-member}`、`admin.client-observe.batch.{close-room,expire-room}`、`admin.client-observe.disconnect-session.{clear-room,stop-reconnect,show-error}` | `peer-sync`                                                                                                                                                                                                                               |
+| REQ-F044 | `admin.authorization.{viewer,operator,admin}.ui-visibility`、`admin.authorization.viewer.server-rejection`                                                                                                              | `local-visible`：`admin.authorization.{viewer,operator,admin}.ui-visibility`；`server-roundtrip`：`admin.authorization.viewer.server-rejection`                                                                                           |
+
+`local-visible` 至少要求 `initiator-visible`；`server-roundtrip` 同时要求 `initiator-visible` 和 `server-result`；`server-observed-visible` 同时要求重启后的 `initiator-visible`、`server-result` 和 `stability-window`；`peer-sync` 必须要求 `peer-result`，并在 `initiator-visible`、`stability-window` 中至少再要求一类；`peer-sync-strict` 必须同时要求 `initiator-visible`、`peer-result` 和 `stability-window`。`server-result` 只能证明服务端接受或拒绝了请求，不能代替真实第二浏览器中 background → content → `HTMLVideoElement` 的 `peer-result`。
+
+每个展开后的操作键必须被上表的策略表达式恰好匹配一次，并在机器可读清单中声明相同的 `assertionPolicy`、非空 `requiredAssertionKeys`、每个断言键的固定类别以及 `requiredAssertionCategories`。缺少策略、重复匹配或 catalog 与上表策略不一致都必须使检查失败；同一操作的一条断言不能替另一条断言或另一类别，也不能替另一操作贡献覆盖。需求 ID 只用于双向追踪和汇总，不是 coverage 主键。
 
 ### 5.2 测试编排
 
@@ -149,16 +188,16 @@ popup → background → WebSocket server → background → content script → 
 - **REQ-F033**：验证浏览器离线/在线、服务端先断后恢复、tab 刷新和共享 tab 关闭后的恢复或用户可见失败。
 - **REQ-F034**：验证两成员近同时操作时，最终状态遵循服务端权威规则，且旧 actor 的迟到快照不能覆盖新快照。
 - **REQ-F035**：验证分享所有者离开、断线重连和新成员加入时，客户端最终看到的分享所有者与服务端完整房间态一致；首次归属重同步 `room_state_updated` 被事件总线拒收时，必须在没有后续房间操作或页面刷新的情况下依靠重试最终收敛。
-- **REQ-F036**：浏览器完全退出后的行为必须符合当前 `chrome.storage.session` 语义：不声称自动恢复已关闭的浏览器会话。
+- **REQ-F036**：浏览器完全退出后的行为必须符合当前 `chrome.storage.session` 语义：重启同一隔离 profile 后，popup 不得声称恢复已关闭的房间会话；服务端会话清理和稳定窗口内不重新出现该会话也必须同时成立。
 - **REQ-F037**：验证 runtime index reaper 清理离线节点会话后，存活客户端最终移除幽灵成员并获得正确的分享所有者；首次清理通告 `room_state_updated` 被事件总线拒收、房间随后保持空闲且后续 sweep 已无法从 runtime index 重新发现该房间时，必须仅依靠保留记录的重试最终收敛。临时停用该重试轨迹时，此场景必须因客户端成员或所有者持续陈旧而失败。
 
 ### 5.6 管理后台
 
 - **REQ-F040**：验证管理员登录、登录失败、会话过期和退出。
-- **REQ-F041**：验证 overview、rooms、events、audit 和 config 页面加载、刷新、筛选、分页及错误重试。
-- **REQ-F042**：验证关闭房间、提前过期、清空共享视频、踢出成员、断开会话和批量操作的确认、原因、成功及部分失败结果。
+- **REQ-F041**：验证 overview、rooms、events、audit 和 config 页面加载、刷新及错误重试；另验证 rooms、events、audit 页面实际提供的筛选和分页入口，不为 overview、config 伪造不存在的操作。
+- **REQ-F042**：验证关闭房间、提前过期、清空共享视频、踢出成员和断开会话的确认、原因及成功结果；批量关闭与批量过期必须分别覆盖确认、原因、成功及部分失败结果。
 - **REQ-F043**：治理动作必须由真实扩展客户端观察结果，例如被踢客户端断开并显示错误；按当前实现，被“断开会话”的客户端必须清空当前房间上下文、停止自动重连并显示专用错误。只断言管理 API 返回成功不算完整 E2E。
-- **REQ-F044**：不同管理角色的可见操作和服务端授权拒绝都必须覆盖。
+- **REQ-F044**：viewer、operator、admin 的操作可见性都必须覆盖；viewer 直接调用写接口的服务端授权拒绝必须覆盖，operator 与 admin 当前均有治理写权限，不要求构造不存在的角色拒绝。
 
 ### 5.7 跨浏览器与真实站点
 
@@ -172,7 +211,7 @@ popup → background → WebSocket server → background → content script → 
 
 - **REQ-O001**：核心断言优先使用用户可见 UI、浏览器可观察的 `HTMLVideoElement` 状态和公开管理 API；不得只读取 extension 内部 store 后宣布用户流程成功。
 - **REQ-O002**：位置同步容差、等待上限和消息风暴上限必须在单一策略模块中定义，不得散落于用例。第一阶段技术 spike 必须以当前 reconcile 阈值和实机基线校准具体数值。
-- **REQ-O003**：每个跨端操作至少验证发起端反馈、接收端结果和稳定窗口内没有反向污染三项中的两项；P0 播放同步必须三项全部验证。
+- **REQ-O003**：每个 `peer-sync` 操作至少验证发起端反馈、真实接收端结果和稳定窗口内没有反向污染三项中的两项，且真实接收端结果不可省略；`peer-sync-strict` 必须三项全部验证。服务端房间态、API 成功或审计记录属于独立的 `server-result`，不得冒充接收端结果。
 - **REQ-O004**：失败后的自动重跑只可用于分类“可复现/偶发”，第一次失败仍必须保留并计入稳定性指标；不得以重跑变绿替换原失败结论。
 - **REQ-O005**：回归用例在修复提交进入主干前必须证明其能在缺少修复时失败。实现时应使用安全的文件备份或独立 worktree 验证，不得破坏未提交修改。
 - **REQ-O006**：涉及跨时钟的断言只能比较同一时钟上的差值或协议携带的时长；不得在测试 oracle 中重新引入服务端时间戳减本地时间戳。跨时钟回归场景必须先从诊断采样证明实际偏移和跳变量超过统一播放容差，并以错误算法负向对照证明测试具有判别力。
@@ -188,7 +227,7 @@ popup → background → WebSocket server → background → content script → 
 
 ### 7.2 可诊断性
 
-- **REQ-N010**：失败 artifact 必须包含场景 ID、commit SHA、浏览器及版本、操作系统、扩展 ID/Origin、服务端端口、随机种子和各步骤起止时间。
+- **REQ-N010**：失败 artifact 必须包含 run ID、场景 ID、attempt ID、commit SHA、浏览器及版本、操作系统、扩展 ID/Origin、服务端端口、随机种子和各步骤起止时间。
 - **REQ-N011**：保存每个浏览器上下文的遮罩截图、控制台/页面错误、service worker 或 event page 日志，以及服务端结构化日志；无凭据的 Playwright 上下文还须保存 trace，Firefox WebDriver lane 须保存 geckodriver/Marionette 日志和经过清洗的 WebDriver 命令/事件记录，并在 BiDi 能力可用且能证明已去除敏感头、cookie 和正文时保存网络事件或 HAR。场景只要会创建、复制、展示或输入邀请串、token、密码或 cookie，就必须在上下文启动前关闭原始 trace/HAR/网络正文，改用步骤日志、播放器采样、遮罩截图和服务端事件等价诊断，并在元数据中说明能力差异；不得依赖上传前丢弃已经捕获凭据的 trace，也不得伪造 `trace.zip`。
 - **REQ-N012**：播放同步失败必须附带双方在同一采样周期的 URL、`currentTime`、`paused`、`readyState`、`playbackRate` 和本地单调采样值。
 - **REQ-N013**：清理失败、浏览器崩溃和 artifact 上传失败本身都必须使对应 job 明确失败。
@@ -219,9 +258,9 @@ popup → background → WebSocket server → background → content script → 
 实施阶段必须维护机器可读或 Markdown 形式的追踪表，至少包含：
 
 ```text
-需求 ID → 场景 ID → 自动化层 → 浏览器/页面矩阵 → 最近结果 → 负责人
+需求 ID → 操作键 → 断言策略 → 必要断言键/类别 → 场景 ID → 自动化层 → 浏览器/页面矩阵 → 最近结果 → 负责人
 ```
 
 一个需求可以由多个场景覆盖；一个场景也可以覆盖多个需求，但不得用“被其他测试间接覆盖”而没有明确断言的方式关闭需求。
 
-追踪不能只读取场景的静态 tag。共享断言 helper 必须在执行时输出 `requirementId`、断言类别（发起端用户可见、接收端/服务端跨端结果、稳定窗口）、结果和时间；覆盖检查只认可本次测试报告中实际执行且通过的证据。空测试、跳过断言或只声明 requirement ID 均不得计为覆盖。
+追踪不能只读取场景的静态 tag。共享断言 helper 必须在执行时输出 `runId`、`scenarioId`、`attemptId`、本次尝试内唯一的 `evidenceId`、`requirementId`、完全展开的 `operationKey`、`assertionKey`、断言类别（发起端用户可见、真实接收端结果、服务端结果、稳定窗口）、结果和时间；覆盖检查对权威操作/策略表、机器可读必要断言清单和必要类别集合分别做集合差，只认可本次测试报告中实际执行且通过、且类别与 catalog 中该断言键固定映射一致的精确 `(operationKey, assertionKey)` 证据。catalog 中重复声明操作键或断言键必须失败；P0 smoke、分域场景或诊断重试重复核验同一二元组是合法的独立运行证据，必须按 `scenarioId` / `attemptId` / `evidenceId` 全部保留，再对通过证据的二元组求并集，不能把后一个场景或尝试误判为重复。测试运行器的首次失败、skip 或未执行断言仍独立使完整 job 失败，不能被后续尝试或其他场景的通过证据掩盖。空测试、跳过断言、未知键、通配键、同一次尝试内重复 `evidenceId`、策略或类别错配、用 `server-result` 冒充 `peer-result`，以及只声明 requirement ID 均不得计为覆盖。

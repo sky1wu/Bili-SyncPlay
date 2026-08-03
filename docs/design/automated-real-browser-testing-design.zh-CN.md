@@ -193,10 +193,10 @@ flowchart LR
 每次运行创建一个 `runId`、一个经校验的运行时临时根和一个独立 artifact 暂存根，负责：
 
 1. 记录 commit、OS、浏览器版本和随机种子。
-2. 先在随机回环端口启动本次运行独占的 bootstrap sink，再用 `BILI_SYNCPLAY_DEFAULT_SERVER_URL` 把测试构建的默认地址指向该 sink。在跨进程构建锁内完成生产构建、校验 manifest，并把产物原子复制到 `.tmp/e2e-runtime/<runId>/extension/<target>/`；浏览器只加载这份 run-scoped 不可变副本，复制完成后才释放构建锁。sink 只处理启动探测并记录意外请求，不承载房间协议。
-3. 启动 owner/member 浏览器上下文并发现扩展 ID/Origin；此时任何自动连接只能命中 bootstrap sink，不能接触日常开发服务或公网。默认并发只有在两个 run 同时构建、启动和重启 background 的隔离压力测试通过后启用；此前 Playwright 固定 `workers: 1`。
-4. 以发现的 Origin 启动真正的同步服务端；端口使用 `listen(0)` 取得。
-5. 把真正的服务端 URL 交给 page model，由 popup UI 完成保存并确认连接后关闭 bootstrap sink。
+2. 先在随机回环端口启动本次运行独占的 bootstrap sink；WSS 场景还须在浏览器启动前生成本次 run 的临时 CA、SAN 只包含 `wssUrl` 实际回环主机名/IP 的叶证书，以及仅供隔离 profile 使用的信任描述。再用 `BILI_SYNCPLAY_DEFAULT_SERVER_URL` 把测试构建的默认地址指向 sink。在跨进程构建锁内完成生产构建、校验 manifest，并把产物原子复制到 `.tmp/e2e-runtime/<runId>/extension/<target>/`；浏览器只加载这份 run-scoped 不可变副本，复制完成后才释放构建锁。sink 只处理启动探测并记录意外请求，不承载房间协议。
+3. 使用上一步的可选信任描述启动 owner/member 浏览器上下文并发现扩展 ID/Origin；此时任何自动连接只能命中 bootstrap sink，不能接触日常开发服务或公网。默认并发只有在两个 run 同时构建、启动和重启 background 的隔离压力测试通过后启用；此前 Playwright 固定 `workers: 1`。
+4. 以发现的 Origin 启动真正的同步服务端；端口使用 `listen(0)` 取得。需要核验 `wss://` 时，再启动只转发到该实例的受管 TLS facade；它使用本次 run 的临时证书和独立随机回环端口，同时代理 HTTPS 普通请求与 WebSocket upgrade。
+5. 把真正的 `ws://` 或 `wss://` 服务端 URL 交给 page model，由 popup UI 保存；若当前尚无房间操作，继续通过 create/join 用户入口触发连接，再确认握手并关闭 bootstrap sink。
 6. 运行场景并持续收集浏览器、worker 和服务端日志到 artifact 暂存根。
 7. 先关闭浏览器，再等待同步服务端与 fixture server 完整 shutdown，最后只清理运行时临时根；完成的 artifact 暂存根保留给调用方或 CI 上传步骤。
 
@@ -218,12 +218,14 @@ flowchart LR
 
 ### 4.3 Server runtime fixture
 
-第一阶段直接导入 `createSyncServer` 创建内存模式实例，而不是另起一个难以观测的 shell daemon：
+第一阶段直接导入 `createSyncServer` 创建内存模式实例，而不是另起一个难以观测的 shell daemon。server runtime fixture 是 bootstrap sink 的唯一所有者，并提供两阶段接口：`prepare()` 在浏览器启动前建立 sink、可选临时证书及 profile 信任描述，`start(allowedOrigins)` 在浏览器 Origin 发现后才启动后端和可选 TLS facade。真实同步握手确认后，coordinator 调用幂等的 `closeBootstrapSink()`，它只关闭 sink；最终幂等的 `close()` 按逆序关闭仍存活的 sink、TLS facade 和同步后端，因此启动中途失败也不要求调用方复制清理逻辑：
 
 - 使用真实 HTTP/WebSocket handler、消息校验和 room service。
 - `allowedOrigins` 精确来自本次浏览器上下文。
 - admin-ui 场景启用测试专用管理员配置；密码在内存中生成，不写文件。
 - 监听回环地址和随机端口。
+- 为 `popup.server-url.save-wss` 提供可选的受管 TLS facade：使用本次 run 生成的临时 CA，以及 SAN 只包含 `wssUrl` 实际回环主机名/IP 的叶证书终止 HTTPS/WSS，只允许代理到同一 fixture 的随机回环端口；普通 HTTPS 请求必须转发 `/api/connection-check` 和 `/` 并保留 Origin/CORS 语义，WebSocket upgrade 转发到同一后端。CA 信任限制在隔离浏览器 profile 的生命周期内；不得修改系统信任库、关闭全局证书校验或借用公网 WSS。fixture 暴露 `wssUrl`，并验证浏览器实际依次完成 HTTPS 预检、TLS、WebSocket 和同步协议握手；SAN 不匹配、错误 CA、错误目标或 profile 外连接必须失败。
+- `closeBootstrapSink()` 返回前必须等待 sink 端口可重新绑定，同时保持同步后端和可选 TLS facade 可用；`close()` 在任何阶段均可安全调用，并汇总各资源的关闭失败。
 - 结构化日志写入本次 artifact 目录并同步进入内存 ring buffer，供失败摘要使用。
 
 普通场景默认使用上述内存实例。为 `REQ-F037` 单独增加一个隔离的 Redis/双节点模式：
@@ -408,9 +410,9 @@ Ownership  = none | owner | peer
 - 先跑 P0 smoke；失败则立即上传 artifact，不继续跑长矩阵。
 - smoke 通过后运行确定性分域场景和 admin-ui 真实客户端治理场景。
 - 与现有 `verify` 并行，最终都作为 branch protection required checks。
-- `browser-e2e-smoke` 可以在 M2 后先作为非 required 信号落地；只有 M3、M4、需求—场景追踪检查和 100 轮稳定性基线全部完成，且权威表中的 P0/P1 都映射到实际断言后，才能新增 `browser-e2e` 并把它设为 required check。两个 job 不复用检查上下文。
+- `browser-e2e-smoke` 可以在 M2 后先作为非 required 信号落地；只有 M3、M4、需求—场景追踪检查和 100 轮稳定性基线全部完成，且权威表中的每个 P0/P1 展开操作键、断言策略、必要断言键及必要断言类别都有实际执行证据后，才能新增 `browser-e2e` 并把它设为 required check。两个 job 不复用检查上下文。
 - 稳定性基线执行拟设为 required 的完整 `browser-e2e` 命令 100 次，逐域记录 P0、P1 和 admin-ui harness failure；只重复 P0 smoke 不能证明完整门禁可用。
-- 追踪检查消费断言 helper 在本次运行生成的证据，而不是只解析场景 tag。每条证据携带 requirement ID、断言类别、结果和时间；覆盖摘要拒绝空测试、未执行断言和只声明 ID 的场景。
+- M1 先落地追踪基础设施：把需求规格第 5.1 节展开为机器可读 operation catalog；每项包含唯一 `operationKey`、所属 `requirementId`、priority、与权威表一致的独立 `assertionPolicy`、非空 `requiredAssertionKeys`、断言键到类别的固定映射和 `requiredAssertionCategories`。策略表达式必须让每个展开键恰好匹配一次；校验器不能从断言类别反推操作是否跨端。证据类别拆为发起端用户可见、真实接收端结果、服务端结果和稳定窗口；`server-observed-visible` 必须包含重启后的发起端可见结果、服务端结果和稳定窗口，`peer-sync` 必须包含真实接收端结果及另外一类，`peer-sync-strict` 必须同时包含发起端、真实接收端和稳定窗口，`server-result` 不得补 `peer-result` 的缺口。断言 helper 的每条运行证据携带 `runId`、`scenarioId`、`attemptId`、本次尝试内唯一的 `evidenceId`、完全展开的 `operationKey`、`assertionKey`、requirement ID、断言类别、结果和时间。门禁分别对权威策略、必需 `(operationKey, assertionKey)` 集合、必要类别集合与本次实际通过证据做精确集合差，并校验证据类别等于 catalog 中该断言键的类别；catalog 内重复键、同一次尝试内重复 `evidenceId`、未知键、花括号/通配键、策略或类别错配、空测试、未执行断言及只声明 ID 的场景都失败。不同场景或尝试可重复核验同一二元组：报告按 `scenarioId` / `attemptId` 保留全部证据，coverage 只对通过二元组求并集；首次失败或 skip 仍由测试运行器独立使 job 失败，不能被后续尝试或另一场景的通过覆盖。
 
 拟议根命令（实现前不可用）：
 
@@ -504,5 +506,6 @@ GitHub 明确说明持久化 self-hosted runner 可能被不可信 workflow 持�
 8. GitHub-hosted runner 上 P0 smoke 和全量确定性套件的实际耗时、CPU 和 artifact 大小。
 9. Linux/WSL 本地 managed Redis 应锁定哪些 `redis-server` / `redis-cli` 版本，怎样取得它们并证明随机端口、关闭持久化、健康检查和进程回收在干净环境可重复。
 10. E2E-only WSL launcher 能否通过 `ServerBootstrapDependencies.now` 稳定制造至少 `max(5_000ms, 4 × playing 动态位置容差)` 的偏移及反向跳变，并让 `sync:ping` 观测到计划值，同时不修改任一系统时钟。
+11. Chromium 隔离 profile 能否在不修改系统信任库、不关闭全局证书校验的前提下，仅信任本次 run 的临时 CA，并让扩展 background 通过受管 `wss://` facade 的 HTTPS `/api/connection-check`、`/` 预检后完成真实 TLS/WebSocket/同步协议握手；错误证书是否稳定失败。
 
 任一 spike 失败都应调整设计或缩小第一阶段范围，不得用重试和 `sleep` 把不确定性藏进硬门禁。

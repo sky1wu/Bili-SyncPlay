@@ -39,7 +39,7 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 | PR    | 范围                                                                         | 明确不包含                 |
 | ----- | ---------------------------------------------------------------------------- | -------------------------- |
 | PR 1  | Phase 0 spike 结果、依赖选型和已验证设计修订                                 | 全操作矩阵、Windows runner |
-| PR 2  | `packages/e2e`、资源生命周期、页面夹具、最小扩展启动测试                     | 双客户端房间旅程           |
+| PR 2  | `packages/e2e`、资源生命周期、操作覆盖基础设施、页面夹具、最小扩展启动测试   | 双客户端房间旅程           |
 | PR 3  | P0 双客户端 create/join/share/play/seek/rate/pause/leave                     | 页面全矩阵、管理后台       |
 | PR 4  | Popup 与五种页面/导航场景                                                    | 生命周期故障、管理后台     |
 | PR 5  | 播放、缓冲、回声、并发、重连、所有权和 reaper 故障场景                       | CI required check          |
@@ -82,10 +82,10 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 ### E2E-004：证明双 profile、Origin 和服务端握手
 
 - **依赖**：E2E-002
-- **需求**：REQ-G03、REQ-F003、REQ-F004
-- **工作**：先启动独占 bootstrap sink，并把测试构建默认服务端地址指向它；再同时启动 owner/member 两个临时 profile，发现各自扩展 Origin；用这些 Origin 创建随机端口同步服务端并通过 popup 切换连接。
-- **验收**：两个 profile 的 storage、tab 和 background 不共享；启动阶段只命中 bootstrap sink，即使本机 `localhost:8787` 放置诱饵服务也收不到请求；同步服务端精确允许本次 Origin，第三个伪造网页 Origin 被拒绝。
-- **估算**：1 天
+- **需求**：REQ-G03、REQ-F003、REQ-F004、REQ-F010
+- **工作**：先生成 run-scoped 临时 CA、SAN 只包含 `wssUrl` 实际回环主机名/IP 的叶证书和仅供隔离 profile 使用的信任描述，再启动独占 bootstrap sink，并把测试构建默认服务端地址指向它；随后同时启动 owner/member 两个临时 profile，发现各自扩展 Origin，用这些 Origin 创建随机端口同步服务端和 HTTPS/WSS facade。popup 保存 `wss://` 后继续点击创建房间，以真实用户入口触发连接。
+- **验收**：两个 profile 的 storage、tab 和 background 不共享；启动阶段只命中 bootstrap sink，即使本机 `localhost:8787` 放置诱饵服务也收不到请求；同步服务端精确允许本次 Origin，第三个伪造网页 Origin 被拒绝。保存 `wss://` 本身先验证持久化，随后创建房间必须让扩展 background 依次完成 HTTPS `/api/connection-check`、`/` 预检以及真实 TLS、WebSocket 和同步协议握手；临时信任不修改系统信任库，SAN 不匹配、错误 CA、非本 run 证书和公网回退均失败，profile 删除后无证书状态残留。
+- **估算**：1～2 天
 
 ### E2E-005：校准媒体事件和时间策略
 
@@ -133,23 +133,23 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **依赖**：E2E-101、E2E-102
 - **需求**：REQ-G02、REQ-F001
 - **工作**：定位构建目录，以本次 bootstrap sink URL 设置 `BILI_SYNCPLAY_DEFAULT_SERVER_URL`；在跨进程构建锁内完成“清理共享 dist、生产构建、校验、原子复制到 run-scoped 目录”，释放锁后只返回不可变副本的只读元数据。
-- **验收**：产物默认地址只指向本次 sink；Chrome 目标误指向 Firefox manifest、缺文件、版本不一致、复用其他 runId 的产物或浏览器直接加载共享 `extension/dist*` 均快速失败。两个 run 并发构建并分别终止/恢复 background 时，扩展文件哈希和连接目标始终属于各自 run；构建锁异常退出后可恢复且不会遗留半份副本。
+- **验收**：产物默认地址只指向本次 sink；Chrome 目标误指向 Firefox manifest、缺文件、版本不一致、复用其他 runId 的产物或浏览器直接加载共享 `extension/dist*` 均快速失败。两个 run 并发构建时，扩展文件哈希和连接目标始终属于各自 run；构建锁异常退出后可恢复且不会遗留半份副本。
 - **估算**：1 天
 
 ### E2E-104：实现 server runtime fixture
 
 - **依赖**：E2E-101、E2E-102
-- **需求**：REQ-F004、REQ-F006、REQ-N010
-- **工作**：在浏览器启动前暴露 bootstrap sink 生命周期；Origin 发现后再导入 `createSyncServer`，使用随机端口、精确 Origin、内存 provider 和结构化日志；暴露 `wsUrl`、`httpUrl`、`close`。
-- **验收**：sink 与同步服务端使用不同随机端口；真实 WebSocket 握手成功；非允许 Origin 失败；close 等待完整 shutdown；两个端口均可在结束后重新绑定。
-- **估算**：1～2 天
+- **需求**：REQ-F004、REQ-F006、REQ-F010、REQ-N010
+- **工作**：实现两阶段 fixture，并让它成为 bootstrap sink 的唯一所有者：`prepare()` 在浏览器启动前建立 sink、可选 run-scoped 临时 CA、SAN 只包含 `wssUrl` 实际回环主机名/IP 的叶证书和 profile 信任描述；Origin 发现后，`start(allowedOrigins)` 再导入 `createSyncServer`，使用随机端口、精确 Origin、内存 provider 和结构化日志。按需启动只转发到该实例的受管 TLS facade；普通请求代理 `/api/connection-check` 和 `/` 并保留 Origin/CORS，upgrade 代理到同一 WebSocket 后端。暴露 `wsUrl`、`wssUrl`、`httpUrl`、只关闭 sink 的幂等 `closeBootstrapSink()`，以及兜底关闭所有仍存活资源的幂等 `close()`。
+- **验收**：sink、同步服务端和 TLS facade 使用不同随机端口；真实 WS 与 WSS 均完成 HTTP(S) 预检、WebSocket 及同步协议握手；WSS 不修改系统信任库、不关闭全局证书校验且不访问公网，SAN 不匹配、错误 CA、缺失 HTTPS 普通请求代理和非允许 Origin 都失败。握手后调用 `closeBootstrapSink()`，其端口可立即重新绑定，而既有同步连接、后端和 facade 继续可用；重复调用不报错。`close()` 在 `prepare()` 后失败、`start()` 中途失败、sink 已单独关闭和正常结束四种状态下都等待其余资源完整 shutdown、汇总关闭错误并使所有端口可重新绑定，临时证书和 profile 信任无残留。
+- **估算**：2～3 天
 
 ### E2E-105：实现 Chromium browser client fixture
 
 - **依赖**：E2E-102～E2E-104
 - **需求**：REQ-F003、REQ-F005、REQ-N011
-- **工作**：启动 persistent context、发现 service worker/ID、创建活动 Bilibili tab、打开 popup、捕获 page/worker console 和错误。
-- **验收**：两个 client 并行启动且隔离；启动至 popup 切换成功前只连接 bootstrap sink；重复创建/关闭 20 轮无孤儿 Chromium 进程和 profile 锁。
+- **工作**：接收 E2E-104 `prepare()` 返回的可选 profile 信任描述后启动 persistent context，发现 service worker/ID、创建活动 Bilibili tab、打开 popup、捕获 page/worker console 和错误；把发现的 Origin 交回 server fixture 的 `start()`。
+- **验收**：两个 client 并行启动且隔离；启动至 popup 切换成功前只连接 bootstrap sink；两个并发 run 分别终止/恢复 background 后，连接目标、扩展文件和证书信任仍属于各自 run；重复创建/关闭 20 轮无孤儿 Chromium 进程、profile 锁或信任状态残留。
 - **估算**：2 天
 
 ### E2E-106：实现 Bilibili fixture contracts
@@ -173,15 +173,15 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **依赖**：E2E-102、E2E-105
 - **需求**：REQ-G06、REQ-N010～REQ-N014、REQ-N022
 - **工作**：把 metadata、summary、无凭据上下文的 Playwright trace、遮罩截图、console、worker 和 server 日志写入独立 artifact 暂存根；在场景启动前按敏感能力 tag 选择采集模式，凡会处理邀请串、token、密码或 cookie 的上下文都不启动原始 trace/HAR/网络正文，并输出步骤日志等价脱敏诊断。采集阶段使用字段 allowlist；实现 archive-aware 扫描器，按本次运行登记的秘密和通用 header/cookie 模式解包检查待上传文件。Firefox 等非 Playwright lane 由各 adapter 追加经过同一策略批准的驱动诊断。
-- **验收**：人为制造断言失败后安全 artifact 齐全且可打开；runtime 根删除后 artifact 仍存在。P0 建房/入房失败时不得生成 trace/HAR，但必须保留不含邀请串的步骤、console、播放器采样、遮罩截图和服务端事件。分别把 bearer token、cookie、管理员密码和邀请串注入普通日志、合成 trace.zip、HAR 和 WebDriver 日志，扫描必须阻止上传并让 job 失败；把同类探针放入待截图的敏感区域，截图必须按遮罩清单覆盖该区域且视觉快照不得泄露原文。清除探针后产物通过，且不能靠损坏归档或删除全部诊断伪装成功。
+- **验收**：用合成的无凭据失败和带邀请串/管理员凭据的敏感失败验证安全 artifact 齐全且可打开；runtime 根删除后 artifact 仍存在。敏感模式不得生成 trace/HAR，但必须保留不含秘密的步骤、console、播放器采样、遮罩截图和服务端事件。分别把 bearer token、cookie、管理员密码和邀请串注入普通日志、合成 trace.zip、HAR 和 WebDriver 日志，扫描必须阻止上传并让 job 失败；把同类探针放入待截图的敏感区域，截图必须按遮罩清单覆盖该区域且视觉快照不得泄露原文。清除探针后产物通过，且不能靠损坏归档或删除全部诊断伪装成功；真实 P0 失败的集成验收由 E2E-503 完成。
 - **估算**：3～4 天
 
-### E2E-109：定义根命令并替换空计划
+### E2E-109：实现场景 runner 与空集合保护
 
-- **依赖**：E2E-101～E2E-108、E2E-110
+- **依赖**：E2E-101～E2E-108、E2E-110、E2E-111
 - **需求**：REQ-F001
-- **工作**：新增 `test:e2e:browser:smoke`、`test:e2e:browser`；在可执行 smoke 完成后删除或改造只打印 JSON 的 `test:e2e:smoke:plan`，避免两个入口都叫 E2E。
-- **验收**：从具备已声明工具链的干净 checkout 执行根命令，smoke 能独立完成；完整命令在未设置 `REDIS_URL` 时自动启动受管 Redis，在设置该变量时验证并隔离外部 Redis，且两种模式都完成构建、全部 P0/P1 测试、artifact 和清理。任一步失败时根命令返回非零，不能跳过 `REQ-F037`。
+- **工作**：在 e2e workspace 内实现统一场景选择、fixture 编排、退出结果合并和 coverage 汇总入口；本任务只接入基础设施自测，不发布会被误认作完整浏览器 E2E 的根命令。
+- **验收**：基础设施自测从干净 checkout 端到端完成 build fixture、浏览器启动、server/Redis 启停、artifact 定稿与清理；零场景、全 skip、Redis 不可用、浏览器启动失败或清理失败均返回非零。不能在 M2 场景尚未实现时用空测试替换 `test:e2e:smoke:plan` 后报绿。
 - **估算**：1 天
 
 ### E2E-110：实现 Redis runtime fixture
@@ -189,7 +189,15 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **依赖**：E2E-102
 - **需求**：REQ-F001、REQ-F006、REQ-F037、REQ-N013
 - **工作**：实现 managed/external 两种模式。managed 模式校验受支持的 `redis-server` 版本，生成关闭持久化、仅绑定回环地址且使用随机端口/临时目录的配置，启动后立即登记 LIFO disposer，并等待 `redis-cli ping`；external 模式接收显式 `REDIS_URL`，只做健康检查而不接管进程。两种模式都生成唯一 key 前缀并在结束时清理、确认。
-- **验收**：本地和 CI 外 soak 未设置 `REDIS_URL` 时能自动运行 `E2E-308`，结束后子进程退出、端口可重绑且无 key/临时目录残留；缺失或版本不兼容的 `redis-server` 在场景启动前给出安装要求并失败。外部 URL 不可达或健康检查失败时快速失败；使用外部实例时只清理本 run 前缀且绝不终止外部进程。两个并发 run 的端口和前缀互不串扰，启动中断和清理超时均使根命令非零。
+- **验收**：fixture 自测在未设置 `REDIS_URL` 时启动 managed Redis、完成 ping 和前缀写入/清理，结束后子进程退出、端口可重绑且无 key/临时目录残留；缺失或版本不兼容的 `redis-server` 在场景启动前给出安装要求并失败。外部 URL 不可达或健康检查失败时快速失败；使用外部实例时只清理本 run 前缀且绝不终止外部进程。两个并发 run 的端口和前缀互不串扰，启动中断和清理超时均使入口非零；E2E-308 在 M3 完成后负责真实浏览器/双节点集成验收。
+- **估算**：2～3 天
+
+### E2E-111：实现操作目录、断言证据与覆盖检查基础设施
+
+- **依赖**：E2E-101
+- **需求**：REQ-G04、REQ-O003、需求规格第 5.1、9 节
+- **工作**：把需求规格第 5.1 节的操作键和权威断言策略展开为机器可读 operation catalog；每项包含唯一 `operationKey`、所属 requirement ID、priority、独立 `assertionPolicy`、非空 `requiredAssertionKeys`、断言键到类别的固定映射和 `requiredAssertionCategories`。实现共享断言 helper 和本地 coverage check，对权威策略、catalog 必需二元组、必要类别与本次实际通过证据做精确集合差；每条证据同时记录 `runId`、`scenarioId`、`attemptId` 和本次尝试内唯一的 `evidenceId`。后续 M2～M4 场景从首个用例起直接产出该证据，不在 M5 返工补 tag。
+- **验收**：任一展开键没有或重复匹配策略、catalog 漏键、多键、重复声明键、空 `requiredAssertionKeys`、策略/类别错配，或与第 5.1 节 priority/requirement/policy 映射漂移时检查失败。表驱动判别力测试分别删除 `playback.user.seek`、`admin.governance.disconnect-session.success`、任一必要 `assertionKey`、`playback.user.seek` 的 `peer-result` 和 `stability-window` 证据、`browser.exit.no-session-recovery` 的重启后 `initiator-visible` 证据，把 `ownership.owner-leave` 从 `peer-sync` 误标成 `local-visible`，并尝试用同操作的 `server-result` 补 `peer-result` 缺口；八种对照都必须失败。同需求兄弟操作、未知键、花括号/通配键、只写 tag/requirement ID、空测试、skip、未执行断言或同一次尝试内重复 `evidenceId` 均不能补缺。另有正向聚合测试让 P0 smoke、分域场景和一次诊断重试分别提交同一 `(operationKey, assertionKey)`：证据按 `scenarioId` / `attemptId` 保留、coverage 求并集且检查通过；若首次尝试或任一场景失败/skip，完整 job 仍失败。
 - **估算**：2～3 天
 
 ## 6. M2：P0 双客户端 smoke
@@ -198,7 +206,7 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：M1
 - **需求**：REQ-F011～REQ-F014、REQ-F030、REQ-O001
-- **工作**：从两端 popup、导航和公开 admin API 聚合成员、共享视频和房间观察。
+- **工作**：从两端 popup、导航和经 fixture 内存管理员认证的只读 admin API 聚合成员、共享视频和房间观察，不读取内部 store。
 - **验收**：能发现“服务端有状态但接收端 UI 未更新”和“成员增量更新但分享所有者仍陈旧”两类差异。
 - **估算**：1～2 天
 
@@ -242,14 +250,22 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **验收**：member 收到当前共享视频，并收敛到 `snapshot.currentTime + ((playbackAgeMs + localElapsedMs) / 1000) * playbackRate`，而不是停在原始陈旧位置；分别临时让接收端忽略 `playbackAgeMs` 和忽略倍速乘数时，用例都必须因位置偏差失败。
 - **估算**：1～2 天
 
+### E2E-207：接通可执行 smoke 根命令
+
+- **依赖**：E2E-109、E2E-204～E2E-206
+- **需求**：REQ-F001
+- **工作**：新增根命令 `test:e2e:browser:smoke` 并接入实际 P0 旅程；在它端到端可执行后删除或改造只打印 JSON 的 `test:e2e:smoke:plan`，避免计划输出继续冒充 E2E。完整 `test:e2e:browser` 留给 E2E-501 在 M3/M4 全部完成后接通。
+- **验收**：从具备已声明工具链的干净 checkout 执行 smoke，完成构建、真实浏览器/扩展、服务端、artifact 和清理；任一步失败、零场景或 skip 都返回非零。此命令使用独立的非 required 检查名，不能声称已覆盖完整 P0/P1 catalog。
+- **估算**：1 天
+
 ## 7. M3：操作、页面、生命周期矩阵
 
 ### E2E-301：Popup 全操作场景
 
 - **依赖**：M2
 - **需求**：REQ-F010～REQ-F017
-- **工作**：覆盖合法/非法服务器地址、Enter join、确认取消、替换分享、打开共享视频、复制、设置持久化、pending 和服务端错误。
-- **验收**：需求追踪表中 REQ-F010～F017 均有正向和拒绝/错误场景。
+- **工作**：覆盖合法/非法服务器地址、Enter join、确认取消、替换分享、打开共享视频、复制、设置持久化、pending 和服务端错误。`save-ws`、`save-wss` 分别在保存后通过 create/join 触发真实握手；`reconnect-after-change` 在已入房时切换独立端点并验证重连，不用同一连接证据同时代替三个操作键。
+- **验收**：使用 E2E-111 的 coverage check 证明需求规格第 5.1 节为 REQ-F010～F017 展开的每个操作键均有本次实际通过的必要断言及类别证据；删除 `room.join-enter`、任一确认/取消分支或任一错误键时检查失败，不能由同需求下的兄弟操作代替。
 - **估算**：3～4 天
 
 ### E2E-302：五种页面和身份场景
@@ -281,7 +297,7 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **依赖**：M2
 - **需求**：REQ-F031～REQ-F033、REQ-F036
 - **工作**：覆盖 service worker terminate、offline/online、服务端重启、tab reload/close、显式离房和浏览器完全退出。
-- **验收**：自动重连与显式离房的 token/成员语义可从用户结果区分；浏览器退出后不错误声称恢复 session。
+- **验收**：自动重连与显式离房的 token/成员语义可从用户结果区分；浏览器完全退出并重启同一隔离 profile 后，popup 明确处于未加入房间状态，服务端已移除旧会话，且稳定窗口内该会话不会重新出现。删除任一 UI、服务端或稳定窗口断言都必须让 coverage check 失败。
 - **估算**：4～5 天
 
 ### E2E-306：并发、陈旧快照和分享所有者
@@ -322,16 +338,16 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：E2E-401
 - **需求**：REQ-F042、REQ-F043
-- **工作**：由真实 owner/member 扩展创建房间，再从 admin UI 关闭、过期、清视频、踢人、断开会话和批量治理。
-- **验收**：每个动作既验证后台结果，也验证扩展客户端的状态/断连/错误；断开会话必须验证当前房间上下文被清除、停止自动重连并显示专用错误；覆盖批量部分失败。
+- **工作**：为每种治理动作创建独立房间夹具。从 admin UI 对在线房间执行关闭、清视频、踢人和断开会话；提前过期前先让客户端离线并等待服务端移除会话，使房间满足“无在线成员”前置条件，过期后再让原隔离 profile 恢复连接并观察房间不存在。批量关闭与批量过期分别建夹具，后者同时包含可过期空闲房间和应拒绝的在线房间。
+- **验收**：每个动作既验证后台结果，也验证扩展客户端的状态/断连/错误；断开会话必须验证当前房间上下文被清除、停止自动重连并显示专用错误；单个与批量过期的客户端证据必须来自恢复连接后的 popup 房间清理/错误，不能伪造向在线房间广播不存在的“过期成功”。批量关闭与批量过期分别覆盖成功及部分失败。
 - **估算**：3～5 天
 
 ### E2E-403：实现角色授权矩阵
 
 - **依赖**：E2E-401
 - **需求**：REQ-F044
-- **工作**：参数化 viewer/operator/admin 的 UI 可见性和服务端拒绝。
-- **验收**：隐藏按钮和直接 API 越权两层均有断言。
+- **工作**：参数化 viewer/operator/admin 的 UI 可见性；验证 viewer 直接调用治理 API 被服务端拒绝，并验证 operator、admin 的同一治理调用获授权。
+- **验收**：viewer 的隐藏按钮和直接 API 越权两层均有断言；operator、admin 的治理按钮可见且服务端请求成功，不构造当前权限模型中不存在的 operator 拒绝。
 - **估算**：1～2 天
 
 ## 9. M5：GitHub-hosted CI 硬门禁
@@ -340,8 +356,8 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：M3、M4
 - **需求**：REQ-G01、REQ-N001、REQ-N002
-- **工作**：在 Ubuntu runner 安装锁定 Chromium；最终 `browser-e2e` 在同一 job 配置锁定版本的 Redis service、`redis-cli ping` 健康检查和 job-scoped `REDIS_URL`，由 run coordinator 为 `E2E-308` 创建并清理唯一 key 前缀，不得依赖并行 `redis-integration` job 的 service。随后先跑 smoke，再运行完整 P0/P1 分域矩阵和 admin-ui 真实客户端场景；与现有 verify 并行。M2 阶段若先接入 CI，只能使用独立且非 required 的 `browser-e2e-smoke` 检查名，该较小范围无需启动 Redis；最终完整门禁使用 `browser-e2e`，两者不得复用检查上下文。
-- **验收**：干净 CI 环境从 `npm ci` 开始能启动并通过 Redis 健康检查、注入连接地址、执行 `E2E-308` 并清理登记的 key 前缀；Redis 启动、健康检查、连接或清理失败时 job 非零。权威优先级表中的场景和 admin-ui E2E 任一缺失或失败时 job 非零；smoke 失败时长矩阵跳过但安全 artifact 仍上传；job 总 timeout 明确。
+- **工作**：新增根命令 `test:e2e:browser`，并在 Ubuntu runner 安装锁定 Chromium；最终 `browser-e2e` 在同一 job 配置锁定版本的 Redis service、`redis-cli ping` 健康检查和 job-scoped `REDIS_URL`，由 run coordinator 为 `E2E-308` 创建并清理唯一 key 前缀，不得依赖并行 `redis-integration` job 的 service。命令先跑 smoke，再运行完整 P0/P1 分域矩阵和 admin-ui 真实客户端场景；与现有 verify 并行。M2 阶段若先接入 CI，只能使用独立且非 required 的 `browser-e2e-smoke` 检查名，该较小范围无需启动 Redis；最终完整门禁使用 `browser-e2e`，两者不得复用检查上下文。
+- **验收**：干净 CI 环境从 `npm ci` 开始能启动并通过 Redis 健康检查、注入连接地址、执行 `E2E-308` 并清理登记的 key 前缀；Redis 启动、健康检查、连接或清理失败时 job 非零。权威优先级表展开后的任一 P0/P1 操作键、断言策略、必要断言键、必要断言类别或 admin-ui E2E 缺失/失败时 job 非零；smoke 失败时长矩阵跳过但安全 artifact 仍上传；job 总 timeout 明确。
 - **估算**：1～2 天
 
 ### E2E-502：实现变更分类
@@ -357,23 +373,23 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **依赖**：E2E-108、E2E-501
 - **需求**：REQ-G06、REQ-N010～REQ-N014、REQ-N022
 - **工作**：只从 artifact collector 生成的 allowlisted 上传清单中上传摘要和失败 trace/等价驱动诊断；上传前重新执行 archive-aware 扫描，在 job summary 展示场景、分类、浏览器版本、第一失败步骤和被拒绝产物原因；上传完成后以 `always()` 独立清理该 runId 的 artifact 根。
-- **验收**：先证明 runtime 根已删除且已扫描 artifact 仍能上传；断言失败、浏览器崩溃、清理失败、artifact 生成失败、秘密扫描失败和上传失败六种情况都能得到非零 job 及无敏感信息的可读摘要。向压缩 trace/HAR 注入测试 bearer/cookie 时上传步骤必须拒绝该文件，不能因测试命令先行清理或扫描器 fail-open 而通过。
+- **验收**：先证明 runtime 根已删除且已扫描 artifact 仍能上传；断言失败、浏览器崩溃、清理失败、artifact 生成失败、秘密扫描失败和上传失败六种情况都能得到非零 job 及无敏感信息的可读摘要。真实 P0 建房/入房失败时不得生成 trace/HAR，但须保留不含邀请串的步骤、console、播放器采样、遮罩截图和服务端事件。向压缩 trace/HAR 注入测试 bearer/cookie 时上传步骤必须拒绝该文件，不能因测试命令先行清理或扫描器 fail-open 而通过。
 - **估算**：1～2 天
 
 ### E2E-504：执行 100 轮稳定性 soak
 
 - **依赖**：E2E-501～E2E-503
 - **需求**：REQ-O004、需求规格 3.2.1
-- **工作**：在与 CI 同等环境连续运行拟设为 required 的完整 `browser-e2e` 命令 100 次，使用 `E2E-110` 的 managed 模式或本环境显式供应的 external Redis，覆盖全部 P0/P1 分域场景（包括每轮执行 `E2E-308`）和 admin-ui 真实客户端场景；按场景域记录产品失败、harness 失败、耗时和 artifact 大小。
-- **验收**：100 次完整套件运行中 harness failure 不超过 1 次，且每个失败有根因；每轮报告都有 `REQ-F037` 的实际断言证据，结束后无受管 Redis 进程或 run 前缀残留。不能用只跑 P0 smoke、跳过 Redis 场景或复用未健康检查的守护进程代替。未达标时先修基础设施，不启用 required check。
+- **工作**：在与 CI 同等环境连续运行拟设为 required 的完整 `browser-e2e` 命令 100 次，使用 `E2E-110` 的 managed 模式或本环境显式供应的 external Redis，覆盖权威清单展开后的全部 P0/P1 操作键（包括每轮执行 `E2E-308`）及其断言策略、必要断言键、必要断言类别和 admin-ui 真实客户端场景；按场景域记录产品失败、harness 失败、耗时和 artifact 大小。
+- **验收**：100 次完整套件运行中 harness failure 不超过 1 次，且每个失败有根因；每轮 operation coverage 的操作键、断言策略、必要断言键和必要类别集合差均为空，并包含 `reaper.failed-first-announcement.retry-converge` 的实际 `peer-result` 及稳定窗口证据；结束后无受管 Redis 进程或 run 前缀残留。不能用只跑 P0 smoke、跳过 Redis 场景或复用未健康检查的守护进程代替。未达标时先修基础设施，不启用 required check。
 - **估算**：2～4 天，取决于完整套件耗时和失败轮次
 
-### E2E-505：建立需求—场景追踪表
+### E2E-505：完成需求—场景追踪汇总
 
-- **依赖**：M3、M4
+- **依赖**：E2E-111、M3、M4
 - **需求**：REQ-G04、需求规格第 5.1、8、9 节
-- **工作**：为每个场景声明 requirement IDs、priority、browser/page tags；让共享断言 helper 在运行时输出 requirement ID、断言类别（发起端用户可见、接收端/服务端跨端结果、稳定窗口）、结果和时间，并由覆盖检查把本次测试报告中的执行证据与权威清单合并生成摘要。required-check 配置读取同一份清单和执行证据。
-- **验收**：遗漏需求规格第 5.1 节任一 P0/P1 操作、admin-ui E2E、所需用户可见/跨端断言类别或断言未实际执行时 CI 失败；空测试、跳过断言和只写 tag/ID 均不能贡献覆盖。阶段性 smoke 与完整门禁使用不同 check 名称，不能以范围较小的成功结果满足 branch protection。
+- **工作**：复用 E2E-111 的 catalog、断言 helper 和 coverage check，汇总 M2～M4 场景的精确 operation keys、断言策略、browser/page tags 及运行证据，生成需求—操作—策略—断言—场景双向追踪摘要；required-check 配置读取同一 catalog 和执行证据，不复制另一套覆盖规则。
+- **验收**：每个 P0/P1 展开操作键、断言策略、必要断言键和必要类别都能反查至少一个实际场景及最近结果，且每个场景都能反查需求；阶段性 smoke 与完整门禁使用不同 check 名称，不能以范围较小的成功结果满足 branch protection。E2E-111 的全部判别力与策略测试作为该任务的前置门禁持续运行。
 - **估算**：1～2 天
 
 ### E2E-506：启用 branch protection 门禁
@@ -381,7 +397,7 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 - **依赖**：E2E-504、E2E-505
 - **需求**：REQ-G01
 - **工作**：把 `browser-e2e` 设为 required check；记录维护者如何处理 GitHub 平台故障而不是靠重跑隐藏失败。
-- **验收**：P0/P1 或 admin-ui 追踪缺口会让 coverage check 失败；一个故意失败的测试 PR 无法合并；恢复后 check 通过。M2 阶段性 smoke 不能使用 required check 的同名成功状态绕过该门禁。
+- **验收**：任一 P0/P1 展开操作键、断言策略、必要断言键、必要断言类别或 admin-ui 追踪缺口会让 coverage check 失败；一个故意删除单个 operation evidence 的测试 PR 无法合并，恢复后 check 通过。M2 阶段性 smoke 不能使用 required check 的同名成功状态绕过该门禁。
 - **估算**：0.5 天
 
 ### E2E-507：更新开发文档和删除旧入口歧义
@@ -504,7 +520,7 @@ npm run test:e2e:browser:smoke
 npm run test:e2e:browser
 ```
 
-上述两个浏览器命令在 E2E-109 完成前不存在；任务未完成时不得在交付说明中声称已经运行。
+smoke 命令在 E2E-207 完成前不存在，完整命令在 E2E-501 完成前不存在；对应任务未完成时不得在交付说明中声称已经运行。
 
 ## 13. 总体估算
 
