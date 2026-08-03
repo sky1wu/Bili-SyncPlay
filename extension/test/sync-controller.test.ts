@@ -669,6 +669,7 @@ test("sync controller allows explicit user seek inside the silence window", asyn
   harness.runtimeState.lastExplicitUserAction = {
     kind: "seek",
     at: 21_950,
+    gestureAt: 21_950,
   };
 
   harness.setNow(22_000);
@@ -712,7 +713,11 @@ function createSeekFromBufferingHarness() {
   harness.setSharedVideo(sharedVideo);
   harness.setCurrentPlaybackVideo(sharedVideo);
   harness.setNow(22_000);
-  harness.runtimeState.lastExplicitUserAction = { kind: "seek", at: 21_950 };
+  harness.runtimeState.lastExplicitUserAction = {
+    kind: "seek",
+    at: 21_950,
+    gestureAt: 21_950,
+  };
 
   return { harness, sharedVideo };
 }
@@ -824,6 +829,7 @@ test("sync controller does not treat a seek as explicit after a forced pause inv
   harness.runtimeState.lastExplicitUserAction = {
     kind: "seek",
     at: 21_950,
+    gestureAt: 21_950,
   };
   harness.runtimeState.lastForcedPauseAt = 21_975;
   harness.setSharedVideo(sharedVideo);
@@ -884,6 +890,7 @@ test("sync controller marks explicit user ratechange with explicit-ratechange in
   harness.runtimeState.lastExplicitUserAction = {
     kind: "ratechange",
     at: 21_950,
+    gestureAt: 21_950,
   };
 
   harness.setNow(22_000);
@@ -1884,6 +1891,7 @@ test("sync controller tags broadcast with userInitiated:true on a fresh user pau
   harness.runtimeState.lastExplicitUserAction = {
     kind: "pause",
     at: 20_350,
+    gestureAt: 20_350,
   };
   harness.runtimeState.pauseStartedAt = 20_350;
   harness.runtimeState.pauseClassifiedAsBuffer = false;
@@ -2038,6 +2046,7 @@ test("sync controller omits userInitiated on buffer-pause upgrade re-broadcast",
   harness.runtimeState.lastExplicitUserAction = {
     kind: "pause",
     at: 19_900,
+    gestureAt: 19_900,
   };
   harness.runtimeState.lastUserGestureAt = 19_900;
   harness.setSharedVideo(sharedVideo);
@@ -2628,7 +2637,11 @@ test("sync controller keeps userInitiated on a pause that cancelled a rate catch
   harness.runtimeState.intendedPlayState = "paused";
   harness.runtimeState.lastUserGestureAt = 20_350;
   harness.runtimeState.lastForcedPauseAt = 0;
-  harness.runtimeState.lastExplicitUserAction = { kind: "pause", at: 20_350 };
+  harness.runtimeState.lastExplicitUserAction = {
+    kind: "pause",
+    at: 20_350,
+    gestureAt: 20_350,
+  };
   harness.runtimeState.pauseStartedAt = 20_350;
   harness.runtimeState.pauseClassifiedAsBuffer = false;
   // The user's own `pause` handler cancelled the active catch-up, and the rate
@@ -2780,7 +2793,11 @@ test("sync controller broadcasts the room's base rate, not the temporary catch-u
   try {
     // An unrelated gesture (a seek moments ago) — this is what opened both the
     // soft-apply and the unexpected-rate gate in production.
-    harness.runtimeState.lastExplicitUserAction = { kind: "seek", at: 20_800 };
+    harness.runtimeState.lastExplicitUserAction = {
+      kind: "seek",
+      at: 20_800,
+      gestureAt: 20_800,
+    };
 
     await harness.controller.broadcastPlayback(video, "playing");
 
@@ -2807,6 +2824,7 @@ test("sync controller broadcasts a user's rate change once their gesture ends th
     harness.runtimeState.lastExplicitUserAction = {
       kind: "ratechange",
       at: 20_800,
+      gestureAt: 20_800,
     };
 
     await harness.controller.broadcastPlayback(video, "ratechange");
@@ -2833,6 +2851,7 @@ test("sync controller keeps the temporary rate off the wire even when a ratechan
     harness.runtimeState.lastExplicitUserAction = {
       kind: "ratechange",
       at: 20_800,
+      gestureAt: 20_800,
     };
 
     await harness.controller.broadcastPlayback(video, "ratechange");

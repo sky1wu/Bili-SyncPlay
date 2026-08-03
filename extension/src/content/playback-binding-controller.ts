@@ -298,9 +298,23 @@ export function createPlaybackBindingController(args: {
         return;
       }
       const previousAction = args.runtimeState.lastExplicitUserAction;
+      // `continuesInFlightSeek` (computed below for the origin snapshot) is the
+      // same question this needs, so it is hoisted: a follow-up event of a seek
+      // already in flight keeps the gesture that STARTED that seek. Re-reading
+      // `lastUserGestureAt` here would let a click the user made between
+      // `seeking` and `seeked` become the seek's authorizing gesture.
+      const continuesInFlightSeek =
+        kind === "seek" &&
+        previousAction?.kind === "seek" &&
+        previousAction.at > args.runtimeState.lastForcedPauseAt &&
+        monotonicNow() - previousAction.at < args.userGestureGraceMs;
       args.runtimeState.lastExplicitUserAction = {
         kind,
         at: monotonicNow(),
+        gestureAt:
+          continuesInFlightSeek && previousAction !== null
+            ? previousAction.gestureAt
+            : args.runtimeState.lastUserGestureAt,
       };
       if (kind === "seek") {
         // One gesture produces `seeking` AND `seeked`, and the `seeking`
@@ -312,10 +326,8 @@ export function createPlaybackBindingController(args: {
         // gesture starts a NEW seek even inside the grace window — inheriting
         // the old origin there would let a `buffering` start survive into a
         // scrub of the now-paused video and force it to `playing`.
-        const continuesInFlightSeek =
-          previousAction?.kind === "seek" &&
-          previousAction.at > args.runtimeState.lastForcedPauseAt &&
-          monotonicNow() - previousAction.at < args.userGestureGraceMs;
+        // (`continuesInFlightSeek` is computed above, where `gestureAt` needs
+        // the same answer.)
         if (!continuesInFlightSeek) {
           args.runtimeState.explicitSeekOriginPlayState =
             args.runtimeState.intendedPlayState;
@@ -451,10 +463,18 @@ export function createPlaybackBindingController(args: {
     // page's `play` has not yet overwritten it). The navigation controller only
     // relaxes the recent-gesture gate for this case — a manual click on another
     // episode does not record a fresh seek, so it stays a manual navigation.
+    //
+    // Compared against the seek's authorizing GESTURE, never against `at`. `at`
+    // is when the media event arrived, and `seeked` arrives late: a click on
+    // another episode between `seeking` and `seeked` keeps the gesture window
+    // warm, so the follow-up event re-stamps `at` past that click and an `at`
+    // comparison then reports "a seek was the last thing the user did" about a
+    // user who had already chosen to navigate away. The sharer would auto-share
+    // that private choice to the whole room (#236).
     const lastAction = args.runtimeState.lastExplicitUserAction;
     args.runtimeState.sharedVideoNaturalEndAfterSeek = Boolean(
       lastAction?.kind === "seek" &&
-      args.runtimeState.lastUserGestureAt <= lastAction.at,
+      args.runtimeState.lastUserGestureAt <= lastAction.gestureAt,
     );
   }
 

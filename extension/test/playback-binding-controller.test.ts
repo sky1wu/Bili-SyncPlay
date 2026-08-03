@@ -106,6 +106,7 @@ test("playback binding controller forwards ratechange event source", async () =>
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "ratechange",
       at: 1_100,
+      gestureAt: 1_000,
     });
   } finally {
     dom.restore();
@@ -230,6 +231,7 @@ test("playback binding controller preserves explicit seek intent across immediat
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 1_100,
+      gestureAt: 1_000,
     });
   } finally {
     dom.restore();
@@ -835,6 +837,7 @@ test("playback binding controller allows manual play after a newer gesture follo
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "play",
       at: 1_200,
+      gestureAt: 1_180,
     });
   } finally {
     dom.restore();
@@ -3108,7 +3111,12 @@ test("playback binding controller records the seek-to-end flag when a seek prece
   // The sharer seeked to the last seconds (the most recent gesture is that seek,
   // no newer gesture since), then the video played out to its natural end.
   runtimeState.lastUserGestureAt = 4_800;
-  runtimeState.lastExplicitUserAction = { kind: "seek", at: 4_850 };
+  runtimeState.lastExplicitUserAction = {
+    kind: "seek",
+    at: 4_850,
+    // The drag, not the `seeked` event it produced at 4_850.
+    gestureAt: 4_800,
+  };
   const originalPause = dom.video.pause;
 
   const controller = createPlaybackBindingController({
@@ -3151,6 +3159,98 @@ test("playback binding controller records the seek-to-end flag when a seek prece
 
     assert.equal(runtimeState.sharedVideoNaturalEndUrl, sharedUrl);
     assert.equal(runtimeState.sharedVideoNaturalEndAfterSeek, true);
+  } finally {
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not credit a seek whose seeked event lands after a newer gesture", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedUrl = "https://www.bilibili.com/video/BVshared";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedUrl;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  // The sharer dragged to the last seconds and then, while `seeked` was still
+  // pending on the decoder, clicked another episode. Their latest intent is the
+  // CLICK, so this end must not be credited as a seek-to-end — otherwise the
+  // navigation controller's seek exception waves the manual destination through
+  // and the sharer auto-shares their own detour to the whole room (#236).
+  // Driven through the real listeners because the defect lived in how
+  // `rememberExplicitUserAction` stamps a follow-up seek event: it re-stamped
+  // `at` past the click, and an `at` comparison then read as "a seek was the
+  // last thing the user did".
+  let now = 1_000;
+  runtimeState.lastUserGestureAt = 1_000; // the drag
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared",
+      url: sharedUrl,
+      title: "Shared Video",
+      sharedByMemberId: "member-1",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  dom.video.pause = () => {
+    dom.video.paused = true;
+    return Promise.resolve();
+  };
+
+  try {
+    controller.attachPlaybackListeners();
+
+    now = 1_010;
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+    assert.equal(
+      runtimeState.lastExplicitUserAction?.gestureAt,
+      1_000,
+      "the seek is credited to the drag that started it",
+    );
+
+    // The user clicks another episode while `seeked` is still pending.
+    now = 1_500;
+    runtimeState.lastUserGestureAt = 1_500;
+
+    now = 1_700;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+    assert.equal(
+      runtimeState.lastExplicitUserAction?.gestureAt,
+      1_000,
+      "the follow-up event keeps the seek's own gesture, not the click",
+    );
+
+    now = 1_900;
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+
+    assert.equal(runtimeState.sharedVideoNaturalEndUrl, sharedUrl);
+    assert.equal(runtimeState.sharedVideoNaturalEndAfterSeek, false);
   } finally {
     dom.video.pause = originalPause;
     dom.restore();
@@ -3689,6 +3789,7 @@ test("playback binding controller still records a gesture made during a programm
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 5_100,
+      gestureAt: 5_050,
     });
   } finally {
     dom.restore();
@@ -3713,6 +3814,7 @@ test("playback binding controller records user actions normally once the apply w
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 6_000,
+      gestureAt: 5_900,
     });
   } finally {
     dom.restore();
@@ -3741,6 +3843,7 @@ test("playback binding controller gives a same-tick gesture to the user, not the
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 5_100,
+      gestureAt: 5_000,
     });
   } finally {
     dom.restore();
@@ -3825,6 +3928,7 @@ test("a user seek that cancels an active rate catch-up is still recorded", async
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "seek",
       at: 1_100,
+      gestureAt: 1_000,
     });
 
     await Promise.resolve();
@@ -3878,6 +3982,7 @@ test("a user pause that cancels an active rate catch-up is still recorded", () =
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "pause",
       at: 1_100,
+      gestureAt: 1_000,
     });
     assert.deepEqual(runtimeState.lastExplicitPlaybackAction, {
       playState: "paused",
@@ -4219,6 +4324,7 @@ test("records explicit user actions on the monotonic clock by default", async ()
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "ratechange",
       at: 1_100,
+      gestureAt: 1_000,
     });
     assert.deepEqual(events, ["ratechange"]);
   } finally {
@@ -4279,6 +4385,7 @@ test("playback binding controller does not treat any recent gesture as a rate ta
     assert.deepEqual(runtimeState.lastExplicitUserAction, {
       kind: "ratechange",
       at: 5_000,
+      gestureAt: 4_500,
     });
     assert.deepEqual(reasons, []);
   } finally {
