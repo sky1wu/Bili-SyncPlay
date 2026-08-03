@@ -202,6 +202,8 @@ flowchart LR
 
 所有资源进入显式 LIFO disposer stack。某一步启动失败时仍运行已注册 disposer；任何 disposer 超时都会写入结果并使 job 失败。
 
+完整矩阵通过 `RedisRuntimeFixture` 取得 Redis。未设置 `REDIS_URL` 时采用 managed 模式：校验受支持的 `redis-server` 版本，生成关闭持久化且只绑定回环地址的临时配置，以随机端口启动子进程，立即登记 disposer，再等待 `redis-cli ping` 成功。设置 `REDIS_URL` 时采用 external 模式：不管理外部进程，但仍须在场景前健康检查，并为每个 run 创建、登记和清理唯一 key 前缀。两种模式都不得在 Redis 不可用时跳过 `REQ-F037`；managed 进程退出、前缀清理或健康检查失败都合并进根命令退出结果。CI 的 job-scoped service 使用 external 模式，本地开发和 CI 外 soak 默认使用 managed 模式。
+
 目录生命周期严格分离：run-scoped 不可变扩展副本、profile、socket 和媒体临时文件位于 `.tmp/e2e-runtime/<runId>/`，根测试命令返回前必须清理；待上传材料位于 `.tmp/e2e-artifacts/<runId>/`，根命令只完成定稿并返回其路径，CI 在 `upload-artifact` 完成后另行清理。两类删除都必须校验精确 runId 路径。
 
 ### 4.2 Extension build fixture
@@ -294,6 +296,8 @@ performance.now() / sample sequence
 - 采样间隔和连续稳定次数。
 
 具体数值由 Phase 0 结合当前 `playback-reconcile.ts` 阈值和 Windows 实测校准，未经基线数据不在本文拍脑袋固定。
+
+跨时钟场景通过 E2E-only WSL launcher 使用现有 `ServerBootstrapDependencies.now` 注入点偏移服务端逻辑墙钟，不修改 Windows 或 WSL 系统时钟，也不改变浏览器本地单调钟。偏移量至少取 `max(5_000ms, 4 × playing 动态位置容差)`，播放稳定后从正偏移切到等幅负偏移；`sync:ping` 的原始 out/in 分量必须证明实测偏移与跳变量达到计划值，否则场景无效并失败。正确实现须在偏移前后都进入稳定窗口；临时把补偿逻辑恢复为 `serverTime - localNow` 后，同一场景必须因播放位置无法收敛而失败，而不是因 launcher 或诊断缺失失败。
 
 #### Stability oracle
 
@@ -424,6 +428,7 @@ npm run test:e2e:browser
 - 使用专用低权限 Windows 用户、独立浏览器安装和独立工作目录。
 - 每次运行创建新 profile；Bilibili 登录态如确有需要，从凭据库复制到临时 profile，用后销毁。
 - WSL 场景由 Windows 编排器调用固定、受控的 WSL 入口启动当前 SHA 的 server 构建；不得使用维护者正在开发的工作树。
+- 跨时钟场景由 E2E-only WSL launcher 导入当前构建的生产 bootstrap，并仅通过 `ServerBootstrapDependencies.now` 注入服务端逻辑墙钟偏移；launcher 先保持至少 `max(5_000ms, 4 × playing 动态位置容差)` 的正偏移，播放稳定后跳到等幅负偏移。全程不得修改宿主机或 WSL 系统时钟，测试结束后该注入随 server 进程退出。
 
 GitHub 明确说明持久化 self-hosted runner 可能被不可信 workflow 持久化攻陷；公开仓库必须把可信 SHA 和 runner 隔离作为设计前提。参考：[GitHub Actions secure use](https://docs.github.com/en/actions/reference/security/secure-use)。
 
@@ -497,5 +502,7 @@ GitHub 明确说明持久化 self-hosted runner 可能被不可信 workflow 持�
 6. Firefox 临时 XPI 的内部 UUID、popup 打开和 event page 日志怎样稳定取得；profile 级代理或 DNS、临时 CA 和回环 HTTPS fixture 怎样在不访问公网、不修改系统 hosts/信任库的前提下稳定提供 Bilibili Origin。
 7. paused/playing 的位置容差和消息风暴上限是多少，才能既符合当前产品策略又能抓住真实回归。
 8. GitHub-hosted runner 上 P0 smoke 和全量确定性套件的实际耗时、CPU 和 artifact 大小。
+9. Linux/WSL 本地 managed Redis 应锁定哪些 `redis-server` / `redis-cli` 版本，怎样取得它们并证明随机端口、关闭持久化、健康检查和进程回收在干净环境可重复。
+10. E2E-only WSL launcher 能否通过 `ServerBootstrapDependencies.now` 稳定制造至少 `max(5_000ms, 4 × playing 动态位置容差)` 的偏移及反向跳变，并让 `sync:ping` 观测到计划值，同时不修改任一系统时钟。
 
 任一 spike 失败都应调整设计或缩小第一阶段范围，不得用重试和 `sleep` 把不确定性藏进硬门禁。

@@ -57,8 +57,8 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 ### E2E-001：锁定工具版本和最小 workspace 草案
 
 - **需求**：REQ-G02、REQ-F001、REQ-N001
-- **工作**：评估并锁定 `@playwright/test`；记录 Node、Chromium 和 Playwright 版本兼容关系。草拟 `@bili-syncplay/e2e` package 和 tsconfig，但暂不展开场景。
-- **验收**：从仓库根目录可启动一个只打开空白 Chromium persistent context 的 spike；退出码、超时和浏览器关闭均被断言。
+- **工作**：评估并锁定 `@playwright/test`；记录 Node、Chromium、Playwright、`redis-server` 和 `redis-cli` 的版本兼容关系，以及 Linux/WSL 本地工具链与 CI service 镜像的取得方式。草拟 `@bili-syncplay/e2e` package 和 tsconfig，但暂不展开场景。
+- **验收**：从仓库根目录可启动一个只打开空白 Chromium persistent context 的 spike；退出码、超时和浏览器关闭均被断言。另记录受支持 Redis 版本的实际 `redis-server --version` / `redis-cli --version` 输出；若目标本地环境尚未安装，必须给出明确安装前置条件，不能把 managed 模式标成已验证。
 - **估算**：0.5～1 天
 
 ### E2E-002：证明真实扩展可加载
@@ -178,11 +178,19 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 ### E2E-109：定义根命令并替换空计划
 
-- **依赖**：E2E-101～E2E-108
+- **依赖**：E2E-101～E2E-108、E2E-110
 - **需求**：REQ-F001
 - **工作**：新增 `test:e2e:browser:smoke`、`test:e2e:browser`；在可执行 smoke 完成后删除或改造只打印 JSON 的 `test:e2e:smoke:plan`，避免两个入口都叫 E2E。
-- **验收**：从干净 checkout 的仓库根执行命令，能完成构建、测试、artifact 和清理；任一步失败时根命令返回非零。
+- **验收**：从具备已声明工具链的干净 checkout 执行根命令，smoke 能独立完成；完整命令在未设置 `REDIS_URL` 时自动启动受管 Redis，在设置该变量时验证并隔离外部 Redis，且两种模式都完成构建、全部 P0/P1 测试、artifact 和清理。任一步失败时根命令返回非零，不能跳过 `REQ-F037`。
 - **估算**：1 天
+
+### E2E-110：实现 Redis runtime fixture
+
+- **依赖**：E2E-102
+- **需求**：REQ-F001、REQ-F006、REQ-F037、REQ-N013
+- **工作**：实现 managed/external 两种模式。managed 模式校验受支持的 `redis-server` 版本，生成关闭持久化、仅绑定回环地址且使用随机端口/临时目录的配置，启动后立即登记 LIFO disposer，并等待 `redis-cli ping`；external 模式接收显式 `REDIS_URL`，只做健康检查而不接管进程。两种模式都生成唯一 key 前缀并在结束时清理、确认。
+- **验收**：本地和 CI 外 soak 未设置 `REDIS_URL` 时能自动运行 `E2E-308`，结束后子进程退出、端口可重绑且无 key/临时目录残留；缺失或版本不兼容的 `redis-server` 在场景启动前给出安装要求并失败。外部 URL 不可达或健康检查失败时快速失败；使用外部实例时只清理本 run 前缀且绝不终止外部进程。两个并发 run 的端口和前缀互不串扰，启动中断和清理超时均使根命令非零。
+- **估算**：2～3 天
 
 ## 6. M2：P0 双客户端 smoke
 
@@ -294,7 +302,7 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 ### E2E-308：runtime index reaper 一次性通告重试
 
-- **依赖**：E2E-305、E2E-306
+- **依赖**：E2E-110、E2E-305、E2E-306
 - **需求**：REQ-F037
 - **工作**：增加使用唯一 Redis key 前缀的双节点 server/runtime store fixture；让存活浏览器客户端与离线节点成员进入同一房间，通过可控租约触发 reaper 清理，并令事件总线只拒收首次清理通告。随后保持房间空闲，触发下一次 sweep，验证它在“没有离线节点”提前返回前重试保留记录。
 - **验收**：首次通告失败、后续扫描已无法重新发现该房间且没有 share/playback/profile/成员操作或页面刷新时，存活客户端仍最终移除幽灵成员并获得完整房间态中的正确所有者；临时停用保留记录重试后，用例必须因成员或所有者持续陈旧而失败。Redis、端口、租约时钟和进程均按 run 隔离并在失败时留存诊断。
@@ -356,8 +364,8 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：E2E-501～E2E-503
 - **需求**：REQ-O004、需求规格 3.2.1
-- **工作**：在与 CI 同等环境连续运行拟设为 required 的完整 `browser-e2e` 命令 100 次，覆盖全部 P0/P1 分域场景和 admin-ui 真实客户端场景；按场景域记录产品失败、harness 失败、耗时和 artifact 大小。
-- **验收**：100 次完整套件运行中 harness failure 不超过 1 次，且每个失败有根因；不能用只跑 P0 smoke 的结果代替。未达标时先修基础设施，不启用 required check。
+- **工作**：在与 CI 同等环境连续运行拟设为 required 的完整 `browser-e2e` 命令 100 次，使用 `E2E-110` 的 managed 模式或本环境显式供应的 external Redis，覆盖全部 P0/P1 分域场景（包括每轮执行 `E2E-308`）和 admin-ui 真实客户端场景；按场景域记录产品失败、harness 失败、耗时和 artifact 大小。
+- **验收**：100 次完整套件运行中 harness failure 不超过 1 次，且每个失败有根因；每轮报告都有 `REQ-F037` 的实际断言证据，结束后无受管 Redis 进程或 run 前缀残留。不能用只跑 P0 smoke、跳过 Redis 场景或复用未健康检查的守护进程代替。未达标时先修基础设施，不启用 required check。
 - **估算**：2～4 天，取决于完整套件耗时和失败轮次
 
 ### E2E-505：建立需求—场景追踪表
@@ -379,8 +387,8 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 ### E2E-507：更新开发文档和删除旧入口歧义
 
 - **依赖**：E2E-501
-- **工作**：同步更新 `docs/development.md`、`docs/development.zh-CN.md` 和需要的 README；说明 Node server E2E 与浏览器 E2E 区别。
-- **验收**：所有文档命令从仓库根实际执行一遍；旧 `test:e2e:smoke:plan` 不再冒充可执行测试。
+- **工作**：同步更新 `docs/development.md`、`docs/development.zh-CN.md` 和需要的 README；说明 Node server E2E 与浏览器 E2E 区别，并记录受支持的 `redis-server`/`redis-cli` 本地前置版本、managed 默认模式、external `REDIS_URL` 模式和 CI service 的责任边界。
+- **验收**：所有文档命令从仓库根分别以 managed Redis 和显式 external Redis 实际执行一遍；旧 `test:e2e:smoke:plan` 不再冒充可执行测试。文档不得暗示并行 `redis-integration` job、维护者日常 Redis 或被跳过的 `REQ-F037` 可以满足完整矩阵。
 - **估算**：1 天
 
 ## 10. M6：Windows、Firefox 与真实站点
@@ -413,9 +421,9 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：E2E-602、E2E-603
 - **需求**：REQ-F054、REQ-O006
-- **工作**：由 Windows runner 在 WSL 启动服务端，Windows 浏览器跑双客户端；采集 `sync:ping` 原始 out/in 分量和播放器收敛。
-- **验收**：测试 oracle 不使用跨钟 timestamp 差；场景能在现有 WSL/宿主钟偏跳变下稳定完成或给出诊断。
-- **估算**：2～3 天
+- **工作**：由 Windows runner 通过 E2E-only WSL launcher 导入当前构建的生产 bootstrap，并利用现有 `ServerBootstrapDependencies.now` 注入服务端逻辑墙钟；Windows 浏览器跑双客户端。先施加至少 `max(5_000ms, 4 × playing 动态位置容差)` 的正偏移，播放进入稳定窗口后跳到等幅负偏移，同时采集 `sync:ping` 原始 out/in 分量、计划/实测偏移和播放器收敛；不得调整 Windows 或 WSL 系统时钟。
+- **验收**：测试 oracle 不使用跨钟 timestamp 差；诊断先证明偏移幅度和跳变量达到计划值，正确实现随后仍在两个阶段各自收敛。用文件备份临时把补偿逻辑恢复为 `serverTime - localNow` 后，同一场景必须因播放器持续超出动态位置容差而失败；还原后重跑通过。若负向对照因 launcher、采样缺失或环境失败而红，不能算有判别力。
+- **估算**：3～4 天
 
 ### E2E-605：Firefox WebDriver/XPI adapter
 
