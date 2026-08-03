@@ -3276,6 +3276,56 @@ test("playback binding controller does not credit a seek whose seeked event land
   }
 });
 
+test("playback binding controller keeps an in-flight seek across a re-bind poll of the same element", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  let now = 1_000;
+  runtimeState.lastUserGestureAt = 1_000;
+  runtimeState.lastUserGestureInPlayerAt = 1_000;
+
+  const controller = createEchoHarness(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+
+    now = 1_010;
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    // `start()` re-runs `attachPlaybackListeners` every `videoBindIntervalMs`
+    // against the SAME element, and most seeks outlive one poll. Clearing the
+    // in-flight seek on every pass rather than only when a NEW element is bound
+    // would drop it here, and the seek-to-end autoplay would stop being credited
+    // — breaking the very case the marker exists for.
+    now = 1_300;
+    controller.attachPlaybackListeners();
+
+    // A buffering pause overwrites the recorded seek, so only the in-flight
+    // record can restore it. Without this the assertions below would pass on the
+    // `seeking` action alone and would not notice the poll dropping anything.
+    now = 1_400;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    assert.equal(runtimeState.lastExplicitUserAction?.kind, "pause");
+
+    dom.video.paused = false;
+    now = 1_600;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.equal(
+      runtimeState.lastExplicitUserAction?.kind,
+      "seek",
+      "the seek survives the re-bind poll and is restored by its seeked",
+    );
+    assert.equal(
+      runtimeState.lastExplicitUserAction?.gestureAt,
+      1_000,
+      "and keeps the gesture that started it",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
 test("playback binding controller records nothing for a seeked with no seek in flight", () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();

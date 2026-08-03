@@ -938,6 +938,85 @@ test("navigation controller does not force-pause a non-sharer's manual episode c
   }
 });
 
+test("navigation controller does not reuse one natural end for a second navigation", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+  // A manual click that the veto correctly refuses (see the tests above). The
+  // catch is what happens NEXT: handling this navigation runs
+  // `resetUserGestureState`, which zeroes `lastUserGestureAt` — so on any
+  // following navigation the evidence that refuted this one is gone. If the
+  // marker outlived its navigation, the manual destination's own follow-up SPA
+  // change would then be classified as the room's autoplay and auto-shared.
+  runtimeState.lastUserGestureAt = 2_000;
+  runtimeState.sharedVideoNaturalEndUrl =
+    "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.sharedVideoNaturalEndAt = 1_000;
+  let now = 5_000;
+
+  let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
+  const autoShareRequests: unknown[] = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: INITIAL_ROOM_STATE_PAUSE_HOLD_MS,
+    sharedVideoNaturalEndWindowMs: SHARED_VIDEO_NATURAL_END_WINDOW_MS,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestBangumiPageUrl,
+    isSupportedVideoPage: (url) => url.includes("/bangumi/play/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.start();
+
+    // Navigation 1: the manual click's destination. Refused.
+    currentUrl = "https://www.bilibili.com/bangumi/play/ep249470";
+    windowHarness.intervals[0]?.();
+    assert.deepEqual(
+      autoShareRequests,
+      [],
+      "the manual destination is not auto-shared",
+    );
+    assert.equal(
+      runtimeState.lastUserGestureAt,
+      0,
+      "handling it cleared the gesture that refuted it",
+    );
+
+    // Navigation 2: a follow-up identity change on that destination, still
+    // inside the natural-end window and with no new gesture to refuse it.
+    now = 8_000;
+    currentUrl = "https://www.bilibili.com/bangumi/play/ep249471";
+    windowHarness.intervals[0]?.();
+
+    assert.deepEqual(
+      autoShareRequests,
+      [],
+      "one natural end explains one navigation, not every navigation after it",
+    );
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller ignores a natural-end marker for a video the room no longer shares", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();

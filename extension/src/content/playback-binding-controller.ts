@@ -964,9 +964,6 @@ export function createPlaybackBindingController(args: {
     if (!video) {
       return;
     }
-    // A seek left in flight on the previous element can never be completed now,
-    // and letting it survive would hand its gesture to the next `seeked`.
-    inFlightSeek = null;
 
     const guardUnexpectedResume = () => {
       const currentVideo = args.getSharedVideo();
@@ -1299,6 +1296,15 @@ export function createPlaybackBindingController(args: {
       // whose paused state we never observed transitioning. The pause
       // classifiers use this timestamp to avoid reporting either as a user pause.
       args.runtimeState.lastVideoElementBoundAt = monotonicNow();
+      // A seek in flight on the PREVIOUS element can never be completed now, and
+      // letting it survive would hand its gesture to the next `seeked`. This must
+      // stay inside the `boundNewElement` guard: `start()` re-runs
+      // `attachPlaybackListeners` every `videoBindIntervalMs` against the SAME
+      // element, so clearing unconditionally would drop the record of any seek
+      // that outlives one poll — which is most of them — and the seek-to-end
+      // autoplay this whole mechanism exists to recognise would stop being
+      // credited.
+      inFlightSeek = null;
       // This poll is the one place that learns a `<video>` exists. Hydration
       // used to discover it by polling `document.querySelector("video")` on its
       // own 350ms timer — the same query this loop already runs at 250ms — and

@@ -274,6 +274,22 @@ export function createNavigationController(args: {
       return;
     }
 
+    // The natural-end marker explains exactly ONE navigation — this one — so it
+    // is consumed here, before anything can classify a second. Keeping it alive
+    // is not symmetric with the veto that guards it: `resetUserGestureState`
+    // below zeroes `lastUserGestureAt`, so by the next navigation the evidence
+    // that refuted this one is gone and a manual destination's own follow-up SPA
+    // change (a redirect, or a second identity resolution) would sail through as
+    // the room's autoplay. Read into locals first; every use below is of these,
+    // never of the runtime state.
+    const naturalEndUrl = args.runtimeState.sharedVideoNaturalEndUrl;
+    const naturalEndAt = args.runtimeState.sharedVideoNaturalEndAt;
+    const naturalEndAfterSeek =
+      args.runtimeState.sharedVideoNaturalEndAfterSeek;
+    args.runtimeState.sharedVideoNaturalEndUrl = null;
+    args.runtimeState.sharedVideoNaturalEndAt = 0;
+    args.runtimeState.sharedVideoNaturalEndAfterSeek = false;
+
     const activeSharedUrl = args.runtimeState.activeSharedUrl;
     // The stable anchor for the room's share. Normally `activeSharedUrl`, but when
     // the room shares an address-bar-opaque *route* (a bare-route festival share),
@@ -405,24 +421,20 @@ export function createNavigationController(args: {
       const gestureRefutesNaturalEnd =
         lastUserGestureAt > 0 &&
         lastUserGestureAt >=
-          args.runtimeState.sharedVideoNaturalEndAt -
-            args.sharedVideoNaturalEndWindowMs &&
-        !(
-          args.runtimeState.sharedVideoNaturalEndAfterSeek &&
-          lastUserGestureAt <= args.runtimeState.sharedVideoNaturalEndAt
-        );
-      // Three things bound the marker, and the third is what makes the wide
+          naturalEndAt - args.sharedVideoNaturalEndWindowMs &&
+        !(naturalEndAfterSeek && lastUserGestureAt <= naturalEndAt);
+      // Four things bound the marker, and the last two are what make the wide
       // window safe:
       //   - the marker must still name the current `activeSharedUrl` (any
       //     shared-url change or room teardown clears it outright);
       //   - the window bounds a same-URL replay;
       //   - no user gesture may be a plausible cause of THIS navigation
-      //     (`gestureRefutesNaturalEnd`).
+      //     (`gestureRefutesNaturalEnd`);
+      //   - it is consumed above, so it can only ever explain this one navigation.
       const navigatedFromSharedVideoEnd =
         activeSharedUrl !== null &&
-        args.runtimeState.sharedVideoNaturalEndUrl === activeSharedUrl &&
-        now - args.runtimeState.sharedVideoNaturalEndAt <
-          args.sharedVideoNaturalEndWindowMs &&
+        naturalEndUrl === activeSharedUrl &&
+        now - naturalEndAt < args.sharedVideoNaturalEndWindowMs &&
         !gestureRefutesNaturalEnd;
       // Classify as the shared video's autoplay only on *provable* evidence that
       // the advance came from the room's shared video:
@@ -453,8 +465,7 @@ export function createNavigationController(args: {
       // that gesture WAS the seek that produced the end. So this adds no test of
       // its own beyond naming that case; it is not an independent relaxation.
       const recentGestureIsSeekToEnd =
-        navigatedFromSharedVideoEnd &&
-        args.runtimeState.sharedVideoNaturalEndAfterSeek;
+        navigatedFromSharedVideoEnd && naturalEndAfterSeek;
       const shouldTreatAsAutoplay =
         (!hadRecentUserGesture || recentGestureIsSeekToEnd) &&
         navigatedFromSharedVideo &&
