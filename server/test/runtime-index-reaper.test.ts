@@ -101,19 +101,8 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
     const cleanedSessions = await reaper.sweep();
     assert.equal(cleanedSessions, 1);
 
-    let remainingSessions = -1;
-    let remainingRooms = -1;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      remainingSessions = (await runtimeStore.listClusterSessions()).length;
-      remainingRooms = await runtimeStore.countClusterActiveRooms();
-      if (remainingSessions === 0 && remainingRooms === 0) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-
-    assert.equal(remainingSessions, 0);
-    assert.equal(remainingRooms, 0);
+    assert.equal((await runtimeStore.listClusterSessions()).length, 0);
+    assert.equal(await runtimeStore.countClusterActiveRooms(), 0);
     // The offline node's members are gone, but their identity is not: those
     // clients are alive and reconnecting to a surviving node, and they must
     // come back as the same members (#234). The token is what lets them.
@@ -124,18 +113,7 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
       "member-offline",
     );
 
-    let remainingStatuses: Awaited<
-      ReturnType<typeof runtimeStore.listNodeStatuses>
-    > = [];
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await reaper.sweep();
-      remainingStatuses = await runtimeStore.listNodeStatuses(currentTime);
-      if (remainingStatuses.length === 0) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.deepEqual(remainingStatuses, []);
+    assert.deepEqual(await runtimeStore.listNodeStatuses(currentTime), []);
   } finally {
     await reaper.stop();
     await runtimeStore.close();

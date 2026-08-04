@@ -307,8 +307,7 @@ test("redis runtime store keeps only the latest room membership after rapid room
     store.registerSession(session);
     store.markSessionJoinedRoom(session.id, "ROOMA1");
     store.markSessionJoinedRoom(session.id, "ROOMB1");
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await settleRuntimeWrites(store);
 
     const roomA = await observer.listClusterSessionsByRoom("ROOMA1");
     const roomB = await observer.listClusterSessionsByRoom("ROOMB1");
@@ -347,22 +346,19 @@ test("redis runtime store can purge stale sessions for a restarted instance", as
   });
   const session = createSession("session-restart");
   session.instanceId = "room-node-a";
-  session.memberId = "member-restart";
-  session.memberToken = "token-restart";
 
   try {
-    store.registerSession(session);
-    store.markSessionJoinedRoom(session.id, "ROOMRS");
-    store.addMember("ROOMRS", session.memberId, session, session.memberToken);
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await seatSession(store, session, {
+      roomCode: "ROOMRS",
+      memberId: "member-restart",
+      memberToken: "token-restart",
+    });
 
     assert.equal(
       (await observer.listClusterSessionsByRoom("ROOMRS")).length,
       1,
     );
     assert.equal(await store.purgeSessionsByInstance?.("room-node-a"), 1);
-    await new Promise((resolve) => setTimeout(resolve, 25));
 
     assert.deepEqual(await observer.listClusterSessionsByRoom("ROOMRS"), []);
     const room = await observer.getRoom("ROOMRS");
@@ -392,21 +388,18 @@ test("redis runtime store keeps the member token when only presence is dropped",
   const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
   const observer = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
   const session = createSession("session-presence");
-  session.memberId = "member-presence";
-  session.memberToken = "token-presence";
 
   try {
-    store.registerSession(session);
-    store.markSessionJoinedRoom(session.id, "ROOMPR");
-    store.addMember("ROOMPR", session.memberId, session, session.memberToken);
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await seatSession(store, session, {
+      roomCode: "ROOMPR",
+      memberId: "member-presence",
+      memberToken: "token-presence",
+    });
 
     // A disconnect: presence goes, identity stays, so the reconnect can reclaim
     // the same memberId.
-    store.removeMember("ROOMPR", session.memberId, session);
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    const removal = store.removeMember("ROOMPR", "member-presence", session);
+    await removal.durable;
 
     assert.equal(
       await observer.findMemberIdByToken("ROOMPR", "token-presence"),
@@ -414,9 +407,7 @@ test("redis runtime store keeps the member token when only presence is dropped",
     );
 
     // An explicit leave / kick: identity goes too.
-    store.revokeMemberToken("ROOMPR", session.memberId);
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await store.revokeMemberToken("ROOMPR", "member-presence");
 
     assert.equal(
       await observer.findMemberIdByToken("ROOMPR", "token-presence"),
@@ -713,14 +704,13 @@ test("redis runtime store bounds how long a disconnected identity survives", asy
     memberTokenRetentionMs: 120,
   });
   const session = createSession("session-retention");
-  session.memberId = "member-retention";
-  session.memberToken = "token-retention";
 
   try {
-    store.registerSession(session);
-    store.markSessionJoinedRoom(session.id, "ROOMRT");
-    store.addMember("ROOMRT", session.memberId, session, session.memberToken);
-    await store.flush?.();
+    await seatSession(store, session, {
+      roomCode: "ROOMRT",
+      memberId: "member-retention",
+      memberToken: "token-retention",
+    });
 
     // Still connected: no clock at all, so someone who never leaves keeps their
     // identity however long the session lasts.
@@ -731,10 +721,10 @@ test("redis runtime store bounds how long a disconnected identity survives", asy
     );
 
     // The last session goes. Identity outlives the disconnect...
-    store.removeMember("ROOMRT", session.memberId, session);
+    const removal = store.removeMember("ROOMRT", "member-retention", session);
+    await removal.durable;
     store.unregisterSession(session.id);
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await settleRuntimeWrites(store);
     assert.equal(
       await store.findMemberIdByToken("ROOMRT", "token-retention"),
       "member-retention",
@@ -781,7 +771,6 @@ test("redis runtime store lifts the retention clock when someone reconnects", as
     await removal.durable;
     store.unregisterSession(session.id);
     await settleRuntimeWrites(store);
-    await new Promise((resolve) => setTimeout(resolve, 25));
 
     // Reconnect inside the window: the clock must be lifted, not merely
     // restarted, or a room that keeps churning members would eventually drop
@@ -1123,19 +1112,16 @@ test("redis runtime store starts the retention clock for bindings cleared at sta
   });
   const session = createSession("session-crashed");
   session.instanceId = "crashed-node";
-  session.memberId = "member-crashed";
-  session.memberToken = "token-crashed";
 
   try {
-    store.registerSession(session);
-    store.markSessionJoinedRoom(session.id, "ROOMCR");
-    store.addMember("ROOMCR", session.memberId, session, session.memberToken);
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await seatSession(store, session, {
+      roomCode: "ROOMCR",
+      memberId: "member-crashed",
+      memberToken: "token-crashed",
+    });
 
     // The process crashed and came back under the same instanceId.
     assert.equal(await store.purgeSessionsByInstance?.("crashed-node"), 1);
-    await new Promise((resolve) => setTimeout(resolve, 25));
 
     // The identity survives, so the client that is about to reconnect keeps it.
     assert.equal(
@@ -1565,10 +1551,8 @@ test("redis runtime store treats leftover session keys as residue on a room code
   try {
     assert.equal(await store.hasRoomResidue("ROOMRS"), false);
 
-    store.registerSession(session);
-    store.markSessionJoinedRoom(session.id, "ROOMRS");
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await store.registerSession(session);
+    await store.markSessionJoinedRoom(session.id, "ROOMRS");
 
     // No members and no member tokens: the members/tokens view `getRoom` offers
     // reads as empty, which is what used to gate room code allocation.
