@@ -301,6 +301,79 @@ test("playback binding controller does not revive a superseded seek when seeked 
   }
 });
 
+test("playback binding controller keeps seek-triggered autoplay blocked through seeked", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const url = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = url;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.lastUserGestureAt = 1_000;
+  dom.video.paused = true;
+  let now = 1_100;
+  let pauseCalls = 0;
+  dom.video.pause = () => {
+    pauseCalls += 1;
+    dom.video.paused = true;
+  };
+  Object.assign(globalThis.window, {
+    setTimeout(callback: () => void) {
+      callback();
+      return 1;
+    },
+  });
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url,
+      title: "Shared",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (value) => value ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    // The decoder finishes inside the gesture window, but the browser resumes
+    // after the original `seeking` record has aged out.
+    now = 2_100;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 2_100,
+    });
+    assert.equal(runtimeState.explicitSeekOriginPlayState, "paused");
+
+    now = 2_500;
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.lastExplicitUserAction, null);
+  } finally {
+    dom.restore();
+  }
+});
+
 test("playback binding controller does not mark programmatic ratechange as explicit user action", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
