@@ -38,7 +38,10 @@ import {
 } from "./sync-guards";
 import { createSoftApplyController } from "./soft-apply-controller";
 import { createPendingLocalOverrideController } from "./pending-local-override";
-import { hasGestureBeenRecorded } from "./runtime-state";
+import {
+  hasGestureBeenRecorded,
+  invalidatePlaybackContext,
+} from "./runtime-state";
 import type {
   ContentRuntimeState,
   LocalPlaybackEventSource,
@@ -317,6 +320,7 @@ export function createSyncController(args: {
   });
 
   function resetPlaybackSyncState(reason: string): void {
+    invalidatePlaybackContext(args.runtimeState);
     softApply.cancelActiveSoftApply(args.getVideoElement(), `reset:${reason}`);
     args.lastAppliedVersionByActor.clear();
     clearRemoteFollowPlayingWindow();
@@ -331,6 +335,9 @@ export function createSyncController(args: {
     softApply.clearSoftApplyCooldown();
     args.runtimeState.lastLocalPlaybackVersion = null;
     args.runtimeState.intendedPlaybackRate = 1;
+    args.runtimeState.lastBufferSignalAt = 0;
+    args.runtimeState.pauseStartedAt = 0;
+    args.runtimeState.pauseClassifiedAsBuffer = false;
     roomConfirmedBroadcast = null;
     args.runtimeState.lastNonSharedGuardUrl = null;
     args.runtimeState.lastExplicitPlaybackAction = null;
@@ -865,7 +872,9 @@ export function createSyncController(args: {
     eventSource: LocalPlaybackEventSource = "manual",
     naturalEnd?: boolean,
   ): Promise<void> {
-    const now = monotonicNow();
+    const playbackContextGeneration =
+      args.runtimeState.playbackContextGeneration;
+    let now = monotonicNow();
     if (!args.runtimeState.hydrationReady) {
       args.debugLog("Skip broadcast before hydration ready");
       logBroadcastTrace(
@@ -919,6 +928,20 @@ export function createSyncController(args: {
     }
 
     const currentVideo = await args.getCurrentPlaybackVideo();
+    if (
+      playbackContextGeneration !==
+        args.runtimeState.playbackContextGeneration ||
+      args.getVideoElement() !== video
+    ) {
+      args.debugLog(
+        "Dropped stale playback broadcast after resolving the current video",
+      );
+      return;
+    }
+    // Resolving festival-page identity can cross an async page bridge. All
+    // gesture and suppression windows below must be measured from the instant
+    // that result is known to still belong to this playback context.
+    now = monotonicNow();
     if (!currentVideo) {
       logBroadcastTrace(
         "no-current-video",
@@ -1423,10 +1446,24 @@ export function createSyncController(args: {
       );
       args.runtimeState.intendedPlayState = "paused";
       args.runtimeState.lastForcedPauseAt = now;
+      const remoteStopRoomCode = args.runtimeState.activeRoomCode;
+      const remoteStopGestureAt = args.runtimeState.lastUserGestureAt;
       window.setTimeout(() => {
-        if (!video.paused) {
-          pauseVideo(video);
+        if (
+          playbackContextGeneration !==
+            args.runtimeState.playbackContextGeneration ||
+          args.getVideoElement() !== video ||
+          args.runtimeState.activeRoomCode !== remoteStopRoomCode ||
+          args.normalizeUrl(args.getSharedVideo()?.url) !==
+            normalizedCurrentVideoUrl ||
+          args.runtimeState.lastUserGestureAt !== remoteStopGestureAt ||
+          args.runtimeState.intendedPlayState !== "paused" ||
+          !hasRecentRemoteStopIntent(currentVideo.url) ||
+          video.paused
+        ) {
+          return;
         }
+        pauseVideo(video);
       }, 0);
       logBroadcastTrace(
         "remote-stop-hold",
@@ -1599,6 +1636,18 @@ export function createSyncController(args: {
     if (response === null) {
       args.debugLog(
         `Dropped playback update actor=${payload.actorId} playState=${payload.playState} url=${payload.url} delta=0.00 result=no-response seq=${payload.seq} source=${eventSource} intent=${payload.syncIntent ?? "none"} rate=${payload.playbackRate.toFixed(2)}`,
+      );
+      return;
+    }
+    const currentLocalVersion = args.runtimeState.lastLocalPlaybackVersion;
+    if (
+      playbackContextGeneration !==
+        args.runtimeState.playbackContextGeneration ||
+      args.getVideoElement() !== video ||
+      (currentLocalVersion !== null && currentLocalVersion.seq > payload.seq)
+    ) {
+      args.debugLog(
+        `Ignored stale playback update acknowledgement seq=${payload.seq}`,
       );
       return;
     }

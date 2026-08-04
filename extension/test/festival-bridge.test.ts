@@ -10,7 +10,14 @@ interface PageBridgeDetail {
   title?: string;
 }
 
-function installBridgeDomStub(details: Array<PageBridgeDetail | null>): {
+interface DeferredPageBridgeDetail {
+  deferred: PageBridgeDetail;
+}
+
+function installBridgeDomStub(
+  details: Array<PageBridgeDetail | DeferredPageBridgeDetail | null>,
+): {
+  flushDeferred: () => void;
   restore: () => void;
 } {
   const originalWindow = globalThis.window;
@@ -19,6 +26,7 @@ function installBridgeDomStub(details: Array<PageBridgeDetail | null>): {
   let listener: EventListener | null = null;
   const pendingTimeouts = new Map<number, boolean>();
   let timeoutSeq = 0;
+  let deferredResponse: (() => void) | null = null;
 
   const windowStub = {
     setTimeout(callback: () => void) {
@@ -43,18 +51,26 @@ function installBridgeDomStub(details: Array<PageBridgeDetail | null>): {
       }
     },
     postMessage(message: { requestId?: string }) {
-      const detail = details.shift();
-      if (!detail || !listener) {
+      const response = details.shift();
+      if (!response || !listener) {
         return;
       }
-      listener({
-        source: windowStub,
-        data: {
-          type: "bili-syncplay:festival-video",
-          requestId: message.requestId,
-          detail,
-        },
-      } as MessageEvent);
+      const detail = "deferred" in response ? response.deferred : response;
+      const dispatch = () => {
+        listener?.({
+          source: windowStub,
+          data: {
+            type: "bili-syncplay:festival-video",
+            requestId: message.requestId,
+            detail,
+          },
+        } as MessageEvent);
+      };
+      if ("deferred" in response) {
+        deferredResponse = dispatch;
+        return;
+      }
+      dispatch();
     },
   };
 
@@ -88,6 +104,14 @@ function installBridgeDomStub(details: Array<PageBridgeDetail | null>): {
   });
 
   return {
+    flushDeferred() {
+      if (!deferredResponse) {
+        throw new Error("No deferred page-bridge response is pending");
+      }
+      const dispatch = deferredResponse;
+      deferredResponse = null;
+      dispatch();
+    },
     restore() {
       Object.assign(globalThis, {
         window: originalWindow,
@@ -205,7 +229,13 @@ test("festival bridge resolves the cached video url for the matching festival pa
 
   try {
     // No snapshot yet.
-    assert.equal(controller.resolveVideoUrlForPage("/festival/demo"), null);
+    assert.equal(
+      controller.resolveVideoUrlForPage(
+        "/festival/demo",
+        "https://www.bilibili.com/festival/demo",
+      ),
+      null,
+    );
 
     await controller.refreshSnapshot({
       pathname: "/festival/demo",
@@ -215,19 +245,43 @@ test("festival bridge resolves the cached video url for the matching festival pa
 
     // Same page (incl. trailing-slash variant) resolves to the snapshot url.
     assert.equal(
-      controller.resolveVideoUrlForPage("/festival/demo"),
+      controller.resolveVideoUrlForPage(
+        "/festival/demo",
+        "https://www.bilibili.com/festival/demo",
+      ),
       "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
     );
     assert.equal(
-      controller.resolveVideoUrlForPage("/festival/demo/"),
+      controller.resolveVideoUrlForPage(
+        "/festival/demo/",
+        "https://www.bilibili.com/festival/demo/",
+      ),
       "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
     );
     // A different festival page or a non-festival page does not match.
-    assert.equal(controller.resolveVideoUrlForPage("/festival/other"), null);
-    assert.equal(controller.resolveVideoUrlForPage("/video/BVx"), null);
+    assert.equal(
+      controller.resolveVideoUrlForPage(
+        "/festival/other",
+        "https://www.bilibili.com/festival/other",
+      ),
+      null,
+    );
+    assert.equal(
+      controller.resolveVideoUrlForPage(
+        "/video/BVx",
+        "https://www.bilibili.com/video/BVx",
+      ),
+      null,
+    );
 
     controller.clearSnapshot();
-    assert.equal(controller.resolveVideoUrlForPage("/festival/demo"), null);
+    assert.equal(
+      controller.resolveVideoUrlForPage(
+        "/festival/demo",
+        "https://www.bilibili.com/festival/demo",
+      ),
+      null,
+    );
   } finally {
     dom.restore();
   }
@@ -254,13 +308,30 @@ test("festival bridge treats a stale cached snapshot as unresolved when a max ag
       "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123";
     // Within the freshness bound (and with no bound) the snapshot resolves.
     assert.equal(
-      controller.resolveVideoUrlForPage("/festival/demo", 60_000),
+      controller.resolveVideoUrlForPage(
+        "/festival/demo",
+        "https://www.bilibili.com/festival/demo",
+        60_000,
+      ),
       url,
     );
-    assert.equal(controller.resolveVideoUrlForPage("/festival/demo"), url);
+    assert.equal(
+      controller.resolveVideoUrlForPage(
+        "/festival/demo",
+        "https://www.bilibili.com/festival/demo",
+      ),
+      url,
+    );
     // Older than the bound: treated as stale so a possibly-left video is not
     // reported as the trustworthy current one.
-    assert.equal(controller.resolveVideoUrlForPage("/festival/demo", 0), null);
+    assert.equal(
+      controller.resolveVideoUrlForPage(
+        "/festival/demo",
+        "https://www.bilibili.com/festival/demo",
+        0,
+      ),
+      null,
+    );
   } finally {
     dom.restore();
   }
@@ -360,11 +431,96 @@ test("ages the cached snapshot on the monotonic clock", async () => {
     clock.clocks.monotonic += 100;
 
     assert.equal(
-      controller.resolveVideoUrlForPage("/festival/demo", 60_000),
+      controller.resolveVideoUrlForPage(
+        "/festival/demo",
+        "https://www.bilibili.com/festival/demo",
+        60_000,
+      ),
       "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
     );
   } finally {
     clock.restore();
+    dom.restore();
+  }
+});
+
+test("festival bridge does not let a pre-clear refresh repopulate the snapshot", async () => {
+  const pageUrl = "https://www.bilibili.com/festival/demo";
+  const dom = installBridgeDomStub([
+    {
+      deferred: {
+        bvid: "BVstale",
+        cid: 123,
+        title: "Stale Visit",
+      },
+    },
+  ]);
+  const controller = createFestivalBridgeController();
+
+  try {
+    const pendingRefresh = controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl,
+      maxAgeMs: 0,
+    });
+    controller.clearSnapshot();
+    dom.flushDeferred();
+
+    assert.equal(await pendingRefresh, null);
+    assert.equal(controller.getSnapshot(), null);
+    assert.equal(
+      controller.resolveVideoUrlForPage("/festival/demo", pageUrl),
+      null,
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("festival bridge does not let a cache hit cancel an in-flight fresh read", async () => {
+  const pageUrl = "https://www.bilibili.com/festival/demo";
+  const dom = installBridgeDomStub([
+    {
+      bvid: "BVcached",
+      cid: 111,
+      title: "Cached Visit",
+    },
+    {
+      deferred: {
+        bvid: "BVfresh",
+        cid: 222,
+        title: "Fresh Visit",
+      },
+    },
+  ]);
+  const controller = createFestivalBridgeController();
+
+  try {
+    await controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl,
+      maxAgeMs: 0,
+    });
+    const pendingFreshRead = controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl,
+      maxAgeMs: 0,
+    });
+
+    const cachedRead = controller.refreshSnapshot({
+      pathname: "/festival/demo",
+      pageUrl,
+      maxAgeMs: 60_000,
+    });
+    dom.flushDeferred();
+    const [cachedSnapshot, freshSnapshot] = await Promise.all([
+      cachedRead,
+      pendingFreshRead,
+    ]);
+    assert.equal(cachedSnapshot?.videoId, "BVcached:111");
+    assert.equal(freshSnapshot?.videoId, "BVfresh:222");
+    assert.equal(controller.getSnapshot()?.videoId, "BVfresh:222");
+  } finally {
     dom.restore();
   }
 });

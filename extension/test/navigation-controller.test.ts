@@ -81,6 +81,7 @@ test("navigation controller ignores same-video url variants during in-room navig
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -131,6 +132,7 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -187,6 +189,7 @@ test("navigation controller suppresses autoplay (load paused) when switching to 
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -254,6 +257,7 @@ test("navigation controller suppresses a non-shared SPA navigation immediately v
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -315,6 +319,7 @@ test("navigation controller schedules auto-share when a shared source autoplays 
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -390,6 +395,7 @@ test("navigation controller schedules auto-share when a bangumi season page auto
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -454,6 +460,7 @@ test("navigation controller holds a non-sharer when a bangumi season page autopl
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -526,6 +533,7 @@ test("navigation controller schedules auto-share for a season-page autoplay that
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -594,6 +602,7 @@ test("navigation controller does not auto-share a manual episode click whose nav
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -654,6 +663,7 @@ test("navigation controller does not auto-share a manual episode click that prec
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -716,6 +726,7 @@ test("navigation controller vetoes a pre-end manual click even when the navigati
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -781,6 +792,7 @@ test("navigation controller still auto-shares an autoplay whose only gesture lon
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -847,6 +859,7 @@ test("navigation controller does not auto-share a seek-to-end autoplay, the acce
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -906,6 +919,7 @@ test("navigation controller does not force-pause a non-sharer's manual episode c
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -966,6 +980,7 @@ test("navigation controller does not reuse one natural end for a second navigati
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -1044,6 +1059,7 @@ test("navigation controller ignores a natural-end marker for a video the room no
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -1106,6 +1122,7 @@ test("navigation controller does not treat an expired end marker as a season-pag
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -1164,6 +1181,7 @@ test("navigation controller does not auto-share a manual click even when its ges
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -1216,6 +1234,7 @@ test("navigation controller chains the next auto-share before the room confirms 
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -1303,6 +1322,7 @@ test("navigation controller does not auto-share a recent user-initiated navigati
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -1351,6 +1371,7 @@ test("navigation controller cancels a pending auto-share on a manual non-autopla
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -1413,6 +1434,7 @@ test("navigation controller suppresses autoplay and does not auto-share a manual
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -1479,6 +1501,7 @@ test("navigation controller does not auto-share an autoplay that started from a 
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -1542,6 +1565,7 @@ test("navigation controller pauses non-sharer autoplay to a different video", ()
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -1615,6 +1639,7 @@ test("navigation controller arms autoplay suppression for a non-shared video tha
       ({
         paused: true,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -1686,6 +1711,7 @@ test("navigation controller suppresses autoplay when navigating through an unsta
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -1742,6 +1768,7 @@ test("navigation controller keeps autoplay suppression armed when switching to a
       ({
         paused: true,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -1811,6 +1838,7 @@ test("navigation controller suppresses autoplay when shared url is an unstable s
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -1864,6 +1892,7 @@ test("navigation controller suppresses autoplay when shared url is not yet known
       ({
         paused: false,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -1921,6 +1950,7 @@ test("navigation controller anchors active shared url for post-navigation settle
       ({
         paused: true,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -1979,6 +2009,7 @@ test("navigation controller clears any anchor when user navigates back to the sh
       ({
         paused: true,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -2020,6 +2051,7 @@ test("navigation controller does not anchor when no shared video was active", ()
       ({
         paused: true,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -2070,6 +2102,7 @@ test("navigation controller clears stale gesture state on in-room navigation", (
       ({
         paused: true,
       }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {},
     hydrateRoomState: async () => {},
     activatePauseHold: () => {},
@@ -2094,6 +2127,14 @@ test("navigation controller clears stale gesture state on in-room navigation", (
 // only through the resolved page-bridge snapshot URL. The route itself
 // normalizes to an unstable id; a `?bvid=&cid=` snapshot URL normalizes to the
 // resolved `/video/...` page.
+/**
+ * `paused` 在 lib.dom 里是只读的,但连播用例需要模拟"播放器已被暂停/恢复"这个
+ * 状态变化,所以桩类型只把这一项放开为可写。
+ */
+type MutablePausedVideoStub = Omit<HTMLVideoElement, "paused"> & {
+  paused: boolean;
+};
+
 const FESTIVAL_ROUTE = "https://www.bilibili.com/festival/MyMuji";
 function normalizeFestivalPageUrl(url: string): string | null {
   if (url.includes("/festival/")) {
@@ -2139,6 +2180,7 @@ test("navigation controller schedules auto-share when a festival page autoplays 
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2214,6 +2256,7 @@ test("navigation controller schedules auto-share when the first festival resolut
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2278,6 +2321,7 @@ test("navigation controller pauses when the first festival resolution is a diffe
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2328,6 +2372,7 @@ test("navigation controller suppresses a first festival resolution while a joine
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2384,6 +2429,7 @@ test("navigation controller adopts a first festival resolution without pausing t
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2444,6 +2490,7 @@ test("navigation controller does not flip-flop when a festival snapshot is brief
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2509,6 +2556,7 @@ test("navigation controller adopts a first festival resolution when the room sha
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2569,6 +2617,7 @@ test("navigation controller defers, not cancels, when a festival address bar kee
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2647,6 +2696,7 @@ test("navigation controller auto-shares a same-page autoplay off a bare-route fe
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2727,6 +2777,7 @@ test("navigation controller anchors a bare-route festival share even when the ad
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2803,6 +2854,7 @@ test("navigation controller anchors a bare-route festival share when the resolve
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2881,6 +2933,7 @@ test("navigation controller does not auto-share a first festival resolution to a
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2935,6 +2988,7 @@ test("navigation controller does not pause a non-sharer on a first festival reso
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -2989,6 +3043,7 @@ test("navigation controller does not auto-share a gesture-driven first festival 
     clearFestivalSnapshot: () => {},
     attachPlaybackListeners: () => {},
     getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
     pauseVideo: () => {
       pauseCalls += 1;
     },
@@ -3012,6 +3067,218 @@ test("navigation controller does not auto-share a gesture-driven first festival 
     assert.deepEqual(autoShareRequests, []);
     assert.equal(pauseCalls, 1);
     assert.equal(runtimeState.intendedPlayState, "paused");
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller resumes the sharer's autoplay-next after the binding's load-pause hold", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVa?cid=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+
+  let resolved: string | null = null;
+  const video: MutablePausedVideoStub = {
+    paused: false,
+  } as MutablePausedVideoStub;
+  let playCalls = 0;
+  const autoShareRequests: Array<{ nextNormalizedPageUrl: string }> = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    sharedVideoNaturalEndWindowMs: 1_500,
+    getCurrentPageUrl: () => FESTIVAL_ROUTE,
+    normalizeVideoPageUrl: normalizeFestivalPageUrl,
+    getResolvedVideoUrl: () => resolved,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => video,
+    playVideo: async () => {
+      playCalls += 1;
+      video.paused = false;
+    },
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getMonotonicNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1";
+    windowHarness.intervals[0]?.();
+
+    // The player autoplays to B. The playback binding sees the `play` event
+    // first — this watcher only polls every 500ms and the festival address bar
+    // never changed — so by now B is already force-paused as a "load paused"
+    // non-shared arrival.
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVb&cid=2";
+    video.paused = true;
+    runtimeState.intendedPlayState = "paused";
+    runtimeState.pauseHoldUntil = 11_500;
+    runtimeState.nonSharerAutoplayHoldUrl =
+      "https://www.bilibili.com/video/BVb?cid=2";
+
+    windowHarness.intervals[0]?.();
+
+    // Without the resume the sharer auto-shares a paused video and the whole
+    // room stops on it.
+    assert.equal(playCalls, 1);
+    assert.equal(video.paused, false);
+    assert.equal(runtimeState.intendedPlayState, "playing");
+    assert.equal(runtimeState.pauseHoldUntil, 0);
+    assert.deepEqual(
+      autoShareRequests.map((request) => request.nextNormalizedPageUrl),
+      ["https://www.bilibili.com/video/BVb?cid=2"],
+    );
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller leaves a paused autoplay-next alone when no load-pause hold names it", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVa?cid=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+
+  let resolved: string | null = null;
+  const video: MutablePausedVideoStub = {
+    paused: false,
+  } as MutablePausedVideoStub;
+  let playCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    sharedVideoNaturalEndWindowMs: 1_500,
+    getCurrentPageUrl: () => FESTIVAL_ROUTE,
+    normalizeVideoPageUrl: normalizeFestivalPageUrl,
+    getResolvedVideoUrl: () => resolved,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => video,
+    playVideo: async () => {
+      playCalls += 1;
+      video.paused = false;
+    },
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1";
+    windowHarness.intervals[0]?.();
+
+    // B arrives paused, but nothing armed a load-pause hold for it — the pause
+    // came from somewhere this controller did not cause (a stall, or the user
+    // pressing pause during the countdown). Resuming it would override the
+    // player rather than undo our own interference.
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVb&cid=2";
+    video.paused = true;
+    runtimeState.nonSharerAutoplayHoldUrl = null;
+
+    windowHarness.intervals[0]?.();
+
+    assert.equal(playCalls, 0);
+    assert.equal(video.paused, true);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
+test("navigation controller resumes the sharer's autoplay-next before the binding's queued pause lands", () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVa?cid=1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+
+  let resolved: string | null = null;
+  const video: MutablePausedVideoStub = {
+    paused: false,
+  } as MutablePausedVideoStub;
+  let playCalls = 0;
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    sharedVideoNaturalEndWindowMs: 1_500,
+    getCurrentPageUrl: () => FESTIVAL_ROUTE,
+    normalizeVideoPageUrl: normalizeFestivalPageUrl,
+    getResolvedVideoUrl: () => resolved,
+    isSupportedVideoPage: (url) =>
+      url.includes("/video/") || url.includes("/festival/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => video,
+    playVideo: async () => {
+      playCalls += 1;
+      video.paused = false;
+    },
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 10_000,
+  });
+
+  try {
+    controller.start();
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVa&cid=1";
+    windowHarness.intervals[0]?.();
+
+    // The binding armed the hold on the `play` event but performs the pause in a
+    // `setTimeout`, which has NOT run yet — the element still reads as playing.
+    // Deciding by `video.paused` here loses the race: the queued pause lands
+    // right after and stops the video with nothing left to revert it.
+    resolved = "https://www.bilibili.com/festival/MyMuji?bvid=BVb&cid=2";
+    video.paused = false;
+    runtimeState.intendedPlayState = "paused";
+    runtimeState.pauseHoldUntil = 11_500;
+    runtimeState.nonSharerAutoplayHoldUrl =
+      "https://www.bilibili.com/video/BVb?cid=2";
+
+    windowHarness.intervals[0]?.();
+
+    assert.equal(playCalls, 1);
+    assert.equal(runtimeState.intendedPlayState, "playing");
+    assert.equal(runtimeState.pauseHoldUntil, 0);
+    // What makes the queued pause a no-op when it fires.
+    assert.equal(
+      runtimeState.explicitNonSharedPlaybackUrl,
+      "https://www.bilibili.com/video/BVb?cid=2",
+    );
   } finally {
     windowHarness.restore();
   }

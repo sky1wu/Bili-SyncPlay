@@ -8,7 +8,7 @@ import { createAutoShareNextController } from "./auto-share-next-controller";
 import { runtimeSendMessage } from "./content-messaging";
 import { createFestivalBridgeController } from "./festival-bridge";
 import { startUserGestureTracking } from "./gesture-tracker";
-import { getVideoElement, pauseVideo } from "./player-binding";
+import { getVideoElement, pauseVideo, playVideo } from "./player-binding";
 import { createContentStateStore } from "./content-store";
 import { createNavigationController } from "./navigation-controller";
 import { startNavigationSignalListener } from "./navigation-signal";
@@ -79,6 +79,7 @@ const autoShareNextController = createAutoShareNextController({
   getCurrentPageUrl: () =>
     festivalBridge.resolveVideoUrlForPage(
       window.location.pathname,
+      window.location.href.split("#")[0],
       FESTIVAL_SNAPSHOT_TTL_MS,
     ) ?? window.location.href.split("#")[0],
   // Lets the self-check distinguish a trustworthy resolved current video from the
@@ -87,6 +88,7 @@ const autoShareNextController = createAutoShareNextController({
   getResolvedVideoUrl: () =>
     festivalBridge.resolveVideoUrlForPage(
       window.location.pathname,
+      window.location.href.split("#")[0],
       FESTIVAL_SNAPSHOT_TTL_MS,
     ),
   normalizeVideoPageUrl: (url) => normalizeSharedVideoUrl(url),
@@ -188,16 +190,23 @@ const navigationController = createNavigationController({
   getResolvedVideoUrl: () =>
     festivalBridge.resolveVideoUrlForPage(
       window.location.pathname,
+      window.location.href.split("#")[0],
       FESTIVAL_SNAPSHOT_TTL_MS,
     ),
   isSupportedVideoPage: (url) => Boolean(normalizeSharedVideoUrl(url)),
   clearFestivalSnapshot: () => {
     festivalBridge.clearSnapshot();
+    // The navigation controller sees every real route transition, including a
+    // quick leave-and-return with no playback event on the page in between.
+    // Give that visit boundary to the share controller so a festival address
+    // bar refuted on the previous visit cannot stay refuted on the next one.
+    shareController.observePageVisit(window.location.href.split("#")[0]);
   },
   attachPlaybackListeners: () =>
     playbackBindingController.attachPlaybackListeners(),
   getVideoElement,
   pauseVideo,
+  playVideo,
   hydrateRoomState: () => syncController.hydrateRoomState(),
   activatePauseHold,
   scheduleAutoShareNextVideo: (input) =>

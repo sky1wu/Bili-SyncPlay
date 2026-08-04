@@ -32,6 +32,26 @@ export function isAddressBarOpaqueVideoUrl(url: string | null): boolean {
   }
 }
 
+/**
+ * Stable key for one address-bar page visit. Hash changes and trailing-slash
+ * variants do not create a new visit; a different query does. That distinction
+ * matters on festival pages: in-player autoplay never changes location.href,
+ * while opening another share link on the same pathname supplies a new bvid/cid
+ * that is authoritative until the bridge resolves its first snapshot.
+ */
+export function normalizePageVisitUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    if (parsed.pathname !== "/") {
+      parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    }
+    return parsed.toString();
+  } catch {
+    return url.split("#")[0]?.replace(/\/+$/, "") ?? url;
+  }
+}
+
 export function isUnstableSharedVideoUrl(url: string | null): boolean {
   if (!url) {
     return false;

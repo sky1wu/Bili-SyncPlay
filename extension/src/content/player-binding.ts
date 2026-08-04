@@ -42,6 +42,17 @@ export function pauseVideo(video: HTMLVideoElement): void {
   video.pause();
 }
 
+/**
+ * Resume a video WE paused. The rejection is expected and swallowed by the
+ * caller's `onRejected`: `play()` returns a promise that rejects when the
+ * browser's autoplay policy refuses (no media engagement yet) or when a newer
+ * load/pause interrupts it, and an unhandled rejection would surface as a page
+ * error for something we can only report.
+ */
+export function playVideo(video: HTMLVideoElement): Promise<void> {
+  return Promise.resolve(video.play()).then(() => undefined);
+}
+
 export function getPlayState(
   video: HTMLVideoElement,
   intendedPlayState: PlaybackState["playState"],

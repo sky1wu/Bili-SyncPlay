@@ -4,6 +4,7 @@ import {
   buildBvidCidShareUrl,
   buildFestivalShareUrl,
 } from "./page-video";
+import { normalizePageVisitUrl } from "./video-identity";
 
 export interface FestivalSnapshot {
   videoId: string;
@@ -39,8 +40,9 @@ export interface FestivalBridgeController {
    * the player swaps videos, so this is the only reliable way for the navigation
    * watcher and auto-share self-check to observe the current video. Returns the
    * snapshot's resolved share URL (with `bvid`/`cid`) when the cached snapshot
-   * belongs to `pathname`, otherwise `null` (non-festival page, or no/stale
-   * matching snapshot — callers fall back to the address bar).
+   * belongs to the same pathname and full page URL visit, otherwise `null`
+   * (non-festival page, or no/stale matching snapshot — callers fall back to
+   * the address bar).
    *
    * When `maxAgeMs` is provided, a snapshot older than it is treated as stale and
    * `null` is returned: a cached video the user may already have left must not be
@@ -50,6 +52,7 @@ export interface FestivalBridgeController {
    */
   resolveVideoUrlForPage: (
     pathname: string,
+    pageUrl: string,
     maxAgeMs?: number,
   ) => string | null;
   refreshSnapshot: (args: {
@@ -62,6 +65,8 @@ export interface FestivalBridgeController {
 export function createFestivalBridgeController(): FestivalBridgeController {
   let festivalBridgeReady = false;
   let festivalSnapshot: FestivalSnapshot | null = null;
+  let pageVisitGeneration = 0;
+  let freshRequestSequence = 0;
 
   async function readFestivalSnapshotFromPageContext(
     pathname: string,
@@ -149,12 +154,18 @@ export function createFestivalBridgeController(): FestivalBridgeController {
     return pathname.replace(/\/+$/, "");
   }
 
-  function canUseCachedFestivalSnapshot(pathname: string): boolean {
+  function canUseCachedFestivalSnapshot(
+    pathname: string,
+    pageUrl: string,
+  ): boolean {
     return (
       pathname.startsWith("/festival/") &&
       festivalSnapshot?.pathname?.startsWith("/festival/") === true &&
       normalizeCachedPagePathname(festivalSnapshot.pathname) ===
-        normalizeCachedPagePathname(pathname)
+        normalizeCachedPagePathname(pathname) &&
+      festivalSnapshot.pageUrl !== undefined &&
+      normalizePageVisitUrl(festivalSnapshot.pageUrl) ===
+        normalizePageVisitUrl(pageUrl)
     );
   }
 
@@ -182,6 +193,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
 
   return {
     clearSnapshot: () => {
+      pageVisitGeneration += 1;
       festivalSnapshot = null;
     },
     ensureBridgeInjected: () => {
@@ -190,6 +202,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
     getSnapshot: () => festivalSnapshot,
     resolveVideoUrlForPage: (
       pathname: string,
+      pageUrl: string,
       maxAgeMs?: number,
     ): string | null => {
       if (!pathname.startsWith("/festival/")) {
@@ -198,7 +211,10 @@ export function createFestivalBridgeController(): FestivalBridgeController {
       if (
         !festivalSnapshot?.pathname?.startsWith("/festival/") ||
         normalizeCachedPagePathname(festivalSnapshot.pathname) !==
-          normalizeCachedPagePathname(pathname)
+          normalizeCachedPagePathname(pathname) ||
+        festivalSnapshot.pageUrl === undefined ||
+        normalizePageVisitUrl(festivalSnapshot.pageUrl) !==
+          normalizePageVisitUrl(pageUrl)
       ) {
         return null;
       }
@@ -217,6 +233,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
     refreshSnapshot: async ({ pathname, pageUrl, maxAgeMs }) => {
       const isBangumiPage = pathname.startsWith("/bangumi/play/");
       if (!pathname.startsWith("/festival/") && !isBangumiPage) {
+        pageVisitGeneration += 1;
         festivalSnapshot = null;
         return null;
       }
@@ -224,7 +241,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
       if (
         !isBangumiPage &&
         festivalSnapshot &&
-        canUseCachedFestivalSnapshot(pathname) &&
+        canUseCachedFestivalSnapshot(pathname, pageUrl) &&
         performance.now() - festivalSnapshot.updatedAt < maxAgeMs
       ) {
         return {
@@ -234,10 +251,21 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         };
       }
 
+      // Only an actual page-world read supersedes another read. A concurrent
+      // cache hit is observational and must not cancel a fresh read that was
+      // already in flight for this same page visit.
+      const requestVisitGeneration = pageVisitGeneration;
+      const requestSequence = (freshRequestSequence += 1);
       const nextSnapshot = await readFestivalSnapshotFromPageContext(
         pathname,
         pageUrl,
       );
+      if (
+        requestVisitGeneration !== pageVisitGeneration ||
+        requestSequence !== freshRequestSequence
+      ) {
+        return null;
+      }
       if (!nextSnapshot) {
         // Mirror the fast-path freshness gate above: when a fresh read fails, only
         // fall back to the cached snapshot while it is still within `maxAgeMs`.
@@ -246,7 +274,7 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         // video the user has already left.
         return !isBangumiPage &&
           festivalSnapshot &&
-          canUseCachedFestivalSnapshot(pathname) &&
+          canUseCachedFestivalSnapshot(pathname, pageUrl) &&
           performance.now() - festivalSnapshot.updatedAt < maxAgeMs
           ? {
               videoId: festivalSnapshot.videoId,
