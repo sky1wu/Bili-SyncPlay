@@ -143,6 +143,40 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
   };
 }
 
+test("runtime seat helper rejects when the add-member write is lost", async () => {
+  const addMemberFailure = Promise.reject(new Error("add-member write lost"));
+  addMemberFailure.catch(() => undefined);
+  const operationFailures: string[] = [];
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: {
+      ...createFakeRedisClient([Promise.resolve(null), addMemberFailure]),
+      // `markSessionJoinedRoom` uses this script; one means its guarded index
+      // write landed, isolating the failure to `addMember` below.
+      async eval() {
+        return 1;
+      },
+    },
+    writeRetry: { maxAttempts: 1 },
+    onPendingOperationError(context) {
+      operationFailures.push(`${context.operationName}:${context.reason}`);
+    },
+  });
+
+  try {
+    await assert.rejects(
+      seatSession(store, createSession("session-add-failed"), {
+        roomCode: "ROOMAF",
+        memberId: "member-add-failed",
+        memberToken: "token-add-failed",
+      }),
+      /Runtime seat member-add-failed in ROOMAF was not persisted/,
+    );
+    assert.deepEqual(operationFailures, ["add_member:failed"]);
+  } finally {
+    await store.close();
+  }
+});
+
 test("redis runtime store shares room sessions and member token state across instances", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
@@ -236,16 +270,14 @@ test("redis runtime store updates session display names when the session is re-r
   const session = createSession("session-display");
 
   try {
-    storeA.registerSession(session);
-    storeA.markSessionJoinedRoom(session.id, "ROOM02");
-    session.memberId = "member-display";
-    session.memberToken = "token-display";
-    storeA.addMember("ROOM02", session.memberId, session, session.memberToken);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await seatSession(storeA, session, {
+      roomCode: "ROOM02",
+      memberId: "member-display",
+      memberToken: "token-display",
+    });
 
     session.displayName = "Alice";
-    storeA.registerSession(session);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await storeA.registerSession(session);
 
     const room = await storeB.getRoom("ROOM02");
     assert.ok(room);
@@ -737,30 +769,29 @@ test("redis runtime store lifts the retention clock when someone reconnects", as
   // reading that cannot tell whether Redis still holds the token.
   const observer = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
   const session = createSession("session-relift");
-  session.memberId = "member-relift";
-  session.memberToken = "token-relift";
 
   try {
-    store.registerSession(session);
-    store.markSessionJoinedRoom(session.id, "ROOMRL");
-    store.addMember("ROOMRL", session.memberId, session, session.memberToken);
-    await store.flush?.();
+    await seatSession(store, session, {
+      roomCode: "ROOMRL",
+      memberId: "member-relift",
+      memberToken: "token-relift",
+    });
 
-    store.removeMember("ROOMRL", session.memberId, session);
+    const removal = store.removeMember("ROOMRL", "member-relift", session);
+    await removal.durable;
     store.unregisterSession(session.id);
-    await store.flush?.();
+    await settleRuntimeWrites(store);
     await new Promise((resolve) => setTimeout(resolve, 25));
 
     // Reconnect inside the window: the clock must be lifted, not merely
     // restarted, or a room that keeps churning members would eventually drop
     // identities while people are still in it.
     const reconnected = createSession("session-relift-2");
-    reconnected.memberId = "member-relift";
-    reconnected.memberToken = "token-relift";
-    store.registerSession(reconnected);
-    store.markSessionJoinedRoom(reconnected.id, "ROOMRL");
-    store.addMember("ROOMRL", "member-relift", reconnected, "token-relift");
-    await store.flush?.();
+    await seatSession(store, reconnected, {
+      roomCode: "ROOMRL",
+      memberId: "member-relift",
+      memberToken: "token-relift",
+    });
 
     await new Promise((resolve) => setTimeout(resolve, 250));
     assert.equal(
@@ -989,27 +1020,26 @@ test("redis runtime store releases a departed visitor from a room that never emp
     memberTokenRetentionMs: 120,
   });
   const host = createSession("session-host");
-  host.memberId = "member-host";
-  host.memberToken = "token-host";
   const visitor = createSession("session-visitor");
-  visitor.memberId = "member-visitor";
-  visitor.memberToken = "token-visitor";
 
   try {
     // The host never leaves, so the room is never empty and a room-scoped clock
     // would never start. A public room with a steady trickle of visitors then
     // accumulates one token per visitor, forever.
-    store.registerSession(host);
-    store.markSessionJoinedRoom(host.id, "ROOMBZ");
-    store.addMember("ROOMBZ", host.memberId, host, host.memberToken);
-    store.registerSession(visitor);
-    store.markSessionJoinedRoom(visitor.id, "ROOMBZ");
-    store.addMember("ROOMBZ", visitor.memberId, visitor, visitor.memberToken);
-    await store.flush?.();
+    await seatSession(store, host, {
+      roomCode: "ROOMBZ",
+      memberId: "member-host",
+      memberToken: "token-host",
+    });
+    await seatSession(store, visitor, {
+      roomCode: "ROOMBZ",
+      memberId: "member-visitor",
+      memberToken: "token-visitor",
+    });
 
-    store.removeMember("ROOMBZ", visitor.memberId, visitor);
-    store.markSessionLeftRoom(visitor.id, "ROOMBZ");
-    await store.flush?.();
+    const removal = store.removeMember("ROOMBZ", "member-visitor", visitor);
+    await removal.durable;
+    await store.markSessionLeftRoom(visitor.id, "ROOMBZ");
     await new Promise((resolve) => setTimeout(resolve, 250));
 
     assert.equal(
@@ -1235,12 +1265,13 @@ test("redis runtime store commits the block and the revoke of a kick together", 
     now: () => currentTime,
   });
   const session = createSession("session-evict");
-  session.memberId = "member-evict";
-  session.memberToken = "token-evict";
 
   try {
-    store.addMember("ROOMEV", session.memberId, session, session.memberToken);
-    await store.flush?.();
+    await seatSession(store, session, {
+      roomCode: "ROOMEV",
+      memberId: "member-evict",
+      memberToken: "token-evict",
+    });
 
     // One commit. As two independent writes, a block that landed could not be
     // rolled back when the revoke then failed: the admin saw the kick fail while
@@ -1379,12 +1410,13 @@ test("redis runtime store does not register a retention entry for a member with 
   const observer = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
   const redis = new Redis(REDIS_URL);
   const session = createSession("session-kicked");
-  session.memberId = "member-kicked";
-  session.memberToken = "token-kicked";
 
   try {
-    store.addMember("ROOMKX", session.memberId, session, session.memberToken);
-    await store.flush?.();
+    await seatSession(store, session, {
+      roomCode: "ROOMKX",
+      memberId: "member-kicked",
+      memberToken: "token-kicked",
+    });
 
     // The kick takes the token and its retention entry away...
     await store.evictMemberToken(
@@ -1396,9 +1428,8 @@ test("redis runtime store does not register a retention entry for a member with 
     await store.flush?.();
 
     // ...and the socket close arrives afterwards, as it always does.
-    store.removeMember("ROOMKX", session.memberId, session);
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    const removal = store.removeMember("ROOMKX", "member-kicked", session);
+    await removal.durable;
 
     // Registering a retention entry here would leave one with no token behind
     // it, and the prune is lazy — nothing collects it once the room goes quiet.
@@ -1485,15 +1516,13 @@ test("redis runtime store does not register a retention entry during startup pur
   const redis = new Redis(REDIS_URL);
   const session = createSession("session-crash-kicked");
   session.instanceId = "crashed-node";
-  session.memberId = "member-crash-kicked";
-  session.memberToken = "token-crash-kicked";
 
   try {
-    store.registerSession(session);
-    store.markSessionJoinedRoom(session.id, "ROOMCK");
-    store.addMember("ROOMCK", session.memberId, session, session.memberToken);
-    await store.flush?.();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await seatSession(store, session, {
+      roomCode: "ROOMCK",
+      memberId: "member-crash-kicked",
+      memberToken: "token-crash-kicked",
+    });
 
     // Kicked, then the process died before the socket close ran — so the member
     // binding is still there for the startup purge to find.
@@ -1506,7 +1535,6 @@ test("redis runtime store does not register a retention entry during startup pur
     await store.flush?.();
 
     assert.equal(await store.purgeSessionsByInstance?.("crashed-node"), 1);
-    await new Promise((resolve) => setTimeout(resolve, 25));
 
     // The identity is gone, so there is nothing to put on a clock. Registering
     // one anyway leaves an entry the lazy prune never reaches once the room goes

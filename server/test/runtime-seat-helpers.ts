@@ -33,10 +33,9 @@ export type RuntimeSeat = {
  * Both halves, because they answer different questions (see
  * `docs/reference/invariants.md`): `flush` says the queue emptied — which is
  * what "my own writes are visible to the read I am about to do" needs — while
- * `confirmWrites` says they actually landed. `flush` waits on error-swallowed
- * copies, so without the second call a write that failed outright drains
- * exactly like one that succeeded, and the test reports the mismatched
- * assertion instead of the lost write that caused it.
+ * `confirmWrites` reports failures from the session write queue. `addMember`
+ * does not use that queue, so callers that depend on it must verify its shared
+ * result separately; {@link seatSession} does that before returning.
  */
 export async function settleRuntimeWrites(
   runtimeStore: SeatBarrierStore,
@@ -77,4 +76,31 @@ export async function seatSession(
   );
 
   await settleRuntimeWrites(runtimeStore);
+
+  // `addMember` returns only the local room and its Redis operation is tracked
+  // through an error-swallowed promise, outside the session write queue that
+  // `confirmWrites` reports. Read the seat back through Redis-authoritative
+  // paths so an add-member failure cannot turn a setup into a false green.
+  const persistedMemberId = await runtimeStore.findMemberIdByToken(
+    seat.roomCode,
+    seat.memberToken,
+  );
+  if (persistedMemberId !== seat.memberId) {
+    throw new Error(
+      `Runtime seat ${seat.memberId} in ${seat.roomCode} was not persisted: ` +
+        `member token resolved to ${persistedMemberId ?? "nothing"}.`,
+    );
+  }
+
+  // The token check above matters for the Redis store: once the shared token
+  // hash is non-empty, `getRoom` cannot fall back to this node's local mirror,
+  // so this verifies the shared member→session binding as well.
+  const persistedRoom = await runtimeStore.getRoom(seat.roomCode);
+  const persistedSessionId = persistedRoom?.members.get(seat.memberId)?.id;
+  if (persistedSessionId !== session.id) {
+    throw new Error(
+      `Runtime seat ${seat.memberId} in ${seat.roomCode} was not persisted: ` +
+        `member binding resolved to ${persistedSessionId ?? "nothing"}.`,
+    );
+  }
 }
