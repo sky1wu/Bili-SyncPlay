@@ -7,6 +7,7 @@ import {
 } from "../src/content/runtime-state";
 import { installClockStubs } from "./clock-stubs";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
+import { derivePlaybackSyncIntent } from "../src/content/playback-broadcast";
 import { createRoomStateController } from "../src/content/room-state-controller";
 import { createToastCoordinatorState } from "../src/content/toast";
 
@@ -234,6 +235,204 @@ test("playback binding controller preserves explicit seek intent across immediat
       kind: "seek",
       at: 1_100,
     });
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not revive a superseded seek when seeked arrives late", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "playing";
+  runtimeState.lastUserGestureAt = 1_000;
+  let now = 1_100;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    // A later play press supersedes the seek while the decoder is still waiting
+    // to emit `seeked` for it.
+    runtimeState.lastUserGestureAt = 2_500;
+    now = 2_550;
+    dom.listeners.get("play")?.(new Event("play"));
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "play",
+      at: 2_550,
+    });
+
+    now = 2_600;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "play",
+      at: 2_550,
+    });
+    assert.equal(
+      derivePlaybackSyncIntent({
+        eventSource: "seeked",
+        lastExplicitUserAction: runtimeState.lastExplicitUserAction,
+        lastForcedPauseAt: runtimeState.lastForcedPauseAt,
+        now,
+        userGestureGraceMs: 1_200,
+      }),
+      undefined,
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not renew a seek invalidated by a forced pause", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 1_000;
+  let now = 1_100;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 1_100,
+    });
+
+    // The forced pause invalidates the seek. A later gesture may make the old
+    // decoder completion look recordable, but must not turn it into new intent.
+    runtimeState.lastForcedPauseAt = 1_200;
+    runtimeState.lastUserGestureAt = 1_250;
+    now = 1_300;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 1_100,
+    });
+    assert.equal(
+      derivePlaybackSyncIntent({
+        eventSource: "seeked",
+        lastExplicitUserAction: runtimeState.lastExplicitUserAction,
+        lastForcedPauseAt: runtimeState.lastForcedPauseAt,
+        now,
+        userGestureGraceMs: 1_200,
+      }),
+      undefined,
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller keeps seek-triggered autoplay blocked through seeked", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const url = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = url;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.lastUserGestureAt = 1_000;
+  dom.video.paused = true;
+  let now = 1_100;
+  let pauseCalls = 0;
+  dom.video.pause = () => {
+    pauseCalls += 1;
+    dom.video.paused = true;
+  };
+  Object.assign(globalThis.window, {
+    setTimeout(callback: () => void) {
+      callback();
+      return 1;
+    },
+  });
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url,
+      title: "Shared",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (value) => value ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    // The decoder finishes inside the gesture window, but the browser resumes
+    // after the original `seeking` record has aged out.
+    now = 2_100;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 2_100,
+    });
+    assert.equal(runtimeState.explicitSeekOriginPlayState, "paused");
+
+    now = 2_500;
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.lastExplicitUserAction, null);
   } finally {
     dom.restore();
   }

@@ -341,8 +341,8 @@ export function createPlaybackBindingController(args: {
         at: monotonicNow(),
       };
       if (kind === "seek") {
-        // One gesture produces `seeking` AND `seeked`, and the `seeking`
-        // broadcast in between writes `intendedPlayState` back to `playing`.
+        // One gesture produces `seeking` and `seeked`, and the `seeking`
+        // broadcast can write `intendedPlayState` back to `playing`.
         // Re-snapshotting on `seeked` would therefore record the write-back
         // rather than the origin, erasing a `buffering` start. Only the first
         // event of a seek establishes the origin; the rest inherit it.
@@ -1245,7 +1245,17 @@ export function createPlaybackBindingController(args: {
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "seek");
         }
-        rememberExplicitUserAction("seek");
+        // Renew only the seek that is still current. Its completion extends the
+        // guard against browser autoplay after a paused scrub, while a `seeked`
+        // delayed by the decoder cannot overwrite a newer play/pause/rate
+        // action. A forced pause likewise invalidates the preceding seek.
+        const previousAction = args.runtimeState.lastExplicitUserAction;
+        if (
+          previousAction?.kind === "seek" &&
+          previousAction.at > args.runtimeState.lastForcedPauseAt
+        ) {
+          rememberExplicitUserAction("seek");
+        }
         scheduleBroadcast(video, "seeked", 120);
       },
       onRateChange: () => {
