@@ -4273,3 +4273,74 @@ test("playback binding controller ends the catch-up for a keyboard speed shortcu
     dom.restore();
   }
 });
+
+test("playback binding controller re-pauses a remote-stopped video on a page younger than the gesture grace", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  // No gesture has EVER been recorded: the background just pointed this tab at
+  // the room's new shared video (`chrome.tabs.update`), so the document is fresh
+  // and its monotonic clock reads well under `userGestureGraceMs`. The room says
+  // paused; the page's own load autoplay must still be caught. With a `0`
+  // sentinel `now - 0 < graceMs` reads as "the user just pressed play" and the
+  // tab runs on until the grace lapses — the 2-3s of unwanted playback (and the
+  // `playing` it broadcasts back to the room) this guards.
+  const pageAgeMs = 800;
+  let pausedByGuard = 0;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url: "https://www.bilibili.com/video/BVshared?p=1",
+      title: "Shared Video",
+    }),
+    hasRecentRemoteStopIntent: () => true,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => pageAgeMs,
+  });
+
+  try {
+    Object.assign(globalThis.window, {
+      setTimeout: (handler: () => void) => {
+        handler();
+        return 1;
+      },
+    });
+    dom.video.pause = () => {
+      pausedByGuard += 1;
+      dom.video.paused = true;
+    };
+    dom.video.paused = false;
+
+    controller.attachPlaybackListeners();
+    dom.listeners.get("play")?.(new Event("play"));
+
+    await Promise.resolve();
+
+    assert.equal(pausedByGuard, 1);
+    assert.equal(runtimeState.lastForcedPauseAt, pageAgeMs);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});

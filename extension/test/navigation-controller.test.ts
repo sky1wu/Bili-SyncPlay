@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createContentRuntimeState,
+  hasGestureBeenRecorded,
   type ExplicitPlaybackAction,
   type ExplicitUserAction,
 } from "../src/content/runtime-state";
@@ -987,8 +988,8 @@ test("navigation controller does not reuse one natural end for a second navigati
       "the manual destination is not auto-shared",
     );
     assert.equal(
-      runtimeState.lastUserGestureAt,
-      0,
+      hasGestureBeenRecorded(runtimeState.lastUserGestureAt),
+      false,
       "handling it cleared the gesture that refuted it",
     );
 
@@ -2080,7 +2081,7 @@ test("navigation controller clears stale gesture state on in-room navigation", (
     currentUrl = "https://www.bilibili.com/video/BV1Em421N7uU";
     windowHarness.intervals[0]?.();
 
-    assert.equal(runtimeState.lastUserGestureAt, 0);
+    assert.equal(hasGestureBeenRecorded(runtimeState.lastUserGestureAt), false);
     assert.equal(runtimeState.lastExplicitPlaybackAction, null);
     assert.equal(runtimeState.lastExplicitUserAction, null);
   } finally {

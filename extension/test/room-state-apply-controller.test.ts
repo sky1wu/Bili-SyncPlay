@@ -181,6 +181,26 @@ test("suppresses autoplay for empty room after navigation resets gesture state",
   assert.equal(video.paused, true);
 });
 
+test("suppresses autoplay on a page younger than the gesture grace", async () => {
+  const video = createStubVideo(false);
+  // The tab was just navigated to the room's video, so the document's monotonic
+  // clock still reads under `userGestureGraceMs` and no gesture has ever been
+  // recorded. "Never" must not be confused with "just now": with a `0` sentinel
+  // this reads as a fresh gesture and the page's load autoplay is waved through.
+  const harness = createController({
+    video,
+    now: 800,
+    userGestureGraceMs: 1_200,
+  });
+
+  harness.runtimeState.pendingRoomStateHydration = true;
+  harness.runtimeState.intendedPlayState = "paused";
+
+  await harness.controller.applyRoomState(createEmptyRoomState());
+
+  assert.equal(video.paused, true);
+});
+
 test("skips pauseVideo when a recent user gesture is within the grace window", async () => {
   const video = createStubVideo(false);
   const harness = createController({

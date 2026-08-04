@@ -140,6 +140,11 @@ export function createPlaybackBindingController(args: {
       void args.broadcastPlayback(video, "pause");
     }, args.bufferPauseUpgradeMs);
   };
+  // A bare freshness check is safe here only because "never" is
+  // `GESTURE_NEVER_AT`, not `0`: on the monotonic clock a `0` default is
+  // *document start*, so this would answer true for the first
+  // `userGestureGraceMs` of every page — precisely when a freshly navigated tab
+  // is autoplaying and every guard below is what must stop it.
   const hasRecentUserGesture = () =>
     monotonicNow() - args.runtimeState.lastUserGestureAt <
     args.userGestureGraceMs;
@@ -154,16 +159,16 @@ export function createPlaybackBindingController(args: {
   // The user just PERSISTENTLY selected a playback speed (Shift+1 / Shift+2).
   // Hold-to-fast-forward is deliberately not one — see `isRateControlGesture`.
   //
-  // The `> 0` check is defensive, not load-bearing today: the field starts at 0
-  // and `performance.now()` starts near it, so a bare freshness check would read
-  // as true for the first `userGestureGraceMs` of the page — but
-  // `hasRecentUserGestureInPlayer` has the same 0 default and the same window,
-  // so that span is already covered by it and the difference is unobservable.
-  // Kept so the two cannot drift apart if either default or window changes.
+  // This used to carry a `lastRateControlGestureAt > 0` presence check, on the
+  // reasoning that the sibling `hasRecentUserGestureInPlayer` "already covered"
+  // the page's opening `userGestureGraceMs`. That was backwards: the sibling had
+  // the same `0` default and so was *itself* true across that span rather than
+  // covering it. The sentinel is now `GESTURE_NEVER_AT`, which makes every one of
+  // these freshness checks answer correctly on its own, so the presence check is
+  // gone rather than duplicated into a second source of truth.
   const hasRecentRateControlGesture = () =>
-    args.runtimeState.lastRateControlGestureAt > 0 &&
     monotonicNow() - args.runtimeState.lastRateControlGestureAt <
-      args.userGestureGraceMs;
+    args.userGestureGraceMs;
   // A FRESH in-player play intent: an in-player gesture that also postdates the
   // last forced pause. While the page bridge resolves, the unconfirmed-context
   // hold force-pauses (updating `lastForcedPauseAt`); the SAME click that
