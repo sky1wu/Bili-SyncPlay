@@ -4409,6 +4409,78 @@ test("playback binding controller re-pauses a remote-stopped video on a page you
   }
 });
 
+test("playback binding controller drops a queued pause from an older playback context", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedUrl;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  let pauseCalls = 0;
+  let queuedPause: (() => void) | null = null;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url: sharedUrl,
+      title: "Shared Video",
+    }),
+    hasRecentRemoteStopIntent: () => true,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    Object.assign(globalThis.window, {
+      setTimeout: (handler: () => void) => {
+        queuedPause = handler;
+        return 1;
+      },
+    });
+    dom.video.pause = () => {
+      pauseCalls += 1;
+      dom.video.paused = true;
+    };
+    dom.video.paused = false;
+
+    controller.attachPlaybackListeners();
+    dom.listeners.get("play")?.(new Event("play"));
+
+    assert.ok(queuedPause, "the remote-stop pause is queued");
+
+    // Only the playback context changes. The same element, shared URL, remote
+    // stop intent, gesture stamp, and intended state deliberately stay valid,
+    // so the helper's captured generation is the sole reason this old pause is
+    // dropped.
+    invalidatePlaybackContext(runtimeState);
+    queuedPause?.();
+
+    assert.equal(pauseCalls, 0);
+    assert.equal(dom.video.paused, false);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
 test("playback binding controller drops a queued load-pause once the url gets authorized", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
