@@ -4,6 +4,7 @@ import type { SharedVideo } from "@bili-syncplay/protocol";
 import { createContentRuntimeState } from "../src/content/runtime-state";
 import { installClockStubs } from "./clock-stubs";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
+import { derivePlaybackSyncIntent } from "../src/content/playback-broadcast";
 import { createRoomStateController } from "../src/content/room-state-controller";
 import { createToastCoordinatorState } from "../src/content/toast";
 
@@ -231,6 +232,70 @@ test("playback binding controller preserves explicit seek intent across immediat
       kind: "seek",
       at: 1_100,
     });
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not revive a superseded seek when seeked arrives late", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "playing";
+  runtimeState.lastUserGestureAt = 1_000;
+  let now = 1_100;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    // A later play press supersedes the seek while the decoder is still waiting
+    // to emit `seeked` for it.
+    runtimeState.lastUserGestureAt = 2_500;
+    now = 2_550;
+    dom.listeners.get("play")?.(new Event("play"));
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "play",
+      at: 2_550,
+    });
+
+    now = 2_600;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "play",
+      at: 2_550,
+    });
+    assert.equal(
+      derivePlaybackSyncIntent({
+        eventSource: "seeked",
+        lastExplicitUserAction: runtimeState.lastExplicitUserAction,
+        lastForcedPauseAt: runtimeState.lastForcedPauseAt,
+        now,
+        userGestureGraceMs: 1_200,
+      }),
+      undefined,
+    );
   } finally {
     dom.restore();
   }

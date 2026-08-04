@@ -308,11 +308,11 @@ export function createPlaybackBindingController(args: {
         at: monotonicNow(),
       };
       if (kind === "seek") {
-        // One gesture produces `seeking` AND `seeked`, and the `seeking`
-        // broadcast in between writes `intendedPlayState` back to `playing`.
-        // Re-snapshotting on `seeked` would therefore record the write-back
-        // rather than the origin, erasing a `buffering` start. Only the first
-        // event of a seek establishes the origin; the rest inherit it.
+        // A seek can surface more than one start signal, and the first one's
+        // broadcast writes `intendedPlayState` back to `playing`.
+        // Re-snapshotting on a later signal would therefore record the
+        // write-back rather than the origin, erasing a `buffering` start. Only
+        // the first event of a seek establishes the origin; the rest inherit it.
         // A forced pause invalidates the seek that preceded it, so the next
         // gesture starts a NEW seek even inside the grace window — inheriting
         // the old origin there would let a `buffering` start survive into a
@@ -1148,7 +1148,11 @@ export function createPlaybackBindingController(args: {
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "seek");
         }
-        rememberExplicitUserAction("seek");
+        // `seeking` already established the seek intent. `seeked` is decoder
+        // driven and may arrive after an unrelated, newer user action; recording
+        // it again would borrow that action's fresh gesture and revive the stale
+        // seek with a new timestamp. A prompt `seeked` still inherits the
+        // existing seek record, while a delayed or superseded one stays stale.
         scheduleBroadcast(video, "seeked", 120);
       },
       onRateChange: () => {
