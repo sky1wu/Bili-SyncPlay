@@ -5,10 +5,15 @@ import {
   resolvePageSharedVideo,
 } from "./page-video";
 import type { ContentRuntimeState } from "./runtime-state";
-import { isAddressBarOpaqueVideoUrl } from "./video-identity";
+import {
+  isAddressBarOpaqueVideoUrl,
+  normalizePageVisitUrl,
+} from "./video-identity";
 
 export interface ShareController {
   getSharedVideo(): SharedVideo | null;
+  /** Records a real page visit so address-bar identity evidence cannot leak across it. */
+  observePageVisit(pageUrl: string): void;
   getCurrentPlaybackVideo(): Promise<SharedVideo | null>;
   getCurrentSharePayload(): {
     video: SharedVideo;
@@ -94,6 +99,7 @@ export function createShareController(args: {
 
   function canUseMatchingCachedPageSnapshot(argsForMatch: {
     pathname: string;
+    pageUrl: string;
     snapshot: CachedPageSnapshot | null;
     currentPart: CurrentPartIdentity;
   }): boolean {
@@ -103,7 +109,10 @@ export function createShareController(args: {
     if (canUseCachedPageSnapshot(argsForMatch.pathname)) {
       return (
         argsForMatch.snapshot.pathname?.startsWith("/festival/") === true &&
-        hasMatchingCachedPagePathname(argsForMatch)
+        hasMatchingCachedPagePathname(argsForMatch) &&
+        argsForMatch.snapshot.pageUrl !== undefined &&
+        normalizePageVisitUrl(argsForMatch.snapshot.pageUrl) ===
+          normalizePageVisitUrl(argsForMatch.pageUrl)
       );
     }
     const snapshotEpId =
@@ -190,27 +199,41 @@ export function createShareController(args: {
   }
 
   /**
-   * The address-bar-opaque pathname whose in-player identity a snapshot has
+   * The address-bar-opaque page visit whose in-player identity a snapshot has
    * already resolved at least once. From that point on the address bar's frozen
-   * `?bvid=` is known to be stale for this page — see
-   * {@link PageVideoSource.addressBarIdentityRefuted}. Keyed by pathname so
-   * leaving the page (a different festival, or any other route) starts over.
+   * `?bvid=` is known to be stale — see
+   * {@link PageVideoSource.addressBarIdentityRefuted}.
+   *
+   * This is keyed by the full page URL, not only its pathname: after leaving a
+   * festival and opening the same route from another share link, the new
+   * `?bvid=&cid=` is the only correct identity until its first snapshot resolves.
+   * Observing any different page also clears the old visit, which covers leaving
+   * and returning through the same link.
    */
-  let snapshotResolvedPathname: string | null = null;
+  let snapshotResolvedPageUrl: string | null = null;
 
-  function rememberSnapshotResolved(pathname: string, pageUrl: string): void {
-    if (isAddressBarOpaqueVideoUrl(pageUrl)) {
-      snapshotResolvedPathname = normalizeCachedPagePathname(pathname);
+  function observePageVisit(pageUrl: string): void {
+    const pageVisitUrl = normalizePageVisitUrl(pageUrl);
+    if (
+      snapshotResolvedPageUrl !== null &&
+      snapshotResolvedPageUrl !== pageVisitUrl
+    ) {
+      snapshotResolvedPageUrl = null;
     }
   }
 
-  function hasRefutedAddressBarIdentity(
-    pathname: string,
-    pageUrl: string,
-  ): boolean {
+  function rememberSnapshotResolved(pageUrl: string): void {
+    observePageVisit(pageUrl);
+    if (isAddressBarOpaqueVideoUrl(pageUrl)) {
+      snapshotResolvedPageUrl = normalizePageVisitUrl(pageUrl);
+    }
+  }
+
+  function hasRefutedAddressBarIdentity(pageUrl: string): boolean {
+    observePageVisit(pageUrl);
     return (
       isAddressBarOpaqueVideoUrl(pageUrl) &&
-      snapshotResolvedPathname === normalizeCachedPagePathname(pathname)
+      snapshotResolvedPageUrl === normalizePageVisitUrl(pageUrl)
     );
   }
 
@@ -223,6 +246,7 @@ export function createShareController(args: {
       festivalSnapshot &&
       canUseMatchingCachedPageSnapshot({
         pathname,
+        pageUrl,
         snapshot: festivalSnapshot,
         currentPart,
       })
@@ -233,7 +257,7 @@ export function createShareController(args: {
           }
         : null;
     if (matchingFestivalSnapshot) {
-      rememberSnapshotResolved(pathname, pageUrl);
+      rememberSnapshotResolved(pageUrl);
     }
     return resolvePageSharedVideo({
       pageUrl,
@@ -243,10 +267,7 @@ export function createShareController(args: {
       currentPartTitle: currentPart.title,
       pageSnapshot: matchingFestivalSnapshot,
       festivalSnapshot: matchingFestivalSnapshot,
-      addressBarIdentityRefuted: hasRefutedAddressBarIdentity(
-        pathname,
-        pageUrl,
-      ),
+      addressBarIdentityRefuted: hasRefutedAddressBarIdentity(pageUrl),
     });
   }
 
@@ -255,18 +276,29 @@ export function createShareController(args: {
   ): Promise<SharedVideo | null> {
     const pathname = window.location.pathname;
     const pageUrl = window.location.href.split("#")[0];
+    observePageVisit(pageUrl);
     const nextSnapshot = await args.refreshFestivalBridge({
       pathname,
       pageUrl,
       maxAgeMs,
     });
+    const currentPageUrl = window.location.href.split("#")[0];
+    if (
+      normalizePageVisitUrl(currentPageUrl) !== normalizePageVisitUrl(pageUrl)
+    ) {
+      observePageVisit(currentPageUrl);
+      args.debugLog(
+        `Discarded page video snapshot for stale visit ${pageUrl}; current page is ${currentPageUrl}`,
+      );
+      return null;
+    }
     if (!nextSnapshot) {
       return null;
     }
     // Recorded here as well as in `getSharedVideo`: a refresh is the
     // authoritative resolution, and it can happen while no caller is reading the
     // cached snapshot — the address bar is stale from this moment on either way.
-    rememberSnapshotResolved(pathname, pageUrl);
+    rememberSnapshotResolved(pageUrl);
     args.debugLog(
       `Page video snapshot detected id=${nextSnapshot.videoId} title=${nextSnapshot.title} url=${nextSnapshot.url}`,
     );
@@ -325,6 +357,7 @@ export function createShareController(args: {
 
   return {
     getSharedVideo,
+    observePageVisit,
     getCurrentPlaybackVideo,
     getCurrentSharePayload,
     resolveCurrentSharePayload,

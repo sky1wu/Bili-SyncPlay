@@ -47,6 +47,11 @@ function createControllerHarness() {
   let currentPlaybackVideo: SharedVideo | null = null;
   let sharedVideo: SharedVideo | null = null;
   let videoElement: HTMLVideoElement | null = null;
+  let nextSequence = 1;
+  let currentPlaybackVideoOverride: (() => Promise<SharedVideo | null>) | null =
+    null;
+  let sendPlaybackUpdateOverride:
+    ((payload: PlaybackState) => Promise<{ ok: boolean } | null>) | null = null;
 
   const controller = createSyncController({
     runtimeState,
@@ -64,7 +69,7 @@ function createControllerHarness() {
     bufferPauseUpgradeMs: 1_500,
     remotePauseDebounceMs: 0,
     duplicateBroadcastWindowMs: 1_000,
-    nextSeq: () => 1,
+    nextSeq: () => nextSequence++,
     markBroadcastAt: () => {},
     getMonotonicNow: () => now,
     debugLog: (message) => {
@@ -73,11 +78,17 @@ function createControllerHarness() {
     shouldLogHeartbeat: () => true,
     sendPlaybackUpdate: async (payload) => {
       runtimeMessages.push({ type: "content:playback-update", payload });
+      if (sendPlaybackUpdateOverride) {
+        return await sendPlaybackUpdateOverride(payload);
+      }
       return null;
     },
     requestRoomStateHydration: async () => null,
     getVideoElement: () => videoElement,
-    getCurrentPlaybackVideo: async () => currentPlaybackVideo,
+    getCurrentPlaybackVideo: async () =>
+      currentPlaybackVideoOverride
+        ? await currentPlaybackVideoOverride()
+        : currentPlaybackVideo,
     getSharedVideo: () => sharedVideo,
     normalizeUrl: (url) => url?.trim() ?? null,
     notifyRoomStateToasts: () => {},
@@ -94,6 +105,17 @@ function createControllerHarness() {
     },
     setCurrentPlaybackVideo(video: SharedVideo | null) {
       currentPlaybackVideo = video;
+    },
+    setCurrentPlaybackVideoOverride(
+      override: (() => Promise<SharedVideo | null>) | null,
+    ) {
+      currentPlaybackVideoOverride = override;
+    },
+    setSendPlaybackUpdateOverride(
+      override:
+        ((payload: PlaybackState) => Promise<{ ok: boolean } | null>) | null,
+    ) {
+      sendPlaybackUpdateOverride = override;
     },
     setSharedVideo(video: SharedVideo | null) {
       sharedVideo = video;
@@ -176,6 +198,166 @@ test("sync controller skips playback broadcast before hydration becomes ready", 
     harness.debugLogs.includes("Skip broadcast before hydration ready"),
     true,
   );
+});
+
+test("sync controller drops a broadcast whose video resolution outlives its playback context", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({ paused: false, currentTime: 12 });
+  let resolveCurrentVideo!: (video: SharedVideo | null) => void;
+  const pendingCurrentVideo = new Promise<SharedVideo | null>((resolve) => {
+    resolveCurrentVideo = resolve;
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.setSharedVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setCurrentPlaybackVideoOverride(() => pendingCurrentVideo);
+
+  const pendingBroadcast = harness.controller.broadcastPlayback(video, "play");
+  harness.controller.resetPlaybackSyncState("shared url changed");
+  resolveCurrentVideo(sharedVideo);
+  await pendingBroadcast;
+
+  assert.equal(harness.runtimeMessages.length, 0);
+  assert.equal(
+    harness.debugLogs.includes(
+      "Dropped stale playback broadcast after resolving the current video",
+    ),
+    true,
+  );
+});
+
+test("sync controller broadcasts an authoritative bangumi episode over a season fallback", async () => {
+  const harness = createControllerHarness();
+  const seasonFallback = {
+    videoId: "ss357",
+    url: "https://www.bilibili.com/bangumi/play/ss357",
+    title: "Season",
+  };
+  const resolvedEpisode = {
+    videoId: "ep508404",
+    url: "https://www.bilibili.com/bangumi/play/ep508404",
+    title: "Episode 46",
+  };
+  const video = createVideo({ paused: false, currentTime: 12 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.setSharedVideo(seasonFallback);
+  harness.setCurrentPlaybackVideo(resolvedEpisode);
+  harness.setVideoElement(video);
+
+  await harness.controller.broadcastPlayback(video, "play");
+
+  assert.equal(harness.runtimeMessages.length, 1);
+  assert.equal(
+    (harness.runtimeMessages[0] as { payload: PlaybackState }).payload.url,
+    resolvedEpisode.url,
+  );
+});
+
+test("sync controller keeps a newer local version when acknowledgements arrive out of order", async () => {
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({ paused: false, currentTime: 12 });
+  const acknowledgements = new Map<
+    number,
+    (response: { ok: boolean }) => void
+  >();
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setSendPlaybackUpdateOverride(
+    (payload) =>
+      new Promise((resolve) => {
+        acknowledgements.set(payload.seq, resolve);
+      }),
+  );
+
+  const firstBroadcast = harness.controller.broadcastPlayback(video, "play");
+  await Promise.resolve();
+  video.currentTime = 13;
+  const secondBroadcast = harness.controller.broadcastPlayback(video, "play");
+  await Promise.resolve();
+
+  assert.equal(acknowledgements.has(1), true);
+  assert.equal(acknowledgements.has(2), true);
+  acknowledgements.get(2)?.({ ok: true });
+  await secondBroadcast;
+  assert.equal(harness.runtimeState.lastLocalPlaybackVersion?.seq, 2);
+
+  acknowledgements.get(1)?.({ ok: true });
+  await firstBroadcast;
+  assert.equal(harness.runtimeState.lastLocalPlaybackVersion?.seq, 2);
+  assert.equal(
+    harness.debugLogs.includes(
+      "Ignored stale playback update acknowledgement seq=1",
+    ),
+    true,
+  );
+});
+
+test("sync controller invalidates a queued remote-stop pause on playback reset", async () => {
+  const windowHarness = installWindowStub();
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  let pauseCalls = 0;
+  const video = createVideo({
+    paused: false,
+    currentTime: 12,
+    pause() {
+      pauseCalls += 1;
+    },
+  });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  harness.runtimeState.intendedPlayState = "paused";
+  harness.runtimeState.pauseHoldUntil = 11_000;
+  harness.runtimeState.pauseStartedAt = 9_900;
+  harness.runtimeState.pauseClassifiedAsBuffer = true;
+  harness.setNow(10_000);
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  try {
+    await harness.controller.broadcastPlayback(video, "play");
+    assert.equal(windowHarness.scheduled.length, 1);
+
+    const previousGeneration = harness.runtimeState.playbackContextGeneration;
+    harness.controller.resetPlaybackSyncState("shared url changed");
+    windowHarness.scheduled[0]?.();
+
+    assert.equal(
+      harness.runtimeState.playbackContextGeneration,
+      previousGeneration + 1,
+    );
+    assert.equal(harness.runtimeState.pauseStartedAt, 0);
+    assert.equal(harness.runtimeState.pauseClassifiedAsBuffer, false);
+    assert.equal(pauseCalls, 0);
+  } finally {
+    windowHarness.restore();
+  }
 });
 
 test("sync controller accepts empty room hydration and clears active shared url", async () => {

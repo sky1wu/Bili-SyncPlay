@@ -101,6 +101,8 @@ export interface ContentRuntimeState {
   hydrationReady: boolean;
   hasReceivedInitialRoomState: boolean;
   pendingRoomStateHydration: boolean;
+  /** Invalidates delayed work that captured an older room/page playback context. */
+  playbackContextGeneration: number;
   intendedPlayState: PlaybackState["playState"];
   intendedPlaybackRate: number;
   lastLocalIntentAt: number;
@@ -326,6 +328,7 @@ export interface ContentRuntimeState {
  * into treating browser-initiated playback as a user action.
  */
 export function resetUserGestureState(state: ContentRuntimeState): void {
+  invalidatePlaybackContext(state);
   state.lastUserGestureAt = GESTURE_NEVER_AT;
   state.lastUserGestureInPlayerAt = GESTURE_NEVER_AT;
   state.lastRateControlGestureAt = GESTURE_NEVER_AT;
@@ -337,6 +340,13 @@ export function resetUserGestureState(state: ContentRuntimeState): void {
   state.suppressedLocalEndPauseUrl = null;
   state.suppressedLocalEndPauseUntil = 0;
   state.nonSharerAutoplayHoldUrl = null;
+  state.lastBufferSignalAt = 0;
+  state.pauseStartedAt = 0;
+  state.pauseClassifiedAsBuffer = false;
+}
+
+export function invalidatePlaybackContext(state: ContentRuntimeState): void {
+  state.playbackContextGeneration += 1;
 }
 
 export function createContentRuntimeState(): ContentRuntimeState {
@@ -351,6 +361,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     hydrationReady: false,
     hasReceivedInitialRoomState: false,
     pendingRoomStateHydration: true,
+    playbackContextGeneration: 0,
     intendedPlayState: "paused",
     intendedPlaybackRate: 1,
     lastLocalIntentAt: 0,

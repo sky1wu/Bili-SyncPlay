@@ -116,6 +116,25 @@ export function createPlaybackBindingController(args: {
       sharerEndedFlushTimerId = null;
     }
   };
+  const queuePauseIfCurrent = (
+    video: HTMLVideoElement,
+    shouldStillPause: () => boolean,
+  ): void => {
+    const playbackContextGeneration =
+      args.runtimeState.playbackContextGeneration;
+    window.setTimeout(() => {
+      if (
+        playbackContextGeneration !==
+          args.runtimeState.playbackContextGeneration ||
+        getVideoElement() !== video ||
+        video.paused ||
+        !shouldStillPause()
+      ) {
+        return;
+      }
+      pauseVideo(video);
+    }, 0);
+  };
   const clearActivePauseClassification = () => {
     args.runtimeState.pauseStartedAt = 0;
     args.runtimeState.pauseClassifiedAsBuffer = false;
@@ -128,9 +147,23 @@ export function createPlaybackBindingController(args: {
    */
   const armBufferPauseUpgrade = (video: HTMLVideoElement) => {
     clearBufferUpgradeTimer();
+    const playbackContextGeneration =
+      args.runtimeState.playbackContextGeneration;
+    const classifiedPauseStartedAt = args.runtimeState.pauseStartedAt;
     pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
       pauseBufferUpgradeTimerId = null;
-      if (!video.paused) {
+      if (
+        playbackContextGeneration !==
+        args.runtimeState.playbackContextGeneration
+      ) {
+        return;
+      }
+      if (
+        getVideoElement() !== video ||
+        !video.paused ||
+        !args.runtimeState.pauseClassifiedAsBuffer ||
+        args.runtimeState.pauseStartedAt !== classifiedPauseStartedAt
+      ) {
         return;
       }
       args.runtimeState.pauseClassifiedAsBuffer = false;
@@ -759,6 +792,8 @@ export function createPlaybackBindingController(args: {
     args.debugLog(
       "Forced pause for non-shared video autoplay (in room, load paused)",
     );
+    const playbackContextGeneration =
+      args.runtimeState.playbackContextGeneration;
     window.setTimeout(() => {
       // Re-check the premise before acting on it. This hold is decided on the
       // `play` event, but the navigation controller — the only layer that can
@@ -773,6 +808,22 @@ export function createPlaybackBindingController(args: {
       ) {
         args.debugLog(
           `Dropped load-pause hold for ${normalizedCurrentUrl}; it was authorized before the pause landed`,
+        );
+        return;
+      }
+      // The navigation reset clears this marker before the queued callback can
+      // run. A reused <video> element may already be showing the room's shared
+      // video by then, so the captured element and URL are not enough to prove
+      // this callback still owns a pause. Only the hold that armed this exact
+      // callback may let it act; a cleared or replaced marker makes it stale.
+      if (
+        playbackContextGeneration !==
+          args.runtimeState.playbackContextGeneration ||
+        getVideoElement() !== video ||
+        args.runtimeState.nonSharerAutoplayHoldUrl !== normalizedCurrentUrl
+      ) {
+        args.debugLog(
+          `Dropped stale load-pause for ${normalizedCurrentUrl}; its hold no longer owns the current page`,
         );
         return;
       }
@@ -804,11 +855,20 @@ export function createPlaybackBindingController(args: {
     );
     args.runtimeState.intendedPlayState = "paused";
     args.runtimeState.lastForcedPauseAt = monotonicNow();
-    window.setTimeout(() => {
-      if (!video.paused) {
-        pauseVideo(video);
-      }
-    }, 0);
+    const roomCode = args.runtimeState.activeRoomCode;
+    queuePauseIfCurrent(video, () => {
+      const latestCurrentVideo = args.getSharedVideo();
+      return (
+        args.runtimeState.activeRoomCode === roomCode &&
+        !isKnownNonSharedVideo(latestCurrentVideo) &&
+        shouldForcePauseWhileWaitingForInitialRoomState({
+          activeRoomCode: args.runtimeState.activeRoomCode,
+          pendingRoomStateHydration:
+            args.runtimeState.pendingRoomStateHydration,
+          videoPaused: video.paused,
+        })
+      );
+    });
     return true;
   }
 
@@ -942,9 +1002,18 @@ export function createPlaybackBindingController(args: {
         args.runtimeState.explicitSeekOriginPlayState = null;
         args.runtimeState.lastExplicitPlaybackAction = null;
         args.runtimeState.lastForcedPauseAt = monotonicNow();
-        window.setTimeout(() => {
-          pauseVideo(video);
-        }, 0);
+        const blockedUrl = args.normalizeUrl(currentVideo?.url);
+        const gestureAtWhenBlocked = args.runtimeState.lastUserGestureAt;
+        queuePauseIfCurrent(video, () => {
+          const latestCurrentVideo = args.getSharedVideo();
+          return (
+            blockedUrl !== null &&
+            args.runtimeState.intendedPlayState !== "playing" &&
+            args.runtimeState.lastUserGestureAt === gestureAtWhenBlocked &&
+            isCurrentVideoShared(latestCurrentVideo) &&
+            args.normalizeUrl(latestCurrentVideo?.url) === blockedUrl
+          );
+        });
         return true;
       }
 
@@ -958,9 +1027,9 @@ export function createPlaybackBindingController(args: {
           `Re-paused non-sharer multi-part autoplay after shared video natural end`,
         );
         args.runtimeState.lastForcedPauseAt = monotonicNow();
-        window.setTimeout(() => {
-          pauseVideo(video);
-        }, 0);
+        queuePauseIfCurrent(video, () =>
+          shouldReapplyHoldAfterSharedVideoEnd(video, args.getSharedVideo()),
+        );
         return true;
       }
 
@@ -976,9 +1045,19 @@ export function createPlaybackBindingController(args: {
           `Forced pause hold reapplied after unexpected resume intended=${args.runtimeState.intendedPlayState}`,
         );
         args.runtimeState.lastForcedPauseAt = monotonicNow();
-        window.setTimeout(() => {
-          pauseVideo(video);
-        }, 0);
+        const remoteStopUrl = args.normalizeUrl(currentVideo.url);
+        const gestureAtWhenBlocked = args.runtimeState.lastUserGestureAt;
+        queuePauseIfCurrent(video, () => {
+          const latestCurrentVideo = args.getSharedVideo();
+          return (
+            remoteStopUrl !== null &&
+            args.runtimeState.intendedPlayState !== "playing" &&
+            args.runtimeState.lastUserGestureAt === gestureAtWhenBlocked &&
+            isCurrentVideoShared(latestCurrentVideo) &&
+            args.normalizeUrl(latestCurrentVideo?.url) === remoteStopUrl &&
+            args.hasRecentRemoteStopIntent(latestCurrentVideo?.url ?? "")
+          );
+        });
         return true;
       }
 
@@ -989,9 +1068,11 @@ export function createPlaybackBindingController(args: {
         args.runtimeState.explicitNonSharedPlaybackUrl = null;
         args.runtimeState.lastNonSharedGuardUrl = null;
         args.runtimeState.lastForcedPauseAt = monotonicNow();
-        window.setTimeout(() => {
-          pauseVideo(video);
-        }, 0);
+        queuePauseIfCurrent(video, () =>
+          shouldReapplyPauseHoldForUnconfirmedSharedVideo(
+            args.getSharedVideo(),
+          ),
+        );
         return true;
       }
 

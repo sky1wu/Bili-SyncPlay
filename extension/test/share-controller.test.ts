@@ -621,12 +621,14 @@ test("stops falling back to the frozen festival address bar once a snapshot has 
     title: string;
     updatedAt: number;
     pathname?: string;
+    pageUrl?: string;
   } | null = {
     videoId: "BVplaying:2",
     url: "https://www.bilibili.com/video/BVplaying?cid=2",
     title: "Playing Video",
     updatedAt: 1_000,
     pathname: "/festival/MyMuji",
+    pageUrl: "https://www.bilibili.com/festival/MyMuji?bvid=BVfrozen",
   };
 
   const controller = createShareController({
@@ -679,6 +681,177 @@ test("still resolves the festival address bar before any snapshot has resolved",
       controller.getSharedVideo()?.url,
       "https://www.bilibili.com/video/BVshared?cid=99",
     );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("uses the festival address bar again after leaving and returning to the page", () => {
+  const festivalUrl =
+    "https://www.bilibili.com/festival/MyMuji?bvid=BVentry&cid=1";
+  const dom = installDomStub({
+    href: festivalUrl,
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+  let snapshot: {
+    videoId: string;
+    url: string;
+    title: string;
+    updatedAt: number;
+    pathname?: string;
+    pageUrl?: string;
+  } | null = {
+    videoId: "BVplaying:2",
+    url: "https://www.bilibili.com/video/BVplaying?cid=2",
+    title: "Playing Video",
+    updatedAt: 1_000,
+    pathname: "/festival/MyMuji",
+    pageUrl: festivalUrl,
+  };
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => snapshot,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVplaying?cid=2",
+    );
+    snapshot = null;
+    assert.equal(controller.getSharedVideo(), null);
+
+    // The navigation controller reports the departure immediately. This must
+    // reset the visit even when no video lookup occurs on the page in between.
+    controller.observePageVisit("https://www.bilibili.com/video/BVaway");
+    Object.assign(window.location, {
+      href: "https://www.bilibili.com/video/BVaway",
+      pathname: "/video/BVaway",
+    });
+
+    // Returning through the exact same share link is a new page visit: before
+    // its first snapshot, the entry bvid/cid is correct and must be usable.
+    Object.assign(window.location, {
+      href: festivalUrl,
+      pathname: "/festival/MyMuji",
+    });
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVentry?cid=1",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("uses a new festival share URL before that page visit resolves a snapshot", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/festival/MyMuji?bvid=BVold&cid=1",
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+  const snapshot: {
+    videoId: string;
+    url: string;
+    title: string;
+    updatedAt: number;
+    pathname?: string;
+    pageUrl?: string;
+  } = {
+    videoId: "BVplaying:2",
+    url: "https://www.bilibili.com/video/BVplaying?cid=2",
+    title: "Playing Video",
+    updatedAt: 1_000,
+    pathname: "/festival/MyMuji",
+    pageUrl: "https://www.bilibili.com/festival/MyMuji?bvid=BVold&cid=1",
+  };
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => snapshot,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVplaying?cid=2",
+    );
+    // Festival autoplay never changes location.href, so a different query on
+    // the same pathname denotes a new share-link visit, not another video in the
+    // old visit. Its entry identity is valid until the new snapshot resolves.
+    Object.assign(window.location, {
+      href: "https://www.bilibili.com/festival/MyMuji?bvid=BVnew&cid=3",
+    });
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVnew?cid=3",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("discards a festival snapshot refresh that resolves after the page visit changes", async () => {
+  const festivalUrl =
+    "https://www.bilibili.com/festival/MyMuji?bvid=BVold&cid=1";
+  const dom = installDomStub({
+    href: festivalUrl,
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+  let resolveBridge!: (value: {
+    videoId: string;
+    url: string;
+    title: string;
+  }) => void;
+  const bridgeResult = new Promise<{
+    videoId: string;
+    url: string;
+    title: string;
+  }>((resolve) => {
+    resolveBridge = resolve;
+  });
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => bridgeResult,
+    debugLog: () => {},
+  });
+
+  try {
+    const pendingRefresh = controller.refreshFestivalSnapshot(0);
+    const awayUrl = "https://www.bilibili.com/video/BVaway";
+    controller.observePageVisit(awayUrl);
+    Object.assign(window.location, {
+      href: awayUrl,
+      pathname: "/video/BVaway",
+    });
+    resolveBridge({
+      videoId: "BVold:1",
+      url: "https://www.bilibili.com/video/BVold?cid=1",
+      title: "Old Visit",
+    });
+
+    assert.equal(await pendingRefresh, null);
   } finally {
     dom.restore();
   }
