@@ -40,9 +40,59 @@ test("room index reconciler swallows a failed pass and logs it", async () => {
       ["room_index_reconcile_failed"],
     );
     assert.equal(logged[0]?.data.error, "scan failed");
+    assert.equal(logged[0]?.data.reason, "room_index_reconcile_failed");
   } finally {
     reconciler.stop();
   }
+});
+
+test("a reconcile pass hung on Redis is reported and not piled on", async () => {
+  const logged: Array<{ event: string; data: Record<string, unknown> }> = [];
+  let started = 0;
+  const reconciler = createRoomIndexReconciler({
+    intervalMs: 60_000,
+    // Same stall as the reaper's (#261): the SCAN went out, nothing comes back.
+    // Unbounded, this pass would also hold `stop_room_index_reconciler` until
+    // the shutdown step itself timed out and was recorded as failed.
+    reconcileRoomIndex: () => {
+      started += 1;
+      return new Promise(() => undefined);
+    },
+    logEvent: (event, data) => {
+      logged.push({ event, data });
+    },
+    reconcileTimeoutMs: 20,
+  });
+
+  try {
+    assert.equal(await reconciler.runNow(), false);
+    assert.equal(await reconciler.runNow(), false);
+  } finally {
+    await reconciler.stop();
+  }
+
+  assert.equal(started, 1);
+  assert.deepEqual(
+    logged.map((entry) => entry.event),
+    [
+      "room_index_reconcile_failed",
+      "room_index_reconcile_failed",
+      // stop() returns on its budget instead of waiting the stall out — and
+      // `close_room_store` runs immediately after this step, so it has to say
+      // the SCAN is still on the connection. Before the cap that overrun was
+      // visible only because the step itself timed out.
+      "room_index_reconcile_abandoned_at_shutdown",
+    ],
+  );
+  assert.deepEqual(
+    logged
+      .filter((entry) => entry.event === "room_index_reconcile_failed")
+      .map((entry) => entry.data.reason),
+    ["room_index_reconcile_timeout", "room_index_reconcile_stalled"],
+  );
+  assert.equal(logged[2]?.data.pendingPasses, 1);
+  assert.equal(logged[2]?.data.result, "timeout");
+  assert.equal(logged[0]?.data.timeoutMs, 20);
 });
 
 test("room index reconciler fires on its interval and stops on stop()", async () => {

@@ -6,7 +6,8 @@ carries the one-line version of each; this file carries the reasoning, which is
 what you need before changing the code they describe.
 
 Read the relevant section before touching: background playback timing, share
-ownership, the shared runtime store, or room-event broadcasts.
+ownership, the shared runtime store, room-event broadcasts, or a background
+maintenance timer.
 
 中文版见 [invariants.zh-CN.md](./invariants.zh-CN.md)。
 
@@ -312,6 +313,51 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
   one write nothing gates on, because it returns `void` (so `confirmWrites` is
   the only place its outcome is visible) and because failing it leaves the room
   index already clean and merely re-runs a no-op next sweep.
+
+## A background pass that cannot time out cannot be observed
+
+`room-reaper` and `room-index-reconciler` both run one async pass against Redis
+per tick. Neither had a timeout anywhere on that path, and neither did the room
+store's client — `lazyConnect` and `maxRetriesPerRequest: 1` bound retries, not
+how long a command that Redis already accepted may take to answer. A half-open
+connection therefore left a pass pending forever, and the reaper stopped
+collecting expired rooms with **no** signal at all: both series of
+`bili_syncplay_room_reaper_sweeps_total` went flat, so an alert on the failure
+rate never fired, and only a manual restart recovered (#261). All three rules
+below live in `maintenance-pass.ts` — one driver, because the same defect
+appeared in both hand-written copies:
+
+- **Every tick records exactly one outcome.** That is what makes "the rate went
+  flat" mean "the timer is gone" and nothing else. A pass that outlives its cap
+  is an `error`, not silence. A cap that only reported the FIRST stalled tick
+  would let the series go quiet again while the stall continued, which is the
+  original bug with extra steps.
+- **The cap does not cancel the call, so a pass never runs on top of another.**
+  Nothing can abort an in-flight Redis command; the cap only stops the caller
+  waiting. Ticking again while the previous command is unanswered piles up one
+  command per interval for as long as the stall lasts, and — because the
+  shutdown step waits on the promise the LAST tick stored — leaves shutdown
+  waiting on the newest pass while older ones are still writing. Same
+  reasoning as `pending-resync-queue` and the runtime index reaper's
+  per-publish cap. The overlap slot is released by the call's own answer, not
+  by the cap: a slot freed one hop late skips the next pass as `still_running`
+  and halves the sweep rate.
+- **`stop` waits for the real call, bounded — and says when the budget was not
+  enough.** The next shutdown step closes the Redis connection, so returning
+  while a command is in the air races `redis.quit()`; but an unbounded wait only
+  moves the overrun into the shutdown step, which is then recorded as failed.
+  `retry-pacer`'s `settleTracked` is that bounded wait, and its budget must stay
+  inside the step's own timeout. Giving up quietly is the same trade in reverse:
+  that race used to be visible precisely BECAUSE the step timed out, so a `stop`
+  that returns cleanly owes an `onSettleTimeout` line naming the calls still
+  outstanding. Bounding a wait and dropping its signal in the same change is how
+  a fix for silence reintroduces it one step down.
+
+The cap belongs to the caller, not to the connection: the room store's client
+still has no `commandTimeout`, so the command itself stays out on the socket.
+Adding one there would bound the request path (`get_room` / `update_room`) too,
+which is a separate decision with its own retry semantics to weigh — deliberately
+not taken in #261.
 
 ## Test fixtures must not cast past the checker
 

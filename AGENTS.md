@@ -4,7 +4,7 @@
 
 - This file is for AI agents, coding assistants, and repository automations working in this codebase.
 - Human contribution rules live in [CONTRIBUTING.md](./CONTRIBUTING.md) and apply here too — workflow, module boundaries, shared sources of truth, commit conventions, testing focus. This file only adds agent-specific execution constraints and decision rules.
-- Hard-won runtime invariants live in [docs/reference/invariants.md](./docs/reference/invariants.md) ([中文](./docs/reference/invariants.zh-CN.md)). Read the relevant section before touching playback timing, share ownership, the shared runtime store, or room-event broadcasts.
+- Hard-won runtime invariants live in [docs/reference/invariants.md](./docs/reference/invariants.md) ([中文](./docs/reference/invariants.zh-CN.md)). Read the relevant section before touching playback timing, share ownership, the shared runtime store, room-event broadcasts, or a background maintenance timer.
 
 ## Language Rules
 
@@ -117,6 +117,13 @@ before changing the code it describes.
   the caller without cancelling the command. A shutdown step that ran out of its
   budget is DEGRADED, not failed. A join whose index write fails is aborted, not
   seated.
+- **A background pass that cannot time out cannot be observed** (#261): every
+  tick of `maintenance-pass` records exactly one outcome, a cap that does not
+  cancel the call means a pass never runs on top of another, and `stop` waits
+  for the real call but only inside its budget — reporting it when the budget
+  was not enough, since that overrun used to be visible as a failed shutdown
+  step. The cap belongs to the caller — the room store client still has no
+  `commandTimeout`.
 - **One-shot broadcasts need a retry trail** (#242): most `room_state_updated`
   sends are repeated by the next update, but the share-ownership resync and the
   runtime index reaper's announcement are not — losing one loses the room until a
