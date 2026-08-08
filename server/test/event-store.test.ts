@@ -352,6 +352,49 @@ test("in-memory event store hides system events by default and can include them 
   assert.equal(fullView.total, 3);
 });
 
+test("the maintenance timers' own events are hidden alongside their siblings", async () => {
+  const store = createEventStore();
+  // Every `node_heartbeat_*` is plumbing — it says nothing about a room — and
+  // the `*_abandoned_at_shutdown` lines are what a bounded `stop()` now emits
+  // in place of the `server_shutdown_step_failed` these used to cause (#261,
+  // #263). Leaving them visible puts shutdown-degraded noise in the operator's
+  // default event feed exactly when Redis is stalled and it is longest.
+  const hidden = [
+    "node_heartbeat_abandoned_at_shutdown",
+    "node_heartbeat_skipped",
+    "room_index_reconcile_abandoned_at_shutdown",
+    "room_reaper_sweep_abandoned_at_shutdown",
+  ];
+  for (const [index, event] of hidden.entries()) {
+    await store.append({
+      event,
+      timestamp: new Date(
+        Date.parse("2026-03-26T12:00:00.000Z") + index,
+      ).toISOString(),
+      data: { result: "timeout" },
+    });
+  }
+  // The room-lifecycle side of the rule: a failed sweep is still something an
+  // operator should see without asking for system events.
+  await store.append({
+    event: "room_persist_failed",
+    timestamp: "2026-03-26T12:00:10.000Z",
+    data: { reason: "room_reaper_sweep_timeout", result: "error" },
+  });
+
+  const defaultView = await store.query({ page: 1, pageSize: 10 });
+  assert.deepEqual(
+    defaultView.items.map((item) => item.event),
+    ["room_persist_failed"],
+  );
+  const fullView = await store.query({
+    includeSystem: true,
+    page: 1,
+    pageSize: 10,
+  });
+  assert.equal(fullView.total, hidden.length + 1);
+});
+
 test("countsByEventInWindow only indexes allowlisted events while totals count everything", async () => {
   const store = createEventStore();
   const base = Date.parse("2026-03-26T12:00:00.000Z");

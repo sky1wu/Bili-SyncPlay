@@ -375,6 +375,35 @@ this series at all, so its absence there is expected rather than a stall.
   pass that collected something. Under steady traffic the lazy read path empties
   the backlog before each sweep, so a healthy reaper can stay silent for hours.
 
+### Why is a node missing or shown as expired?
+
+A node that stops beating drops out of the cluster index: the global admin shows
+it stale and then offline, and another node's runtime index reaper eventually
+reaps its sessions — while it may still be serving WebSocket clients. Read the
+node's OWN logs before believing the view from outside, because the two answer
+different questions: "others cannot see it" and "it knows why".
+
+- `node_heartbeat_sent` — beating. Absent for longer than
+  `NODE_HEARTBEAT_INTERVAL_MS` with nothing below, and the process itself is
+  gone.
+- `node_heartbeat_failed`, `reason=node_heartbeat_write_failed` — Redis
+  answered, with an error. Message on the same line.
+- `node_heartbeat_failed`, `reason=node_heartbeat_write_timeout` — Redis did not
+  answer within the beat's cap (half an interval, never more than a third of
+  `NODE_HEARTBEAT_TTL_MS`). A stalled connection or a blocked Redis. The cap is
+  deliberately well under the TTL, so this line lands **before** other nodes can
+  call this one stale — if you are looking at an expired node and its logs show
+  these, the stall started roughly one TTL before the expiry (#263).
+- `node_heartbeat_failed`, `reason=node_heartbeat_write_stalled` — the tick
+  found the previous beat's EXEC still unanswered past its cap and did not issue
+  another. Always follows a timeout; on its own it means the stall is ongoing.
+- `node_heartbeat_abandoned_at_shutdown` — the node was shutting down with a
+  beat still unanswered, so it stopped waiting. Expected on a node whose Redis
+  was already stalled; on its own it explains nothing else.
+
+As with the reaper, the cap only bounds how long the heartbeat waits, not the
+command: the runtime store's client sets no `commandTimeout` either.
+
 When troubleshooting, check these together first:
 
 ```bash

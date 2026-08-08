@@ -4,21 +4,25 @@ import { clampTimerIntervalMs } from "./timers.js";
 /**
  * A background maintenance job on a timer, bounded in every direction.
  *
- * `room-reaper` and `room-index-reconciler` are the same shape: an interval
- * fires, one async pass runs against Redis, its outcome is logged, and a
- * shutdown step waits the pass out before the room store is closed. Both grew
- * that shape by hand, and both had the same hole — nothing on the path had a
- * timeout, so a stalled connection (TCP half-open, a blocked Redis) left the
- * pass pending forever. `maxRetriesPerRequest` does not help: it bounds
- * retries, not how long a command that was already accepted may take to answer.
+ * `room-reaper`, `room-index-reconciler` and `node-heartbeat` are the same
+ * shape: an interval fires, one async pass runs against Redis, its outcome is
+ * logged, and a shutdown step waits the pass out before that Redis connection
+ * is closed. All three grew that shape by hand, and all three had the same hole
+ * — nothing on the path had a timeout, so a stalled connection (TCP half-open,
+ * a blocked Redis) left the pass pending forever. `maxRetriesPerRequest` does
+ * not help: it bounds retries, not how long a command that was already accepted
+ * may take to answer.
  *
  * What that cost (#261): the reaper stopped collecting expired rooms and said
  * nothing — the `ok` and `error` series of
  * `bili_syncplay_room_reaper_sweeps_total` both went flat, so an alert on the
  * failure rate never fired, and recovery meant restarting the process by hand.
+ * And (#263): the heartbeat stopped beating just as quietly, while other nodes
+ * aged this one out of the cluster index and reaped the sessions of a process
+ * that was still serving clients.
  *
- * The three rules that fix it, in one place rather than two hand-written
- * copies (#242's lesson):
+ * The rules that fix it, in one place rather than three hand-written copies
+ * (#242's lesson):
  *
  * - **Every pass answers.** A pass that outlives {@link timeoutMs} is reported
  *   as `timed_out` — the call is NOT cancelled, because nothing can cancel an
@@ -67,6 +71,11 @@ export type MaintenancePassFailure = {
 
 export type MaintenancePass<T> = {
   /**
+   * Arm the timer. Idempotent, and only needed with `autoStart: false` — a
+   * caller that owns its own enable flag arms it after deciding.
+   */
+  start: () => void;
+  /**
    * Stop the timer and wait, bounded, for the call in flight.
    *
    * Resolves either once that call settles or once the settle budget runs out,
@@ -102,6 +111,17 @@ export function createMaintenancePass<Value, Reported>(options: {
   /** Caps ONE pass. Does not cancel it — nothing can. */
   timeoutMs: number;
   settleTimeoutMs?: number;
+  /** Leave the timer disarmed until `start()`. Defaults to arming on creation. */
+  autoStart?: boolean;
+  /**
+   * `unref` the timer, for a job the process need not stay alive for.
+   *
+   * Off by default: the reaper and the reconciler are the only thing keeping
+   * their own work scheduled, so an idle event loop draining past them would
+   * lose it silently. The heartbeat opts in — it only reports state, and a
+   * process with nothing else to do must still be able to exit.
+   */
+  unrefTimer?: boolean;
   run: () => Promise<Value>;
   /** Called only for a pass that answered inside its cap. */
   onSuccess: (value: Value) => Reported;
@@ -196,16 +216,34 @@ export function createMaintenancePass<Value, Reported>(options: {
     return options.onSuccess(value);
   }
 
-  const intervalId = setInterval(() => {
-    // The handlers own their own error reporting; swallowing here only stops a
-    // throwing one from surfacing as an unhandled rejection out of a timer,
-    // which would take the process down over a log line.
-    void runNow().catch(() => undefined);
-  }, clampTimerIntervalMs(options.intervalMs));
+  let intervalId: ReturnType<typeof setInterval> | null = null;
+
+  function start(): void {
+    if (intervalId !== null) {
+      return;
+    }
+    intervalId = setInterval(() => {
+      // The handlers own their own error reporting; swallowing here only stops
+      // a throwing one from surfacing as an unhandled rejection out of a timer,
+      // which would take the process down over a log line.
+      void runNow().catch(() => undefined);
+    }, clampTimerIntervalMs(options.intervalMs));
+    if (options.unrefTimer) {
+      intervalId.unref?.();
+    }
+  }
+
+  if (options.autoStart !== false) {
+    start();
+  }
 
   return {
+    start,
     async stop() {
-      clearInterval(intervalId);
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
       // Waits on the underlying calls, not on `runNow`: a pass that already hit
       // its cap has answered its caller while its Redis command is still in the
       // air, and that command is exactly what the next shutdown step —

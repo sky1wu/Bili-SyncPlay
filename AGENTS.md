@@ -117,13 +117,14 @@ before changing the code it describes.
   the caller without cancelling the command. A shutdown step that ran out of its
   budget is DEGRADED, not failed. A join whose index write fails is aborted, not
   seated.
-- **A background pass that cannot time out cannot be observed** (#261): every
-  tick of `maintenance-pass` records exactly one outcome, a cap that does not
-  cancel the call means a pass never runs on top of another, and `stop` waits
-  for the real call but only inside its budget — reporting it when the budget
-  was not enough, since that overrun used to be visible as a failed shutdown
-  step. The cap belongs to the caller — the room store client still has no
-  `commandTimeout`.
+- **A background pass that cannot time out cannot be observed** (#261, #263):
+  every tick of `maintenance-pass` records exactly one outcome, a cap that does
+  not cancel the call means a pass never runs on top of another, and `stop`
+  waits for the real call but only inside its budget — reporting it when the
+  budget was not enough, since that overrun used to be visible as a failed
+  shutdown step. The cap is derived from what a late pass costs (the heartbeat's
+  from `NODE_HEARTBEAT_TTL_MS`), and belongs to the caller — neither Redis
+  client has a `commandTimeout`.
 - **One-shot broadcasts need a retry trail** (#242): most `room_state_updated`
   sends are repeated by the next update, but the share-ownership resync and the
   runtime index reaper's announcement are not — losing one loses the room until a

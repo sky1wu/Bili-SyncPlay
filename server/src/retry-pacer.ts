@@ -27,6 +27,8 @@
  * and who decides to retry. Those differ per facility and belong to it.
  */
 
+import { clampTimerIntervalMs } from "./timers.js";
+
 export type RetryPacerOptions = {
   initialDelayMs: number;
   maxDelayMs: number;
@@ -94,7 +96,16 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
           () => {
             onTimeout(resolve, reject);
           },
-          Math.max(timeoutMs, 1),
+          // Clamped at BOTH ends, and the upper one is the surprising half: a
+          // delay past the 32-bit limit does not mean "very late", it makes
+          // Node fire after ~1ms. Every cap here is derived from a caller's
+          // configuration — `heartbeatTimeoutMs` from `NODE_HEARTBEAT_TTL_MS`,
+          // for one — and those settings only have to be positive integers, so
+          // one absurd value would turn every capped call into an instant
+          // timeout instead of a slow one (#265 review). Same limit
+          // `clampTimerIntervalMs` exists for; this is the other place a delay
+          // reaches `setTimeout`.
+          clampTimerIntervalMs(Math.max(timeoutMs, 1)),
         );
       }),
     ]).finally(() => {

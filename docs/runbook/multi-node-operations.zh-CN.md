@@ -374,6 +374,31 @@ sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<窗口>])) by (
   东西时才记。持续访问下惰性读取路径会在每轮扫描前把积压删光，健康的 reaper
   也可以长期不记。
 
+### 某个节点不见了或显示已过期？
+
+停止心跳的节点会从集群索引里掉出去：Global Admin 先显示 stale 再显示 offline，
+另一个节点的 runtime index reaper 最终会回收它的 session——而它可能仍在服务
+WebSocket 客户端。先读**该节点自己的日志**再去信外部视图，因为两者回答的是不同的
+问题："别人看不见它"与"它知道为什么"。
+
+- `node_heartbeat_sent`——在跳。超过 `NODE_HEARTBEAT_INTERVAL_MS` 还没有，且下面
+  几条也没有，那就是进程本身没了。
+- `node_heartbeat_failed`，`reason=node_heartbeat_write_failed`——Redis 回了，回
+  的是错误。错误内容在同一行。
+- `node_heartbeat_failed`，`reason=node_heartbeat_write_timeout`——Redis 在这一拍
+  的上限内没有回应（半个间隔，且不超过 `NODE_HEARTBEAT_TTL_MS` 的三分之一）。连接
+  僵死或 Redis 被阻塞。这个上限有意远小于 TTL，所以这条日志会**先于**其他节点把它
+  判为 stale 落地——如果你正在看一个已过期的节点而它的日志里是这几条，那僵死大约
+  开始于过期时刻的一个 TTL 之前（#263）。
+- `node_heartbeat_failed`，`reason=node_heartbeat_write_stalled`——本次触发发现上
+  一拍的 EXEC 已超过上限仍未回应，于是没有再发一条。它总是跟在一次 timeout 之后；
+  单独看到它，说明僵死还在持续。
+- `node_heartbeat_abandoned_at_shutdown`——节点关闭时还有一拍没回应，于是不再等。
+  在 Redis 本来就僵死的节点上出现属于预期；它本身不额外说明任何问题。
+
+与 reaper 一样，这个上限只约束心跳等多久，并不约束命令本身：runtime store 的客户端
+同样没有设置 `commandTimeout`。
+
 排障时优先同时查看：
 
 ```bash
