@@ -53,7 +53,9 @@ const RATE_LIMITED_MESSAGE_TYPES = [
 // Pre-seeded so a reaper that has never failed still exports an explicit zero:
 // an absent series and a healthy one must not look alike on the panel whose
 // whole job is telling "sweeping fine" from "not sweeping at all".
-const ROOM_REAPER_SWEEP_RESULTS = ["ok", "error"] as const;
+const ROOM_REAPER_SWEEP_RESULTS = ["ok", "error", "skipped"] as const;
+
+export type RoomReaperSweepResult = (typeof ROOM_REAPER_SWEEP_RESULTS)[number];
 
 export type MonitoredMessageType =
   | "video:share"
@@ -130,12 +132,18 @@ export type MetricsCollector = {
    */
   declareRoomReaper: () => void;
   /**
-   * One expiry sweep finished. Incremented on EVERY pass, including the ones
-   * that found nothing — a sweep that collects no rooms is the normal state of
-   * a healthy reaper, so only a counter that moves regardless can tell "idle"
-   * from "stopped".
+   * One tick of the reaper's timer is accounted for. Incremented on EVERY tick,
+   * including the ones that found nothing — a sweep that collects no rooms is
+   * the normal state of a healthy reaper, so only a counter that moves
+   * regardless can tell "idle" from "stopped".
+   *
+   * `skipped` is not a failure: the previous sweep was still inside its own
+   * timeout when this tick came round, which only happens where
+   * `ROOM_CLEANUP_INTERVAL_MS` is shorter than a sweep takes. Filing it under
+   * `error` would raise the failure rate on a reaper that is working, just
+   * behind (#262 review).
    */
-  recordRoomReaperSweep: (result: "ok" | "error") => void;
+  recordRoomReaperSweep: (result: RoomReaperSweepResult) => void;
   render: () => Promise<string>;
 };
 

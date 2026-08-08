@@ -160,3 +160,145 @@ test("room reaper records a failed sweep under its own result", async () => {
   // sit beside.
   assert.equal(declared, 1);
 });
+
+test("a sweep hung on Redis is recorded as an error, not as silence", async () => {
+  const sweeps: string[] = [];
+  const logged: Array<{ event: string; data: Record<string, unknown> }> = [];
+  let started = 0;
+  const reaper = createRoomReaper({
+    intervalMs: 60_000,
+    // A half-open connection: the command was accepted and no answer, no error
+    // and no close ever comes back. `maxRetriesPerRequest` does not bound this
+    // — it bounds retries, not the wait for a command already sent (#261).
+    deleteExpiredRooms: () => {
+      started += 1;
+      return new Promise(() => undefined);
+    },
+    logEvent: (event, data) => {
+      logged.push({ event, data });
+    },
+    metricsCollector: {
+      declareRoomReaper: () => undefined,
+      recordRoomReaperSweep: (result) => {
+        sweeps.push(result);
+      },
+    },
+    now: () => 10,
+    sweepTimeoutMs: 20,
+  });
+
+  try {
+    // Before the cap this never returned: the reaper stopped collecting rooms
+    // while both series of `room_reaper_sweeps_total` stayed flat, so an alert
+    // on the failure rate could not fire and only a restart recovered it.
+    assert.equal(await reaper.runNow(), 0);
+    // And a second pass must not put another command on a connection that has
+    // answered neither.
+    assert.equal(await reaper.runNow(), 0);
+  } finally {
+    await reaper.stop();
+  }
+
+  assert.equal(started, 1);
+  assert.deepEqual(sweeps, ["error", "error"]);
+  assert.deepEqual(
+    logged.map((entry) => entry.event),
+    [
+      "room_persist_failed",
+      "room_persist_failed",
+      // stop() returns on its budget rather than waiting out the stall — and
+      // says the EVAL is still on the connection `close_room_store` is about to
+      // quit. That overrun used to surface as a failed shutdown step.
+      "room_reaper_sweep_abandoned_at_shutdown",
+    ],
+  );
+  assert.equal(logged[2]?.data.pendingSweeps, 1);
+  assert.equal(logged[2]?.data.result, "timeout");
+  // Told apart in the log, since they share the metric's `error` label: a
+  // stalled sweep and one that piled up behind it are different repairs.
+  assert.deepEqual(
+    logged
+      .filter((entry) => entry.event === "room_persist_failed")
+      .map((entry) => entry.data.reason),
+    ["room_reaper_sweep_timeout", "room_reaper_sweep_stalled"],
+  );
+  assert.equal(logged[0]?.data.timeoutMs, 20);
+});
+
+test("a sweep still inside its cap is counted as skipped, not as a failure", async () => {
+  const sweeps: string[] = [];
+  const logged: string[] = [];
+  let started = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const reaper = createRoomReaper({
+    // The configuration this exists for: a cleanup interval shorter than a
+    // sweep takes. `ROOM_CLEANUP_INTERVAL_MS` only has to be a positive
+    // integer, so nothing stops it being set below the 30s cap.
+    intervalMs: 60_000,
+    deleteExpiredRooms: async () => {
+      started += 1;
+      await blocked;
+      return { deletedRooms: 0, orphanedIndexEntries: 0 };
+    },
+    logEvent: (event) => logged.push(event),
+    metricsCollector: {
+      declareRoomReaper: () => undefined,
+      recordRoomReaperSweep: (result) => {
+        sweeps.push(result);
+      },
+    },
+    now: () => 10,
+    sweepTimeoutMs: 60_000,
+  });
+
+  const inFlight = reaper.runNow();
+
+  try {
+    assert.equal(await reaper.runNow(), 0);
+  } finally {
+    release();
+    await inFlight;
+    await reaper.stop();
+  }
+
+  assert.equal(started, 1);
+  // Redis is answering — the reaper is only behind. Filing this under `error`
+  // would put the failure rate at 1 on a healthy Redis and bury the real
+  // stall it is supposed to detect (#262 review).
+  assert.deepEqual(sweeps, ["skipped", "ok"]);
+  // And no log line: at a short interval this would be per-tick chatter, and
+  // under a blocked Redis the structured logger feeds an event store whose
+  // appends are serialized behind the same connection.
+  assert.deepEqual(logged, []);
+});
+
+test("a sweep that threw names its own reason", async () => {
+  const logged: Array<Record<string, unknown>> = [];
+  const reaper = createRoomReaper({
+    intervalMs: 60_000,
+    deleteExpiredRooms: async () => {
+      throw new Error("redis is gone");
+    },
+    logEvent: (_event, data) => {
+      logged.push(data);
+    },
+    now: () => 10,
+  });
+
+  try {
+    assert.equal(await reaper.runNow(), 0);
+  } finally {
+    await reaper.stop();
+  }
+
+  // The reason a Redis error has always carried; a timeout must not be filed
+  // under it, or the runbook cannot tell "Redis answered with an error" from
+  // "Redis never answered".
+  assert.equal(logged[0]?.reason, "room_reaper_failed");
+  assert.equal(logged[0]?.error, "redis is gone");
+  // Nothing came near the cap, so naming it here would be noise.
+  assert.equal("timeoutMs" in (logged[0] ?? {}), false);
+});

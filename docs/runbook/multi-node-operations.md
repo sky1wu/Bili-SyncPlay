@@ -299,8 +299,15 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 ### Is the room reaper still sweeping?
 
 `bili_syncplay_room_reaper_sweeps_total` is the only signal that answers this.
-Each pass records exactly one of `result="ok"` or `result="error"`, so the two
-add up to every pass attempted.
+Every tick records exactly one of `result="ok"`, `result="error"` or
+`result="skipped"` — including a tick whose sweep never came back, which is
+capped and recorded as an error rather than waited on forever (#261) — so the
+three add up to every tick the timer fired.
+
+`skipped` is not a failure and only appears where `ROOM_CLEANUP_INTERVAL_MS` is
+set shorter than a sweep takes: the tick found the previous sweep still running
+inside its 30s cap and did not start a second one. Redis is answering; the
+reaper is behind. Lengthen the interval.
 
 Replace `<window>` with several times your deployed `ROOM_CLEANUP_INTERVAL_MS`
 before running these. The setting only has to be a positive integer, so there is
@@ -312,7 +319,8 @@ between samples and reads as zero.
 # a healthy node sits at 1000/ROOM_CLEANUP_INTERVAL_MS — 1/60 at the 60000 default.
 sum(rate(bili_syncplay_room_reaper_sweeps_total[<window>])) by (instance)
 
-# Share of passes that failed, 0 to 1.
+# Share of ticks that failed, 0 to 1. `skipped` stays in the denominator on
+# purpose: it is a tick that collected nothing, just not a broken one.
 sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<window>])) by (instance)
   / sum(rate(bili_syncplay_room_reaper_sweeps_total[<window>])) by (instance)
 ```
@@ -323,23 +331,36 @@ Read them together:
 | --------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | ≈ `1000/ROOM_CLEANUP_INTERVAL_MS` | 0                            | Healthy. Collecting nothing is normal — see below                                                          |
 | ≈ expected                        | between 0 and 1              | Intermittent failures, most often a flapping Redis. Not a stall; the timer is running and some passes land |
-| ≈ expected                        | 1                            | Every pass is failing. The timer runs, the work does not                                                   |
-| 0                                 | undefined (no passes at all) | No sweep **completed** in the window. See the causes below                                                 |
+| ≈ expected                        | 1                            | Every pass is failing. The timer runs, the work does not. Read `reason` in the logs to see which           |
+| 0                                 | undefined (no passes at all) | No pass recorded an outcome in the window. See the causes below                                            |
 
-A completion rate of 0 is an observation, not a diagnosis. A pass is counted
-only after `deleteExpiredRooms` settles, so the timer can be alive and the rate
-still zero. Separate the causes before acting:
+When every pass fails, the `reason` on the `room_persist_failed` log line says
+which failure it is, and they need different repairs:
+
+- `room_reaper_failed` — Redis answered, with an error. Its message is on the
+  same line.
+- `room_reaper_sweep_timeout` — Redis did not answer within the sweep's 30s cap.
+  A stalled connection, a blocked Redis, or the first sweep after startup still
+  waiting on the one-time index bootstrap walk.
+- `room_reaper_sweep_stalled` — the tick found the previous sweep's command
+  still unanswered **past its cap** and did not issue another. Always follows a
+  timeout; on its own it means the stall is ongoing. A tick that finds the
+  previous sweep still inside its cap is the `skipped` label above instead, and
+  is neither logged nor counted as a failure.
+
+The cap only bounds how long the reaper waits, not the command itself — the room
+store's client still sets no `commandTimeout`, so the command stays out on the
+connection until Redis or the socket ends it.
+
+A rate of 0 is an observation, not a diagnosis. Every tick records an outcome,
+including one that gave up on a hung sweep, so a flat series means no tick
+produced anything at all. Separate the causes before acting:
 
 - **The process restarted less than one interval ago.** Compare against
   `bili_syncplay_process_start_time_seconds`; the first pass only lands one
   `ROOM_CLEANUP_INTERVAL_MS` after startup.
-- **The sweep is hung on Redis.** The room store's client sets no command
-  timeout, so a stalled connection leaves a sweep pending indefinitely and
-  nothing is ever counted — no error either. Check
-  `bili_syncplay_redis_operation_failures_total`, Redis latency, and
-  [Redis Incident Handling](#redis-incident-handling).
-- **The timer is gone.** Only after ruling out the two above: check the process
-  is alive and read its logs.
+- **The timer is gone.** Only after ruling out the above: check the process is
+  alive and read its logs.
 
 Room nodes only. The standalone global admin runs no reaper and does not export
 this series at all, so its absence there is expected rather than a stall.
