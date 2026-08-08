@@ -215,6 +215,112 @@ test("metrics collector renders event counters, histograms, and redis failure co
   );
 });
 
+test("metrics collector counts reclaimed rooms apart from reaper sweeps", async () => {
+  const metrics = createMetricsCollector({
+    runtimeStore: createInMemoryRuntimeStore(() => 0),
+    roomStore: {
+      async countRooms() {
+        return 0;
+      },
+    },
+  });
+
+  // Pre-seeded to 0 so "the reaper has not collected anything yet" is
+  // distinguishable from "metric absent" — the difference between a young
+  // process and a wedged reaper.
+  const initial = await metrics.render();
+  assert.match(initial, /^bili_syncplay_rooms_expired_deleted_total 0$/m);
+  // Absent until a reaper declares itself. The standalone global admin builds
+  // this same collector and never creates one, so an always-on series would
+  // sit at 0 there and make "rate dropped to 0" fire on a healthy process.
+  assert.equal(
+    initial.includes("bili_syncplay_room_reaper_sweeps_total"),
+    false,
+  );
+
+  metrics.declareRoomReaper();
+  const declared = await metrics.render();
+  // Once declared, both outcomes are pre-seeded even before the first sweep, so
+  // "never failed" and "has not swept yet" stay distinguishable from "absent".
+  for (const result of ["ok", "error"]) {
+    assert.match(
+      declared,
+      new RegExp(
+        `^bili_syncplay_room_reaper_sweeps_total\\{result="${result}"\\} 0$`,
+        "m",
+      ),
+    );
+  }
+
+  // HELP is the only description a scraper or an operator reading /metrics
+  // gets, and this counter is fed by the lazy read path as well as by reaper
+  // sweeps. Describing it as reaper-only turns it into a liveness signal it
+  // cannot serve — the reaper can be dead while this still climbs.
+  const help = initial.match(
+    /^# HELP bili_syncplay_rooms_expired_deleted_total (.*)$/m,
+  );
+  assert.notEqual(help, null);
+  assert.match(help![1], /reaper/);
+  assert.match(help![1], /lazy/);
+
+  // Two sweeps, five rooms. The event counter these panels used to read says
+  // 2 for exactly this history, which is why the room count needs its own
+  // series before it can be rated against room_created_total.
+  metrics.recordEvent("room_expired_deleted");
+  metrics.recordRoomsExpiredDeleted(3);
+  metrics.recordEvent("room_expired_deleted");
+  metrics.recordRoomsExpiredDeleted(2);
+
+  const rendered = await metrics.render();
+  assert.match(rendered, /^bili_syncplay_rooms_expired_deleted_total 5$/m);
+
+  // Sweep liveness is a separate series on purpose: both counters above stay
+  // flat on a healthy but idle reaper, and the lazy read path can keep the
+  // reclaimed count climbing after the reaper has died.
+  metrics.declareRoomReaper();
+  metrics.recordRoomReaperSweep("ok");
+  metrics.recordRoomReaperSweep("ok");
+  metrics.recordRoomReaperSweep("error");
+  const swept = await metrics.render();
+  assert.match(
+    swept,
+    /^bili_syncplay_room_reaper_sweeps_total\{result="ok"\} 2$/m,
+  );
+  assert.match(
+    swept,
+    /^bili_syncplay_room_reaper_sweeps_total\{result="error"\} 1$/m,
+  );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_events_total{event="room_expired_deleted"} 2',
+    ),
+    true,
+  );
+});
+
+test("metrics collector refuses room counts that would rewind the counter", async () => {
+  const metrics = createMetricsCollector({
+    runtimeStore: createInMemoryRuntimeStore(() => 0),
+    roomStore: {
+      async countRooms() {
+        return 0;
+      },
+    },
+  });
+
+  metrics.recordRoomsExpiredDeleted(4);
+  for (const bogus of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    metrics.recordRoomsExpiredDeleted(bogus);
+  }
+
+  // A counter that moves backwards or lands on NaN makes every rate() over it
+  // useless, so a nonsense sweep result is dropped rather than added.
+  assert.match(
+    await metrics.render(),
+    /^bili_syncplay_rooms_expired_deleted_total 4$/m,
+  );
+});
+
 test("metrics collector can rebind to the effective runtime store", async () => {
   const localRuntimeStore = createInMemoryRuntimeStore(() => 0);
   const sharedRuntimeStore = createInMemoryRuntimeStore(() => 0);

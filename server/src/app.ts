@@ -173,6 +173,7 @@ export async function createSyncServer(
       ),
     generateToken,
     logEvent,
+    metricsCollector,
     now,
   });
 
@@ -285,6 +286,7 @@ export async function createSyncServer(
     intervalMs: persistenceConfig.roomCleanupIntervalMs,
     deleteExpiredRooms: roomService.deleteExpiredRooms,
     logEvent,
+    metricsCollector,
     now,
   });
   const nodeHeartbeatRuntimeStore = {

@@ -19,10 +19,16 @@ test("room reaper deletes expired rooms through the store interface", async () =
 
   const reaper = createRoomReaper({
     intervalMs: 60_000,
-    // The reaper counts; the store reports which rooms died so the caller can
-    // collect their runtime state. `room-service` adapts the two in production.
-    deleteExpiredRooms: async (currentTime) =>
-      (await store.deleteExpiredRooms(currentTime)).length,
+    // The store reports which rooms died so the caller can collect their
+    // runtime state; the reaper only needs the counts. `room-service` adapts
+    // the two in production.
+    deleteExpiredRooms: async (currentTime) => {
+      const swept = await store.deleteExpiredRooms(currentTime);
+      return {
+        deletedRooms: swept.deletedRoomCodes.length,
+        orphanedIndexEntries: swept.orphanedIndexCodes.length,
+      };
+    },
     logEvent: () => undefined,
     now: () => 10,
   });
@@ -56,7 +62,7 @@ test("room reaper stop() waits for the sweep in flight", async () => {
       // matching note in room-index-reconciler.test.ts.
       await delay(0);
       settled = true;
-      return 0;
+      return { deletedRooms: 0, orphanedIndexEntries: 0 };
     },
     logEvent: () => undefined,
     now: () => 10,
@@ -70,4 +76,87 @@ test("room reaper stop() waits for the sweep in flight", async () => {
   releaseSweep();
   await stopped;
   assert.equal(settled, true);
+});
+
+test("room reaper records every sweep, including the ones that collect nothing", async () => {
+  const sweeps: string[] = [];
+  let declared = 0;
+  const outcomes: Array<{
+    deletedRooms: number;
+    orphanedIndexEntries: number;
+  }> = [
+    { deletedRooms: 2, orphanedIndexEntries: 0 },
+    { deletedRooms: 0, orphanedIndexEntries: 0 },
+    { deletedRooms: 0, orphanedIndexEntries: 1 },
+  ];
+  const logged: string[] = [];
+  const reaper = createRoomReaper({
+    intervalMs: 60_000,
+    deleteExpiredRooms: async () =>
+      outcomes.shift() ?? { deletedRooms: 0, orphanedIndexEntries: 0 },
+    logEvent: (event) => logged.push(event),
+    metricsCollector: {
+      declareRoomReaper: () => {
+        declared += 1;
+      },
+      recordRoomReaperSweep: (result) => {
+        sweeps.push(result);
+      },
+    },
+    now: () => 10,
+  });
+
+  try {
+    await reaper.runNow();
+    await reaper.runNow();
+    await reaper.runNow();
+  } finally {
+    await reaper.stop();
+  }
+
+  // An empty sweep is the normal state of a healthy reaper: with steady traffic
+  // the lazy read path deletes expired rooms before the sweep reaches them. The
+  // deletion event goes quiet, so only a per-pass signal separates "idle" from
+  // "stopped".
+  assert.deepEqual(sweeps, ["ok", "ok", "ok"]);
+  // Declared once, at construction — a process that never builds a reaper must
+  // not export the series at all, or "rate dropped to 0" fires on it forever.
+  assert.equal(declared, 1);
+  assert.deepEqual(logged, ["room_expired_deleted", "room_expired_deleted"]);
+});
+
+test("room reaper records a failed sweep under its own result", async () => {
+  const sweeps: string[] = [];
+  let declared = 0;
+  const reaper = createRoomReaper({
+    intervalMs: 60_000,
+    deleteExpiredRooms: async () => {
+      throw new Error("redis is gone");
+    },
+    logEvent: () => undefined,
+    metricsCollector: {
+      declareRoomReaper: () => {
+        declared += 1;
+      },
+      recordRoomReaperSweep: (result) => {
+        sweeps.push(result);
+      },
+    },
+    now: () => 10,
+  });
+
+  try {
+    assert.equal(await reaper.runNow(), 0);
+  } finally {
+    await reaper.stop();
+  }
+
+  // Failures need their own series: a reaper that runs every minute and throws
+  // every minute is as broken as one that stopped, and `events_total` carries
+  // no `reason` label to filter the failure log by.
+  assert.deepEqual(sweeps, ["error"]);
+  // Declared at construction, so the series exists even for a reaper whose
+  // every sweep fails — otherwise the failure counter would have nothing to
+  // sit beside.
+  assert.equal(declared, 1);
 });

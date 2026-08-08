@@ -281,19 +281,78 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 
 ## Common Alerts and Triage
 
-| Alert or symptom                                                  | Key metrics / signals                                                                  | Check first                                                           | Direction                                                                      |
-| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Abnormal drop in WebSocket connections                            | `bili_syncplay_connections`                                                            | Edge upstreams, room node `/readyz`, process logs                     | Restore the node or remove the unhealthy node from the LB                      |
-| Abnormal drop in active rooms                                     | `bili_syncplay_active_rooms`, `bili_syncplay_rooms_non_expired`                        | Redis connectivity, room expiry settings, restart history             | Restore Redis; confirm `ROOM_STORE_PROVIDER` was not switched to memory        |
-| Redis operation failures                                          | `bili_syncplay_redis_operation_failures_total`                                         | Redis process, network, ACLs, password, slow queries                  | Restore Redis first; downgrade to in-memory only if necessary                  |
-| Elevated Redis runtime store latency                              | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                            | Redis CPU, memory, network RTT, command queueing                      | Scale Redis or reduce edge-layer traffic                                       |
-| Redis room event bus publish latency or failures                  | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`, failure counters | Redis pub/sub connectivity, network jitter, room node logs            | Restore Redis and the network; verify cross-node playback sync                 |
-| Increase in rejected connections                                  | `bili_syncplay_ws_connection_rejected_total`, structured `origin_not_allowed` logs     | `ALLOWED_ORIGINS`, whether the edge rewrites `Origin`                 | Fix the origin allowlist or the reverse-proxy configuration                    |
-| Increase in rate limiting                                         | `bili_syncplay_rate_limited_total`                                                     | Source IPs, real IP forwarding at the edge, `TRUSTED_PROXY_ADDRESSES` | Tune the limits or fix the proxy address configuration                         |
-| Elevated message handling latency                                 | `bili_syncplay_message_handler_duration_seconds_bucket`                                | Node CPU, Redis latency, room member counts, errors in logs           | Rate-limit, scale room nodes, investigate slow Redis                           |
-| Global admin missing a node, or a node shown as expired           | Global admin overview, `node_heartbeat_failed` logs                                    | `NODE_HEARTBEAT_ENABLED`, `INSTANCE_ID`, Redis runtime store          | Fix the heartbeat configuration or the Redis runtime store                     |
-| Admin login failures or frequent re-login prompts                 | `/api/admin/auth/login` responses, audit logs                                          | Whether `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET` are consistent | Align the admin auth settings and restart                                      |
-| Cross-node room actions fail, e.g. kick or close room returns 502 | Audit logs, `ADMIN_COMMAND_BUS_PROVIDER`, target node heartbeat                        | Admin command bus, target `INSTANCE_ID`, Redis                        | Restore the Redis command bus or perform the action locally on the target node |
+| Alert or symptom                                                  | Key metrics / signals                                                                  | Check first                                                                  | Direction                                                                      |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Abnormal drop in WebSocket connections                            | `bili_syncplay_connections`                                                            | Edge upstreams, room node `/readyz`, process logs                            | Restore the node or remove the unhealthy node from the LB                      |
+| Abnormal drop in active rooms                                     | `bili_syncplay_active_rooms`, `bili_syncplay_rooms_non_expired`                        | Redis connectivity, room expiry settings, restart history                    | Restore Redis; confirm `ROOM_STORE_PROVIDER` was not switched to memory        |
+| Expired rooms stop being reclaimed (reaper stalled)               | `bili_syncplay_room_reaper_sweeps_total`                                               | See [Is the room reaper still sweeping?](#is-the-room-reaper-still-sweeping) | Restore Redis; confirm `ROOM_CLEANUP_INTERVAL_MS` was not raised               |
+| Redis operation failures                                          | `bili_syncplay_redis_operation_failures_total`                                         | Redis process, network, ACLs, password, slow queries                         | Restore Redis first; downgrade to in-memory only if necessary                  |
+| Elevated Redis runtime store latency                              | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                            | Redis CPU, memory, network RTT, command queueing                             | Scale Redis or reduce edge-layer traffic                                       |
+| Redis room event bus publish latency or failures                  | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`, failure counters | Redis pub/sub connectivity, network jitter, room node logs                   | Restore Redis and the network; verify cross-node playback sync                 |
+| Increase in rejected connections                                  | `bili_syncplay_ws_connection_rejected_total`, structured `origin_not_allowed` logs     | `ALLOWED_ORIGINS`, whether the edge rewrites `Origin`                        | Fix the origin allowlist or the reverse-proxy configuration                    |
+| Increase in rate limiting                                         | `bili_syncplay_rate_limited_total`                                                     | Source IPs, real IP forwarding at the edge, `TRUSTED_PROXY_ADDRESSES`        | Tune the limits or fix the proxy address configuration                         |
+| Elevated message handling latency                                 | `bili_syncplay_message_handler_duration_seconds_bucket`                                | Node CPU, Redis latency, room member counts, errors in logs                  | Rate-limit, scale room nodes, investigate slow Redis                           |
+| Global admin missing a node, or a node shown as expired           | Global admin overview, `node_heartbeat_failed` logs                                    | `NODE_HEARTBEAT_ENABLED`, `INSTANCE_ID`, Redis runtime store                 | Fix the heartbeat configuration or the Redis runtime store                     |
+| Admin login failures or frequent re-login prompts                 | `/api/admin/auth/login` responses, audit logs                                          | Whether `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET` are consistent        | Align the admin auth settings and restart                                      |
+| Cross-node room actions fail, e.g. kick or close room returns 502 | Audit logs, `ADMIN_COMMAND_BUS_PROVIDER`, target node heartbeat                        | Admin command bus, target `INSTANCE_ID`, Redis                               | Restore the Redis command bus or perform the action locally on the target node |
+
+### Is the room reaper still sweeping?
+
+`bili_syncplay_room_reaper_sweeps_total` is the only signal that answers this.
+Each pass records exactly one of `result="ok"` or `result="error"`, so the two
+add up to every pass attempted.
+
+Replace `<window>` with several times your deployed `ROOM_CLEANUP_INTERVAL_MS`
+before running these. The setting only has to be a positive integer, so there is
+no window that is safe by default: pick one too short and a healthy reaper falls
+between samples and reads as zero.
+
+```promql
+# Passes per second. rate() is per second and the setting is milliseconds, so
+# a healthy node sits at 1000/ROOM_CLEANUP_INTERVAL_MS — 1/60 at the 60000 default.
+sum(rate(bili_syncplay_room_reaper_sweeps_total[<window>])) by (instance)
+
+# Share of passes that failed, 0 to 1.
+sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<window>])) by (instance)
+  / sum(rate(bili_syncplay_room_reaper_sweeps_total[<window>])) by (instance)
+```
+
+Read them together:
+
+| Passes per second                 | Failure share                | Reading                                                                                                    |
+| --------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| ≈ `1000/ROOM_CLEANUP_INTERVAL_MS` | 0                            | Healthy. Collecting nothing is normal — see below                                                          |
+| ≈ expected                        | between 0 and 1              | Intermittent failures, most often a flapping Redis. Not a stall; the timer is running and some passes land |
+| ≈ expected                        | 1                            | Every pass is failing. The timer runs, the work does not                                                   |
+| 0                                 | undefined (no passes at all) | No sweep **completed** in the window. See the causes below                                                 |
+
+A completion rate of 0 is an observation, not a diagnosis. A pass is counted
+only after `deleteExpiredRooms` settles, so the timer can be alive and the rate
+still zero. Separate the causes before acting:
+
+- **The process restarted less than one interval ago.** Compare against
+  `bili_syncplay_process_start_time_seconds`; the first pass only lands one
+  `ROOM_CLEANUP_INTERVAL_MS` after startup.
+- **The sweep is hung on Redis.** The room store's client sets no command
+  timeout, so a stalled connection leaves a sweep pending indefinitely and
+  nothing is ever counted — no error either. Check
+  `bili_syncplay_redis_operation_failures_total`, Redis latency, and
+  [Redis Incident Handling](#redis-incident-handling).
+- **The timer is gone.** Only after ruling out the two above: check the process
+  is alive and read its logs.
+
+Room nodes only. The standalone global admin runs no reaper and does not export
+this series at all, so its absence there is expected rather than a stall.
+
+**Do not** try to answer this question with any of these:
+
+- `bili_syncplay_rooms_non_expired` — a room leaves that gauge the moment
+  `expiresAt` passes, whether or not anything deleted it.
+- `bili_syncplay_rooms_expired_deleted_total` — also fed by the lazy read path,
+  so it keeps climbing with the reaper dead.
+- `bili_syncplay_events_total{event="room_expired_deleted"}` — logged only on a
+  pass that collected something. Under steady traffic the lazy read path empties
+  the backlog before each sweep, so a healthy reaper can stay silent for hours.
 
 When troubleshooting, check these together first:
 

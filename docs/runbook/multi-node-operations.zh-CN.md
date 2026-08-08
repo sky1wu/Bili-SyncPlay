@@ -291,19 +291,72 @@ curl -fsS http://10.0.0.11:8788/readyz
 
 ## 常见告警与定位
 
-| 告警或现象                                     | 主要指标 / 信号                                                                | 优先检查                                               | 处理方向                                            |
-| ---------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------ | --------------------------------------------------- |
-| WebSocket 连接数异常下降                       | `bili_syncplay_connections`                                                    | 入口层 upstream、Room Node `/readyz`、进程日志         | 恢复节点或从 LB 摘除异常节点                        |
-| 活跃房间数异常下降                             | `bili_syncplay_active_rooms`、`bili_syncplay_rooms_non_expired`                | Redis 连通性、房间过期配置、重启记录                   | 恢复 Redis，确认 `ROOM_STORE_PROVIDER` 未被改为内存 |
-| Redis 操作失败                                 | `bili_syncplay_redis_operation_failures_total`                                 | Redis 进程、网络、ACL、密码、慢查询                    | 优先恢复 Redis；必要时执行应急降级                  |
-| Redis runtime store 延迟升高                   | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                    | Redis CPU、内存、网络 RTT、命令排队                    | 扩容 Redis 或降低入口层流量                         |
-| Redis room event bus publish 延迟或失败        | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`、失败计数 | Redis pub/sub 连通性、网络抖动、Room Node 日志         | 恢复 Redis 与网络；验证跨节点播放同步               |
-| 连接被拒绝增加                                 | `bili_syncplay_ws_connection_rejected_total`、结构化日志 `origin_not_allowed`  | `ALLOWED_ORIGINS`、入口层是否改写 Origin               | 修正 Origin 白名单或反代配置                        |
-| 限流增加                                       | `bili_syncplay_rate_limited_total`                                             | 来源 IP、入口层转发真实 IP、`TRUSTED_PROXY_ADDRESSES`  | 调整限流或修正代理地址配置                          |
-| 消息处理耗时升高                               | `bili_syncplay_message_handler_duration_seconds_bucket`                        | Node CPU、Redis 延迟、房间成员数、日志中的错误         | 限流、扩容 Room Node、排查慢 Redis                  |
-| Global Admin 看不到某个节点或节点显示过期      | Global Admin 概览、`node_heartbeat_failed` 日志                                | `NODE_HEARTBEAT_ENABLED`、`INSTANCE_ID`、Redis runtime | 修复心跳配置或 Redis runtime store                  |
-| 后台登录失败或频繁要求重新登录                 | `/api/admin/auth/login` 响应、审计日志                                         | `ADMIN_PASSWORD_HASH`、`ADMIN_SESSION_SECRET` 是否一致 | 同步 admin 认证配置并重启                           |
-| 跨节点房间动作失败，例如踢人或关闭房间返回 502 | 审计日志、`ADMIN_COMMAND_BUS_PROVIDER`、目标节点心跳                           | 管理命令总线、目标 `INSTANCE_ID`、Redis                | 恢复 Redis command bus 或在目标节点本地操作         |
+| 告警或现象                                     | 主要指标 / 信号                                                                | 优先检查                                               | 处理方向                                             |
+| ---------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------ | ---------------------------------------------------- |
+| WebSocket 连接数异常下降                       | `bili_syncplay_connections`                                                    | 入口层 upstream、Room Node `/readyz`、进程日志         | 恢复节点或从 LB 摘除异常节点                         |
+| 活跃房间数异常下降                             | `bili_syncplay_active_rooms`、`bili_syncplay_rooms_non_expired`                | Redis 连通性、房间过期配置、重启记录                   | 恢复 Redis，确认 `ROOM_STORE_PROVIDER` 未被改为内存  |
+| 过期房间不再被回收（reaper 停摆）              | `bili_syncplay_room_reaper_sweeps_total`                                       | 见 [reaper 还在扫吗？](#reaper-还在扫吗)               | 恢复 Redis；确认 `ROOM_CLEANUP_INTERVAL_MS` 未被调大 |
+| Redis 操作失败                                 | `bili_syncplay_redis_operation_failures_total`                                 | Redis 进程、网络、ACL、密码、慢查询                    | 优先恢复 Redis；必要时执行应急降级                   |
+| Redis runtime store 延迟升高                   | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                    | Redis CPU、内存、网络 RTT、命令排队                    | 扩容 Redis 或降低入口层流量                          |
+| Redis room event bus publish 延迟或失败        | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`、失败计数 | Redis pub/sub 连通性、网络抖动、Room Node 日志         | 恢复 Redis 与网络；验证跨节点播放同步                |
+| 连接被拒绝增加                                 | `bili_syncplay_ws_connection_rejected_total`、结构化日志 `origin_not_allowed`  | `ALLOWED_ORIGINS`、入口层是否改写 Origin               | 修正 Origin 白名单或反代配置                         |
+| 限流增加                                       | `bili_syncplay_rate_limited_total`                                             | 来源 IP、入口层转发真实 IP、`TRUSTED_PROXY_ADDRESSES`  | 调整限流或修正代理地址配置                           |
+| 消息处理耗时升高                               | `bili_syncplay_message_handler_duration_seconds_bucket`                        | Node CPU、Redis 延迟、房间成员数、日志中的错误         | 限流、扩容 Room Node、排查慢 Redis                   |
+| Global Admin 看不到某个节点或节点显示过期      | Global Admin 概览、`node_heartbeat_failed` 日志                                | `NODE_HEARTBEAT_ENABLED`、`INSTANCE_ID`、Redis runtime | 修复心跳配置或 Redis runtime store                   |
+| 后台登录失败或频繁要求重新登录                 | `/api/admin/auth/login` 响应、审计日志                                         | `ADMIN_PASSWORD_HASH`、`ADMIN_SESSION_SECRET` 是否一致 | 同步 admin 认证配置并重启                            |
+| 跨节点房间动作失败，例如踢人或关闭房间返回 502 | 审计日志、`ADMIN_COMMAND_BUS_PROVIDER`、目标节点心跳                           | 管理命令总线、目标 `INSTANCE_ID`、Redis                | 恢复 Redis command bus 或在目标节点本地操作          |
+
+### reaper 还在扫吗？
+
+只有 `bili_syncplay_room_reaper_sweeps_total` 能回答这个问题。每一轮扫描只会记
+`result="ok"` 或 `result="error"` 其中之一，两者之和即为已发生的全部轮次。
+
+执行前把 `<窗口>` 换成本部署 `ROOM_CLEANUP_INTERVAL_MS` 的数倍。该配置只要求是正
+整数，所以不存在"默认安全"的窗口：取短了，健康的 reaper 会落在两次采样之间被读
+成 0。
+
+```promql
+# 每秒扫描轮次。rate() 的单位是每秒而配置是毫秒，健康值为
+# 1000/ROOM_CLEANUP_INTERVAL_MS——默认 60000 时是 1/60。
+sum(rate(bili_syncplay_room_reaper_sweeps_total[<窗口>])) by (instance)
+
+# 失败轮次占比，取值 0 到 1。
+sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<窗口>])) by (instance)
+  / sum(rate(bili_syncplay_room_reaper_sweeps_total[<窗口>])) by (instance)
+```
+
+两者要合起来读：
+
+| 每秒轮次                          | 失败占比               | 结论                                                                          |
+| --------------------------------- | ---------------------- | ----------------------------------------------------------------------------- |
+| ≈ `1000/ROOM_CLEANUP_INTERVAL_MS` | 0                      | 健康。一轮什么都没收到是正常的，见下                                          |
+| ≈ 预期值                          | 介于 0 和 1 之间       | 间歇性失败，最常见的是 Redis 抖动。**不是停摆**：定时器在跑，且有部分轮次成功 |
+| ≈ 预期值                          | 1                      | 每一轮都在失败。定时器在跑，活没干成                                          |
+| 0                                 | 无定义（根本没有轮次） | 窗口内没有任何一轮**跑完**。原因见下                                          |
+
+完成速率为 0 是观测，不是结论。一轮要等 `deleteExpiredRooms` 有结果才计数，所以
+定时器活着、速率照样为 0 的情况是存在的。先分辨原因再动手：
+
+- **进程重启还不到一个周期**。对照 `bili_syncplay_process_start_time_seconds`；
+  第一轮要在启动后一个 `ROOM_CLEANUP_INTERVAL_MS` 才落地。
+- **扫描挂在 Redis 上**。房间存储的客户端没有设置命令超时，连接僵死时一轮扫描会
+  无限期挂起，什么都不会被计上——连错误都不会有。查
+  `bili_syncplay_redis_operation_failures_total`、Redis 延迟，以及
+  [Redis 故障处理](#redis-故障处理)。
+- **定时器真的没了**。排除上面两条之后再查：进程是否还活着，以及它的日志。
+
+只有 Room Node 有这条序列。独立 Global Admin 不跑 reaper，根本不导出它，在那里
+查不到属于预期，不是停摆。
+
+以下三个**都不能**用来回答这个问题：
+
+- `bili_syncplay_rooms_non_expired`——房间一到 `expiresAt` 就从该 gauge 掉出，
+  与是否真被删无关。
+- `bili_syncplay_rooms_expired_deleted_total`——含惰性读取路径，reaper 死了它
+  照样涨。
+- `bili_syncplay_events_total{event="room_expired_deleted"}`——只在某轮真收到
+  东西时才记。持续访问下惰性读取路径会在每轮扫描前把积压删光，健康的 reaper
+  也可以长期不记。
 
 排障时优先同时查看：
 

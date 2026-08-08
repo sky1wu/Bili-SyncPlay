@@ -1,3 +1,5 @@
+import type { MetricsCollector } from "./admin/metrics.js";
+import type { ExpiredRoomSweepCounts } from "./room-service.js";
 import { clampTimerIntervalMs } from "./timers.js";
 import type { LogEvent } from "./types.js";
 
@@ -9,23 +11,44 @@ export type RoomReaper = {
 
 export function createRoomReaper(options: {
   intervalMs: number;
-  deleteExpiredRooms: (now: number) => Promise<number>;
+  deleteExpiredRooms: (now: number) => Promise<ExpiredRoomSweepCounts>;
   logEvent: LogEvent;
+  metricsCollector?: Pick<
+    MetricsCollector,
+    "declareRoomReaper" | "recordRoomReaperSweep"
+  >;
   now?: () => number;
 }): RoomReaper {
   const now = options.now ?? Date.now;
 
+  // Declared here rather than at the wiring site: existing is what makes the
+  // series meaningful, so the two cannot drift apart. A process without a
+  // reaper never reaches this line and never exports the series.
+  options.metricsCollector?.declareRoomReaper();
+
   async function runNow(): Promise<number> {
     try {
-      const deletedCount = await options.deleteExpiredRooms(now());
-      if (deletedCount > 0) {
+      const swept = await options.deleteExpiredRooms(now());
+      // Every pass, whatever it found. This is the only signal that separates a
+      // healthy idle reaper from a stopped one: the deletion event below fires
+      // only when a sweep collected something, and continuous traffic can make
+      // `resolveRoom` lazily delete every expired room before each sweep gets
+      // to it, so a perfectly alive reaper can go hours without emitting it
+      // (#254 review).
+      options.metricsCollector?.recordRoomReaperSweep("ok");
+      if (swept.deletedRooms > 0 || swept.orphanedIndexEntries > 0) {
+        // Once per sweep, not once per room, and its counts do not survive into
+        // events_total. Rooms are metered in `room-service`, which is also
+        // where the lazy read-path expiry lives.
         options.logEvent("room_expired_deleted", {
-          deletedCount,
+          deletedCount: swept.deletedRooms,
+          orphanedIndexEntries: swept.orphanedIndexEntries,
           result: "ok",
         });
       }
-      return deletedCount;
+      return swept.deletedRooms;
     } catch (error) {
+      options.metricsCollector?.recordRoomReaperSweep("error");
       options.logEvent("room_persist_failed", {
         result: "error",
         reason: "room_reaper_failed",

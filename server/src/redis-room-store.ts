@@ -177,10 +177,13 @@ return "ok"
 // sweep runs. Doing both here also keeps deleteRoom from throwing after the
 // body is already gone, which would abort the caller's downstream cleanup and
 // leave other nodes serving a room that no longer exists.
+// Returns the DEL count, not "ok": concurrent readers of the same expired room
+// all reach this script, and the caller has to be able to tell which one of them
+// actually removed the body. ZREM stays unconditional — the index entry must go
+// even when the body was already collected by whoever got here first.
 const DELETE_ROOM_LUA = `
 redis.call("ZREM", KEYS[2], ARGV[1])
-redis.call("DEL", KEYS[1])
-return "ok"
+return redis.call("DEL", KEYS[1])
 `;
 
 // Candidates come from the score range itself, so rooms that never expire are
@@ -195,6 +198,7 @@ local roomKeyPrefix = ARGV[1]
 local now = tonumber(ARGV[2])
 local candidates = redis.call("ZRANGEBYSCORE", roomsKey, "-inf", now)
 local deletedCodes = {}
+local orphanCodes = {}
 
 for _, code in ipairs(candidates) do
   local key = roomKeyPrefix .. code
@@ -208,12 +212,15 @@ for _, code in ipairs(candidates) do
   if not readable then
     redis.call("ZREM", roomsKey, code)
   elseif not rawRoom then
-    -- Index entry without a body: the room is gone, so report it like any other
-    -- deletion. Staying silent left its runtime state uncollected, and since a
-    -- code is only handed out once nothing remains under it, that code stopped
-    -- being allocatable (#237 review).
+    -- Index entry without a body: the room is already gone, so it still has to
+    -- be reported — staying silent left its runtime state uncollected, and
+    -- since a code is only handed out once nothing remains under it, that code
+    -- stopped being allocatable (#237 review). Reported apart from the real
+    -- deletions though: no room died on this pass, and metering it as one would
+    -- inflate reclamations with manual cleanups, older builds and corruption
+    -- (#254 review).
     redis.call("ZREM", roomsKey, code)
-    deletedCodes[#deletedCodes + 1] = code
+    orphanCodes[#orphanCodes + 1] = code
   else
     local ok, room = pcall(cjson.decode, rawRoom)
     -- cjson.decode("1") yields a truthy scalar; indexing it raises a Lua
@@ -232,7 +239,7 @@ for _, code in ipairs(candidates) do
   end
 end
 
-return deletedCodes
+return { deletedCodes, orphanCodes }
 `;
 
 // Chunk the repair passes: a first run against a database that has never been
@@ -713,13 +720,14 @@ export async function createRedisRoomStore(
       return { ok: true, room: nextRoom };
     },
     async deleteRoom(code) {
-      await redis.eval(
+      const deleted = await redis.eval(
         DELETE_ROOM_LUA,
         2,
         roomKey(code),
         roomsByExpiryKey,
         code,
       );
+      return Number(deleted) > 0;
     },
     async deleteExpiredRooms(currentTime) {
       // Candidates come from the index, so on a database that predates it the
@@ -728,14 +736,23 @@ export async function createRedisRoomStore(
       // keyspace walk inside one reaper tick per interval, which is what made
       // this operation's histogram bimodal.
       await ensureBootstrapReconciled();
-      const deletedCodes = await redis.eval(
+      // Two nested arrays, in this order — a Lua table with string keys does
+      // not survive the RESP conversion, only its array part does.
+      const swept = await redis.eval(
         DELETE_EXPIRED_ROOMS_LUA,
         1,
         roomsByExpiryKey,
         roomKeyPrefix,
         String(currentTime),
       );
-      return Array.isArray(deletedCodes) ? (deletedCodes as string[]) : [];
+      const codesAt = (index: number): string[] => {
+        const group = Array.isArray(swept) ? swept[index] : null;
+        return Array.isArray(group) ? (group as string[]) : [];
+      };
+      return {
+        deletedRoomCodes: codesAt(0),
+        orphanedIndexCodes: codesAt(1),
+      };
     },
     async listRooms(
       query: Pick<

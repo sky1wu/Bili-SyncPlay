@@ -50,6 +50,11 @@ const RATE_LIMITED_MESSAGE_TYPES = [
   "sync:ping",
 ] as const;
 
+// Pre-seeded so a reaper that has never failed still exports an explicit zero:
+// an absent series and a healthy one must not look alike on the panel whose
+// whole job is telling "sweeping fine" from "not sweeping at all".
+const ROOM_REAPER_SWEEP_RESULTS = ["ok", "error"] as const;
+
 export type MonitoredMessageType =
   | "video:share"
   | "playback:update"
@@ -104,6 +109,33 @@ export type MetricsCollector = {
   observeRedisRoomEventBusPublishDuration: (durationMs: number) => void;
   observeRedisRoomEventBusPublishFailure: () => void;
   recordRoomEventPublishDropped: (eventType: RoomEventType) => void;
+  /**
+   * Rooms reclaimed because they expired, by EITHER path: a reaper sweep, or
+   * the lazy delete a read performs on a room found already past its expiry.
+   * Counts ROOMS, unlike the sibling
+   * `bili_syncplay_events_total{event="room_expired_deleted"}`, which counts
+   * SWEEPS — the reaper logs once per pass no matter how many rooms it removed.
+   *
+   * Because the lazy path feeds this too, a growing counter does NOT prove the
+   * reaper is alive; that question belongs to the sweep event above.
+   */
+  recordRoomsExpiredDeleted: (roomCount: number) => void;
+  /**
+   * This process runs a room reaper, so its sweep series belongs on /metrics.
+   *
+   * Not exported unconditionally: the standalone global admin builds the same
+   * collector (`global-admin-app.ts`) and never creates a reaper, so an
+   * always-on series would sit at 0 there forever and the "rate dropped to 0"
+   * rule would call a healthy admin process a stalled reaper (#254 review).
+   */
+  declareRoomReaper: () => void;
+  /**
+   * One expiry sweep finished. Incremented on EVERY pass, including the ones
+   * that found nothing — a sweep that collects no rooms is the normal state of
+   * a healthy reaper, so only a counter that moves regardless can tell "idle"
+   * from "stopped".
+   */
+  recordRoomReaperSweep: (result: "ok" | "error") => void;
   render: () => Promise<string>;
 };
 
@@ -209,6 +241,15 @@ export function createMetricsCollector(options: {
     help: "Total room event publishes dropped after backpressure timeout, grouped by event type",
     samples: new Map(),
   };
+  const roomsExpiredDeletedCounter: CounterMetric = {
+    help: "Total rooms deleted after expiry, by a reaper sweep or by the lazy read path",
+    samples: new Map(),
+  };
+  const roomReaperSweepCounter: CounterMetric = {
+    help: "Total room expiry sweeps the reaper completed, grouped by outcome",
+    samples: new Map(),
+  };
+  let roomReaperDeclared = false;
   const messageDurationHistogram: HistogramMetric = {
     help: "Duration of monitored message handler paths in seconds",
     buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
@@ -458,6 +499,39 @@ export function createMetricsCollector(options: {
         "bili_syncplay_room_joined_total",
         ensureCounterSample(eventCounter, { event: "room_joined" }).value,
       ),
+      // Rooms, not sweeps: events_total{event="room_expired_deleted"} counts
+      // reaper passes that collected at least one room, which is a different
+      // unit from room_created_total and must not be rated against it. The HELP
+      // names both delete paths because whoever reads it off /metrics has only
+      // that line to go on, and reading this as reaper-only turns it into a
+      // liveness signal it cannot serve (#254 review).
+      "# HELP bili_syncplay_rooms_expired_deleted_total Total rooms deleted after expiry, by a reaper sweep or by the lazy read path",
+      "# TYPE bili_syncplay_rooms_expired_deleted_total counter",
+      formatMetricLine(
+        "bili_syncplay_rooms_expired_deleted_total",
+        ensureCounterSample(roomsExpiredDeletedCounter, {}).value,
+      ),
+      // The reaper's liveness signal, and deliberately not derived from how
+      // many rooms it collected: an idle sweep and a dead timer look identical
+      // through the deletion counters, and with steady traffic the lazy read
+      // path can empty the expiry backlog before every sweep (#254 review).
+      //
+      // Only where a reaper exists. The standalone global admin scrapes the
+      // same collector without ever creating one, and a permanent zero there
+      // would make the "rate dropped to 0" rule fire on a healthy process.
+      ...(roomReaperDeclared
+        ? [
+            "# HELP bili_syncplay_room_reaper_sweeps_total Total room expiry sweeps the reaper completed, grouped by outcome",
+            "# TYPE bili_syncplay_room_reaper_sweeps_total counter",
+            ...ROOM_REAPER_SWEEP_RESULTS.map((result) =>
+              formatMetricLine(
+                "bili_syncplay_room_reaper_sweeps_total",
+                ensureCounterSample(roomReaperSweepCounter, { result }).value,
+                { result },
+              ),
+            ),
+          ]
+        : []),
       "# HELP bili_syncplay_ws_connection_rejected_total Total rejected websocket upgrades",
       "# TYPE bili_syncplay_ws_connection_rejected_total counter",
       formatMetricLine(
@@ -608,6 +682,27 @@ export function createMetricsCollector(options: {
       incrementCounter(roomEventPublishDroppedCounter, {
         event_type: eventType,
       });
+    },
+    recordRoomsExpiredDeleted(roomCount) {
+      // A counter that ever moves backwards breaks every rate() over it, so a
+      // sweep that reports something other than a whole positive number is
+      // dropped rather than added.
+      if (!Number.isInteger(roomCount) || roomCount <= 0) {
+        return;
+      }
+      incrementCounter(roomsExpiredDeletedCounter, {}, roomCount);
+    },
+    declareRoomReaper() {
+      roomReaperDeclared = true;
+      // Seeded here rather than on the first sweep, so a room node that has not
+      // swept yet still exports both series — otherwise the very first scrape
+      // after a restart is indistinguishable from a process with no reaper.
+      for (const result of ROOM_REAPER_SWEEP_RESULTS) {
+        ensureCounterSample(roomReaperSweepCounter, { result });
+      }
+    },
+    recordRoomReaperSweep(result) {
+      incrementCounter(roomReaperSweepCounter, { result });
     },
     render,
   };
