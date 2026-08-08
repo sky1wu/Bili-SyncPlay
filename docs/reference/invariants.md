@@ -316,16 +316,20 @@ one-shot, and both lose the room permanently when the bus rejects them (#242):
 
 ## A background pass that cannot time out cannot be observed
 
-`room-reaper` and `room-index-reconciler` both run one async pass against Redis
-per tick. Neither had a timeout anywhere on that path, and neither did the room
-store's client — `lazyConnect` and `maxRetriesPerRequest: 1` bound retries, not
-how long a command that Redis already accepted may take to answer. A half-open
-connection therefore left a pass pending forever, and the reaper stopped
-collecting expired rooms with **no** signal at all: both series of
-`bili_syncplay_room_reaper_sweeps_total` went flat, so an alert on the failure
-rate never fired, and only a manual restart recovered (#261). All three rules
-below live in `maintenance-pass.ts` — one driver, because the same defect
-appeared in both hand-written copies:
+`room-reaper`, `room-index-reconciler` and `node-heartbeat` each run one async
+pass against Redis per tick. None had a timeout anywhere on that path, and
+neither Redis client has one either — `lazyConnect` and `maxRetriesPerRequest:
+1` bound retries, not how long a command that Redis already accepted may take to
+answer. A half-open connection therefore left a pass pending forever, and the
+reaper stopped collecting expired rooms with **no** signal at all: both series
+of `bili_syncplay_room_reaper_sweeps_total` went flat, so an alert on the
+failure rate never fired, and only a manual restart recovered (#261). The
+heartbeat failed the same way and worse: `node_heartbeat_failed` was only ever
+reachable through the beat's `.catch`, so a beat that never settled logged
+nothing at all, while other nodes aged this one out of the cluster index and
+reaped its sessions — from a node still serving clients (#263). All the rules
+below live in `maintenance-pass.ts` — one driver, because the same defect turned
+up in every hand-written copy:
 
 - **Every tick records exactly one outcome.** That is what makes "the rate went
   flat" mean "the timer is gone" and nothing else. A pass that outlives its cap
@@ -359,8 +363,21 @@ appeared in both hand-written copies:
   outstanding. Bounding a wait and dropping its signal in the same change is how
   a fix for silence reintroduces it one step down.
 
-The cap belongs to the caller, not to the connection: the room store's client
-still has no `commandTimeout`, so the command itself stays out on the socket.
+- **The cap is derived from what a late pass costs, not picked for comfort.**
+  The reaper's is a flat 30s under a 60s default interval. The heartbeat's is
+  computed (`heartbeatTimeoutMs`): half an interval, and never more than a third
+  of `NODE_HEARTBEAT_TTL_MS` — because the consequence of a late beat is other
+  nodes calling this one stale at `staleAt` and reaping its sessions at
+  `expiresAt`. A cap that fired at the same time as the expiry would answer a
+  question nobody could still act on. Below the interval is the other half of
+  the rule: it is what makes the tick after a timeout a `stalled` rather than an
+  `overlapped`.
+
+The cap belongs to the caller, not to the connection: neither the room store's
+nor the runtime store's client has a `commandTimeout`, so the command itself
+stays out on the socket. `heartbeatNode` in particular is a direct `MULTI` —
+it does not go through the write queue, so the queue's own
+`pendingOperationTimeoutMs` never applied to it.
 Adding one there would bound the request path (`get_room` / `update_room`) too,
 which is a separate decision with its own retry semantics to weigh — deliberately
 not taken in #261.

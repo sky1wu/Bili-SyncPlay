@@ -313,6 +313,50 @@ test("a run that throws synchronously is reported as a failed pass", async () =>
   }
 });
 
+test("unrefTimer decides whether the timer holds the event loop open", async () => {
+  const countRefdTimers = (): number =>
+    process.getActiveResourcesInfo().filter((kind) => kind === "Timeout")
+      .length;
+
+  function build(
+    unrefTimer: boolean,
+  ): ReturnType<typeof createMaintenancePass<void, string>> {
+    return createMaintenancePass<void, string>({
+      name: "test pass",
+      intervalMs: 60_000,
+      timeoutMs: 1_000,
+      settleTimeoutMs: 20,
+      unrefTimer,
+      run: async () => undefined,
+      onSuccess: () => "ok",
+      onFailure: (failure) => failure.reason,
+    });
+  }
+
+  // Sampled with no awaits in between, so the only handles that can appear are
+  // the ones each constructor arms — everything the test runner holds is
+  // identical across the three samples. `getActiveResourcesInfo` lists only
+  // resources keeping the loop alive, which is exactly the question here.
+  const before = countRefdTimers();
+  const holdsLoopOpen = build(false);
+  const withRef = countRefdTimers();
+  const releasesLoop = build(true);
+  const withUnref = countRefdTimers();
+
+  try {
+    // The default, and it must stay the default: the reaper's timer is the only
+    // thing keeping its work scheduled, so an idle loop draining past it would
+    // lose that work with nothing said.
+    assert.equal(withRef, before + 1);
+    // Opted out for the heartbeat, which only reports state — the process must
+    // still be able to exit when nothing else is running.
+    assert.equal(withUnref, withRef);
+  } finally {
+    await holdsLoopOpen.stop();
+    await releasesLoop.stop();
+  }
+});
+
 test("a timer tick does not take the process down when a handler throws", async () => {
   let ticks = 0;
   let sawTick!: () => void;

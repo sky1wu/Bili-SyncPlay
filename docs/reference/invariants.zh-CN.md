@@ -228,12 +228,15 @@
 
 ## 不能超时的后台轮次，也就无法被观测
 
-`room-reaper` 与 `room-index-reconciler` 每次触发都对 Redis 跑一轮异步任务。这条链路上原本没有任何超时，
-房间存储的客户端也没有——`lazyConnect` 与 `maxRetriesPerRequest: 1` 约束的是重试次数，
-而不是 Redis 已经收下的那条命令可以花多久回应。于是连接半开时一轮任务会永久挂起，
-reaper 不再回收过期房间，却**没有任何**信号：`bili_syncplay_room_reaper_sweeps_total`
-的两条序列一起静止，只看失败率的告警不会触发，恢复只能靠人工重启（#261）。
-下面三条规则统一放在 `maintenance-pass.ts` 里——一份驱动，因为同一个缺陷在两份手写副本里各出现了一次：
+`room-reaper`、`room-index-reconciler` 与 `node-heartbeat` 每次触发都对 Redis 跑一轮异步任务。
+这条链路上原本没有任何超时，两个 Redis 客户端也都没有——`lazyConnect` 与
+`maxRetriesPerRequest: 1` 约束的是重试次数，而不是 Redis 已经收下的那条命令可以花多久回应。
+于是连接半开时一轮任务会永久挂起，reaper 不再回收过期房间，却**没有任何**信号：
+`bili_syncplay_room_reaper_sweeps_total` 的两条序列一起静止，只看失败率的告警不会触发，
+恢复只能靠人工重启（#261）。心跳坏得一样、后果更重：`node_heartbeat_failed` 只能通过那一拍的
+`.catch` 抵达，所以一拍永远不 settle 就什么都不会记，与此同时其他节点把它从集群索引里判老、
+回收它的 session——而它还在服务客户端（#263）。
+下面这些规则统一放在 `maintenance-pass.ts` 里——一份驱动，因为同一个缺陷在每一份手写副本里都出现了：
 
 - **每一次触发都恰好记下一个结果。** 只有这样，"速率变平"才只能意味着"定时器没了"。
   超过上限的一轮记为 `error`，而不是沉默。如果上限只报告**第一次**僵死的触发，
@@ -256,7 +259,16 @@ reaper 不再回收过期房间，却**没有任何**信号：`bili_syncplay_roo
   欠调用方一条 `onSettleTimeout`，把仍未回应的调用数报出来。
   在同一次改动里既给等待加了界、又把它的信号丢掉，正是"治沉默的修复在下一步重新制造沉默"的做法。
 
-上限属于调用方，不属于连接：房间存储的客户端仍然没有 `commandTimeout`，命令本身照样挂在 socket 上。
+- **上限是由"这一轮迟到要付什么代价"推出来的，不是拍脑袋图省事定的。**
+  reaper 是固定 30s（默认间隔 60s）。心跳则是算出来的（`heartbeatTimeoutMs`）：半个间隔，
+  且不超过 `NODE_HEARTBEAT_TTL_MS` 的三分之一——因为一拍迟到的代价是别的节点在 `staleAt`
+  把它判老、在 `expiresAt` 回收它的 session。上限如果跟过期同时触发，那就是在回答一个
+  已经没人能据此行动的问题。"低于间隔"是这条规则的另一半：正是它让超时之后的那次触发
+  是 `stalled` 而不是 `overlapped`。
+
+上限属于调用方，不属于连接：房间存储与 runtime store 的客户端都仍然没有 `commandTimeout`，
+命令本身照样挂在 socket 上。尤其 `heartbeatNode` 是直连的 `MULTI`——它不走写回队列，
+所以队列自己的 `pendingOperationTimeoutMs` 从来就没管到它。
 在那里加超时会连带约束请求路径（`get_room` / `update_room`），那是另一个需要单独权衡重试语义的决定——
 #261 有意没有做。
 
