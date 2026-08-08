@@ -187,6 +187,13 @@ export function createNodeHeartbeat(options: {
     },
     async stop() {
       await pass.stop();
+      // Reset only once the stop has settled, so `start()` can arm it again —
+      // `MaintenancePass.stop()` clears its own timer for exactly that reason,
+      // and the pre-driver implementation set `timer = null` here. A flag that
+      // never resets turns a stop/start cycle into a heartbeat that never beats
+      // again, and the node ages out of the cluster index with nothing said
+      // (#265 review).
+      started = false;
     },
   };
 }

@@ -407,3 +407,45 @@ test("the beat timer does not hold the process open", async () => {
     await heartbeat.stop();
   }
 });
+
+test("start() works again after stop()", async () => {
+  let beats = 0;
+  let announce!: () => void;
+  let beaten = new Promise<void>((resolve) => {
+    announce = resolve;
+  });
+  const heartbeat = createNodeHeartbeat({
+    enabled: true,
+    instanceId: "node-a",
+    serviceVersion: "test-version",
+    runtimeStore: createStubRuntimeStore(async () => {
+      beats += 1;
+      announce();
+    }),
+    // Long enough that only the beat `start()` fires itself can be counted.
+    intervalMs: 60_000,
+    ttlMs: 180_000,
+    now: () => 10,
+  });
+
+  heartbeat.start();
+  await beaten;
+  await heartbeat.stop();
+
+  beaten = new Promise<void>((resolve) => {
+    announce = resolve;
+  });
+  // A stopped heartbeat has to be startable again — `MaintenancePass.stop()`
+  // clears its own timer for that reason, and the pre-driver implementation
+  // reset its `timer` here. An idempotence flag that never resets would make
+  // this silently do nothing, and the node would age out of the cluster index
+  // with nothing in its log to say why.
+  heartbeat.start();
+  await beaten;
+
+  try {
+    assert.equal(beats, 2);
+  } finally {
+    await heartbeat.stop();
+  }
+});
