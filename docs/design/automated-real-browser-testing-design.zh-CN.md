@@ -39,6 +39,7 @@
 - Playwright 扩展测试的可靠基线是其自带 Chromium，不能把结果标成稳定版 Chrome/Edge 已验证。
 - 扩展必须使用 persistent context；普通 `browser.newContext()` 不适用。
 - 纯渲染、输入和错误反馈可以通过 `chrome-extension://<id>/popup.html` 测试；凡是依赖活动 tab 的分享、打开共享视频等流程，都先激活 Bilibili tab，再通过 `chrome.action.openPopup()` 打开真实 action popup 并捕获其 page。Phase 0 必须证明目标 Chromium 支持这一入口。
+- `REQ-F032` 依赖测试运行器能主动终止而不是仅等待空闲挂起 MV3 service worker。Phase 0 必须用选定 Playwright/Chromium 版本证明：双方先通过真实入口绑定同一共享视频，浏览器调试协议再确实终止已加入该同步房间的目标扩展 worker；下一次 popup/content 生产事件重新启动 worker、恢复持久化房间会话并完成重连及跨端消息闭环，且恢复不是未真正失效的旧执行上下文、自动重试或测试后门造成的假象。popup 周期在终止前必须显式关闭旧 popup、确认旧文档及 port 消失，再从全新 action popup 触发；当前新 popup 先建立 runtime port、随后才查询状态。bootstrap pending 时首次查询可以返回默认过渡快照，不能要求它立即已入房；最终恢复由后续 port 更新与服务端房间收敛证明。受控页面重载则先请求页内分享按钮设置、随后才执行房间 hydration。首事件负责证明唤醒归因，查询/hydration 另负责证明对应消息路径工作，不能把后者倒推成唤醒源。只恢复未入房或没有共享视频的 popup 不算通过。Playwright 可以保留同一个 Worker 对象句柄，但不能把句柄存活误判为旧 worker 仍在运行。若 Playwright 暴露的 CDP 能力不足，必须在进入 M1 前调整适配器，而不是把风险留到生命周期矩阵。
 - 不使用脆弱的操作系统坐标点击作为主要入口；坐标点击只可能作为稳定版浏览器最外层 smoke，不能承载功能矩阵。
 
 官方能力参考：
@@ -117,7 +118,7 @@ packages/e2e/
 - popup 操作通过 DOM 和 `chrome.runtime` 的真实监听链路。
 - 播放操作通过页面中的真实 `HTMLVideoElement`。
 - 房间观察通过 popup、接收端播放器和公开 admin API。
-- service worker 终止通过浏览器调试协议，而不是新增生产消息。
+- service worker 终止通过 Phase 0 已验证的浏览器调试协议路径，而不是新增生产消息；终止前后要用目标 ID、worker 执行上下文、触发入口实际发出的首个生产事件和恢复后的用户消息闭环证明被关闭的是当前生产 worker。popup 周期还要证明旧文档/port 已关闭、新文档确实创建；popup port 或 content 设置 hydration 等先行事件必须如实记录，不能为了让后续查询/房间 hydration 看似负责唤醒而绕过真实入口，也不能把 bootstrap pending 的查询过渡态误判成恢复失败。
 
 只允许添加以下窄观测能力，并要求单独评审：
 
@@ -401,7 +402,7 @@ Ownership  = none | owner | peer
 
 ### 7.1 GitHub 托管 PR job
 
-最终完整门禁 job：`browser-e2e`；M2 阶段性 smoke 如提前接入 CI，使用独立的 `browser-e2e-smoke`。
+最终完整门禁 job：`browser-e2e`；M2 的 E2E-207 先接入独立且非 required 的阶段性 `browser-e2e-smoke`。
 
 - Ubuntu GitHub-hosted runner。
 - `npm ci` 后安装与锁定版本匹配的 Playwright Chromium。
@@ -410,9 +411,10 @@ Ownership  = none | owner | peer
 - 先跑 P0 smoke；失败则立即上传 artifact，不继续跑长矩阵。
 - smoke 通过后运行确定性分域场景和 admin-ui 真实客户端治理场景。
 - 与现有 `verify` 并行，最终都作为 branch protection required checks。
-- `browser-e2e-smoke` 可以在 M2 后先作为非 required 信号落地；只有 M3、M4、需求—场景追踪检查和 100 轮稳定性基线全部完成，且权威表中的每个 P0/P1 展开操作键、断言策略、必要断言键及必要断言类别都有实际执行证据后，才能新增 `browser-e2e` 并把它设为 required check。两个 job 不复用检查上下文。
+- E2E-207 必须在 M2 接入 `browser-e2e-smoke`，以非 required 信号取得 GitHub-hosted P0 实测；E2E-501 在 M3/M4 完成后先让 non-required 的 `browser-e2e` 与它并存。只有需求—场景追踪检查和 100 轮稳定性基线全部完成，且权威表中的每个 P0/P1 展开操作键、断言策略、必要断言键及必要断言类别都有实际执行证据后，E2E-506 才能把 `browser-e2e` 设为 required 并停用阶段性 smoke。两个 job 不复用检查上下文。
+- E2E-501 的 GitHub-hosted 单轮实测和 E2E-504 的 100 轮分布必须在 E2E-506 前共同关闭 `REQ-N001` 的当前 10 分钟目标。未达到时先优化；若证据表明目标必须调整，则先在需求规格中提交有依据的新预算并取得评审同意，不能只记录一个更慢的数字后照常提升 required check。
 - 稳定性基线执行拟设为 required 的完整 `browser-e2e` 命令 100 次，逐域记录 P0、P1 和 admin-ui harness failure；只重复 P0 smoke 不能证明完整门禁可用。
-- M1 先落地追踪基础设施：把需求规格第 5.1 节展开为机器可读 operation catalog；每项包含唯一 `operationKey`、所属 `requirementId`、priority、与权威表一致的独立 `assertionPolicy`、非空 `requiredAssertionKeys`、断言键到类别的固定映射和 `requiredAssertionCategories`。策略表达式必须让每个展开键恰好匹配一次；校验器不能从断言类别反推操作是否跨端。证据类别拆为发起端用户可见、真实接收端结果、服务端结果和稳定窗口；`server-observed-visible` 必须包含重启后的发起端可见结果、服务端结果和稳定窗口，`peer-sync` 必须包含真实接收端结果及另外一类，`peer-sync-strict` 必须同时包含发起端、真实接收端和稳定窗口，`server-result` 不得补 `peer-result` 的缺口。断言 helper 的每条运行证据携带 `runId`、`scenarioId`、`attemptId`、本次尝试内唯一的 `evidenceId`、完全展开的 `operationKey`、`assertionKey`、requirement ID、断言类别、结果和时间。门禁分别对权威策略、必需 `(operationKey, assertionKey)` 集合、必要类别集合与本次实际通过证据做精确集合差，并校验证据类别等于 catalog 中该断言键的类别；catalog 内重复键、同一次尝试内重复 `evidenceId`、未知键、花括号/通配键、策略或类别错配、空测试、未执行断言及只声明 ID 的场景都失败。不同场景或尝试可重复核验同一二元组：报告按 `scenarioId` / `attemptId` 保留全部证据，coverage 只对通过二元组求并集；首次失败或 skip 仍由测试运行器独立使 job 失败，不能被后续尝试或另一场景的通过覆盖。
+- M1 先落地追踪基础设施：把需求规格第 5.1 节展开为机器可读 operation catalog；每项包含唯一 `operationKey`、所属 `requirementId`、priority、与权威表一致的独立 `assertionPolicy`、非空 `requiredAssertionKeys`、断言键到类别的固定映射和 `requiredAssertionCategories`。策略表达式必须让每个展开键恰好匹配一次；校验器不能从断言类别反推操作是否跨端。证据类别拆为发起端用户可见、真实接收端结果、服务端结果和稳定窗口；`local-stable` 必须包含发起端可见结果和稳定窗口，`server-observed-visible` 必须包含重启后的发起端可见结果、服务端结果和稳定窗口，`peer-sync` 必须包含真实接收端结果及另外一类，`peer-sync-strict` 必须同时包含发起端、真实接收端和稳定窗口，`server-result` 不得补 `peer-result` 的缺口。断言 helper 的每条运行证据携带 `runId`、`scenarioId`、`attemptId`、本次尝试内唯一的 `evidenceId`、完全展开的 `operationKey`、`assertionKey`、requirement ID、断言类别、结果和时间。门禁分别对权威策略、必需 `(operationKey, assertionKey)` 集合、必要类别集合与本次实际通过证据做精确集合差，并校验证据类别等于 catalog 中该断言键的类别；catalog 内重复键、同一次尝试内重复 `evidenceId`、未知键、花括号/通配键、策略或类别错配、空测试、未执行断言及只声明 ID 的场景都失败。不同场景或尝试可重复核验同一二元组：报告按 `scenarioId` / `attemptId` 保留全部证据，coverage 只对通过二元组求并集；首次失败或 skip 仍由测试运行器独立使 job 失败，不能被后续尝试或另一场景的通过覆盖。
 
 拟议根命令（实现前不可用）：
 
@@ -492,9 +494,9 @@ GitHub 明确说明持久化 self-hosted runner 可能被不可信 workflow 持�
 
 对分辨率、缩放、浏览器主题和工具栏布局高度敏感。Chromium 确定性层优先调用 `chrome.action.openPopup()`；稳定版实机只保留一条必要的工具栏打开 smoke。与活动 tab 无关的 popup 行为才通过扩展页 URL 测试。
 
-## 11. 开放问题与 Phase 0 判定项
+## 11. 开放问题与分阶段判定项
 
-以下问题在实现前必须通过可执行 spike 回答，答案记录到任务文档并更新本文：
+除第 8 项按其列出的后续门禁分阶段实测外，以下问题都必须在进入 M1 前通过可执行 spike 回答，答案记录到任务文档并更新本文。第 8 项在 Phase 0 只要求代表性样本和预算可行性，不能反过来要求尚不存在的 P0/完整套件给出实测结果：
 
 1. 当前 Playwright/Chromium 版本下，route-fulfilled Bilibili 主文档是否稳定触发 manifest content script 和 page bridge。
 2. `chrome.action.openPopup()` 能否在保持 Bilibili tab 活动的情况下稳定取得 popup page；headless 与 headed 是否一致。
@@ -503,9 +505,10 @@ GitHub 明确说明持久化 self-hosted runner 可能被不可信 workflow 持�
 5. 当前稳定版 Chrome/Edge 是否能用自动化加载当前 commit 的扩展；若只能验证已签名产物，实机 lane 应明确标成发布产物验证。
 6. Firefox 临时 XPI 的内部 UUID、popup 打开和 event page 日志怎样稳定取得；profile 级代理或 DNS、临时 CA 和回环 HTTPS fixture 怎样在不访问公网、不修改系统 hosts/信任库的前提下稳定提供 Bilibili Origin。
 7. paused/playing 的位置容差和消息风暴上限是多少，才能既符合当前产品策略又能抓住真实回归。
-8. GitHub-hosted runner 上 P0 smoke 和全量确定性套件的实际耗时、CPU 和 artifact 大小。
+8. GitHub-hosted runner 上的预算分三次关闭：Phase 0 记录空白扩展、双 profile/握手和媒体代表场景的耗时、CPU、内存及 artifact 样本，证明 5/10 分钟目标没有明显不可行；E2E-207 在真实 P0 命令存在后记录 P0 实测并验证 5 分钟目标；E2E-501/504 在完整命令存在后记录全量套件单轮和 100 轮分布，并在 E2E-506 前验证当前 10 分钟目标。未达标时必须先优化，或基于实测修改需求预算并取得评审同意。不得把后两项当作 E2E-007/M0 的前置条件，也不得用 Phase 0 估算冒充最终实测。
 9. Linux/WSL 本地 managed Redis 应锁定哪些 `redis-server` / `redis-cli` 版本，怎样取得它们并证明随机端口、关闭持久化、健康检查和进程回收在干净环境可重复。
 10. E2E-only WSL launcher 能否通过 `ServerBootstrapDependencies.now` 稳定制造至少 `max(5_000ms, 4 × playing 动态位置容差)` 的偏移及反向跳变，并让 `sync:ping` 观测到计划值，同时不修改任一系统时钟。
 11. Chromium 隔离 profile 能否在不修改系统信任库、不关闭全局证书校验的前提下，仅信任本次 run 的临时 CA，并让扩展 background 通过受管 `wss://` facade 的 HTTPS `/api/connection-check`、`/` 预检后完成真实 TLS/WebSocket/同步协议握手；错误证书是否稳定失败。
+12. 选定 Playwright/Chromium 版本能否通过浏览器调试协议主动终止已加入真实同步房间、且双方已绑定同一共享视频的目标 MV3 service worker，并由下一次真实 popup/content 生产事件恢复持久化房间会话、重连和跨端消息处理；如何记录 popup port、content 设置 hydration 等实际首事件并证明是它触发新 target，而非错误 target、未终止上下文、alarm、自动重试或测试侧重载扩展。
 
-任一 spike 失败都应调整设计或缩小第一阶段范围，不得用重试和 `sleep` 把不确定性藏进硬门禁。
+任一 Phase 0 spike 失败都应调整设计或缩小第一阶段范围，不得用重试和 `sleep` 把不确定性藏进硬门禁。第 8 项的 P0/全量实测未到对应里程碑不算 Phase 0 阻塞，但到 E2E-207、E2E-501/504 时必须分别关闭，不能只保留估算。
