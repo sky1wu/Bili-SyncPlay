@@ -98,6 +98,98 @@ test("keeps playback snapshot outside of a room", () => {
   );
 });
 
+test("share controller reports a paused video as paused once its buffer-pause window has elapsed", () => {
+  // #258: the snapshot went out as `buffering` for a video that had been sitting
+  // paused since page load, because the old `getPlayState` answered from
+  // `intendedPlayState` (the last thing broadcast) instead of the element. A
+  // receiver neither pauses for `buffering` nor lets its pause hold act on it,
+  // so the joiner's fresh tab autoplayed and pulled the whole room into play.
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/video/BV199W9zEEcH",
+    pathname: "/video/BV199W9zEEcH",
+    title: "New Video_哔哩哔哩",
+    video: {
+      currentTime: 6.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  // The load-time buffer pause was broadcast, so the intent latched to it.
+  runtimeState.intendedPlayState = "buffering";
+  runtimeState.pauseStartedAt = 8_000;
+  runtimeState.pauseClassifiedAsBuffer = true;
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    // 1.7s after the pause: past the window, so this is a real pause.
+    getMonotonicNow: () => 9_700,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 7,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getCurrentSharePayload()?.playback?.playState,
+      "paused",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller still reports buffering inside the buffer-pause window", () => {
+  // The other polarity: a genuine player hiccup must NOT be shared as `paused`,
+  // or sharing mid-stall would stop the room.
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/video/BV199W9zEEcH",
+    pathname: "/video/BV199W9zEEcH",
+    title: "New Video_哔哩哔哩",
+    video: {
+      currentTime: 6.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.intendedPlayState = "buffering";
+  runtimeState.pauseStartedAt = 8_000;
+  runtimeState.pauseClassifiedAsBuffer = true;
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    // 0.5s after the pause: still inside the window.
+    getMonotonicNow: () => 8_500,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 7,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getCurrentSharePayload()?.playback?.playState,
+      "buffering",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
 test("share controller keeps playback snapshot while switching to another shared video in-room", () => {
   const dom = installDomStub({
     href: "https://www.bilibili.com/video/BV199W9zEEcH",
@@ -120,6 +212,8 @@ test("share controller keeps playback snapshot while switching to another shared
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
     getFestivalSnapshot: () => null,
@@ -165,6 +259,8 @@ test("share controller resolves bangumi season pages through page snapshot", asy
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 3,
     getFestivalSnapshot: () => null,
@@ -209,6 +305,8 @@ test("share controller does not reuse cached bangumi snapshot synchronously", ()
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 4,
     getFestivalSnapshot: () => ({
@@ -253,6 +351,8 @@ test("share controller reuses matching cached bangumi snapshot for current page 
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 5,
     getFestivalSnapshot: () => ({
@@ -301,6 +401,8 @@ test("share controller reuses cached bangumi snapshot by active episode id witho
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 6,
     getFestivalSnapshot: () => ({
@@ -348,6 +450,8 @@ test("share controller reuses cached bangumi snapshot by active cid without titl
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
     getFestivalSnapshot: () => ({
@@ -395,6 +499,8 @@ test("share controller rejects same-title cached bangumi snapshot from another p
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 6,
     getFestivalSnapshot: () => ({
@@ -440,6 +546,8 @@ test("share controller rejects cached bangumi snapshot on festival page", () => 
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 8,
     getFestivalSnapshot: () => ({
@@ -483,6 +591,8 @@ test("share controller reuses cached festival snapshot across trailing slash pat
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 9,
     getFestivalSnapshot: () => ({
@@ -543,6 +653,8 @@ test("share controller reports the room's base rate while a catch-up is running"
       return 1;
     },
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
     getFestivalSnapshot: () => null,
@@ -586,6 +698,8 @@ test("share controller falls back to the element rate with no catch-up running",
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
     getFestivalSnapshot: () => null,
@@ -599,6 +713,269 @@ test("share controller falls back to the element rate with no catch-up running",
       controller.getCurrentSharePayload()?.playback?.playbackRate,
       1.5,
     );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("stops falling back to the frozen festival address bar once a snapshot has resolved", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/festival/MyMuji?bvid=BVfrozen",
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+  // The festival snapshot resolves the video actually playing, then goes away —
+  // the navigation controller clears it on every autoplay-next so the bridge
+  // re-resolves. During that window the address bar still names the video the
+  // page was OPENED with, which is not what is playing.
+  let snapshot: {
+    videoId: string;
+    url: string;
+    title: string;
+    updatedAt: number;
+    pathname?: string;
+    pageUrl?: string;
+  } | null = {
+    videoId: "BVplaying:2",
+    url: "https://www.bilibili.com/video/BVplaying?cid=2",
+    title: "Playing Video",
+    updatedAt: 1_000,
+    pathname: "/festival/MyMuji",
+    pageUrl: "https://www.bilibili.com/festival/MyMuji?bvid=BVfrozen",
+  };
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => snapshot,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVplaying?cid=2",
+    );
+
+    snapshot = null;
+
+    // Answering `null` ("not known yet") is what routes callers to their
+    // unresolved-identity paths. Answering `/video/BVfrozen` instead reads as a
+    // different, non-shared video and gets the page force-paused.
+    assert.equal(controller.getSharedVideo(), null);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("still resolves the festival address bar before any snapshot has resolved", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/festival/MyMuji?bvid=BVshared&cid=99",
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVshared?cid=99",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("uses the festival address bar again after leaving and returning to the page", () => {
+  const festivalUrl =
+    "https://www.bilibili.com/festival/MyMuji?bvid=BVentry&cid=1";
+  const dom = installDomStub({
+    href: festivalUrl,
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+  let snapshot: {
+    videoId: string;
+    url: string;
+    title: string;
+    updatedAt: number;
+    pathname?: string;
+    pageUrl?: string;
+  } | null = {
+    videoId: "BVplaying:2",
+    url: "https://www.bilibili.com/video/BVplaying?cid=2",
+    title: "Playing Video",
+    updatedAt: 1_000,
+    pathname: "/festival/MyMuji",
+    pageUrl: festivalUrl,
+  };
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => snapshot,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVplaying?cid=2",
+    );
+    snapshot = null;
+    assert.equal(controller.getSharedVideo(), null);
+
+    // The navigation controller reports the departure immediately. This must
+    // reset the visit even when no video lookup occurs on the page in between.
+    controller.observePageVisit("https://www.bilibili.com/video/BVaway");
+    Object.assign(window.location, {
+      href: "https://www.bilibili.com/video/BVaway",
+      pathname: "/video/BVaway",
+    });
+
+    // Returning through the exact same share link is a new page visit: before
+    // its first snapshot, the entry bvid/cid is correct and must be usable.
+    Object.assign(window.location, {
+      href: festivalUrl,
+      pathname: "/festival/MyMuji",
+    });
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVentry?cid=1",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("uses a new festival share URL before that page visit resolves a snapshot", () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/festival/MyMuji?bvid=BVold&cid=1",
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+  const snapshot: {
+    videoId: string;
+    url: string;
+    title: string;
+    updatedAt: number;
+    pathname?: string;
+    pageUrl?: string;
+  } = {
+    videoId: "BVplaying:2",
+    url: "https://www.bilibili.com/video/BVplaying?cid=2",
+    title: "Playing Video",
+    updatedAt: 1_000,
+    pathname: "/festival/MyMuji",
+    pageUrl: "https://www.bilibili.com/festival/MyMuji?bvid=BVold&cid=1",
+  };
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => snapshot,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVplaying?cid=2",
+    );
+    // Festival autoplay never changes location.href, so a different query on
+    // the same pathname denotes a new share-link visit, not another video in the
+    // old visit. Its entry identity is valid until the new snapshot resolves.
+    Object.assign(window.location, {
+      href: "https://www.bilibili.com/festival/MyMuji?bvid=BVnew&cid=3",
+    });
+    assert.equal(
+      controller.getSharedVideo()?.url,
+      "https://www.bilibili.com/video/BVnew?cid=3",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("discards a festival snapshot refresh that resolves after the page visit changes", async () => {
+  const festivalUrl =
+    "https://www.bilibili.com/festival/MyMuji?bvid=BVold&cid=1";
+  const dom = installDomStub({
+    href: festivalUrl,
+    pathname: "/festival/MyMuji",
+    title: "MyMuji_哔哩哔哩",
+  });
+  const runtimeState = createContentRuntimeState();
+  let resolveBridge!: (value: {
+    videoId: string;
+    url: string;
+    title: string;
+  }) => void;
+  const bridgeResult = new Promise<{
+    videoId: string;
+    url: string;
+    title: string;
+  }>((resolve) => {
+    resolveBridge = resolve;
+  });
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 1,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => bridgeResult,
+    debugLog: () => {},
+  });
+
+  try {
+    const pendingRefresh = controller.refreshFestivalSnapshot(0);
+    const awayUrl = "https://www.bilibili.com/video/BVaway";
+    controller.observePageVisit(awayUrl);
+    Object.assign(window.location, {
+      href: awayUrl,
+      pathname: "/video/BVaway",
+    });
+    resolveBridge({
+      videoId: "BVold:1",
+      url: "https://www.bilibili.com/video/BVold?cid=1",
+      title: "Old Visit",
+    });
+
+    assert.equal(await pendingRefresh, null);
   } finally {
     dom.restore();
   }

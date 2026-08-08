@@ -6,6 +6,7 @@ import {
   type RuntimeIndexReaperStore,
 } from "../src/runtime-index-reaper.js";
 import type { AttachedSession, Session } from "../src/types.js";
+import { seatSession } from "./runtime-seat-helpers.js";
 
 const REDIS_URL = process.env.REDIS_URL;
 
@@ -65,18 +66,11 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
   const session = createSession("session-offline", "offline-node");
 
   try {
-    runtimeStore.registerSession(session);
-    runtimeStore.markSessionJoinedRoom(session.id, "ROOM01");
-    session.roomCode = "ROOM01";
-    session.memberId = "member-offline";
-    session.memberToken = "token-offline";
-    runtimeStore.registerSession(session);
-    runtimeStore.addMember(
-      "ROOM01",
-      "member-offline",
-      session,
-      "token-offline",
-    );
+    await seatSession(runtimeStore, session, {
+      roomCode: "ROOM01",
+      memberId: "member-offline",
+      memberToken: "token-offline",
+    });
     await runtimeStore.heartbeatNode({
       instanceId: "offline-node",
       version: "test-version",
@@ -90,15 +84,11 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
       health: "ok",
     });
 
-    // The seat writes above are write-behind: they update this node's own maps
-    // synchronously and queue the shared write behind them. Reading the cluster
-    // index back without flushing races that queue — and the failure is silent
-    // and partial, because the queue drains in order: the session write lands
-    // (so `listClusterSessions` is right) while the room-index write is still
-    // pending (so `countClusterActiveRooms` reads 0). Flush is the ordering
-    // barrier for "my own writes must be visible to the read I am about to do".
-    await runtimeStore.flush?.();
-
+    // `seatSession` above carries the write-behind barrier: without it the read
+    // below races the queue, and the failure is silent and partial, because the
+    // queue drains in order — the session write lands (so `listClusterSessions`
+    // is right) while the room-index write is still pending (so
+    // `countClusterActiveRooms` reads 0).
     assert.equal((await runtimeStore.listClusterSessions()).length, 1);
     assert.equal(await runtimeStore.countClusterActiveRooms(), 1);
 
@@ -111,19 +101,8 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
     const cleanedSessions = await reaper.sweep();
     assert.equal(cleanedSessions, 1);
 
-    let remainingSessions = -1;
-    let remainingRooms = -1;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      remainingSessions = (await runtimeStore.listClusterSessions()).length;
-      remainingRooms = await runtimeStore.countClusterActiveRooms();
-      if (remainingSessions === 0 && remainingRooms === 0) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-
-    assert.equal(remainingSessions, 0);
-    assert.equal(remainingRooms, 0);
+    assert.equal((await runtimeStore.listClusterSessions()).length, 0);
+    assert.equal(await runtimeStore.countClusterActiveRooms(), 0);
     // The offline node's members are gone, but their identity is not: those
     // clients are alive and reconnecting to a surviving node, and they must
     // come back as the same members (#234). The token is what lets them.
@@ -134,18 +113,7 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
       "member-offline",
     );
 
-    let remainingStatuses: Awaited<
-      ReturnType<typeof runtimeStore.listNodeStatuses>
-    > = [];
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await reaper.sweep();
-      remainingStatuses = await runtimeStore.listNodeStatuses(currentTime);
-      if (remainingStatuses.length === 0) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.deepEqual(remainingStatuses, []);
+    assert.deepEqual(await runtimeStore.listNodeStatuses(currentTime), []);
   } finally {
     await reaper.stop();
     await runtimeStore.close();
@@ -184,18 +152,11 @@ test("runtime index reaper tells the rooms it emptied to rebuild", async (t) => 
 
   try {
     for (const [index, session] of [first, second].entries()) {
-      runtimeStore.registerSession(session);
-      runtimeStore.markSessionJoinedRoom(session.id, "ROOM41");
-      session.roomCode = "ROOM41";
-      session.memberId = `member-dead-${index}`;
-      session.memberToken = `token-dead-${index}`;
-      runtimeStore.registerSession(session);
-      runtimeStore.addMember(
-        "ROOM41",
-        session.memberId,
-        session,
-        session.memberToken,
-      );
+      await seatSession(runtimeStore, session, {
+        roomCode: "ROOM41",
+        memberId: `member-dead-${index}`,
+        memberToken: `token-dead-${index}`,
+      });
     }
     await runtimeStore.heartbeatNode({
       instanceId: "offline-node",
@@ -210,11 +171,9 @@ test("runtime index reaper tells the rooms it emptied to rebuild", async (t) => 
       health: "ok",
     });
 
-    // Same write-behind barrier as the test above: the sweep reads the cluster
-    // index, so the seats must have actually landed in it or it finds nothing to
-    // clean and returns 0.
-    await runtimeStore.flush?.();
-
+    // Same write-behind barrier as the test above, carried by `seatSession`:
+    // the sweep reads the cluster index, so the seats must have actually landed
+    // in it or it finds nothing to clean and returns 0.
     currentTime += 200;
     assert.equal(await reaper.sweep(), 2);
 

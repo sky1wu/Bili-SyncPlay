@@ -116,6 +116,25 @@ export function createPlaybackBindingController(args: {
       sharerEndedFlushTimerId = null;
     }
   };
+  const queuePauseIfCurrent = (
+    video: HTMLVideoElement,
+    shouldStillPause: () => boolean,
+  ): void => {
+    const playbackContextGeneration =
+      args.runtimeState.playbackContextGeneration;
+    window.setTimeout(() => {
+      if (
+        playbackContextGeneration !==
+          args.runtimeState.playbackContextGeneration ||
+        getVideoElement() !== video ||
+        video.paused ||
+        !shouldStillPause()
+      ) {
+        return;
+      }
+      pauseVideo(video);
+    }, 0);
+  };
   const clearActivePauseClassification = () => {
     args.runtimeState.pauseStartedAt = 0;
     args.runtimeState.pauseClassifiedAsBuffer = false;
@@ -128,9 +147,30 @@ export function createPlaybackBindingController(args: {
    */
   const armBufferPauseUpgrade = (video: HTMLVideoElement) => {
     clearBufferUpgradeTimer();
+    // The premise is "this element, still in the pause I classified, still in
+    // the membership I was armed under" — which is exactly what
+    // `playerSessionGeneration` tracks, so it is the only context check needed.
+    //
+    // Not the ROOM's generation: sharing your own video switches the shared url
+    // and bumps that counter, which killed this upgrade on every share and left
+    // the room on a stale `buffering` (#258). And not a captured room CODE
+    // either: `ROOM01 → null → ROOM01` inside the window restores the captured
+    // value while the leave has already ended the session the pause belonged to.
+    const playerSessionGeneration = args.runtimeState.playerSessionGeneration;
+    const classifiedPauseStartedAt = args.runtimeState.pauseStartedAt;
     pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
       pauseBufferUpgradeTimerId = null;
-      if (!video.paused) {
+      if (
+        playerSessionGeneration !== args.runtimeState.playerSessionGeneration
+      ) {
+        return;
+      }
+      if (
+        getVideoElement() !== video ||
+        !video.paused ||
+        !args.runtimeState.pauseClassifiedAsBuffer ||
+        args.runtimeState.pauseStartedAt !== classifiedPauseStartedAt
+      ) {
         return;
       }
       args.runtimeState.pauseClassifiedAsBuffer = false;
@@ -140,6 +180,11 @@ export function createPlaybackBindingController(args: {
       void args.broadcastPlayback(video, "pause");
     }, args.bufferPauseUpgradeMs);
   };
+  // A bare freshness check is safe here only because "never" is
+  // `GESTURE_NEVER_AT`, not `0`: on the monotonic clock a `0` default is
+  // *document start*, so this would answer true for the first
+  // `userGestureGraceMs` of every page — precisely when a freshly navigated tab
+  // is autoplaying and every guard below is what must stop it.
   const hasRecentUserGesture = () =>
     monotonicNow() - args.runtimeState.lastUserGestureAt <
     args.userGestureGraceMs;
@@ -154,16 +199,16 @@ export function createPlaybackBindingController(args: {
   // The user just PERSISTENTLY selected a playback speed (Shift+1 / Shift+2).
   // Hold-to-fast-forward is deliberately not one — see `isRateControlGesture`.
   //
-  // The `> 0` check is defensive, not load-bearing today: the field starts at 0
-  // and `performance.now()` starts near it, so a bare freshness check would read
-  // as true for the first `userGestureGraceMs` of the page — but
-  // `hasRecentUserGestureInPlayer` has the same 0 default and the same window,
-  // so that span is already covered by it and the difference is unobservable.
-  // Kept so the two cannot drift apart if either default or window changes.
+  // This used to carry a `lastRateControlGestureAt > 0` presence check, on the
+  // reasoning that the sibling `hasRecentUserGestureInPlayer` "already covered"
+  // the page's opening `userGestureGraceMs`. That was backwards: the sibling had
+  // the same `0` default and so was *itself* true across that span rather than
+  // covering it. The sentinel is now `GESTURE_NEVER_AT`, which makes every one of
+  // these freshness checks answer correctly on its own, so the presence check is
+  // gone rather than duplicated into a second source of truth.
   const hasRecentRateControlGesture = () =>
-    args.runtimeState.lastRateControlGestureAt > 0 &&
     monotonicNow() - args.runtimeState.lastRateControlGestureAt <
-      args.userGestureGraceMs;
+    args.userGestureGraceMs;
   // A FRESH in-player play intent: an in-player gesture that also postdates the
   // last forced pause. While the page bridge resolves, the unconfirmed-context
   // hold force-pauses (updating `lastForcedPauseAt`); the SAME click that
@@ -303,8 +348,8 @@ export function createPlaybackBindingController(args: {
         at: monotonicNow(),
       };
       if (kind === "seek") {
-        // One gesture produces `seeking` AND `seeked`, and the `seeking`
-        // broadcast in between writes `intendedPlayState` back to `playing`.
+        // One gesture produces `seeking` and `seeked`, and the `seeking`
+        // broadcast can write `intendedPlayState` back to `playing`.
         // Re-snapshotting on `seeked` would therefore record the write-back
         // rather than the origin, erasing a `buffering` start. Only the first
         // event of a seek establishes the origin; the rest inherit it.
@@ -754,7 +799,41 @@ export function createPlaybackBindingController(args: {
     args.debugLog(
       "Forced pause for non-shared video autoplay (in room, load paused)",
     );
+    const playbackContextGeneration =
+      args.runtimeState.playbackContextGeneration;
     window.setTimeout(() => {
+      // Re-check the premise before acting on it. This hold is decided on the
+      // `play` event, but the navigation controller — the only layer that can
+      // tell a sharer's own autoplay-next from an arrival at someone else's
+      // video — classifies on a 400ms poll and can land in between. When it
+      // does, it authorizes this URL and undoes the hold; an unconditional
+      // pause here would then re-stop the very video the room is about to be
+      // advanced to, with nothing left to revert it (the classification for
+      // this navigation has already run).
+      if (
+        args.runtimeState.explicitNonSharedPlaybackUrl === normalizedCurrentUrl
+      ) {
+        args.debugLog(
+          `Dropped load-pause hold for ${normalizedCurrentUrl}; it was authorized before the pause landed`,
+        );
+        return;
+      }
+      // The navigation reset clears this marker before the queued callback can
+      // run. A reused <video> element may already be showing the room's shared
+      // video by then, so the captured element and URL are not enough to prove
+      // this callback still owns a pause. Only the hold that armed this exact
+      // callback may let it act; a cleared or replaced marker makes it stale.
+      if (
+        playbackContextGeneration !==
+          args.runtimeState.playbackContextGeneration ||
+        getVideoElement() !== video ||
+        args.runtimeState.nonSharerAutoplayHoldUrl !== normalizedCurrentUrl
+      ) {
+        args.debugLog(
+          `Dropped stale load-pause for ${normalizedCurrentUrl}; its hold no longer owns the current page`,
+        );
+        return;
+      }
       pauseVideo(video);
     }, 0);
     return true;
@@ -783,11 +862,20 @@ export function createPlaybackBindingController(args: {
     );
     args.runtimeState.intendedPlayState = "paused";
     args.runtimeState.lastForcedPauseAt = monotonicNow();
-    window.setTimeout(() => {
-      if (!video.paused) {
-        pauseVideo(video);
-      }
-    }, 0);
+    const roomCode = args.runtimeState.activeRoomCode;
+    queuePauseIfCurrent(video, () => {
+      const latestCurrentVideo = args.getSharedVideo();
+      return (
+        args.runtimeState.activeRoomCode === roomCode &&
+        !isKnownNonSharedVideo(latestCurrentVideo) &&
+        shouldForcePauseWhileWaitingForInitialRoomState({
+          activeRoomCode: args.runtimeState.activeRoomCode,
+          pendingRoomStateHydration:
+            args.runtimeState.pendingRoomStateHydration,
+          videoPaused: video.paused,
+        })
+      );
+    });
     return true;
   }
 
@@ -921,9 +1009,18 @@ export function createPlaybackBindingController(args: {
         args.runtimeState.explicitSeekOriginPlayState = null;
         args.runtimeState.lastExplicitPlaybackAction = null;
         args.runtimeState.lastForcedPauseAt = monotonicNow();
-        window.setTimeout(() => {
-          pauseVideo(video);
-        }, 0);
+        const blockedUrl = args.normalizeUrl(currentVideo?.url);
+        const gestureAtWhenBlocked = args.runtimeState.lastUserGestureAt;
+        queuePauseIfCurrent(video, () => {
+          const latestCurrentVideo = args.getSharedVideo();
+          return (
+            blockedUrl !== null &&
+            args.runtimeState.intendedPlayState !== "playing" &&
+            args.runtimeState.lastUserGestureAt === gestureAtWhenBlocked &&
+            isCurrentVideoShared(latestCurrentVideo) &&
+            args.normalizeUrl(latestCurrentVideo?.url) === blockedUrl
+          );
+        });
         return true;
       }
 
@@ -937,9 +1034,9 @@ export function createPlaybackBindingController(args: {
           `Re-paused non-sharer multi-part autoplay after shared video natural end`,
         );
         args.runtimeState.lastForcedPauseAt = monotonicNow();
-        window.setTimeout(() => {
-          pauseVideo(video);
-        }, 0);
+        queuePauseIfCurrent(video, () =>
+          shouldReapplyHoldAfterSharedVideoEnd(video, args.getSharedVideo()),
+        );
         return true;
       }
 
@@ -955,9 +1052,19 @@ export function createPlaybackBindingController(args: {
           `Forced pause hold reapplied after unexpected resume intended=${args.runtimeState.intendedPlayState}`,
         );
         args.runtimeState.lastForcedPauseAt = monotonicNow();
-        window.setTimeout(() => {
-          pauseVideo(video);
-        }, 0);
+        const remoteStopUrl = args.normalizeUrl(currentVideo.url);
+        const gestureAtWhenBlocked = args.runtimeState.lastUserGestureAt;
+        queuePauseIfCurrent(video, () => {
+          const latestCurrentVideo = args.getSharedVideo();
+          return (
+            remoteStopUrl !== null &&
+            args.runtimeState.intendedPlayState !== "playing" &&
+            args.runtimeState.lastUserGestureAt === gestureAtWhenBlocked &&
+            isCurrentVideoShared(latestCurrentVideo) &&
+            args.normalizeUrl(latestCurrentVideo?.url) === remoteStopUrl &&
+            args.hasRecentRemoteStopIntent(latestCurrentVideo?.url ?? "")
+          );
+        });
         return true;
       }
 
@@ -968,9 +1075,11 @@ export function createPlaybackBindingController(args: {
         args.runtimeState.explicitNonSharedPlaybackUrl = null;
         args.runtimeState.lastNonSharedGuardUrl = null;
         args.runtimeState.lastForcedPauseAt = monotonicNow();
-        window.setTimeout(() => {
-          pauseVideo(video);
-        }, 0);
+        queuePauseIfCurrent(video, () =>
+          shouldReapplyPauseHoldForUnconfirmedSharedVideo(
+            args.getSharedVideo(),
+          ),
+        );
         return true;
       }
 
@@ -1143,7 +1252,17 @@ export function createPlaybackBindingController(args: {
         if (hasRecentUserGesture()) {
           args.cancelActiveSoftApply(video, "seek");
         }
-        rememberExplicitUserAction("seek");
+        // Renew only the seek that is still current. Its completion extends the
+        // guard against browser autoplay after a paused scrub, while a `seeked`
+        // delayed by the decoder cannot overwrite a newer play/pause/rate
+        // action. A forced pause likewise invalidates the preceding seek.
+        const previousAction = args.runtimeState.lastExplicitUserAction;
+        if (
+          previousAction?.kind === "seek" &&
+          previousAction.at > args.runtimeState.lastForcedPauseAt
+        ) {
+          rememberExplicitUserAction("seek");
+        }
         scheduleBroadcast(video, "seeked", 120);
       },
       onRateChange: () => {

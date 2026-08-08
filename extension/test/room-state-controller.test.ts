@@ -84,6 +84,78 @@ test("room state controller stays silent for the local sharer's manual share", (
   setLocaleForTests(null);
 });
 
+test("every membership change ends the local player session", () => {
+  // #260 review. The buffer-pause upgrade and the classification it verifies
+  // itself against belong to the membership they were recorded under. A captured
+  // room code cannot express that: `ROOM01 -> null -> ROOM01` restores the
+  // captured value even though the leave already ended that session, so the
+  // pre-leave pause would be published into the new one. Joining from no room at
+  // all is the other case neither of the existing reset branches covers.
+  const harness = createController([]);
+  const armClassification = () => {
+    harness.runtimeState.lastBufferSignalAt = 5_000;
+    harness.runtimeState.pauseStartedAt = 5_100;
+    harness.runtimeState.pauseClassifiedAsBuffer = true;
+  };
+  const sessionOf = () => harness.runtimeState.playerSessionGeneration;
+
+  armClassification();
+  const beforeJoin = sessionOf();
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM01",
+    connected: true,
+    memberId: "self",
+    rttMs: 10,
+  });
+  assert.equal(sessionOf(), beforeJoin + 1, "joining starts a new session");
+  assert.equal(harness.runtimeState.pauseClassifiedAsBuffer, false);
+  assert.equal(harness.runtimeState.pauseStartedAt, 0);
+  assert.equal(harness.runtimeState.lastBufferSignalAt, 0);
+
+  // Leave, then rejoin the SAME room.
+  armClassification();
+  const beforeLeave = sessionOf();
+  harness.controller.handleSyncStatus({
+    roomCode: null,
+    connected: false,
+    memberId: null,
+    rttMs: null,
+  });
+  assert.equal(sessionOf(), beforeLeave + 1, "leaving ends the session");
+  assert.equal(harness.runtimeState.pauseClassifiedAsBuffer, false);
+
+  armClassification();
+  const beforeRejoin = sessionOf();
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM01",
+    connected: true,
+    memberId: "self",
+    rttMs: 10,
+  });
+  assert.equal(
+    sessionOf(),
+    beforeRejoin + 1,
+    "rejoining the same room is still a new session",
+  );
+  assert.equal(harness.runtimeState.pauseClassifiedAsBuffer, false);
+  assert.equal(harness.runtimeState.lastBufferSignalAt, 0);
+
+  // A status repeat for the same room is NOT a membership change: the local
+  // pause classification must survive it, or every heartbeat would wipe the
+  // evidence the pending upgrade checks itself against (#258).
+  armClassification();
+  const beforeRepeat = sessionOf();
+  harness.controller.handleSyncStatus({
+    roomCode: "ROOM01",
+    connected: true,
+    memberId: "self",
+    rttMs: 12,
+  });
+  assert.equal(sessionOf(), beforeRepeat, "same room is not a new session");
+  assert.equal(harness.runtimeState.pauseClassifiedAsBuffer, true);
+  assert.equal(harness.runtimeState.pauseStartedAt, 5_100);
+});
+
 test("switching rooms clears the previous room's hydration backoff", () => {
   // Both hydration backoff streaks measure how long *this* room's wait has been
   // failing, and the retry timer belongs to it too. Carried into a new room they

@@ -153,3 +153,40 @@ test("builds canonical episode and cid share URLs", () => {
     "https://www.bilibili.com/video/BV1abc?cid=22",
   );
 });
+
+test("refuses the frozen festival address bar once a snapshot has resolved before", () => {
+  // The festival player has moved on (the snapshot just got cleared for a
+  // re-resolve), but the address bar still carries the `?bvid=` the page was
+  // opened with. Answering with it would name a video that is not playing.
+  const video = resolvePageSharedVideo({
+    pageUrl: "https://www.bilibili.com/festival/MyMuji?bvid=BVfrozen",
+    pathname: "/festival/MyMuji",
+    documentTitle: "MyMuji_哔哩哔哩",
+    headingTitle: null,
+    currentPartTitle: null,
+    festivalSnapshot: null,
+    addressBarIdentityRefuted: true,
+  });
+
+  assert.equal(video, null);
+});
+
+test("still uses the festival address bar before any snapshot has resolved", () => {
+  // A festival page opened from a share link: the frozen `?bvid=` IS the video
+  // about to play, and until the bridge resolves it is the only identity there.
+  const video = resolvePageSharedVideo({
+    pageUrl: "https://www.bilibili.com/festival/MyMuji?bvid=BVshared&cid=99",
+    pathname: "/festival/MyMuji",
+    documentTitle: "MyMuji_哔哩哔哩",
+    headingTitle: null,
+    currentPartTitle: null,
+    festivalSnapshot: null,
+    addressBarIdentityRefuted: false,
+  });
+
+  assert.deepEqual(video, {
+    videoId: "BVshared:99",
+    url: "https://www.bilibili.com/video/BVshared?cid=99",
+    title: "MyMuji",
+  });
+});

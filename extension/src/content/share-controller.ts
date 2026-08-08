@@ -1,13 +1,19 @@
 import type { PlaybackState, SharedVideo } from "@bili-syncplay/protocol";
-import { getPlayState, getVideoElement } from "./player-binding";
+import { getReportedPlayState, getVideoElement } from "./player-binding";
 import {
   createSharePayload as createPageSharePayload,
   resolvePageSharedVideo,
 } from "./page-video";
 import type { ContentRuntimeState } from "./runtime-state";
+import {
+  isAddressBarOpaqueVideoUrl,
+  normalizePageVisitUrl,
+} from "./video-identity";
 
 export interface ShareController {
   getSharedVideo(): SharedVideo | null;
+  /** Records a real page visit so address-bar identity evidence cannot leak across it. */
+  observePageVisit(pageUrl: string): void;
   getCurrentPlaybackVideo(): Promise<SharedVideo | null>;
   getCurrentSharePayload(): {
     video: SharedVideo;
@@ -64,6 +70,10 @@ export function createShareController(args: {
   getActiveCorrectionBaseRate: (
     url: string | undefined | null,
   ) => number | null;
+  /** See {@link getReportedPlayState}; the share snapshot reports through it. */
+  bufferPauseUpgradeMs: number;
+  /** Monotonic clock, matching every other window measured in this codebase. */
+  getMonotonicNow: () => number;
   debugLog: (message: string) => void;
 }): ShareController {
   function canUsePageSnapshot(pathname: string): boolean {
@@ -93,6 +103,7 @@ export function createShareController(args: {
 
   function canUseMatchingCachedPageSnapshot(argsForMatch: {
     pathname: string;
+    pageUrl: string;
     snapshot: CachedPageSnapshot | null;
     currentPart: CurrentPartIdentity;
   }): boolean {
@@ -102,7 +113,10 @@ export function createShareController(args: {
     if (canUseCachedPageSnapshot(argsForMatch.pathname)) {
       return (
         argsForMatch.snapshot.pathname?.startsWith("/festival/") === true &&
-        hasMatchingCachedPagePathname(argsForMatch)
+        hasMatchingCachedPagePathname(argsForMatch) &&
+        argsForMatch.snapshot.pageUrl !== undefined &&
+        normalizePageVisitUrl(argsForMatch.snapshot.pageUrl) ===
+          normalizePageVisitUrl(argsForMatch.pageUrl)
       );
     }
     const snapshotEpId =
@@ -177,7 +191,19 @@ export function createShareController(args: {
             playbackRate:
               args.getActiveCorrectionBaseRate(sharedVideo.url) ??
               video.playbackRate,
-            playState: getPlayState(video, args.runtimeState.intendedPlayState),
+            // Same classification the broadcast funnel uses. A share snapshot
+            // is a full play state on the wire, so it must be able to say
+            // `paused` for a video that is paused — reporting `buffering` there
+            // tells receivers "we are trying to play", and they neither pause
+            // for it nor let their pause hold act on it (#258).
+            playState: getReportedPlayState({
+              video,
+              pauseClassifiedAsBuffer:
+                args.runtimeState.pauseClassifiedAsBuffer,
+              pauseStartedAt: args.runtimeState.pauseStartedAt,
+              now: args.getMonotonicNow(),
+              bufferPauseUpgradeMs: args.bufferPauseUpgradeMs,
+            }),
           }
         : null,
       actorId: args.runtimeState.localMemberId ?? "local",
@@ -186,6 +212,45 @@ export function createShareController(args: {
       // script measures a duration with reads the monotonic clock instead.
       updatedAt: Date.now(),
     });
+  }
+
+  /**
+   * The address-bar-opaque page visit whose in-player identity a snapshot has
+   * already resolved at least once. From that point on the address bar's frozen
+   * `?bvid=` is known to be stale — see
+   * {@link PageVideoSource.addressBarIdentityRefuted}.
+   *
+   * This is keyed by the full page URL, not only its pathname: after leaving a
+   * festival and opening the same route from another share link, the new
+   * `?bvid=&cid=` is the only correct identity until its first snapshot resolves.
+   * Observing any different page also clears the old visit, which covers leaving
+   * and returning through the same link.
+   */
+  let snapshotResolvedPageUrl: string | null = null;
+
+  function observePageVisit(pageUrl: string): void {
+    const pageVisitUrl = normalizePageVisitUrl(pageUrl);
+    if (
+      snapshotResolvedPageUrl !== null &&
+      snapshotResolvedPageUrl !== pageVisitUrl
+    ) {
+      snapshotResolvedPageUrl = null;
+    }
+  }
+
+  function rememberSnapshotResolved(pageUrl: string): void {
+    observePageVisit(pageUrl);
+    if (isAddressBarOpaqueVideoUrl(pageUrl)) {
+      snapshotResolvedPageUrl = normalizePageVisitUrl(pageUrl);
+    }
+  }
+
+  function hasRefutedAddressBarIdentity(pageUrl: string): boolean {
+    observePageVisit(pageUrl);
+    return (
+      isAddressBarOpaqueVideoUrl(pageUrl) &&
+      snapshotResolvedPageUrl === normalizePageVisitUrl(pageUrl)
+    );
   }
 
   function getSharedVideo(): SharedVideo | null {
@@ -197,6 +262,7 @@ export function createShareController(args: {
       festivalSnapshot &&
       canUseMatchingCachedPageSnapshot({
         pathname,
+        pageUrl,
         snapshot: festivalSnapshot,
         currentPart,
       })
@@ -206,6 +272,9 @@ export function createShareController(args: {
             title: festivalSnapshot.title,
           }
         : null;
+    if (matchingFestivalSnapshot) {
+      rememberSnapshotResolved(pageUrl);
+    }
     return resolvePageSharedVideo({
       pageUrl,
       pathname,
@@ -214,20 +283,38 @@ export function createShareController(args: {
       currentPartTitle: currentPart.title,
       pageSnapshot: matchingFestivalSnapshot,
       festivalSnapshot: matchingFestivalSnapshot,
+      addressBarIdentityRefuted: hasRefutedAddressBarIdentity(pageUrl),
     });
   }
 
   async function refreshFestivalSnapshot(
     maxAgeMs = args.festivalSnapshotTtlMs,
   ): Promise<SharedVideo | null> {
+    const pathname = window.location.pathname;
+    const pageUrl = window.location.href.split("#")[0];
+    observePageVisit(pageUrl);
     const nextSnapshot = await args.refreshFestivalBridge({
-      pathname: window.location.pathname,
-      pageUrl: window.location.href.split("#")[0],
+      pathname,
+      pageUrl,
       maxAgeMs,
     });
+    const currentPageUrl = window.location.href.split("#")[0];
+    if (
+      normalizePageVisitUrl(currentPageUrl) !== normalizePageVisitUrl(pageUrl)
+    ) {
+      observePageVisit(currentPageUrl);
+      args.debugLog(
+        `Discarded page video snapshot for stale visit ${pageUrl}; current page is ${currentPageUrl}`,
+      );
+      return null;
+    }
     if (!nextSnapshot) {
       return null;
     }
+    // Recorded here as well as in `getSharedVideo`: a refresh is the
+    // authoritative resolution, and it can happen while no caller is reading the
+    // cached snapshot — the address bar is stale from this moment on either way.
+    rememberSnapshotResolved(pageUrl);
     args.debugLog(
       `Page video snapshot detected id=${nextSnapshot.videoId} title=${nextSnapshot.title} url=${nextSnapshot.url}`,
     );
@@ -286,6 +373,7 @@ export function createShareController(args: {
 
   return {
     getSharedVideo,
+    observePageVisit,
     getCurrentPlaybackVideo,
     getCurrentSharePayload,
     resolveCurrentSharePayload,
