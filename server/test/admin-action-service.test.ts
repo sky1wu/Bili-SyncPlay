@@ -69,7 +69,7 @@ function createService(options: {
   requestAdminCommand: Parameters<
     typeof createAdminActionService
   >[0]["requestAdminCommand"];
-  deleteRoom?: (roomCode: string) => Promise<void>;
+  deleteRoom?: (roomCode: string) => Promise<boolean>;
   deleteRuntimeRoom?: (roomCode: string) => void;
   publishRoomDeleted?: (roomCode: string) => Promise<void>;
   auditLogService?: ReturnType<typeof createAuditLogService>;
@@ -82,7 +82,7 @@ function createService(options: {
       updateRoom: async () => {
         throw new Error("updateRoom should not be called in this test");
       },
-      deleteRoom: options.deleteRoom ?? (async () => {}),
+      deleteRoom: options.deleteRoom ?? (async () => true),
       listRooms: async () => [],
       countRooms: async () => 0,
       isReady: async () => true,
@@ -213,6 +213,7 @@ test("admin action service keeps room state when closeRoom cannot disconnect eve
     }),
     deleteRoom: async () => {
       deletedPersistedRoom = true;
+      return true;
     },
     deleteRuntimeRoom: () => {
       deletedRuntimeRoom = true;

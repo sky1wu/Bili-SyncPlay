@@ -513,11 +513,19 @@ export function createRoomService(options: {
       return null;
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
-      await roomStore.deleteRoom(code);
+      const deletedHere = await roomStore.deleteRoom(code);
       // Counted here as well as in the sweep: a room read between its expiry
       // instant and the next pass dies on this path instead, and leaving it out
       // would make reclamations look like they trail room creations forever.
-      options.metricsCollector?.recordRoomsExpiredDeleted(1);
+      //
+      // Only the caller whose delete actually removed the record counts it.
+      // Concurrent readers all see the same expired snapshot and all reach this
+      // delete — and the reaper's sweep can be one of them — so counting every
+      // arrival would meter one room several times, which is the exact defect
+      // this counter exists to remove (#254 review).
+      if (deletedHere) {
+        options.metricsCollector?.recordRoomsExpiredDeleted(1);
+      }
       // Same helper as the reaper: it refuses to tear down a code that has
       // already been recycled, and queues a failed teardown for retry.
       await collectRuntimeStateForDeletedRooms([code]);

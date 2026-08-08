@@ -177,10 +177,13 @@ return "ok"
 // sweep runs. Doing both here also keeps deleteRoom from throwing after the
 // body is already gone, which would abort the caller's downstream cleanup and
 // leave other nodes serving a room that no longer exists.
+// Returns the DEL count, not "ok": concurrent readers of the same expired room
+// all reach this script, and the caller has to be able to tell which one of them
+// actually removed the body. ZREM stays unconditional — the index entry must go
+// even when the body was already collected by whoever got here first.
 const DELETE_ROOM_LUA = `
 redis.call("ZREM", KEYS[2], ARGV[1])
-redis.call("DEL", KEYS[1])
-return "ok"
+return redis.call("DEL", KEYS[1])
 `;
 
 // Candidates come from the score range itself, so rooms that never expire are
@@ -713,13 +716,14 @@ export async function createRedisRoomStore(
       return { ok: true, room: nextRoom };
     },
     async deleteRoom(code) {
-      await redis.eval(
+      const deleted = await redis.eval(
         DELETE_ROOM_LUA,
         2,
         roomKey(code),
         roomsByExpiryKey,
         code,
       );
+      return Number(deleted) > 0;
     },
     async deleteExpiredRooms(currentTime) {
       // Candidates come from the index, so on a database that predates it the

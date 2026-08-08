@@ -37,7 +37,12 @@ export type RoomStore = {
     expectedVersion: number,
     patch: PersistedRoomPatch,
   ) => Promise<RoomUpdateResult>;
-  deleteRoom: (code: string) => Promise<void>;
+  /**
+   * Removes the room record. Idempotent, and reports whether THIS call is the
+   * one that removed it: concurrent readers of the same expired room all reach
+   * the delete, and only the winner may be counted as having reclaimed a room.
+   */
+  deleteRoom: (code: string) => Promise<boolean>;
   /**
    * Deletes every expired room and returns their codes.
    *
@@ -172,8 +177,8 @@ export function createInMemoryRoomStore(
       rooms.set(code, nextRoom);
       return { ok: true, room: cloneRoom(nextRoom) };
     },
-    async deleteRoom(code): Promise<void> {
-      rooms.delete(code);
+    async deleteRoom(code): Promise<boolean> {
+      return rooms.delete(code);
     },
     async deleteExpiredRooms(currentTime): Promise<string[]> {
       const deletedCodes: string[] = [];

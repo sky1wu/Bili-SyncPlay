@@ -5030,3 +5030,65 @@ test("room service meters a room reclaimed by the lazy read path", async () => {
   assert.equal(await service.deleteExpiredRooms(), 0);
   assert.deepEqual(reclaimed, [1, 0]);
 });
+
+test("room service counts one reclaimed room when concurrent readers race the same expiry", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const reclaimed: number[] = [];
+  let releaseDeletes!: () => void;
+  const deletesHeld = new Promise<void>((resolve) => {
+    releaseDeletes = resolve;
+  });
+  let heldDeletes = 0;
+  const roomStore = {
+    ...baseRoomStore,
+    // Both readers take their expired snapshot, then both park here before
+    // either delete lands — the interleaving a shared Redis makes routine, and
+    // the one an idempotent delete cannot distinguish on its own.
+    async deleteRoom(code: string) {
+      heldDeletes += 1;
+      await deletesHeld;
+      return baseRoomStore.deleteRoom(code);
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    metricsCollector: {
+      recordRoomsExpiredDeleted: (roomCount) => reclaimed.push(roomCount),
+    },
+    now: () => currentTime,
+    createRoomCode: () => "ROOM01",
+  });
+
+  const owner = createSession("owner");
+  const { room } = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+
+  // `getRoomStateByCode` reads through `resolveRoom` with no admission lock, so
+  // two of them genuinely overlap; concurrent joins would serialise instead.
+  currentTime = 7_000;
+  const reads = [
+    service.getRoomStateByCode(room.code),
+    service.getRoomStateByCode(room.code),
+  ];
+
+  while (heldDeletes < 2) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  releaseDeletes();
+  assert.deepEqual(await Promise.all(reads), [null, null]);
+
+  // One room died; only the delete that actually removed the record counts it.
+  assert.deepEqual(reclaimed, [1]);
+});

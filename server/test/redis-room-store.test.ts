@@ -1221,3 +1221,42 @@ test("redis room store reports codes whose index entry outlived the room body", 
     await store.close();
   }
 });
+
+test("redis room store reports which delete removed the room and still drops the index entry", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("delone");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const room = await store.createRoom({
+      code: "DELONE",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    assert.equal(await redis.zscore(roomsKey, room.code), "inf");
+
+    // The delete is idempotent, so both a losing concurrent reader and the
+    // reaper can arrive after the room is already gone. Only the call that
+    // actually removed the body may be counted as reclaiming a room.
+    assert.equal(await store.deleteRoom(room.code), true);
+    assert.equal(await store.deleteRoom(room.code), false);
+    assert.equal(await store.getRoom(room.code), null);
+    assert.equal(await redis.zscore(roomsKey, room.code), null);
+
+    // An index entry whose body is already gone must still be dropped, and must
+    // not be reported as a room this call reclaimed.
+    await redis.zadd(roomsKey, "inf", "DELTWO");
+    assert.equal(await store.deleteRoom("DELTWO"), false);
+    assert.equal(await redis.zscore(roomsKey, "DELTWO"), null);
+  } finally {
+    await redis.del(roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});
