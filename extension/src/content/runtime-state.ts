@@ -109,18 +109,26 @@ export interface ContentRuntimeState {
    */
   playbackContextGeneration: number;
   /**
-   * Invalidates delayed work that captured an older PAGE/player context.
+   * Invalidates delayed work whose premise is "this page's `<video>` element,
+   * inside THIS membership of a room".
    *
-   * Deliberately separate from [[playbackContextGeneration]]: a room-level
-   * shared-url switch does not end the pause the local `<video>` element is
-   * sitting in, so delayed work whose premise is purely local must not be
-   * dropped by it. The buffer-pause upgrade is exactly that work — it re-reads
-   * the element and re-broadcasts what it finds — and sharing your own video
-   * always switches the shared url, so reading the room-scoped counter there
-   * killed the upgrade on every share and left the room on a stale `buffering`
-   * (#258). Only a real navigation (via [[resetUserGestureState]]) bumps this.
+   * Deliberately separate from [[playbackContextGeneration]] in both directions,
+   * because those two answer different questions:
+   *
+   * - A room-level shared-url switch does not end the pause the element is
+   *   sitting in. Sharing your own video always switches the shared url, so
+   *   pinning the buffer-pause upgrade to the room counter killed it on every
+   *   share and left the room on a stale `buffering` (#258).
+   * - But joining, leaving or switching rooms DOES end the session that work was
+   *   scheduled for, even though the page never changed. Comparing the room
+   *   *code* instead is not enough: `ROOM01 → null → ROOM01` inside the window
+   *   restores the captured value, and the pre-leave pause would be published
+   *   into the new session.
+   *
+   * Bumped by [[resetUserGestureState]] (a real navigation) and by every change
+   * of `activeRoomCode` (a new membership), through [[invalidatePlayerSession]].
    */
-  playerContextGeneration: number;
+  playerSessionGeneration: number;
   intendedPlayState: PlaybackState["playState"];
   intendedPlaybackRate: number;
   lastLocalIntentAt: number;
@@ -347,11 +355,10 @@ export interface ContentRuntimeState {
  */
 export function resetUserGestureState(state: ContentRuntimeState): void {
   invalidatePlaybackContext(state);
-  // A navigation replaces the page's player context as well as the room's, and
-  // it is the ONLY thing that does. The pause fields cleared below describe the
-  // element this page is leaving, so delayed work anchored on them (the
-  // buffer-pause upgrade) must go with them.
-  state.playerContextGeneration += 1;
+  // A navigation ends the page's player session as well as the room's playback
+  // context. The pause classification it clears describes the element this page
+  // is leaving, so delayed work anchored on it goes with it.
+  invalidatePlayerSession(state);
   state.lastUserGestureAt = GESTURE_NEVER_AT;
   state.lastUserGestureInPlayerAt = GESTURE_NEVER_AT;
   state.lastRateControlGestureAt = GESTURE_NEVER_AT;
@@ -363,13 +370,33 @@ export function resetUserGestureState(state: ContentRuntimeState): void {
   state.suppressedLocalEndPauseUrl = null;
   state.suppressedLocalEndPauseUntil = 0;
   state.nonSharerAutoplayHoldUrl = null;
-  state.lastBufferSignalAt = 0;
-  state.pauseStartedAt = 0;
-  state.pauseClassifiedAsBuffer = false;
 }
 
 export function invalidatePlaybackContext(state: ContentRuntimeState): void {
   state.playbackContextGeneration += 1;
+}
+
+/**
+ * End the current player session: this page's `<video>` element as seen by this
+ * membership of a room. Call it on a real navigation and on every change of
+ * `activeRoomCode` (join, leave, switch).
+ *
+ * It drops the buffer-pause classification with the generation, because those
+ * fields are the premise the pending upgrade verifies itself against and they
+ * are just as session-bound: `lastBufferSignalAt` only exists to attribute the
+ * NEXT pause within `bufferSignalWindowMs` to a stall, so carrying it into a new
+ * membership lets that room's first pause borrow the previous room's `waiting`
+ * and go out as `buffering`; and a classification carried across would make the
+ * new room's `video:share` snapshot say `buffering` with no armed upgrade left
+ * to correct it. What must survive is narrower: the same classification across
+ * our OWN share confirming, which changes no room code and is not a session
+ * boundary (#258).
+ */
+export function invalidatePlayerSession(state: ContentRuntimeState): void {
+  state.playerSessionGeneration += 1;
+  state.lastBufferSignalAt = 0;
+  state.pauseStartedAt = 0;
+  state.pauseClassifiedAsBuffer = false;
 }
 
 export function createContentRuntimeState(): ContentRuntimeState {
@@ -385,7 +412,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     hasReceivedInitialRoomState: false,
     pendingRoomStateHydration: true,
     playbackContextGeneration: 0,
-    playerContextGeneration: 0,
+    playerSessionGeneration: 0,
     intendedPlayState: "paused",
     intendedPlaybackRate: 1,
     lastLocalIntentAt: 0,

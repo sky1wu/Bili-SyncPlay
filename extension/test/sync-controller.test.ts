@@ -2077,6 +2077,48 @@ test("sync controller reports paused for a paused video whose last broadcast was
   assert.equal(latchedPayload.playState, "paused");
 });
 
+test("sync controller suppresses the echo of a remote buffering applied to an already-paused element", async () => {
+  // #260 review. Applying a remote `buffering` never starts playback, so on an
+  // element that is already paused the apply's own `canplay`/`seeking` echoes
+  // report `paused` — the only thing that element can say about itself. The
+  // programmatic signature says `buffering`, and judging the two incompatible
+  // let the echo escape and broadcast `paused` back at a room that was merely
+  // buffering, stopping everyone in it.
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({ paused: true, readyState: 4, currentTime: 40 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.hasReceivedInitialRoomState = true;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  // The state left behind by applying a remote `buffering`.
+  harness.runtimeState.intendedPlayState = "buffering";
+  harness.runtimeState.programmaticApplySignature = {
+    url: sharedVideo.url,
+    playState: "buffering",
+    currentTime: 40,
+    playbackRate: 1,
+  };
+  harness.runtimeState.programmaticApplyAt = 20_000;
+  harness.runtimeState.programmaticApplyUntil = 20_700;
+  harness.runtimeState.programmaticApplyScope = "all";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_100);
+
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.deepEqual(harness.runtimeMessages, []);
+});
+
 test("sync controller suppresses local end-pause broadcasts from non-sharer autoplay guard", async () => {
   const harness = createControllerHarness();
   const sharedVideo = {

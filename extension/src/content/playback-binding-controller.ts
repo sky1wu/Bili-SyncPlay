@@ -147,30 +147,21 @@ export function createPlaybackBindingController(args: {
    */
   const armBufferPauseUpgrade = (video: HTMLVideoElement) => {
     clearBufferUpgradeTimer();
-    // This upgrade has two premises, and it must verify BOTH — it re-reads the
-    // local element, and it broadcasts what it finds to a room.
+    // The premise is "this element, still in the pause I classified, still in
+    // the membership I was armed under" — which is exactly what
+    // `playerSessionGeneration` tracks, so it is the only context check needed.
     //
-    // Element/page side: `playerContextGeneration`, which only a real navigation
-    // moves. Reading `playbackContextGeneration` here instead tied the upgrade to
-    // the ROOM's generation, and sharing your own video switches the shared url —
-    // so the upgrade was dropped by the very event that had just published the
-    // `buffering` it exists to correct (#258).
-    //
-    // Room side: the room CODE, not that generation. A room switch or leave
-    // resets the playback sync state while the page and the element carry on
-    // unchanged, so without this the timer armed in room A would fire into room
-    // B and broadcast this page's old pause over whatever B is playing. The room
-    // code is the honest discriminator: it is untouched by our own share
-    // confirming (the case #258 needed to survive) and necessarily changes on a
-    // switch or leave (`room-state-controller` resets on both).
-    const playerContextGeneration = args.runtimeState.playerContextGeneration;
-    const armedRoomCode = args.runtimeState.activeRoomCode;
+    // Not the ROOM's generation: sharing your own video switches the shared url
+    // and bumps that counter, which killed this upgrade on every share and left
+    // the room on a stale `buffering` (#258). And not a captured room CODE
+    // either: `ROOM01 → null → ROOM01` inside the window restores the captured
+    // value while the leave has already ended the session the pause belonged to.
+    const playerSessionGeneration = args.runtimeState.playerSessionGeneration;
     const classifiedPauseStartedAt = args.runtimeState.pauseStartedAt;
     pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
       pauseBufferUpgradeTimerId = null;
       if (
-        playerContextGeneration !== args.runtimeState.playerContextGeneration ||
-        args.runtimeState.activeRoomCode !== armedRoomCode
+        playerSessionGeneration !== args.runtimeState.playerSessionGeneration
       ) {
         return;
       }

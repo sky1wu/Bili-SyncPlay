@@ -4,6 +4,7 @@ import type { SharedVideo } from "@bili-syncplay/protocol";
 import {
   createContentRuntimeState,
   invalidatePlaybackContext,
+  invalidatePlayerSession,
   resetUserGestureState,
 } from "../src/content/runtime-state";
 import { installClockStubs } from "./clock-stubs";
@@ -3329,9 +3330,11 @@ test("playback binding controller drops a buffer-pause upgrade after a room swit
     assert.notEqual(upgradeTimer, undefined);
     broadcasts.length = 0;
 
-    // What a room switch does (`room-state-controller` handleSyncStatus): the
-    // room code moves, and the playback sync state is reset.
+    // What a room switch does (`room-state-controller.handleSyncStatus`): the
+    // room code moves, the player session ends, and the playback sync state is
+    // reset.
     runtimeState.activeRoomCode = "ROOM02";
+    invalidatePlayerSession(runtimeState);
     invalidatePlaybackContext(runtimeState);
     now = 6_600;
     upgradeTimer?.cb();
