@@ -230,6 +230,18 @@ test("metrics collector counts reclaimed rooms apart from reaper sweeps", async 
   // process and a wedged reaper.
   const initial = await metrics.render();
   assert.match(initial, /^bili_syncplay_rooms_expired_deleted_total 0$/m);
+  // Both outcomes pre-seeded, so "never failed" is distinguishable from
+  // "metric absent" on the panel whose whole job is telling a sweeping reaper
+  // from a stopped one.
+  for (const result of ["ok", "error"]) {
+    assert.match(
+      initial,
+      new RegExp(
+        `^bili_syncplay_room_reaper_sweeps_total\\{result="${result}"\\} 0$`,
+        "m",
+      ),
+    );
+  }
 
   // HELP is the only description a scraper or an operator reading /metrics
   // gets, and this counter is fed by the lazy read path as well as by reaper
@@ -252,6 +264,22 @@ test("metrics collector counts reclaimed rooms apart from reaper sweeps", async 
 
   const rendered = await metrics.render();
   assert.match(rendered, /^bili_syncplay_rooms_expired_deleted_total 5$/m);
+
+  // Sweep liveness is a separate series on purpose: both counters above stay
+  // flat on a healthy but idle reaper, and the lazy read path can keep the
+  // reclaimed count climbing after the reaper has died.
+  metrics.recordRoomReaperSweep("ok");
+  metrics.recordRoomReaperSweep("ok");
+  metrics.recordRoomReaperSweep("error");
+  const swept = await metrics.render();
+  assert.match(
+    swept,
+    /^bili_syncplay_room_reaper_sweeps_total\{result="ok"\} 2$/m,
+  );
+  assert.match(
+    swept,
+    /^bili_syncplay_room_reaper_sweeps_total\{result="error"\} 1$/m,
+  );
   assert.equal(
     rendered.includes(
       'bili_syncplay_events_total{event="room_expired_deleted"} 2',

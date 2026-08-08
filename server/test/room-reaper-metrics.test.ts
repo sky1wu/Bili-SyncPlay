@@ -53,15 +53,18 @@ test("a reaper sweep inside a running server moves the reclaimed-rooms counter",
   }
   const metricsUrl = `http://127.0.0.1:${address.port}/metrics`;
 
-  async function scrapeReclaimedRooms(): Promise<number> {
+  async function scrape(pattern: RegExp): Promise<number> {
     const response = await fetch(metricsUrl);
     assert.equal(response.status, 200);
-    const match = (await response.text()).match(
-      /^bili_syncplay_rooms_expired_deleted_total (\d+)$/m,
-    );
-    assert.notEqual(match, null, "counter missing from /metrics");
+    const match = (await response.text()).match(pattern);
+    assert.notEqual(match, null, `counter missing from /metrics: ${pattern}`);
     return Number(match![1]);
   }
+
+  const scrapeReclaimedRooms = () =>
+    scrape(/^bili_syncplay_rooms_expired_deleted_total (\d+)$/m);
+  const scrapeSweeps = () =>
+    scrape(/^bili_syncplay_room_reaper_sweeps_total\{result="ok"\} (\d+)$/m);
 
   try {
     // No "starts at 0" assertion: the reaper is already sweeping by the time
@@ -79,6 +82,9 @@ test("a reaper sweep inside a running server moves the reclaimed-rooms counter",
 
     assert.equal(reclaimed, 1);
     assert.equal(await roomStore.getRoom("ROOM01"), null);
+    // The liveness counter has to reach /metrics through the same wiring, and
+    // it is the one that keeps moving once there is nothing left to collect.
+    assert.equal((await scrapeSweeps()) > 0, true);
   } finally {
     await server.close();
   }

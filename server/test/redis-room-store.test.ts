@@ -121,7 +121,10 @@ test("redis room reaper deletes expired rooms and drops their membership", async
     });
     assert.equal(expiring.ok, true);
 
-    assert.equal((await store.deleteExpiredRooms(10)).length, 1);
+    assert.equal(
+      (await store.deleteExpiredRooms(10)).deletedRoomCodes.length,
+      1,
+    );
     assert.equal(await store.getRoom(room.code), null);
     assert.equal(await redis.zscore(roomsKey, room.code), null);
     assert.equal(await store.countRooms({ includeExpired: true }), 0);
@@ -153,7 +156,10 @@ test("redis room reaper rescores rather than deletes a room whose expiry was cle
     // it up as a candidate and must repair it instead of deleting the room.
     await redis.zadd(roomsKey, "10", room.code);
 
-    assert.equal((await store.deleteExpiredRooms(10)).length, 0);
+    assert.equal(
+      (await store.deleteExpiredRooms(10)).deletedRoomCodes.length,
+      0,
+    );
     assert.ok(await store.getRoom(room.code));
     assert.equal(await redis.zscore(roomsKey, room.code), "inf");
   } finally {
@@ -197,7 +203,10 @@ test("redis room store migrates a database that predates the sorted set", async 
     assert.equal(await redis.zscore(roomsKey, "OLDTWO"), "70");
     assert.equal(await store.countRooms({ includeExpired: true }), 2);
     assert.equal(await store.countRooms({ includeExpired: false }), 1);
-    assert.equal((await store.deleteExpiredRooms(100)).length, 1);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      1,
+    );
   } finally {
     await redis.del(
       `${namespace}:room:OLDONE`,
@@ -719,7 +728,10 @@ test("redis room reaper waits for the migration pass before its first sweep", as
     );
 
     store = await createRedisRoomStore(REDIS_URL, { namespace });
-    assert.equal((await store.deleteExpiredRooms(100)).length, 1);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      1,
+    );
     assert.equal(await redis.exists(`${namespace}:room:NOREAD`), 0);
     assert.equal(await redis.zscore(roomsKey, "NOREAD"), null);
   } finally {
@@ -747,7 +759,10 @@ test("redis room reaper does not reconcile again after the migration pass", asyn
       now: () => clock,
     });
     // Settle the migration pass first, so what follows can only be a later one.
-    assert.equal((await store.deleteExpiredRooms(100)).length, 0);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      0,
+    );
 
     // Written straight to Redis afterwards, exactly as a node on an older
     // build would: expired, but with no membership for the reaper's range
@@ -762,12 +777,18 @@ test("redis room reaper does not reconcile again after the migration pass", asyn
     // Well past the interval the pass used to be re-triggered on, so a tick
     // that still reconciled would be free to do so here.
     clock += 900_000 * 4;
-    assert.equal((await store.deleteExpiredRooms(100)).length, 0);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      0,
+    );
     assert.equal(await redis.exists(`${namespace}:room:LATEBD`), 1);
 
     // The reconciler's timer is what collects it, one tick later.
     await store.reconcileRoomIndex();
-    assert.equal((await store.deleteExpiredRooms(100)).length, 1);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      1,
+    );
     assert.equal(await redis.exists(`${namespace}:room:LATEBD`), 0);
   } finally {
     await redis.del(`${namespace}:room:LATEBD`, roomsKey);
@@ -849,7 +870,10 @@ test("redis room store keeps working when one room body is corrupt", async (t) =
       rooms.map((listed) => listed.code),
       ["GOODEX"],
     );
-    assert.equal((await store.deleteExpiredRooms(100)).length, 1);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      1,
+    );
     assert.equal(await redis.exists(`${namespace}:room:GOODEX`), 0);
 
     // The corrupt body is left alone rather than silently dropped.
@@ -934,7 +958,10 @@ test("redis room store skips bodies whose fields are the wrong shape", async (t)
       rooms.map((listed) => listed.code),
       ["GOODEX"],
     );
-    assert.equal((await store.deleteExpiredRooms(100)).length, 1);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      1,
+    );
     assert.equal(await redis.exists(`${namespace}:room:GOODEX`), 0);
 
     // The unusable bodies are left alone, not silently destroyed.
@@ -987,7 +1014,10 @@ test("redis room reaper survives a body corrupted into a JSON scalar", async (t)
     );
     await redis.zadd(roomsKey, "20", "VICTIM");
 
-    assert.equal((await store.deleteExpiredRooms(100)).length, 1);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      1,
+    );
     assert.equal(await redis.exists(`${namespace}:room:VICTIM`), 0);
     // The scalar body is left alone rather than deleted on a guess.
     assert.equal(await redis.exists(`${namespace}:room:SCALAR`), 1);
@@ -1110,7 +1140,10 @@ test("redis room store isolates a room key of the wrong type", async (t) => {
     assert.equal(await redis.zscore(roomsKey, doomed.code), null);
 
     // The genuinely expired room is still collected.
-    assert.equal((await store.deleteExpiredRooms(100)).length, 1);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      1,
+    );
     assert.equal(await redis.exists(`${namespace}:room:EXPIRE`), 0);
     // The wrong-type key itself is left alone rather than destroyed.
     assert.equal(await redis.exists(`${namespace}:room:WRONGT`), 1);
@@ -1169,7 +1202,10 @@ test("redis room reaper survives a candidate whose key turns the wrong type", as
 
     // Without the guard the script raises on the first candidate and the room
     // ordered after it is never collected.
-    assert.equal((await store.deleteExpiredRooms(100)).length, 1);
+    assert.equal(
+      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
+      1,
+    );
     assert.equal(await redis.exists(`${namespace}:room:REAPME`), 0);
     assert.equal(await redis.zscore(roomsKey, doomed.code), null);
     assert.equal(await redis.exists(`${namespace}:room:BADKEY`), 1);
@@ -1213,7 +1249,12 @@ test("redis room store reports codes whose index entry outlived the room body", 
     // Reporting it is what gets its runtime state collected. Staying silent
     // stranded that state, and since a code is only handed out once nothing
     // remains under it, the code stopped being allocatable altogether.
-    assert.deepEqual(await store.deleteExpiredRooms(10), ["NOBODY"]);
+    const swept = await store.deleteExpiredRooms(10);
+    // Reported, so its runtime state still gets collected — but apart from the
+    // real deletions: no room died here, and metering it as one would inflate
+    // reclamations with manual cleanups and corruption (#254 review).
+    assert.deepEqual(swept.orphanedIndexCodes, ["NOBODY"]);
+    assert.deepEqual(swept.deletedRoomCodes, []);
     assert.equal(await redis.zscore(roomsKey, "NOBODY"), null);
   } finally {
     await redis.del(roomsKey);

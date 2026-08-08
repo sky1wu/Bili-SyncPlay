@@ -28,6 +28,17 @@ export type RoomUpdateResult =
   | { ok: true; room: PersistedRoom }
   | { ok: false; reason: "not_found" | "version_conflict" };
 
+/** What one expiry sweep removed, split by whether a room was actually there. */
+export type ExpiredRoomSweep = {
+  /** Rooms whose body this pass deleted. */
+  deletedRoomCodes: string[];
+  /**
+   * Index entries this pass dropped whose room body was already gone. They
+   * still owe runtime teardown, but no room died here.
+   */
+  orphanedIndexCodes: string[];
+};
+
 export type RoomStore = {
   createRoom: (input: CreatePersistedRoomInput) => Promise<PersistedRoom>;
   getRoom: (code: string) => Promise<PersistedRoom | null>;
@@ -44,13 +55,20 @@ export type RoomStore = {
    */
   deleteRoom: (code: string) => Promise<boolean>;
   /**
-   * Deletes every expired room and returns their codes.
+   * Deletes every expired room and reports what the pass found, split by
+   * category.
    *
    * Codes, not a count: the runtime store keeps per-room state that outlives a
    * disconnect (member tokens, since #234) and nothing else collects it once the
    * room is gone, so the caller has to be told WHICH rooms died (#237 review).
+   *
+   * Split, because the two categories owe different things. Both need runtime
+   * teardown, but only the first is a room this pass reclaimed — an orphaned
+   * index entry (manual cleanup, an older build, corruption) never had a live
+   * room behind it, and counting it would put the reclamation metric back out
+   * of step with room creations (#254 review).
    */
-  deleteExpiredRooms: (now: number) => Promise<string[]>;
+  deleteExpiredRooms: (now: number) => Promise<ExpiredRoomSweep>;
   listRooms: (
     query: Pick<
       RoomListQuery,
@@ -180,15 +198,18 @@ export function createInMemoryRoomStore(
     async deleteRoom(code): Promise<boolean> {
       return rooms.delete(code);
     },
-    async deleteExpiredRooms(currentTime): Promise<string[]> {
-      const deletedCodes: string[] = [];
+    async deleteExpiredRooms(currentTime): Promise<ExpiredRoomSweep> {
+      const deletedRoomCodes: string[] = [];
       for (const [code, room] of rooms.entries()) {
         if (room.expiresAt !== null && room.expiresAt <= currentTime) {
           rooms.delete(code);
-          deletedCodes.push(code);
+          deletedRoomCodes.push(code);
         }
       }
-      return deletedCodes;
+      // A room and its index entry are the same Map entry here, so this
+      // implementation cannot produce an orphan; only the Redis store keeps
+      // the two apart.
+      return { deletedRoomCodes, orphanedIndexCodes: [] };
     },
     async listRooms(query) {
       const items = Array.from(rooms.values())

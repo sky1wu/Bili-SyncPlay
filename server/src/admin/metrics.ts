@@ -50,6 +50,11 @@ const RATE_LIMITED_MESSAGE_TYPES = [
   "sync:ping",
 ] as const;
 
+// Pre-seeded so a reaper that has never failed still exports an explicit zero:
+// an absent series and a healthy one must not look alike on the panel whose
+// whole job is telling "sweeping fine" from "not sweeping at all".
+const ROOM_REAPER_SWEEP_RESULTS = ["ok", "error"] as const;
+
 export type MonitoredMessageType =
   | "video:share"
   | "playback:update"
@@ -115,6 +120,13 @@ export type MetricsCollector = {
    * reaper is alive; that question belongs to the sweep event above.
    */
   recordRoomsExpiredDeleted: (roomCount: number) => void;
+  /**
+   * One expiry sweep finished. Incremented on EVERY pass, including the ones
+   * that found nothing — a sweep that collects no rooms is the normal state of
+   * a healthy reaper, so only a counter that moves regardless can tell "idle"
+   * from "stopped".
+   */
+  recordRoomReaperSweep: (result: "ok" | "error") => void;
   render: () => Promise<string>;
 };
 
@@ -222,6 +234,10 @@ export function createMetricsCollector(options: {
   };
   const roomsExpiredDeletedCounter: CounterMetric = {
     help: "Total rooms deleted after expiry, by a reaper sweep or by the lazy read path",
+    samples: new Map(),
+  };
+  const roomReaperSweepCounter: CounterMetric = {
+    help: "Total room expiry sweeps the reaper completed, grouped by outcome",
     samples: new Map(),
   };
   const messageDurationHistogram: HistogramMetric = {
@@ -485,6 +501,19 @@ export function createMetricsCollector(options: {
         "bili_syncplay_rooms_expired_deleted_total",
         ensureCounterSample(roomsExpiredDeletedCounter, {}).value,
       ),
+      // The reaper's liveness signal, and deliberately not derived from how
+      // many rooms it collected: an idle sweep and a dead timer look identical
+      // through the deletion counters, and with steady traffic the lazy read
+      // path can empty the expiry backlog before every sweep (#254 review).
+      "# HELP bili_syncplay_room_reaper_sweeps_total Total room expiry sweeps the reaper completed, grouped by outcome",
+      "# TYPE bili_syncplay_room_reaper_sweeps_total counter",
+      ...ROOM_REAPER_SWEEP_RESULTS.map((result) =>
+        formatMetricLine(
+          "bili_syncplay_room_reaper_sweeps_total",
+          ensureCounterSample(roomReaperSweepCounter, { result }).value,
+          { result },
+        ),
+      ),
       "# HELP bili_syncplay_ws_connection_rejected_total Total rejected websocket upgrades",
       "# TYPE bili_syncplay_ws_connection_rejected_total counter",
       formatMetricLine(
@@ -644,6 +673,9 @@ export function createMetricsCollector(options: {
         return;
       }
       incrementCounter(roomsExpiredDeletedCounter, {}, roomCount);
+    },
+    recordRoomReaperSweep(result) {
+      incrementCounter(roomReaperSweepCounter, { result });
     },
     render,
   };

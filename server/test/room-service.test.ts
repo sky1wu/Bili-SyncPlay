@@ -1051,7 +1051,7 @@ test("expiring a room collects the runtime state that outlives it", async () => 
   );
 
   currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
-  assert.equal(await service.deleteExpiredRooms(), 1);
+  assert.equal((await service.deleteExpiredRooms()).deletedRooms, 1);
 
   // The reaper is the only path that ever deletes a room nobody touches again.
   // If it leaves the runtime state behind, tokens pile up for every abandoned
@@ -4000,7 +4000,7 @@ test("reaper keeps collecting rooms when one runtime teardown fails", async () =
   currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
   // Both rooms are collected even though the first teardown throws — one
   // failure must not strand every room queued behind it.
-  assert.equal(await service.deleteExpiredRooms(), 2);
+  assert.equal((await service.deleteExpiredRooms()).deletedRooms, 2);
   assert.deepEqual(failedFor, ["ROOMF1"]);
   assert.equal(activeRooms.getRoom("ROOMF2"), null);
 });
@@ -4040,7 +4040,7 @@ test("retries a failed runtime teardown on the next reaper pass", async () => {
   await service.leaveRoomForSession(owner, "disconnect");
 
   currentTime += getDefaultPersistenceConfig().emptyRoomTtlMs + 1;
-  assert.equal(await service.deleteExpiredRooms(), 1);
+  assert.equal((await service.deleteExpiredRooms()).deletedRooms, 1);
   // The persisted room and its expiry index are already gone, so nothing else
   // will ever name this code again — a swallowed failure strands it for good.
   assert.equal(
@@ -4052,7 +4052,7 @@ test("retries a failed runtime teardown on the next reaper pass", async () => {
   teardowns.length = 0;
   // A later pass finds nothing newly expired, but must still work through what
   // it owes.
-  assert.equal(await service.deleteExpiredRooms(), 0);
+  assert.equal((await service.deleteExpiredRooms()).deletedRooms, 0);
   assert.deepEqual(teardowns, ["ROOMRT"]);
   assert.equal(activeRooms.getRoom("ROOMRT"), null);
 });
@@ -4977,7 +4977,7 @@ test("room service meters a reaper sweep by rooms, not by sweeps", async () => {
   }
 
   currentTime = 7_000;
-  assert.equal(await service.deleteExpiredRooms(), 2);
+  assert.equal((await service.deleteExpiredRooms()).deletedRooms, 2);
 
   // One sweep, two rooms. The reaper's log event fires once here, which is why
   // counting it cannot be compared against room creations.
@@ -5027,7 +5027,7 @@ test("room service meters a room reclaimed by the lazy read path", async () => {
   assert.equal(await roomStore.getRoom(room.code), null);
   assert.deepEqual(reclaimed, [1]);
   // The sweep that follows must not count the same room a second time.
-  assert.equal(await service.deleteExpiredRooms(), 0);
+  assert.equal((await service.deleteExpiredRooms()).deletedRooms, 0);
   assert.deepEqual(reclaimed, [1, 0]);
 });
 
@@ -5091,4 +5091,56 @@ test("room service counts one reclaimed room when concurrent readers race the sa
 
   // One room died; only the delete that actually removed the record counts it.
   assert.deepEqual(reclaimed, [1]);
+});
+
+test("room service tears down orphaned index codes without metering them as reclaimed rooms", async () => {
+  const currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const reclaimed: number[] = [];
+  const tornDown: string[] = [];
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  const roomStore = {
+    ...baseRoomStore,
+    // What the Redis sweep reports when one candidate had a live body and the
+    // other was an index entry whose body was already gone — manual cleanup, an
+    // older build, or corruption.
+    async deleteExpiredRooms() {
+      return {
+        deletedRoomCodes: ["REALRM"],
+        orphanedIndexCodes: ["ORPHAN"],
+      };
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+        tornDown.push(code);
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    metricsCollector: {
+      recordRoomsExpiredDeleted: (roomCount) => reclaimed.push(roomCount),
+    },
+    now: () => currentTime,
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  const swept = await service.deleteExpiredRooms();
+
+  // The orphan owes runtime teardown exactly like a real deletion — its code
+  // stays unallocatable until that state is gone (#237 review) …
+  assert.deepEqual(tornDown.sort(), ["ORPHAN", "REALRM"]);
+  // … but no room died under it, so metering it would put this counter back
+  // out of step with room creations (#254 review).
+  assert.deepEqual(reclaimed, [1]);
+  assert.deepEqual(swept, { deletedRooms: 1, orphanedIndexEntries: 1 });
 });

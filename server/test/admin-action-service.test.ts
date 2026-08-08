@@ -89,7 +89,10 @@ function createService(options: {
       saveRoom: async () => {
         throw new Error("saveRoom should not be called in this test");
       },
-      deleteExpiredRooms: async () => [],
+      deleteExpiredRooms: async () => ({
+        deletedRoomCodes: [],
+        orphanedIndexCodes: [],
+      }),
       createRoom: async () => {
         throw new Error("createRoom should not be called in this test");
       },

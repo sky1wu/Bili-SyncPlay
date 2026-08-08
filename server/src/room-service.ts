@@ -82,6 +82,15 @@ export type RoomServiceRuntimeStore = ActiveRoomRegistry &
  */
 export type LeaveRoomReason = "client-request" | "disconnect";
 
+/**
+ * What one expiry sweep did, counted. The two are reported apart because only
+ * the first is a reclaimed room — see `ExpiredRoomSweep` in `room-store`.
+ */
+export type ExpiredRoomSweepCounts = {
+  deletedRooms: number;
+  orphanedIndexEntries: number;
+};
+
 type JoinedRoomAccess = {
   session: Session;
   persistedRoom: PersistedRoom;
@@ -213,7 +222,7 @@ export function createRoomService(options: {
   getRoomStateByCode: (
     roomCode: string,
   ) => Promise<ReturnType<typeof roomStateOf> | null>;
-  deleteExpiredRooms: (currentTime?: number) => Promise<number>;
+  deleteExpiredRooms: (currentTime?: number) => Promise<ExpiredRoomSweepCounts>;
   teardownRoomRuntime: (code: string) => Promise<void>;
 } {
   const { config, persistence, roomStore, generateToken, logEvent } = options;
@@ -1900,21 +1909,33 @@ export function createRoomService(options: {
     },
 
     async deleteExpiredRooms(currentTime = now()) {
-      const deletedCodes = await roomStore.deleteExpiredRooms(currentTime);
-      // Only this pass's own codes. The backlog below is runtime cleanup owed
-      // for rooms whose persisted record died in an earlier pass — counting it
-      // would meter the same room twice.
-      options.metricsCollector?.recordRoomsExpiredDeleted(deletedCodes.length);
-      // Retries first, then this pass's own codes. The reaper is the only path
-      // that deletes a room nobody touches again, so it is also the only chance
-      // to collect the runtime state that outlives it — member tokens survive a
-      // disconnect on purpose (#234) — and once the persisted room is gone
-      // nothing will ever name that code again (#237 review).
+      const swept = await roomStore.deleteExpiredRooms(currentTime);
+      // Only rooms this pass actually deleted. NOT the orphaned index entries
+      // beside them — those never had a room behind them, so metering them
+      // would put this counter back out of step with room creations, which is
+      // the whole reason it exists (#254 review). NOT the backlog below either:
+      // that is runtime cleanup owed for rooms whose record died in an earlier
+      // pass, and counting it would meter the same room twice.
+      options.metricsCollector?.recordRoomsExpiredDeleted(
+        swept.deletedRoomCodes.length,
+      );
+      // Teardown, unlike the metric, owes both categories the same thing — an
+      // orphaned code still has runtime state under it and still cannot be
+      // handed out again until that state is gone (#237 review). Retries ride
+      // along first: the reaper is the only path that reaches a room nobody
+      // touches again, so it is also the only chance to collect the runtime
+      // state that outlives it (member tokens survive a disconnect on purpose,
+      // #234), and once the persisted room is gone nothing will ever name that
+      // code again.
       await collectRuntimeStateForDeletedRooms([
         ...pendingRuntimeTeardowns,
-        ...deletedCodes,
+        ...swept.deletedRoomCodes,
+        ...swept.orphanedIndexCodes,
       ]);
-      return deletedCodes.length;
+      return {
+        deletedRooms: swept.deletedRoomCodes.length,
+        orphanedIndexEntries: swept.orphanedIndexCodes.length,
+      };
     },
   };
 }

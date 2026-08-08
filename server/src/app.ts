@@ -286,6 +286,7 @@ export async function createSyncServer(
     intervalMs: persistenceConfig.roomCleanupIntervalMs,
     deleteExpiredRooms: roomService.deleteExpiredRooms,
     logEvent,
+    metricsCollector,
     now,
   });
   const nodeHeartbeatRuntimeStore = {
