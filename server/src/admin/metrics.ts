@@ -105,9 +105,14 @@ export type MetricsCollector = {
   observeRedisRoomEventBusPublishFailure: () => void;
   recordRoomEventPublishDropped: (eventType: RoomEventType) => void;
   /**
-   * Rooms collected by one expiry sweep. Counts ROOMS; the sibling
-   * `events_total{event="room_expired_deleted"}` counts SWEEPS, because the
-   * reaper logs once per pass no matter how many rooms that pass removed.
+   * Rooms reclaimed because they expired, by EITHER path: a reaper sweep, or
+   * the lazy delete a read performs on a room found already past its expiry.
+   * Counts ROOMS, unlike the sibling
+   * `bili_syncplay_events_total{event="room_expired_deleted"}`, which counts
+   * SWEEPS — the reaper logs once per pass no matter how many rooms it removed.
+   *
+   * Because the lazy path feeds this too, a growing counter does NOT prove the
+   * reaper is alive; that question belongs to the sweep event above.
    */
   recordRoomsExpiredDeleted: (roomCount: number) => void;
   render: () => Promise<string>;
@@ -216,7 +221,7 @@ export function createMetricsCollector(options: {
     samples: new Map(),
   };
   const roomsExpiredDeletedCounter: CounterMetric = {
-    help: "Total rooms deleted by the expiry reaper",
+    help: "Total rooms deleted after expiry, by a reaper sweep or by the lazy read path",
     samples: new Map(),
   };
   const messageDurationHistogram: HistogramMetric = {
@@ -470,8 +475,11 @@ export function createMetricsCollector(options: {
       ),
       // Rooms, not sweeps: events_total{event="room_expired_deleted"} counts
       // reaper passes that collected at least one room, which is a different
-      // unit from room_created_total and must not be rated against it.
-      "# HELP bili_syncplay_rooms_expired_deleted_total Total rooms deleted by the expiry reaper",
+      // unit from room_created_total and must not be rated against it. The HELP
+      // names both delete paths because whoever reads it off /metrics has only
+      // that line to go on, and reading this as reaper-only turns it into a
+      // liveness signal it cannot serve (#254 review).
+      "# HELP bili_syncplay_rooms_expired_deleted_total Total rooms deleted after expiry, by a reaper sweep or by the lazy read path",
       "# TYPE bili_syncplay_rooms_expired_deleted_total counter",
       formatMetricLine(
         "bili_syncplay_rooms_expired_deleted_total",

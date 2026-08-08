@@ -228,10 +228,19 @@ test("metrics collector counts reclaimed rooms apart from reaper sweeps", async 
   // Pre-seeded to 0 so "the reaper has not collected anything yet" is
   // distinguishable from "metric absent" — the difference between a young
   // process and a wedged reaper.
-  assert.match(
-    await metrics.render(),
-    /^bili_syncplay_rooms_expired_deleted_total 0$/m,
+  const initial = await metrics.render();
+  assert.match(initial, /^bili_syncplay_rooms_expired_deleted_total 0$/m);
+
+  // HELP is the only description a scraper or an operator reading /metrics
+  // gets, and this counter is fed by the lazy read path as well as by reaper
+  // sweeps. Describing it as reaper-only turns it into a liveness signal it
+  // cannot serve — the reaper can be dead while this still climbs.
+  const help = initial.match(
+    /^# HELP bili_syncplay_rooms_expired_deleted_total (.*)$/m,
   );
+  assert.notEqual(help, null);
+  assert.match(help![1], /reaper/);
+  assert.match(help![1], /lazy/);
 
   // Two sweeps, five rooms. The event counter these panels used to read says
   // 2 for exactly this history, which is why the room count needs its own
