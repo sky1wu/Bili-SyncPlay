@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SharedVideo } from "@bili-syncplay/protocol";
-import { createContentRuntimeState } from "../src/content/runtime-state";
+import {
+  createContentRuntimeState,
+  invalidatePlaybackContext,
+  invalidatePlayerSession,
+  resetUserGestureState,
+} from "../src/content/runtime-state";
 import { installClockStubs } from "./clock-stubs";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
+import { derivePlaybackSyncIntent } from "../src/content/playback-broadcast";
 import { createRoomStateController } from "../src/content/room-state-controller";
 import { createToastCoordinatorState } from "../src/content/toast";
 
@@ -231,6 +237,204 @@ test("playback binding controller preserves explicit seek intent across immediat
       kind: "seek",
       at: 1_100,
     });
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not revive a superseded seek when seeked arrives late", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "playing";
+  runtimeState.lastUserGestureAt = 1_000;
+  let now = 1_100;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    // A later play press supersedes the seek while the decoder is still waiting
+    // to emit `seeked` for it.
+    runtimeState.lastUserGestureAt = 2_500;
+    now = 2_550;
+    dom.listeners.get("play")?.(new Event("play"));
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "play",
+      at: 2_550,
+    });
+
+    now = 2_600;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "play",
+      at: 2_550,
+    });
+    assert.equal(
+      derivePlaybackSyncIntent({
+        eventSource: "seeked",
+        lastExplicitUserAction: runtimeState.lastExplicitUserAction,
+        lastForcedPauseAt: runtimeState.lastForcedPauseAt,
+        now,
+        userGestureGraceMs: 1_200,
+      }),
+      undefined,
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not renew a seek invalidated by a forced pause", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 1_000;
+  let now = 1_100;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 1_100,
+    });
+
+    // The forced pause invalidates the seek. A later gesture may make the old
+    // decoder completion look recordable, but must not turn it into new intent.
+    runtimeState.lastForcedPauseAt = 1_200;
+    runtimeState.lastUserGestureAt = 1_250;
+    now = 1_300;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 1_100,
+    });
+    assert.equal(
+      derivePlaybackSyncIntent({
+        eventSource: "seeked",
+        lastExplicitUserAction: runtimeState.lastExplicitUserAction,
+        lastForcedPauseAt: runtimeState.lastForcedPauseAt,
+        now,
+        userGestureGraceMs: 1_200,
+      }),
+      undefined,
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller keeps seek-triggered autoplay blocked through seeked", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const url = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = url;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  runtimeState.lastUserGestureAt = 1_000;
+  dom.video.paused = true;
+  let now = 1_100;
+  let pauseCalls = 0;
+  dom.video.pause = () => {
+    pauseCalls += 1;
+    dom.video.paused = true;
+  };
+  Object.assign(globalThis.window, {
+    setTimeout(callback: () => void) {
+      callback();
+      return 1;
+    },
+  });
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url,
+      title: "Shared",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (value) => value ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("seeking")?.(new Event("seeking"));
+
+    // The decoder finishes inside the gesture window, but the browser resumes
+    // after the original `seeking` record has aged out.
+    now = 2_100;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+    assert.deepEqual(runtimeState.lastExplicitUserAction, {
+      kind: "seek",
+      at: 2_100,
+    });
+    assert.equal(runtimeState.explicitSeekOriginPlayState, "paused");
+
+    now = 2_500;
+    dom.video.paused = false;
+    dom.listeners.get("play")?.(new Event("play"));
+
+    assert.equal(pauseCalls, 1);
+    assert.equal(runtimeState.lastExplicitUserAction, null);
   } finally {
     dom.restore();
   }
@@ -2933,6 +3137,216 @@ test("playback binding controller re-broadcasts paused after buffer-pause upgrad
   }
 });
 
+test("playback binding controller drops a buffer-pause upgrade from an older page context", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 0;
+  let now = 5_000;
+  const broadcasts: string[] = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const scheduledTimers: Array<{ cb: () => void; ms: number }> = [];
+  globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
+    if (typeof callback === "function") {
+      scheduledTimers.push({ cb: callback as () => void, ms: ms ?? 0 });
+    }
+    return scheduledTimers.length;
+  }) as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    now = 5_100;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+
+    const upgradeTimer = scheduledTimers.find((timer) => timer.ms === 1_500);
+    assert.notEqual(upgradeTimer, undefined);
+    broadcasts.length = 0;
+    // A navigation — the only thing that replaces the page's player context, and
+    // the reason this upgrade must not fire. A ROOM-level invalidation is a
+    // different question, covered by the test below.
+    resetUserGestureState(runtimeState);
+    upgradeTimer?.cb();
+    await Promise.resolve();
+
+    assert.deepEqual(broadcasts, []);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.restore();
+  }
+});
+
+test("playback binding controller keeps a buffer-pause upgrade across a room-level playback reset", async () => {
+  // The regression behind #258. Sharing your own video switches the room's
+  // shared url, which resets the playback sync state — and that reset used to
+  // take the pending buffer-pause upgrade with it. The room had just been told
+  // `buffering` by the share snapshot, and the upgrade is the only thing that
+  // ever corrects it to `paused`, so losing it here strands every member on a
+  // state the sharer left long ago.
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 0;
+  // A share happens inside a room, and that room does not change when our own
+  // share confirms — which is what lets the upgrade survive here.
+  runtimeState.activeRoomCode = "ROOM01";
+  let now = 5_000;
+  const broadcasts: string[] = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const scheduledTimers: Array<{ cb: () => void; ms: number }> = [];
+  globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
+    if (typeof callback === "function") {
+      scheduledTimers.push({ cb: callback as () => void, ms: ms ?? 0 });
+    }
+    return scheduledTimers.length;
+  }) as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    now = 5_100;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+
+    const upgradeTimer = scheduledTimers.find((timer) => timer.ms === 1_500);
+    assert.notEqual(upgradeTimer, undefined);
+    broadcasts.length = 0;
+
+    // What the share confirmation does: bump the room-scoped generation. The
+    // page, the element and the pause it is sitting in are all unchanged.
+    invalidatePlaybackContext(runtimeState);
+    now = 6_600;
+    upgradeTimer?.cb();
+    await Promise.resolve();
+
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+    assert.equal(broadcasts.includes("pause"), true);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.restore();
+  }
+});
+
+test("playback binding controller drops a buffer-pause upgrade after a room switch", async () => {
+  // The other half of the same premise (Codex review on #260). Switching rooms
+  // resets the playback sync state while the page and the `<video>` element
+  // carry on unchanged, so the page-scoped generation alone would let room A's
+  // timer fire into room B — re-broadcasting this page's old pause over whatever
+  // B is playing, and stopping every member of a room we just joined.
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 0;
+  runtimeState.activeRoomCode = "ROOM01";
+  let now = 5_000;
+  const broadcasts: string[] = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const scheduledTimers: Array<{ cb: () => void; ms: number }> = [];
+  globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
+    if (typeof callback === "function") {
+      scheduledTimers.push({ cb: callback as () => void, ms: ms ?? 0 });
+    }
+    return scheduledTimers.length;
+  }) as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    now = 5_100;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+
+    const upgradeTimer = scheduledTimers.find((timer) => timer.ms === 1_500);
+    assert.notEqual(upgradeTimer, undefined);
+    broadcasts.length = 0;
+
+    // What a room switch does (`room-state-controller.handleSyncStatus`): the
+    // room code moves, the player session ends, and the playback sync state is
+    // reset.
+    runtimeState.activeRoomCode = "ROOM02";
+    invalidatePlayerSession(runtimeState);
+    invalidatePlaybackContext(runtimeState);
+    now = 6_600;
+    upgradeTimer?.cb();
+    await Promise.resolve();
+
+    assert.deepEqual(broadcasts, []);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.restore();
+  }
+});
+
 test("playback binding controller suppresses the natural-end pause for a non-sharer", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
@@ -4270,6 +4684,301 @@ test("playback binding controller ends the catch-up for a keyboard speed shortcu
 
     assert.deepEqual(reasons, ["user-ratechange"]);
   } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller re-pauses a remote-stopped video on a page younger than the gesture grace", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  // No gesture has EVER been recorded: the background just pointed this tab at
+  // the room's new shared video (`chrome.tabs.update`), so the document is fresh
+  // and its monotonic clock reads well under `userGestureGraceMs`. The room says
+  // paused; the page's own load autoplay must still be caught. With a `0`
+  // sentinel `now - 0 < graceMs` reads as "the user just pressed play" and the
+  // tab runs on until the grace lapses — the 2-3s of unwanted playback (and the
+  // `playing` it broadcasts back to the room) this guards.
+  const pageAgeMs = 800;
+  let pausedByGuard = 0;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url: "https://www.bilibili.com/video/BVshared?p=1",
+      title: "Shared Video",
+    }),
+    hasRecentRemoteStopIntent: () => true,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => pageAgeMs,
+  });
+
+  try {
+    Object.assign(globalThis.window, {
+      setTimeout: (handler: () => void) => {
+        handler();
+        return 1;
+      },
+    });
+    dom.video.pause = () => {
+      pausedByGuard += 1;
+      dom.video.paused = true;
+    };
+    dom.video.paused = false;
+
+    controller.attachPlaybackListeners();
+    dom.listeners.get("play")?.(new Event("play"));
+
+    await Promise.resolve();
+
+    assert.equal(pausedByGuard, 1);
+    assert.equal(runtimeState.lastForcedPauseAt, pageAgeMs);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller drops a queued pause from an older playback context", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedUrl;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.intendedPlayState = "paused";
+  let pauseCalls = 0;
+  let queuedPause: (() => void) | null = null;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVshared:p1",
+      url: sharedUrl,
+      title: "Shared Video",
+    }),
+    hasRecentRemoteStopIntent: () => true,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    Object.assign(globalThis.window, {
+      setTimeout: (handler: () => void) => {
+        queuedPause = handler;
+        return 1;
+      },
+    });
+    dom.video.pause = () => {
+      pauseCalls += 1;
+      dom.video.paused = true;
+    };
+    dom.video.paused = false;
+
+    controller.attachPlaybackListeners();
+    dom.listeners.get("play")?.(new Event("play"));
+
+    assert.ok(queuedPause, "the remote-stop pause is queued");
+
+    // Only the playback context changes. The same element, shared URL, remote
+    // stop intent, gesture stamp, and intended state deliberately stay valid,
+    // so the helper's captured generation is the sole reason this old pause is
+    // dropped.
+    invalidatePlaybackContext(runtimeState);
+    queuedPause?.();
+
+    assert.equal(pauseCalls, 0);
+    assert.equal(dom.video.paused, false);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller drops a queued load-pause once the url gets authorized", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  runtimeState.pendingRoomStateHydration = false;
+  const nonSharedUrl = "https://www.bilibili.com/video/BVother?p=1";
+  let pauseCalls = 0;
+  let queuedPause: (() => void) | null = null;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "BVother:p1",
+      url: nonSharedUrl,
+      title: "Other Video",
+    }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 20_000,
+  });
+
+  try {
+    // Hold the pause instead of running it, so the navigation controller's
+    // classification can land in between — exactly the window it polls in.
+    Object.assign(globalThis.window, {
+      setTimeout: (handler: () => void) => {
+        queuedPause = handler;
+        return 1;
+      },
+    });
+    dom.video.pause = () => {
+      pauseCalls += 1;
+      dom.video.paused = true;
+    };
+    dom.video.paused = false;
+
+    controller.attachPlaybackListeners();
+    dom.listeners.get("play")?.(new Event("play"));
+    await Promise.resolve();
+
+    assert.equal(runtimeState.nonSharerAutoplayHoldUrl, nonSharedUrl);
+    assert.ok(queuedPause, "the pause is queued, not immediate");
+
+    // The navigation controller classified this as the sharer's own
+    // autoplay-next and authorized the url.
+    runtimeState.explicitNonSharedPlaybackUrl = nonSharedUrl;
+    queuedPause?.();
+
+    assert.equal(pauseCalls, 0);
+    assert.equal(dom.video.paused, false);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller drops a queued load-pause after navigation clears its hold", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedUrl = "https://www.bilibili.com/video/BVshared?p=1";
+  const nonSharedUrl = "https://www.bilibili.com/video/BVother?p=1";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedUrl;
+  runtimeState.pendingRoomStateHydration = false;
+  let currentVideo = {
+    videoId: "BVother:p1",
+    url: nonSharedUrl,
+    title: "Other Video",
+  };
+  let pauseCalls = 0;
+  let queuedPause: (() => void) | null = null;
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalPause = dom.video.pause;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => currentVideo,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 20_000,
+  });
+
+  try {
+    Object.assign(globalThis.window, {
+      setTimeout: (handler: () => void) => {
+        queuedPause = handler;
+        return 1;
+      },
+    });
+    dom.video.pause = () => {
+      pauseCalls += 1;
+      dom.video.paused = true;
+    };
+    dom.video.paused = false;
+
+    controller.attachPlaybackListeners();
+    dom.listeners.get("play")?.(new Event("play"));
+    await Promise.resolve();
+
+    assert.equal(runtimeState.nonSharerAutoplayHoldUrl, nonSharedUrl);
+    assert.ok(queuedPause, "the old page's pause is still queued");
+
+    // A navigation can run before a zero-delay timer that was queued by another
+    // due interval. The reset clears the old hold, while Bilibili reuses the same
+    // video element for the room's shared destination.
+    currentVideo = {
+      videoId: "BVshared:p1",
+      url: sharedUrl,
+      title: "Shared Video",
+    };
+    runtimeState.nonSharerAutoplayHoldUrl = null;
+    queuedPause?.();
+
+    assert.equal(pauseCalls, 0);
+    assert.equal(dom.video.paused, false);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.video.pause = originalPause;
     dom.restore();
   }
 });

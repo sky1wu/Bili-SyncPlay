@@ -1,6 +1,6 @@
 {
   "name": "@bili-syncplay/protocol",
-  "version": "1.3.2",
+  "version": "1.3.4",
   "private": true,
   "type": "module",
   "main": "dist/index.js",

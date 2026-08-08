@@ -20,6 +20,25 @@ export interface PageVideoSource {
     url: string;
     title: string;
   } | null;
+  /**
+   * Whether the address bar has been PROVEN stale as an identity for this page,
+   * so the `parseBilibiliVideoRef(pageUrl)` fallback below must not be used.
+   *
+   * A festival page keeps whatever `?bvid=` it was opened with while the player
+   * runs through the whole playlist, so once a snapshot has resolved even once
+   * we know the address bar names some earlier video — very likely not the one
+   * playing. The fallback then does not degrade gracefully: it answers with a
+   * confident, *wrong* `/video/<frozen bvid>` identity, which reads as "some
+   * other, non-shared video" and gets the page force-paused (and remote room
+   * states discarded as "not this page"). Answering `null` — "not known yet" —
+   * routes those callers to their unresolved-identity paths, which is what the
+   * situation actually is.
+   *
+   * Left false until a snapshot has resolved: a festival page opened from a
+   * share link carries `?bvid=A&cid=...` for the video it is about to play, and
+   * until the bridge resolves that is the only identity available.
+   */
+  addressBarIdentityRefuted?: boolean;
 }
 
 export interface VideoPlaybackSnapshot {
@@ -45,6 +64,10 @@ export function resolvePageSharedVideo(
       url: source.festivalSnapshot.url,
       title: source.festivalSnapshot.title,
     };
+  }
+
+  if (source.addressBarIdentityRefuted) {
+    return null;
   }
 
   const fallbackVideoRef = parseBilibiliVideoRef(source.pageUrl);

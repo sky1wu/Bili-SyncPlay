@@ -1,5 +1,28 @@
 import type { PlaybackState, RoomState } from "@bili-syncplay/protocol";
 
+/**
+ * "This never happened" for a gesture timestamp measured on the content
+ * script's MONOTONIC clock (`performance.now()`, zero at document start).
+ *
+ * It cannot be `0`. Every reader of these fields asks an elapsed-time question
+ * — `now - at >= graceMs` ("no recent gesture") or `now - at < graceMs` ("a
+ * gesture just happened") — and under the epoch clock these fields used before
+ * #231/#233 the `0` sentinel answered both correctly, because `Date.now() - 0`
+ * is ~56 years. On the monotonic clock `0` is *document start*, so for the
+ * first `graceMs` of every page `now - 0 < graceMs`: every guard reads "the
+ * user just did something" and the whole load-paused protection is off exactly
+ * when a fresh page is autoplaying. `-Infinity` restores "infinitely long ago"
+ * under both polarities, and stays correct however the guard is phrased.
+ *
+ * Use {@link hasGestureBeenRecorded} rather than `at > 0` to test for presence.
+ */
+export const GESTURE_NEVER_AT = Number.NEGATIVE_INFINITY;
+
+/** Whether a gesture timestamp holds a real observation (see {@link GESTURE_NEVER_AT}). */
+export function hasGestureBeenRecorded(at: number): boolean {
+  return Number.isFinite(at);
+}
+
 export interface FestivalVideoSnapshot {
   videoId: string;
   url: string;
@@ -78,10 +101,42 @@ export interface ContentRuntimeState {
   hydrationReady: boolean;
   hasReceivedInitialRoomState: boolean;
   pendingRoomStateHydration: boolean;
+  /**
+   * Invalidates delayed work that captured an older ROOM playback context —
+   * anything decided from the room's shared video, such as a queued load-pause
+   * or a broadcast in flight. A shared-url switch bumps it, because the decision
+   * that scheduled that work is the thing that just went stale.
+   */
+  playbackContextGeneration: number;
+  /**
+   * Invalidates delayed work whose premise is "this page's `<video>` element,
+   * inside THIS membership of a room".
+   *
+   * Deliberately separate from [[playbackContextGeneration]] in both directions,
+   * because those two answer different questions:
+   *
+   * - A room-level shared-url switch does not end the pause the element is
+   *   sitting in. Sharing your own video always switches the shared url, so
+   *   pinning the buffer-pause upgrade to the room counter killed it on every
+   *   share and left the room on a stale `buffering` (#258).
+   * - But joining, leaving or switching rooms DOES end the session that work was
+   *   scheduled for, even though the page never changed. Comparing the room
+   *   *code* instead is not enough: `ROOM01 → null → ROOM01` inside the window
+   *   restores the captured value, and the pre-leave pause would be published
+   *   into the new session.
+   *
+   * Bumped by [[resetUserGestureState]] (a real navigation) and by every change
+   * of `activeRoomCode` (a new membership), through [[invalidatePlayerSession]].
+   */
+  playerSessionGeneration: number;
   intendedPlayState: PlaybackState["playState"];
   intendedPlaybackRate: number;
   lastLocalIntentAt: number;
   lastLocalIntentPlayState: PlaybackState["playState"] | null;
+  /**
+   * Timestamp of the most recent document-level user gesture.
+   * {@link GESTURE_NEVER_AT} means never.
+   */
   lastUserGestureAt: number;
   /**
    * Timestamp of the most recent user gesture that lands inside the video player
@@ -90,6 +145,7 @@ export interface ContentRuntimeState {
    * popup that the document-level `lastUserGestureAt` also records. Used to
    * authorize manual playback of a non-shared video on a "load paused" page so a
    * stray gesture cannot wave the page-load autoplay through.
+   * {@link GESTURE_NEVER_AT} means never.
    */
   lastUserGestureInPlayerAt: number;
   /**
@@ -100,7 +156,8 @@ export interface ContentRuntimeState {
    * "load paused" pages, so speed keys must not feed it.
    *
    * This is the only positive evidence that something other than our own rate
-   * catch-up moved `playbackRate`; see `isRateControlGesture`. `0` means never.
+   * catch-up moved `playbackRate`; see `isRateControlGesture`.
+   * {@link GESTURE_NEVER_AT} means never.
    */
   lastRateControlGestureAt: number;
   lastExplicitPlaybackAction: ExplicitPlaybackAction | null;
@@ -297,9 +354,14 @@ export interface ContentRuntimeState {
  * into treating browser-initiated playback as a user action.
  */
 export function resetUserGestureState(state: ContentRuntimeState): void {
-  state.lastUserGestureAt = 0;
-  state.lastUserGestureInPlayerAt = 0;
-  state.lastRateControlGestureAt = 0;
+  invalidatePlaybackContext(state);
+  // A navigation ends the page's player session as well as the room's playback
+  // context. The pause classification it clears describes the element this page
+  // is leaving, so delayed work anchored on it goes with it.
+  invalidatePlayerSession(state);
+  state.lastUserGestureAt = GESTURE_NEVER_AT;
+  state.lastUserGestureInPlayerAt = GESTURE_NEVER_AT;
+  state.lastRateControlGestureAt = GESTURE_NEVER_AT;
   state.lastExplicitPlaybackAction = null;
   state.lastExplicitUserAction = null;
   state.explicitSeekOriginPlayState = null;
@@ -308,6 +370,33 @@ export function resetUserGestureState(state: ContentRuntimeState): void {
   state.suppressedLocalEndPauseUrl = null;
   state.suppressedLocalEndPauseUntil = 0;
   state.nonSharerAutoplayHoldUrl = null;
+}
+
+export function invalidatePlaybackContext(state: ContentRuntimeState): void {
+  state.playbackContextGeneration += 1;
+}
+
+/**
+ * End the current player session: this page's `<video>` element as seen by this
+ * membership of a room. Call it on a real navigation and on every change of
+ * `activeRoomCode` (join, leave, switch).
+ *
+ * It drops the buffer-pause classification with the generation, because those
+ * fields are the premise the pending upgrade verifies itself against and they
+ * are just as session-bound: `lastBufferSignalAt` only exists to attribute the
+ * NEXT pause within `bufferSignalWindowMs` to a stall, so carrying it into a new
+ * membership lets that room's first pause borrow the previous room's `waiting`
+ * and go out as `buffering`; and a classification carried across would make the
+ * new room's `video:share` snapshot say `buffering` with no armed upgrade left
+ * to correct it. What must survive is narrower: the same classification across
+ * our OWN share confirming, which changes no room code and is not a session
+ * boundary (#258).
+ */
+export function invalidatePlayerSession(state: ContentRuntimeState): void {
+  state.playerSessionGeneration += 1;
+  state.lastBufferSignalAt = 0;
+  state.pauseStartedAt = 0;
+  state.pauseClassifiedAsBuffer = false;
 }
 
 export function createContentRuntimeState(): ContentRuntimeState {
@@ -322,13 +411,15 @@ export function createContentRuntimeState(): ContentRuntimeState {
     hydrationReady: false,
     hasReceivedInitialRoomState: false,
     pendingRoomStateHydration: true,
+    playbackContextGeneration: 0,
+    playerSessionGeneration: 0,
     intendedPlayState: "paused",
     intendedPlaybackRate: 1,
     lastLocalIntentAt: 0,
     lastLocalIntentPlayState: null,
-    lastUserGestureAt: 0,
-    lastUserGestureInPlayerAt: 0,
-    lastRateControlGestureAt: 0,
+    lastUserGestureAt: GESTURE_NEVER_AT,
+    lastUserGestureInPlayerAt: GESTURE_NEVER_AT,
+    lastRateControlGestureAt: GESTURE_NEVER_AT,
     lastExplicitPlaybackAction: null,
     explicitNonSharedPlaybackUrl: null,
     suppressedLocalEndPauseUrl: null,

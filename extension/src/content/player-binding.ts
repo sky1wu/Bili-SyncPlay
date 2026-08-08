@@ -42,17 +42,91 @@ export function pauseVideo(video: HTMLVideoElement): void {
   video.pause();
 }
 
-export function getPlayState(
-  video: HTMLVideoElement,
-  intendedPlayState: PlaybackState["playState"],
-): PlaybackState["playState"] {
+/**
+ * Resume a video WE paused. The rejection is expected and swallowed by the
+ * caller's `onRejected`: `play()` returns a promise that rejects when the
+ * browser's autoplay policy refuses (no media engagement yet) or when a newer
+ * load/pause interrupts it, and an unhandled rejection would surface as a page
+ * error for something we can only report.
+ */
+export function playVideo(video: HTMLVideoElement): Promise<void> {
+  return Promise.resolve(video.play()).then(() => undefined);
+}
+
+/**
+ * What the element itself is doing, and nothing else.
+ *
+ * This deliberately does NOT consult `intendedPlayState`. It used to answer
+ * `buffering` for a paused element whenever the last broadcast had been
+ * `buffering`, which is a latch, not an observation: every broadcast writes
+ * `intendedPlayState` to the state it just sent, so one buffer-classified pause
+ * made every later read report `buffering` for a plainly paused video, for as
+ * long as it stayed paused. It also disarmed the bounded correction — the
+ * buffer-pause upgrade re-broadcasts through this function, so the upgrade
+ * published `buffering` again and could never reach `paused` (#258).
+ *
+ * A paused element is only reported as `buffering` through
+ * {@link getReportedPlayState}, whose window closes on its own — which is also
+ * why this stays module-private. Exporting it puts a way to publish a play state
+ * that skips the bounded classification back within reach, and the share
+ * snapshot doing exactly that is half of what #258 was.
+ */
+function getPlayState(video: HTMLVideoElement): PlaybackState["playState"] {
   if (!video.paused && video.readyState < 3) {
     return "buffering";
   }
   if (video.paused) {
-    return intendedPlayState === "buffering" ? "buffering" : "paused";
+    return "paused";
   }
   return "playing";
+}
+
+/**
+ * Whether a pause the classifier attributed to buffering is still young enough
+ * to be reported as `buffering` rather than `paused`.
+ *
+ * The window is what makes the claim falsifiable: a player hiccup resolves
+ * inside it, while an element still sitting paused when it elapses was never
+ * buffering. `armBufferPauseUpgrade` schedules the re-broadcast that carries the
+ * corrected state to the room once this returns false.
+ */
+export function isInsideBufferPauseWindow(args: {
+  pauseClassifiedAsBuffer: boolean;
+  pauseStartedAt: number;
+  now: number;
+  bufferPauseUpgradeMs: number;
+}): boolean {
+  return (
+    args.pauseClassifiedAsBuffer &&
+    args.pauseStartedAt > 0 &&
+    args.now - args.pauseStartedAt < args.bufferPauseUpgradeMs
+  );
+}
+
+/**
+ * The play state this client reports to the room: the element's own state, with
+ * a buffer-induced pause presented as `buffering` for the bounded window above.
+ *
+ * Every path that publishes a play state must go through here — the broadcast
+ * funnel, the `video:share` snapshot, and the programmatic-apply signatures
+ * compared against broadcasts — because a `buffering` published by one and a
+ * `paused` published by another describe the same element and cannot both be
+ * true. The share snapshot skipping this was how an indefinitely paused video
+ * was shared as `buffering`: receivers do not pause for `buffering`, so a
+ * joiner's fresh tab autoplayed and broadcast `playing` back to the room (#258).
+ */
+export function getReportedPlayState(args: {
+  video: HTMLVideoElement;
+  pauseClassifiedAsBuffer: boolean;
+  pauseStartedAt: number;
+  now: number;
+  bufferPauseUpgradeMs: number;
+}): PlaybackState["playState"] {
+  const playState = getPlayState(args.video);
+  if (playState !== "paused") {
+    return playState;
+  }
+  return isInsideBufferPauseWindow(args) ? "buffering" : "paused";
 }
 
 export function canApplyPlaybackImmediately(video: HTMLVideoElement): boolean {

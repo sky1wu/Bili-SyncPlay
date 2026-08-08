@@ -11,6 +11,7 @@ import {
   createMultiNodeTestKit,
   requestJson,
 } from "./multi-node-test-kit.js";
+import { seatSession } from "./runtime-seat-helpers.js";
 
 function createGhostSession(roomCode: string): Session {
   return {
@@ -66,14 +67,15 @@ test("offline node sessions are reaped from the global room view after heartbeat
     const roomCode = (created.payload as { roomCode: string }).roomCode;
 
     const ghostSession = createGhostSession(roomCode);
-    runtimeStore.registerSession(ghostSession);
-    runtimeStore.markSessionJoinedRoom(ghostSession.id, roomCode);
-    runtimeStore.addMember(
+    // Seated through the helper so the shared index is readable when the admin
+    // route below reads it: the seat writes are write-behind, and the
+    // `heartbeatNode` await underneath is a coincidence of latency, not a
+    // barrier (#247).
+    await seatSession(runtimeStore, ghostSession, {
       roomCode,
-      ghostSession.memberId ?? "offline-member-1",
-      ghostSession,
-      ghostSession.memberToken ?? "offline-member-token",
-    );
+      memberId: "offline-member-1",
+      memberToken: "offline-member-token",
+    });
     await runtimeStore.heartbeatNode({
       instanceId: "node-crashed",
       version: "0.9.0-node-crashed-test",

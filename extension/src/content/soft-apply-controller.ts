@@ -5,7 +5,7 @@ import {
 } from "./playback-reconcile";
 import {
   createProgrammaticPlaybackSignature,
-  getPlayState,
+  getReportedPlayState,
   setVideoPlaybackRate,
 } from "./player-binding";
 import type {
@@ -85,6 +85,8 @@ export function createSoftApplyController(args: {
   debugLog: (message: string) => void;
   userGestureGraceMs: number;
   programmaticApplyWindowMs: number;
+  /** See {@link getReportedPlayState}; the cancel signature reports through it. */
+  bufferPauseUpgradeMs: number;
   /**
    * Monotonic time source. Every timestamp this controller stores and every
    * window it compares is an interval measured on this machine, so none of them
@@ -206,7 +208,17 @@ export function createSoftApplyController(args: {
       args.armProgrammaticApplyWindow(
         {
           url: session.normalizedUrl,
-          playState: getPlayState(video, args.runtimeState.intendedPlayState),
+          // Must be the state a broadcast would report, not the raw element
+          // state: this signature is compared against the play state the
+          // broadcast funnel computes, and a mismatch there means the guard
+          // stops recognizing our own `ratechange` echo.
+          playState: getReportedPlayState({
+            video,
+            pauseClassifiedAsBuffer: args.runtimeState.pauseClassifiedAsBuffer,
+            pauseStartedAt: args.runtimeState.pauseStartedAt,
+            now: monotonicNow(),
+            bufferPauseUpgradeMs: args.bufferPauseUpgradeMs,
+          }),
           currentTime: video.currentTime,
           playbackRate: session.restorePlaybackRate,
         },

@@ -81,6 +81,7 @@ test("chained upsertActiveSoftApply preserves the first session's restore rate",
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
@@ -124,6 +125,7 @@ test("upsertActiveSoftApply for a different url starts a fresh restore rate", ()
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
@@ -170,6 +172,7 @@ test("explicit user ratechange cancels a rate-only session without reverting the
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
@@ -215,6 +218,7 @@ test("drift-closed honors the sticky cooldown of a soft-apply taken over by a ra
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
@@ -260,6 +264,7 @@ test("isActiveRateOnlyCatchUp flags pure rate-only sessions but not real soft-ap
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
@@ -312,6 +317,7 @@ test("relative-drift session settling via the timer still honors a sticky cooldo
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
@@ -357,6 +363,7 @@ test("a steadily advancing peer no longer cancels a catch-up as target-shifted",
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
@@ -406,6 +413,7 @@ test("a peer's buffering does not abort an active catch-up, a real pause still d
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
@@ -460,6 +468,7 @@ test("hasActiveCorrectionSession covers real soft-apply, not just rate-only catc
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => 20_000,
       armProgrammaticApplyWindow: () => {},
     });
@@ -495,6 +504,7 @@ test("the rate restore on cancel arms a ratechange-scoped window", () => {
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: (_signature, _reason, actorId, scope) => {
         armed.push({ actorId, scope });
@@ -535,6 +545,7 @@ test("cancel restores an elevated defaultPlaybackRate the player already reset",
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
@@ -580,6 +591,7 @@ test("cancel still leaves an explicit user rate alone", () => {
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
@@ -620,6 +632,7 @@ test("arms the soft-apply cooldown on the monotonic clock by default", () => {
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       armProgrammaticApplyWindow: () => {},
     });
 
@@ -658,6 +671,7 @@ test("getActiveCorrectionBaseRate reports the room's base rate for the whole lif
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => now,
       armProgrammaticApplyWindow: () => {},
     });
@@ -712,6 +726,7 @@ test("the correction session is found through a festival bare-route alias", () =
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
@@ -765,6 +780,7 @@ test("a stale session cannot borrow the festival alias of another share", () => 
       debugLog: () => {},
       userGestureGraceMs: 300,
       programmaticApplyWindowMs: 700,
+      bufferPauseUpgradeMs: 1_500,
       getMonotonicNow: () => 10_000,
       armProgrammaticApplyWindow: () => {},
     });
