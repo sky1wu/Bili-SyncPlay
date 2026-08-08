@@ -240,9 +240,9 @@ test("metrics collector counts reclaimed rooms apart from reaper sweeps", async 
 
   metrics.declareRoomReaper();
   const declared = await metrics.render();
-  // Once declared, both outcomes are pre-seeded even before the first sweep, so
+  // Once declared, every outcome is pre-seeded even before the first sweep, so
   // "never failed" and "has not swept yet" stay distinguishable from "absent".
-  for (const result of ["ok", "error"]) {
+  for (const result of ["ok", "error", "skipped"]) {
     assert.match(
       declared,
       new RegExp(
@@ -281,6 +281,7 @@ test("metrics collector counts reclaimed rooms apart from reaper sweeps", async 
   metrics.recordRoomReaperSweep("ok");
   metrics.recordRoomReaperSweep("ok");
   metrics.recordRoomReaperSweep("error");
+  metrics.recordRoomReaperSweep("skipped");
   const swept = await metrics.render();
   assert.match(
     swept,
@@ -289,6 +290,14 @@ test("metrics collector counts reclaimed rooms apart from reaper sweeps", async 
   assert.match(
     swept,
     /^bili_syncplay_room_reaper_sweeps_total\{result="error"\} 1$/m,
+  );
+  // Its own label, not `error`: a tick that found the previous sweep still
+  // inside its cap means the interval is shorter than a sweep takes, and
+  // counting that as a failure raises the alerting rate on a reaper that is
+  // working (#262 review).
+  assert.match(
+    swept,
+    /^bili_syncplay_room_reaper_sweeps_total\{result="skipped"\} 1$/m,
   );
   assert.equal(
     rendered.includes(

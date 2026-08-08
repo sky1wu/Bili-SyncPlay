@@ -27,13 +27,20 @@ export type RoomReaper = {
 const SWEEP_TIMEOUT_MS = 30_000;
 
 /**
- * Every failure lands on the same `result="error"` series — a stalled sweep is
- * no less broken than one that threw — and is told apart in the log by `reason`.
+ * Three of the four failures land on the same `result="error"` series — a
+ * stalled sweep is no less broken than one that threw — and are told apart in
+ * the log by `reason`.
+ *
+ * `overlapped` is the exception and gets no entry: nothing failed, the previous
+ * sweep was simply still inside its cap. See {@link RoomReaper} wiring below.
  */
-const SWEEP_FAILURE_REASON: Record<MaintenancePassFailureReason, string> = {
+const SWEEP_FAILURE_REASON: Record<
+  Exclude<MaintenancePassFailureReason, "overlapped">,
+  string
+> = {
   run_failed: "room_reaper_failed",
   timed_out: "room_reaper_sweep_timeout",
-  still_running: "room_reaper_sweep_stalled",
+  stalled: "room_reaper_sweep_stalled",
 };
 
 export function createRoomReaper(options: {
@@ -83,6 +90,17 @@ export function createRoomReaper(options: {
       return swept.deletedRooms;
     },
     onFailure: ({ reason, error }) => {
+      if (reason === "overlapped") {
+        // A tick that found the previous sweep still inside its cap. Counted,
+        // because every tick owes the series one record and this one collected
+        // nothing; NOT an error, because the sweep is answering — it is only
+        // slower than `ROOM_CLEANUP_INTERVAL_MS`, which is the operator's
+        // signal to lengthen the interval (#262 review). Deliberately not
+        // logged either: at a short interval this is per-tick chatter, and the
+        // counter already carries it.
+        options.metricsCollector?.recordRoomReaperSweep("skipped");
+        return 0;
+      }
       options.metricsCollector?.recordRoomReaperSweep("error");
       options.logEvent("room_persist_failed", {
         result: "error",

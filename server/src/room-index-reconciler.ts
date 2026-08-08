@@ -22,10 +22,13 @@ export type RoomIndexReconciler = {
  */
 const RECONCILE_TIMEOUT_MS = 60_000;
 
-const RECONCILE_FAILURE_REASON: Record<MaintenancePassFailureReason, string> = {
+const RECONCILE_FAILURE_REASON: Record<
+  Exclude<MaintenancePassFailureReason, "overlapped">,
+  string
+> = {
   run_failed: "room_index_reconcile_failed",
   timed_out: "room_index_reconcile_timeout",
-  still_running: "room_index_reconcile_stalled",
+  stalled: "room_index_reconcile_stalled",
 };
 
 /**
@@ -54,6 +57,18 @@ export function createRoomIndexReconciler(options: {
     run: () => options.reconcileRoomIndex(),
     onSuccess: () => true,
     onFailure: ({ reason, error }) => {
+      if (reason === "overlapped") {
+        // The previous pass is still inside its cap, so nothing failed — the
+        // walk is just slower than the interval. Only reachable where the
+        // interval is configured below the cap, which for a 15-minute
+        // reconcile means never in practice; logged rather than counted
+        // because this driver has no series of its own (#262 review).
+        options.logEvent("room_index_reconcile_skipped", {
+          result: "ignored",
+          timeoutMs: reconcileTimeoutMs,
+        });
+        return false;
+      }
       // Reported rather than rethrown: an unhandled rejection out of a timer
       // takes the process down, and a failed pass is not fatal — reads still
       // answer from the index as it stands, and the next tick retries.

@@ -90,7 +90,7 @@ test("a pass never runs on top of a call that has not answered", async () => {
     // a second one would leave two commands outstanding against a dependency
     // that has answered neither.
     outcomes.push(await pass.runNow());
-    assert.deepEqual(outcomes, ["timed_out", "still_running"]);
+    assert.deepEqual(outcomes, ["timed_out", "stalled"]);
     assert.equal(started, 1);
 
     release();
@@ -103,6 +103,49 @@ test("a pass never runs on top of a call that has not answered", async () => {
     assert.equal(await pass.runNow(), "ok");
     assert.equal(started, 2);
   } finally {
+    await pass.stop();
+  }
+});
+
+test("a pass still inside its cap is overlapped, not stalled", async () => {
+  let started = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const outcomes: string[] = [];
+  const pass = createMaintenancePass<void, string>({
+    name: "test pass",
+    intervalMs: 5,
+    // Deliberately far longer than the interval — the configuration this
+    // distinction exists for: `ROOM_CLEANUP_INTERVAL_MS` set below the cap.
+    timeoutMs: 60_000,
+    settleTimeoutMs: 5_000,
+    run: async () => {
+      started += 1;
+      await blocked;
+    },
+    onSuccess: () => "ok",
+    onFailure: (failure) => {
+      outcomes.push(failure.reason);
+      return failure.reason;
+    },
+  });
+
+  // Not awaited: `runNow` occupies the slot synchronously, before its first
+  // await, so the next call is guaranteed to meet a pass in flight.
+  const inFlight = pass.runNow();
+
+  try {
+    assert.equal(await pass.runNow(), "overlapped");
+    // The dependency is answering — it is just slower than the interval. A
+    // reaper that reports these as failures raises its own alerting rate on a
+    // Redis that is perfectly healthy (#262 review).
+    assert.deepEqual(new Set(outcomes), new Set(["overlapped"]));
+    assert.equal(started, 1);
+  } finally {
+    release();
+    assert.equal(await inFlight, "ok");
     await pass.stop();
   }
 });
@@ -140,7 +183,7 @@ test("the timer keeps recording outcomes while the dependency is hung", async ()
     // stayed flat and no alert on it could fire.
     await threeOutcomes;
     assert.equal(outcomes[0], "timed_out");
-    assert.deepEqual(new Set(outcomes.slice(1)), new Set(["still_running"]));
+    assert.deepEqual(new Set(outcomes.slice(1)), new Set(["stalled"]));
     // ...while issuing exactly one command, no matter how long the stall lasts.
     assert.equal(started, 1);
   } finally {

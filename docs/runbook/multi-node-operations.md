@@ -299,10 +299,15 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 ### Is the room reaper still sweeping?
 
 `bili_syncplay_room_reaper_sweeps_total` is the only signal that answers this.
-Every tick records exactly one of `result="ok"` or `result="error"` — including
-a tick whose sweep never came back, which is capped and recorded as an error
-rather than waited on forever (#261) — so the two add up to every tick the timer
-fired.
+Every tick records exactly one of `result="ok"`, `result="error"` or
+`result="skipped"` — including a tick whose sweep never came back, which is
+capped and recorded as an error rather than waited on forever (#261) — so the
+three add up to every tick the timer fired.
+
+`skipped` is not a failure and only appears where `ROOM_CLEANUP_INTERVAL_MS` is
+set shorter than a sweep takes: the tick found the previous sweep still running
+inside its 30s cap and did not start a second one. Redis is answering; the
+reaper is behind. Lengthen the interval.
 
 Replace `<window>` with several times your deployed `ROOM_CLEANUP_INTERVAL_MS`
 before running these. The setting only has to be a positive integer, so there is
@@ -314,7 +319,8 @@ between samples and reads as zero.
 # a healthy node sits at 1000/ROOM_CLEANUP_INTERVAL_MS — 1/60 at the 60000 default.
 sum(rate(bili_syncplay_room_reaper_sweeps_total[<window>])) by (instance)
 
-# Share of passes that failed, 0 to 1.
+# Share of ticks that failed, 0 to 1. `skipped` stays in the denominator on
+# purpose: it is a tick that collected nothing, just not a broken one.
 sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<window>])) by (instance)
   / sum(rate(bili_syncplay_room_reaper_sweeps_total[<window>])) by (instance)
 ```
@@ -337,8 +343,10 @@ which failure it is, and they need different repairs:
   A stalled connection, a blocked Redis, or the first sweep after startup still
   waiting on the one-time index bootstrap walk.
 - `room_reaper_sweep_stalled` — the tick found the previous sweep's command
-  still unanswered and did not issue another. Always follows a timeout; on its
-  own it means the stall is ongoing.
+  still unanswered **past its cap** and did not issue another. Always follows a
+  timeout; on its own it means the stall is ongoing. A tick that finds the
+  previous sweep still inside its cap is the `skipped` label above instead, and
+  is neither logged nor counted as a failure.
 
 The cap only bounds how long the reaper waits, not the command itself — the room
 store's client still sets no `commandTimeout`, so the command stays out on the

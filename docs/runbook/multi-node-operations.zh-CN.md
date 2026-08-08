@@ -309,9 +309,13 @@ curl -fsS http://10.0.0.11:8788/readyz
 ### reaper 还在扫吗？
 
 只有 `bili_syncplay_room_reaper_sweeps_total` 能回答这个问题。每一次定时触发都只
-记 `result="ok"` 或 `result="error"` 其中之一——扫描一直没回来的那一轮也算：它有
-超时上限，会被记成 error，而不是无限期干等（#261）——两者之和即为定时器触发过的
-全部轮次。
+记 `result="ok"`、`result="error"` 或 `result="skipped"` 其中之一——扫描一直没回
+来的那一轮也算：它有超时上限，会被记成 error，而不是无限期干等（#261）——三者之
+和即为定时器触发过的全部轮次。
+
+`skipped` 不是失败，只在 `ROOM_CLEANUP_INTERVAL_MS` 被设得比一轮扫描还短时出现：
+本次触发发现上一轮还在自己的 30s 上限之内跑着，于是没有再起一轮。Redis 是在回应
+的，只是 reaper 跟不上——把间隔调长。
 
 执行前把 `<窗口>` 换成本部署 `ROOM_CLEANUP_INTERVAL_MS` 的数倍。该配置只要求是正
 整数，所以不存在"默认安全"的窗口：取短了，健康的 reaper 会落在两次采样之间被读
@@ -322,7 +326,8 @@ curl -fsS http://10.0.0.11:8788/readyz
 # 1000/ROOM_CLEANUP_INTERVAL_MS——默认 60000 时是 1/60。
 sum(rate(bili_syncplay_room_reaper_sweeps_total[<窗口>])) by (instance)
 
-# 失败轮次占比，取值 0 到 1。
+# 失败轮次占比，取值 0 到 1。`skipped` 有意留在分母里：它也是一次什么都没收到的
+# 触发，只是并没有坏掉。
 sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<窗口>])) by (instance)
   / sum(rate(bili_syncplay_room_reaper_sweeps_total[<窗口>])) by (instance)
 ```
@@ -342,8 +347,9 @@ sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<窗口>])) by (
 - `room_reaper_failed`——Redis 回了，回的是错误。错误内容在同一行里。
 - `room_reaper_sweep_timeout`——Redis 在这一轮 30s 的上限内没有给出回应。可能是
   连接僵死、Redis 被阻塞，或者启动后第一轮还卡在一次性的索引 bootstrap 遍历上。
-- `room_reaper_sweep_stalled`——本次触发发现上一轮的命令仍未收到回应，于是没有再
-  发一条。它总是跟在一次 timeout 之后；单独看到它，说明僵死还在持续。
+- `room_reaper_sweep_stalled`——本次触发发现上一轮的命令**已经超过上限**仍未收到
+  回应，于是没有再发一条。它总是跟在一次 timeout 之后；单独看到它，说明僵死还在
+  持续。若上一轮还在上限**之内**，那属于上面的 `skipped`，既不记日志也不算失败。
 
 这个上限只约束 reaper 等多久，并不约束命令本身——房间存储的客户端仍然没有设置
 `commandTimeout`，命令会一直挂在连接上，直到 Redis 或 socket 了结它。

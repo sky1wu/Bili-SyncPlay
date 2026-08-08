@@ -331,7 +331,13 @@ appeared in both hand-written copies:
   flat" mean "the timer is gone" and nothing else. A pass that outlives its cap
   is an `error`, not silence. A cap that only reported the FIRST stalled tick
   would let the series go quiet again while the stall continued, which is the
-  original bug with extra steps.
+  original bug with extra steps. But "recorded" is not the same as "failed": a
+  tick that finds the previous pass still running INSIDE its cap gets its own
+  `skipped` label, because the interval is a configurable positive integer and
+  can be set below the cap — filing that under `error` puts the failure rate at
+  1 on a dependency that is answering (#262 review). `stalled` therefore always
+  follows a `timed_out` on the same call, which is what the runbook tells
+  operators to read it as.
 - **The cap does not cancel the call, so a pass never runs on top of another.**
   Nothing can abort an in-flight Redis command; the cap only stops the caller
   waiting. Ticking again while the previous command is unanswered piles up one

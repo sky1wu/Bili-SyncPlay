@@ -25,13 +25,14 @@ import { clampTimerIntervalMs } from "./timers.js";
  *   in-flight Redis command, but the caller stops waiting and records an
  *   outcome. A stall is now a rising failure counter instead of silence.
  * - **A pass never runs on top of another.** While the previous call is still
- *   unanswered, a tick reports `still_running` instead of issuing a second
- *   command. Without it a hung dependency accumulates one command per interval
- *   for as long as it stays hung — and every tick would overwrite the promise
- *   the shutdown step waits on, so shutdown would wait on the newest pass while
- *   older ones were still writing. It also keeps the outcome series moving at
- *   one record per tick, which is what makes "the rate went flat" mean "the
- *   timer is gone" and nothing else.
+ *   unanswered, a tick reports it instead of issuing a second command. Without
+ *   that a hung dependency accumulates one command per interval for as long as
+ *   it stays hung — and every tick would overwrite the promise the shutdown
+ *   step waits on, so shutdown would wait on the newest pass while older ones
+ *   were still writing. It also keeps the outcome series moving at one record
+ *   per tick, which is what makes "the rate went flat" mean "the timer is gone"
+ *   and nothing else. The report distinguishes `stalled` (the call is past its
+ *   cap) from `overlapped` (still inside it) — only the first is a failure.
  * - **Shutdown is bounded, and says so when the budget is not enough.** `stop`
  *   waits for the real call to settle, because the next step closes the Redis
  *   connection under it, but only for `settleTimeoutMs` — a wait that cannot
@@ -45,8 +46,19 @@ export type MaintenancePassFailureReason =
   | "run_failed"
   /** The cap expired first. The call is still in flight. */
   | "timed_out"
-  /** A previous call is still unanswered, so this pass never started. */
-  | "still_running";
+  /**
+   * A previous call outlived its cap and STILL has not answered, so this pass
+   * never started. Always follows a `timed_out` on the same call.
+   */
+  | "stalled"
+  /**
+   * A previous call is still running, inside its cap, so this pass never
+   * started. Not a failure — the interval is simply shorter than a pass takes,
+   * which only happens where the interval is configured below the cap. Kept
+   * apart from `stalled` because filing it under the failure series would raise
+   * the failure rate on a dependency that is answering (#262 review).
+   */
+  | "overlapped";
 
 export type MaintenancePassFailure = {
   reason: MaintenancePassFailureReason;
@@ -120,11 +132,13 @@ export function createMaintenancePass<Value, Reported>(options: {
 
   /** The call still owed an answer, or null. Set and cleared on the call itself. */
   let inFlight: Promise<Value> | null = null;
+  /** Whether {@link inFlight} has already lost its own race against the cap. */
+  let inFlightIsStalled = false;
 
   async function runNow(): Promise<Reported> {
     if (inFlight !== null) {
       return options.onFailure({
-        reason: "still_running",
+        reason: inFlightIsStalled ? "stalled" : "overlapped",
         error: new MaintenancePassTimeoutError(
           `The previous ${options.name}`,
           options.timeoutMs,
@@ -142,9 +156,11 @@ export function createMaintenancePass<Value, Reported>(options: {
     }
 
     inFlight = call;
+    inFlightIsStalled = false;
     const release = (): void => {
       if (inFlight === call) {
         inFlight = null;
+        inFlightIsStalled = false;
       }
     };
     // On the call itself, and registered before it is handed to the cap:
@@ -152,7 +168,7 @@ export function createMaintenancePass<Value, Reported>(options: {
     // `capAttempt` resolves below no matter how many microtask hops its race
     // adds. Clearing the slot from `runNow`'s own continuation instead would
     // tie the guard to the timing of a mechanism that is allowed to change, and
-    // a slot released one hop late skips the NEXT pass as `still_running`.
+    // a slot released one hop late skips the NEXT pass as `overlapped`.
     void call.then(release, release);
 
     let value: Value;
@@ -163,13 +179,17 @@ export function createMaintenancePass<Value, Reported>(options: {
         () => new MaintenancePassTimeoutError(options.name, options.timeoutMs),
       );
     } catch (error) {
-      return options.onFailure({
-        reason:
-          error instanceof MaintenancePassTimeoutError
-            ? "timed_out"
-            : "run_failed",
-        error,
-      });
+      if (error instanceof MaintenancePassTimeoutError) {
+        // Only if the call has not answered in the meantime: `release` runs
+        // before this continuation, so `inFlight === call` here means the cap
+        // won and the command really is still out there. That is what makes the
+        // NEXT tick a `stalled` rather than an `overlapped`.
+        if (inFlight === call) {
+          inFlightIsStalled = true;
+        }
+        return options.onFailure({ reason: "timed_out", error });
+      }
+      return options.onFailure({ reason: "run_failed", error });
     }
     // Outside the try: a throwing `onSuccess` is a bug in the caller, not a
     // failed pass, and reporting it as one would hide it behind a metric.
