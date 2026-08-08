@@ -83,8 +83,8 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：E2E-003
 - **需求**：REQ-G03、REQ-F003、REQ-F004、REQ-F010、REQ-F032
-- **工作**：先生成 run-scoped 临时 CA、SAN 只包含 `wssUrl` 实际回环主机名/IP 的叶证书和仅供隔离 profile 使用的信任描述，再启动独占 bootstrap sink，并把测试构建默认服务端地址指向它；随后同时启动 owner/member 两个临时 profile，发现各自扩展 Origin，用这些 Origin 创建随机端口同步服务端和 HTTPS/WSS facade。popup 保存 `wss://` 后继续点击创建房间，以真实用户入口触发连接；member 加入同一房间后，owner 通过真实 action popup 分享当前 fixture 视频，并确认 member 已导航、绑定同一规范化共享 URL。关闭分享用 popup 并确认其文档及 port 消失后，用 E2E-002 已证明的调试协议路径执行两个独立终止周期：第一次在目标消失后创建全新 action popup，由真实入口先建立 runtime port、再查询状态，最终通过后续 port 更新和服务端收敛验证房间恢复；待重连稳定后关闭该 popup、再次确认文档及 port 消失，再终止 worker 并确认目标仍不存在，随后重载 owner 的共享视频 tab，由新注入的生产 content script 按当前顺序先发送页内分享按钮设置 hydration 以唤醒 worker，再执行房间 hydration；待新 worker 完成 bootstrap 与重连后，由 owner 在同一视频执行真实播放操作并验证跨端同步。
-- **验收**：两个 profile 的 storage、tab 和 background 不共享；启动阶段只命中 bootstrap sink，即使本机 `localhost:8787` 放置诱饵服务也收不到请求；同步服务端精确允许本次 Origin，第三个伪造网页 Origin 被拒绝。保存 `wss://` 本身先验证持久化，随后创建/加入/分享必须让扩展 background 依次完成 HTTPS `/api/connection-check`、`/` 预检以及真实 TLS、WebSocket 和同步协议握手，且分享前后直接从双方 popup、member 播放器和本 spike 服务端的只读 admin API 响应逐项证明房间已有同一共享视频；M0 不依赖 E2E-201 才实现的可复用 room oracle。两个终止周期都必须记录各自目标 ID、旧执行上下文失效、实际首个生产事件和新 target 创建时刻：popup 周期必须证明旧 popup 文档及 port 已消失、新 popup 文档标识不同，并如实记录新 port 连接先于状态查询；bootstrap pending 时首次查询允许返回结构合法的过渡态，不能把它当成恢复结论，新 worker 最终必须以相同扩展 ID、服务端地址、房间代码和成员 token 重连，后续 port 状态恢复已加入且服务端在稳定窗口内不存在重复成员。content 周期必须如实记录 tab 重载后的首个 `content:get-page-share-button-settings` 先于 `content:get-room-state`，在页面重载动作前不得出现新 worker target 或 popup、alarm、自动重试等其他唤醒源，设置消息发出后必须创建新 worker，随后的房间 hydration 经生产重试路径完成，真实播放更新再从已恢复的 owner background 到达 member 播放器并稳定收敛。若生产顺序变化，必须更新首事件断言并保留后续闭环，不能复用旧 popup 或绕开先行消息让查询/房间 hydration 冒充唤醒源。若只终止一次、跳过建房或分享、只恢复未入房 popup，或通过重载扩展/测试后门恢复，REQ-F032 验收必须失败。临时信任不修改系统信任库，SAN 不匹配、错误 CA、非本 run 证书和公网回退均失败，profile 删除后无证书状态残留。
+- **工作**：先生成 run-scoped 临时 CA、SAN 只包含 `wssUrl` 实际回环主机名/IP 的叶证书和仅供隔离 profile 使用的信任描述，再启动独占 bootstrap sink，并把测试构建默认服务端地址指向它；随后同时启动 owner/member 两个临时 profile，发现各自扩展 Origin，用这些 Origin 创建随机端口同步服务端和 HTTPS/WSS facade。owner popup 保存 `wss://` 后继续点击创建房间，以真实用户入口触发连接并复制邀请串；member popup 必须先在自己的隔离 storage 中保存同一个 `wss://`，再输入邀请串加入同一房间。owner 随后通过真实 action popup 分享当前 fixture 视频，并确认 member 已导航、绑定同一规范化共享 URL。关闭分享用 popup 并确认其文档及 port 消失后，用 E2E-002 已证明的调试协议路径执行两个独立终止周期：第一次在目标消失后创建全新 action popup，由真实入口先建立 runtime port、再查询状态，最终通过后续 port 更新和服务端收敛验证房间恢复；待重连稳定后关闭该 popup、再次确认文档及 port 消失，再终止 worker 并确认目标仍不存在，随后重载 owner 的共享视频 tab，由新注入的生产 content script 按当前顺序先发送页内分享按钮设置 hydration 以唤醒 worker，再执行房间 hydration；待新 worker 完成 bootstrap 与重连后，由 owner 在同一视频执行真实播放操作并验证跨端同步。
+- **验收**：两个 profile 的 storage、tab 和 background 不共享；启动阶段只命中 bootstrap sink，即使本机 `localhost:8787` 放置诱饵服务也收不到请求；同步服务端精确允许本次 Origin，第三个伪造网页 Origin 被拒绝。owner 与 member 必须分别通过各自 popup 保存并持久化同一个 `wss://`；邀请串只含房间代码和 join token，不能代替 member 的服务端配置。随后创建/加入/分享必须让两端 extension background 各自依次完成 HTTPS `/api/connection-check`、`/` 预检以及真实 TLS、WebSocket 和同步协议握手，且分享前后直接从双方 popup、member 播放器和本 spike 服务端的只读 admin API 响应逐项证明房间已有同一共享视频；M0 不依赖 E2E-201 才实现的可复用 room oracle。两个终止周期都必须记录各自目标 ID、旧执行上下文失效、实际首个生产事件和新 target 创建时刻：popup 周期必须证明旧 popup 文档及 port 已消失、新 popup 文档标识不同，并如实记录新 port 连接先于状态查询；bootstrap pending 时首次查询允许返回结构合法的过渡态，不能把它当成恢复结论，新 worker 最终必须以相同扩展 ID、服务端地址、房间代码和成员 token 重连，后续 port 状态恢复已加入且服务端在稳定窗口内不存在重复成员。content 周期必须如实记录 tab 重载后的首个 `content:get-page-share-button-settings` 先于 `content:get-room-state`，在页面重载动作前不得出现新 worker target 或 popup、alarm、自动重试等其他唤醒源，设置消息发出后必须创建新 worker，随后的房间 hydration 经生产重试路径完成，真实播放更新再从已恢复的 owner background 到达 member 播放器并稳定收敛。若生产顺序变化，必须更新首事件断言并保留后续闭环，不能复用旧 popup 或绕开先行消息让查询/房间 hydration 冒充唤醒源。若 member 未先保存真实地址、只终止一次、跳过建房或分享、只恢复未入房 popup，或通过重载扩展/测试后门恢复，REQ-F032 验收必须失败。临时信任不修改系统信任库，SAN 不匹配、错误 CA、非本 run 证书和公网回退均失败，profile 删除后无证书状态残留。
 - **估算**：1～2 天
 
 ### E2E-005：校准媒体事件和时间策略
@@ -230,8 +230,8 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：E2E-201～E2E-203
 - **需求**：REQ-G03、REQ-F010～REQ-F014、REQ-F021、REQ-F023、REQ-F031
-- **工作**：owner 打开页面、保存 server、建房、复制邀请；member 入房；owner 分享、play、seek、rate、pause；member 离房。
-- **验收**：每一步验证发起端、接收端和稳定窗口；单次运行 5 分钟内；连续本地运行 20 次无 harness failure。
+- **工作**：owner 打开页面、保存随机 server、建房、复制邀请；member 在自己的 popup 保存同一个 server 后再输入邀请入房；owner 分享、play、seek、rate、pause；member 离房。
+- **验收**：每一步验证发起端、接收端和稳定窗口；member profile 的持久化服务端地址必须等于 owner 使用的随机地址，省略该保存步骤或保留 bootstrap sink 时用例须在 join 阶段失败；单次运行 5 分钟内；连续本地运行 20 次无 harness failure。
 - **估算**：2～3 天
 
 ### E2E-205：验证 smoke 的判别力
@@ -364,8 +364,8 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：E2E-501
 - **需求**：需求规格第 8 节
-- **工作**：runtime、e2e、构建和 workflow 改动运行浏览器 E2E；纯文档/翻译可跳过。分类逻辑放在可测试脚本，不散写多份 YAML 表达式。
-- **验收**：表驱动测试覆盖每个 workspace、根配置、lockfile、workflow、fixture 和 docs；未知路径默认运行而非跳过。
+- **工作**：runtime、e2e、构建和 workflow 改动运行浏览器 E2E；纯文档/翻译通常可跳过，但承载第 5.1 节权威操作/策略映射的 `docs/design/automated-real-browser-testing-requirements.zh-CN.md` 必须排除在 docs skip 集合之外，其任意改动都运行完整 browser E2E 和规格—catalog 漂移检查。分类逻辑放在可测试脚本，不散写多份 YAML 表达式。
+- **验收**：表驱动测试覆盖每个 workspace、根配置、lockfile、workflow、fixture 和 docs；单独修改权威需求文件时必须选择完整 browser E2E 并执行漂移检查，单独修改可跳过的普通文档时仍选择 docs skip，修改分类规则本身必须运行分类器测试；未知路径默认运行而非跳过。
 - **估算**：1～2 天
 
 ### E2E-503：接入 artifact 和失败摘要
@@ -437,8 +437,8 @@ M3 和 M4 可在 M2 合并后并行开发，但会同时修改 `packages/e2e` �
 
 - **依赖**：E2E-602、E2E-603
 - **需求**：REQ-F054、REQ-O006
-- **工作**：由 Windows runner 通过 E2E-only WSL launcher 导入当前构建的生产 bootstrap，并利用现有 `ServerBootstrapDependencies.now` 注入服务端逻辑墙钟；Windows 浏览器跑双客户端。先施加至少 `max(5_000ms, 4 × playing 动态位置容差)` 的正偏移，播放进入稳定窗口后跳到等幅负偏移，同时采集 `sync:ping` 原始 out/in 分量、计划/实测偏移和播放器收敛；不得调整 Windows 或 WSL 系统时钟。
-- **验收**：测试 oracle 不使用跨钟 timestamp 差；诊断先证明偏移幅度和跳变量达到计划值，正确实现随后仍在两个阶段各自收敛。用文件备份临时把补偿逻辑恢复为 `serverTime - localNow` 后，同一场景必须因播放器持续超出动态位置容差而失败；还原后重跑通过。若负向对照因 launcher、采样缺失或环境失败而红，不能算有判别力。
+- **工作**：由 Windows runner 通过 E2E-only WSL launcher 导入当前构建的生产 bootstrap，并利用现有 `ServerBootstrapDependencies.now` 注入服务端逻辑墙钟；Windows 浏览器跑双客户端。为 `+Δ` 与 `-Δ` 分别启动完全隔离的新 server 进程、房间和浏览器 profiles，每个进程从启动到退出保持固定偏移，且 `Δ >= max(5_000ms, 4 × playing 动态位置容差)`；两个子场景分别采集 `sync:ping` 原始 out/in 分量、计划/实测偏移和播放器收敛。不得调整 Windows 或 WSL 系统时钟，也不得在已写入播放版本的同一 server 进程中反向跳变注入时钟。
+- **验收**：测试 oracle 不使用跨钟 timestamp 差；两个隔离子场景的诊断分别证明固定正、负偏移的方向和幅度达到计划值，正确实现随后各自在全新房间中收敛。用文件备份临时把补偿逻辑恢复为 `serverTime - localNow` 后，同样的两个隔离子场景必须因播放器持续超出动态位置容差而失败；还原后重跑通过。每个子场景都须记录新的 server 进程、房间代码、profile 路径和无前序播放版本证据；若负向对照因 launcher、采样缺失、复用旧运行状态或服务端版本时间倒退而红，不能算有判别力。
 - **估算**：3～4 天
 
 ### E2E-605：Firefox WebDriver/XPI adapter

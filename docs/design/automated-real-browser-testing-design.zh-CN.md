@@ -300,7 +300,7 @@ performance.now() / sample sequence
 
 具体数值由 Phase 0 结合当前 `playback-reconcile.ts` 阈值和 Windows 实测校准，未经基线数据不在本文拍脑袋固定。
 
-跨时钟场景通过 E2E-only WSL launcher 使用现有 `ServerBootstrapDependencies.now` 注入点偏移服务端逻辑墙钟，不修改 Windows 或 WSL 系统时钟，也不改变浏览器本地单调钟。偏移量至少取 `max(5_000ms, 4 × playing 动态位置容差)`，播放稳定后从正偏移切到等幅负偏移；`sync:ping` 的原始 out/in 分量必须证明实测偏移与跳变量达到计划值，否则场景无效并失败。正确实现须在偏移前后都进入稳定窗口；临时把补偿逻辑恢复为 `serverTime - localNow` 后，同一场景必须因播放位置无法收敛而失败，而不是因 launcher 或诊断缺失失败。
+跨时钟场景通过 E2E-only WSL launcher 使用现有 `ServerBootstrapDependencies.now` 注入点偏移服务端逻辑墙钟，不修改 Windows 或 WSL 系统时钟，也不改变浏览器本地单调钟。正、负偏移分别在两个完全隔离的子场景中运行：每个子场景都创建新的 server 进程、房间和浏览器 profiles，并从进程启动到退出保持固定的 `+Δ` 或 `-Δ`，其中 `Δ >= max(5_000ms, 4 × playing 动态位置容差)`；不得在已经写入播放版本的同一服务端进程中把时钟从正偏移反向跳到负偏移。`sync:ping` 的原始 out/in 分量必须分别证明实测偏移方向和幅度达到计划值，否则对应子场景无效并失败。正确实现须在两个子场景中各自进入稳定窗口；临时把补偿逻辑恢复为 `serverTime - localNow` 后，同样的两个隔离子场景必须因播放位置无法收敛而失败，而不是因 launcher、服务端版本时间倒退或诊断缺失失败。
 
 #### Stability oracle
 
@@ -358,7 +358,7 @@ CI 无论成功或失败都上传已通过扫描的 `metadata.json` 和摘要；
 1. owner 打开普通视频夹具。
 2. owner popup 保存随机服务端地址并创建房间。
 3. 从剪贴板读取邀请串。
-4. member popup 输入邀请串加入。
+4. member popup 保存与 owner 相同的随机服务端地址，再输入邀请串加入。
 5. owner 分享当前视频。
 6. member 自动打开共享视频。
 7. owner 依次 play、seek、修改倍速、pause。
@@ -414,6 +414,7 @@ Ownership  = none | owner | peer
 - E2E-207 必须在 M2 接入 `browser-e2e-smoke`，以非 required 信号取得 GitHub-hosted P0 实测；E2E-501 在 M3/M4 完成后先让 non-required 的 `browser-e2e` 与它并存。只有需求—场景追踪检查和 100 轮稳定性基线全部完成，且权威表中的每个 P0/P1 展开操作键、断言策略、必要断言键及必要断言类别都有实际执行证据后，E2E-506 才能把 `browser-e2e` 设为 required 并停用阶段性 smoke。两个 job 不复用检查上下文。
 - E2E-501 的 GitHub-hosted 单轮实测和 E2E-504 的 100 轮分布必须在 E2E-506 前共同关闭 `REQ-N001` 的当前 10 分钟目标。未达到时先优化；若证据表明目标必须调整，则先在需求规格中提交有依据的新预算并取得评审同意，不能只记录一个更慢的数字后照常提升 required check。
 - 稳定性基线执行拟设为 required 的完整 `browser-e2e` 命令 100 次，逐域记录 P0、P1 和 admin-ui harness failure；只重复 P0 smoke 不能证明完整门禁可用。
+- `docs/design/automated-real-browser-testing-requirements.zh-CN.md` 承载第 5.1 节权威操作/策略映射，不属于可跳过的纯文档：该文件有改动时必须运行完整 `browser-e2e` 和规格—catalog 漂移检查。其他文档/翻译是否跳过由经过表驱动测试的路径分类器决定，未知路径默认运行。
 - M1 先落地追踪基础设施：把需求规格第 5.1 节展开为机器可读 operation catalog；每项包含唯一 `operationKey`、所属 `requirementId`、priority、与权威表一致的独立 `assertionPolicy`、非空 `requiredAssertionKeys`、断言键到类别的固定映射和 `requiredAssertionCategories`。策略表达式必须让每个展开键恰好匹配一次；校验器不能从断言类别反推操作是否跨端。证据类别拆为发起端用户可见、真实接收端结果、服务端结果和稳定窗口；`local-stable` 必须包含发起端可见结果和稳定窗口，`server-observed-visible` 必须包含重启后的发起端可见结果、服务端结果和稳定窗口，`peer-sync` 必须包含真实接收端结果及另外一类，`peer-sync-strict` 必须同时包含发起端、真实接收端和稳定窗口，`server-result` 不得补 `peer-result` 的缺口。断言 helper 的每条运行证据携带 `runId`、`scenarioId`、`attemptId`、本次尝试内唯一的 `evidenceId`、完全展开的 `operationKey`、`assertionKey`、requirement ID、断言类别、结果和时间。门禁分别对权威策略、必需 `(operationKey, assertionKey)` 集合、必要类别集合与本次实际通过证据做精确集合差，并校验证据类别等于 catalog 中该断言键的类别；catalog 内重复键、同一次尝试内重复 `evidenceId`、未知键、花括号/通配键、策略或类别错配、空测试、未执行断言及只声明 ID 的场景都失败。不同场景或尝试可重复核验同一二元组：报告按 `scenarioId` / `attemptId` 保留全部证据，coverage 只对通过二元组求并集；首次失败或 skip 仍由测试运行器独立使 job 失败，不能被后续尝试或另一场景的通过覆盖。
 
 拟议根命令（实现前不可用）：
@@ -432,7 +433,7 @@ npm run test:e2e:browser
 - 使用专用低权限 Windows 用户、独立浏览器安装和独立工作目录。
 - 每次运行创建新 profile；Bilibili 登录态如确有需要，从凭据库复制到临时 profile，用后销毁。
 - WSL 场景由 Windows 编排器调用固定、受控的 WSL 入口启动当前 SHA 的 server 构建；不得使用维护者正在开发的工作树。
-- 跨时钟场景由 E2E-only WSL launcher 导入当前构建的生产 bootstrap，并仅通过 `ServerBootstrapDependencies.now` 注入服务端逻辑墙钟偏移；launcher 先保持至少 `max(5_000ms, 4 × playing 动态位置容差)` 的正偏移，播放稳定后跳到等幅负偏移。全程不得修改宿主机或 WSL 系统时钟，测试结束后该注入随 server 进程退出。
+- 跨时钟场景由 E2E-only WSL launcher 导入当前构建的生产 bootstrap，并仅通过 `ServerBootstrapDependencies.now` 注入服务端逻辑墙钟偏移；launcher 为固定正、负偏移分别启动全新的 server 进程、房间和浏览器 profiles，每个进程终身保持至少 `max(5_000ms, 4 × playing 动态位置容差)` 的单一偏移。全程不得修改宿主机或 WSL 系统时钟，也不得在同一 server 进程内反向调整测试时钟；测试结束后该注入随对应进程退出。
 
 GitHub 明确说明持久化 self-hosted runner 可能被不可信 workflow 持久化攻陷；公开仓库必须把可信 SHA 和 runner 隔离作为设计前提。参考：[GitHub Actions secure use](https://docs.github.com/en/actions/reference/security/secure-use)。
 
@@ -507,7 +508,7 @@ GitHub 明确说明持久化 self-hosted runner 可能被不可信 workflow 持�
 7. paused/playing 的位置容差和消息风暴上限是多少，才能既符合当前产品策略又能抓住真实回归。
 8. GitHub-hosted runner 上的预算分三次关闭：Phase 0 记录空白扩展、双 profile/握手和媒体代表场景的耗时、CPU、内存及 artifact 样本，证明 5/10 分钟目标没有明显不可行；E2E-207 在真实 P0 命令存在后记录 P0 实测并验证 5 分钟目标；E2E-501/504 在完整命令存在后记录全量套件单轮和 100 轮分布，并在 E2E-506 前验证当前 10 分钟目标。未达标时必须先优化，或基于实测修改需求预算并取得评审同意。不得把后两项当作 E2E-007/M0 的前置条件，也不得用 Phase 0 估算冒充最终实测。
 9. Linux/WSL 本地 managed Redis 应锁定哪些 `redis-server` / `redis-cli` 版本，怎样取得它们并证明随机端口、关闭持久化、健康检查和进程回收在干净环境可重复。
-10. E2E-only WSL launcher 能否通过 `ServerBootstrapDependencies.now` 稳定制造至少 `max(5_000ms, 4 × playing 动态位置容差)` 的偏移及反向跳变，并让 `sync:ping` 观测到计划值，同时不修改任一系统时钟。
+10. E2E-only WSL launcher 能否通过 `ServerBootstrapDependencies.now` 在两个完全隔离的新 server/房间/profile 运行中分别稳定制造至少 `max(5_000ms, 4 × playing 动态位置容差)` 的固定正、负偏移，并让 `sync:ping` 观测到各自方向和幅度，同时不修改任一系统时钟或让单个 server 的版本时间倒退。
 11. Chromium 隔离 profile 能否在不修改系统信任库、不关闭全局证书校验的前提下，仅信任本次 run 的临时 CA，并让扩展 background 通过受管 `wss://` facade 的 HTTPS `/api/connection-check`、`/` 预检后完成真实 TLS/WebSocket/同步协议握手；错误证书是否稳定失败。
 12. 选定 Playwright/Chromium 版本能否通过浏览器调试协议主动终止已加入真实同步房间、且双方已绑定同一共享视频的目标 MV3 service worker，并由下一次真实 popup/content 生产事件恢复持久化房间会话、重连和跨端消息处理；如何记录 popup port、content 设置 hydration 等实际首事件并证明是它触发新 target，而非错误 target、未终止上下文、alarm、自动重试或测试侧重载扩展。
 

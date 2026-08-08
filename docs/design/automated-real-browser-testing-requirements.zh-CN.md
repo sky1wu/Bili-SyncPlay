@@ -205,7 +205,7 @@ popup → background → WebSocket server → background → content script → 
 - **REQ-F051**：Firefox smoke 必须加载 Firefox 专用构建，在不访问线上 Bilibili 的确定性页面夹具上验证 event page、随机 `moz-extension://<uuid>` Origin、`ws://localhost` 和包括播放/暂停/seek/永久倍速在内的核心同步流程。
 - **REQ-F052**：真实站点 canary 至少访问普通视频、番剧和 festival 公开页面；需要登录的稍后再看场景仅在专用测试账号凭据可用时运行。
 - **REQ-F053**：真实站点测试不得高频刷新、批量抓取或尝试绕过验证码；遭遇登录/风控/地区限制时应报告为外部阻塞，而非伪装为产品通过。
-- **REQ-F054**：WSL 服务端 + Windows 浏览器场景必须保留，并在不修改宿主机或 WSL 系统时钟的前提下，为服务端测试时钟注入已测量且大于播放容差的偏移与跳变；场景必须验证正确实现仍收敛，且临时恢复“服务端时间戳减本地时间戳”的错误实现后因播放不收敛而失败。
+- **REQ-F054**：WSL 服务端 + Windows 浏览器场景必须保留，并在不修改宿主机或 WSL 系统时钟的前提下，用两个完全隔离的新服务端、房间和浏览器 profile 分别注入已测量且大于播放容差的固定正、负服务端时钟偏移；同一服务端进程内不得反向跳变注入时钟。两个场景都必须验证正确实现仍收敛，且临时恢复“服务端时间戳减本地时间戳”的错误实现后因播放不收敛而失败。
 
 ## 6. 测试判定要求
 
@@ -214,7 +214,7 @@ popup → background → WebSocket server → background → content script → 
 - **REQ-O003**：每个 `peer-sync` 操作至少验证发起端反馈、真实接收端结果和稳定窗口内没有反向污染三项中的两项，且真实接收端结果不可省略；`peer-sync-strict` 必须三项全部验证。服务端房间态、API 成功或审计记录属于独立的 `server-result`，不得冒充接收端结果。
 - **REQ-O004**：失败后的自动重跑只可用于分类“可复现/偶发”，第一次失败仍必须保留并计入稳定性指标；不得以重跑变绿替换原失败结论。
 - **REQ-O005**：回归用例在修复提交进入主干前必须证明其能在缺少修复时失败。实现时应使用安全的文件备份或独立 worktree 验证，不得破坏未提交修改。
-- **REQ-O006**：涉及跨时钟的断言只能比较同一时钟上的差值或协议携带的时长；不得在测试 oracle 中重新引入服务端时间戳减本地时间戳。跨时钟回归场景必须先从诊断采样证明实际偏移和跳变量超过统一播放容差，并以错误算法负向对照证明测试具有判别力。
+- **REQ-O006**：涉及跨时钟的断言只能比较同一时钟上的差值或协议携带的时长；不得在测试 oracle 中重新引入服务端时间戳减本地时间戳。跨时钟回归场景必须先从两个隔离运行的诊断采样分别证明固定正、负偏移的方向和幅度超过统一播放容差，并以错误算法负向对照证明测试具有判别力；不得用同一服务端进程中的时钟倒退制造反向偏移。
 
 ## 7. 非功能需求
 
@@ -251,7 +251,7 @@ popup → background → WebSocket server → background → content script → 
 | 每日定时        | 受保护 Windows runner | 真实 Bilibili canary                               | 软门禁；连续失败升级为人工检查     |
 | 发布候选/tag 前 | 受保护 runner         | 发布产物、全浏览器核心矩阵、真实站点 canary        | 发布门禁；外部站点阻塞须人工确认   |
 
-文档、翻译或纯元数据改动可以通过路径分类跳过浏览器 E2E，但修改分类规则本身必须受测试保护；`extension/`、`server/`、`packages/protocol/`、`packages/admin-ui/`、测试夹具、构建脚本和相关 workflow 的改动不得跳过。
+文档、翻译或纯元数据改动可以通过路径分类跳过浏览器 E2E，但本文件是第 5.1 节权威操作/策略映射的载体，修改 `docs/design/automated-real-browser-testing-requirements.zh-CN.md` 时不得走纯文档跳过路径，必须运行完整 browser E2E 及规格—catalog 漂移检查。修改分类规则本身也必须受测试保护；`extension/`、`server/`、`packages/protocol/`、`packages/admin-ui/`、测试夹具、构建脚本和相关 workflow 的改动不得跳过。
 
 ## 9. 需求追踪
 
