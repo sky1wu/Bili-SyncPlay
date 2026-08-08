@@ -302,18 +302,19 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 Each pass records exactly one of `result="ok"` or `result="error"`, so the two
 add up to every pass attempted.
 
-Pick a window several times `ROOM_CLEANUP_INTERVAL_MS`, or a healthy reaper
-falls between samples and reads as zero. `[5m]` only suits intervals well under
-a minute.
+Replace `<window>` with several times your deployed `ROOM_CLEANUP_INTERVAL_MS`
+before running these. The setting only has to be a positive integer, so there is
+no window that is safe by default: pick one too short and a healthy reaper falls
+between samples and reads as zero.
 
 ```promql
 # Passes per second. rate() is per second and the setting is milliseconds, so
 # a healthy node sits at 1000/ROOM_CLEANUP_INTERVAL_MS — 1/60 at the 60000 default.
-sum(rate(bili_syncplay_room_reaper_sweeps_total[15m])) by (instance)
+sum(rate(bili_syncplay_room_reaper_sweeps_total[<window>])) by (instance)
 
 # Share of passes that failed, 0 to 1.
-sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[15m])) by (instance)
-  / sum(rate(bili_syncplay_room_reaper_sweeps_total[15m])) by (instance)
+sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<window>])) by (instance)
+  / sum(rate(bili_syncplay_room_reaper_sweeps_total[<window>])) by (instance)
 ```
 
 Read them together:
@@ -323,7 +324,22 @@ Read them together:
 | ≈ `1000/ROOM_CLEANUP_INTERVAL_MS` | 0                            | Healthy. Collecting nothing is normal — see below                                                          |
 | ≈ expected                        | between 0 and 1              | Intermittent failures, most often a flapping Redis. Not a stall; the timer is running and some passes land |
 | ≈ expected                        | 1                            | Every pass is failing. The timer runs, the work does not                                                   |
-| 0                                 | undefined (no passes at all) | The timer itself is gone. Check the process, then Redis                                                    |
+| 0                                 | undefined (no passes at all) | No sweep **completed** in the window. See the causes below                                                 |
+
+A completion rate of 0 is an observation, not a diagnosis. A pass is counted
+only after `deleteExpiredRooms` settles, so the timer can be alive and the rate
+still zero. Separate the causes before acting:
+
+- **The process restarted less than one interval ago.** Compare against
+  `bili_syncplay_process_start_time_seconds`; the first pass only lands one
+  `ROOM_CLEANUP_INTERVAL_MS` after startup.
+- **The sweep is hung on Redis.** The room store's client sets no command
+  timeout, so a stalled connection leaves a sweep pending indefinitely and
+  nothing is ever counted — no error either. Check
+  `bili_syncplay_redis_operation_failures_total`, Redis latency, and
+  [Redis Incident Handling](#redis-incident-handling).
+- **The timer is gone.** Only after ruling out the two above: check the process
+  is alive and read its logs.
 
 Room nodes only. The standalone global admin runs no reaper and does not export
 this series at all, so its absence there is expected rather than a stall.

@@ -311,17 +311,18 @@ curl -fsS http://10.0.0.11:8788/readyz
 只有 `bili_syncplay_room_reaper_sweeps_total` 能回答这个问题。每一轮扫描只会记
 `result="ok"` 或 `result="error"` 其中之一，两者之和即为已发生的全部轮次。
 
-窗口要取 `ROOM_CLEANUP_INTERVAL_MS` 的数倍，否则健康的 reaper 会落在两次采样之间
-被读成 0。`[5m]` 只适用于清理周期远小于 1 分钟的情况。
+执行前把 `<窗口>` 换成本部署 `ROOM_CLEANUP_INTERVAL_MS` 的数倍。该配置只要求是正
+整数，所以不存在"默认安全"的窗口：取短了，健康的 reaper 会落在两次采样之间被读
+成 0。
 
 ```promql
 # 每秒扫描轮次。rate() 的单位是每秒而配置是毫秒，健康值为
 # 1000/ROOM_CLEANUP_INTERVAL_MS——默认 60000 时是 1/60。
-sum(rate(bili_syncplay_room_reaper_sweeps_total[15m])) by (instance)
+sum(rate(bili_syncplay_room_reaper_sweeps_total[<窗口>])) by (instance)
 
 # 失败轮次占比，取值 0 到 1。
-sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[15m])) by (instance)
-  / sum(rate(bili_syncplay_room_reaper_sweeps_total[15m])) by (instance)
+sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<窗口>])) by (instance)
+  / sum(rate(bili_syncplay_room_reaper_sweeps_total[<窗口>])) by (instance)
 ```
 
 两者要合起来读：
@@ -331,7 +332,18 @@ sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[15m])) by (insta
 | ≈ `1000/ROOM_CLEANUP_INTERVAL_MS` | 0                      | 健康。一轮什么都没收到是正常的，见下                                          |
 | ≈ 预期值                          | 介于 0 和 1 之间       | 间歇性失败，最常见的是 Redis 抖动。**不是停摆**：定时器在跑，且有部分轮次成功 |
 | ≈ 预期值                          | 1                      | 每一轮都在失败。定时器在跑，活没干成                                          |
-| 0                                 | 无定义（根本没有轮次） | 定时器本身没了。先查进程，再查 Redis                                          |
+| 0                                 | 无定义（根本没有轮次） | 窗口内没有任何一轮**跑完**。原因见下                                          |
+
+完成速率为 0 是观测，不是结论。一轮要等 `deleteExpiredRooms` 有结果才计数，所以
+定时器活着、速率照样为 0 的情况是存在的。先分辨原因再动手：
+
+- **进程重启还不到一个周期**。对照 `bili_syncplay_process_start_time_seconds`；
+  第一轮要在启动后一个 `ROOM_CLEANUP_INTERVAL_MS` 才落地。
+- **扫描挂在 Redis 上**。房间存储的客户端没有设置命令超时，连接僵死时一轮扫描会
+  无限期挂起，什么都不会被计上——连错误都不会有。查
+  `bili_syncplay_redis_operation_failures_total`、Redis 延迟，以及
+  [Redis 故障处理](#redis-故障处理)。
+- **定时器真的没了**。排除上面两条之后再查：进程是否还活着，以及它的日志。
 
 只有 Room Node 有这条序列。独立 Global Admin 不跑 reaper，根本不导出它，在那里
 查不到属于预期，不是停摆。
