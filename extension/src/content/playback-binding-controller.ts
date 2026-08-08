@@ -147,18 +147,30 @@ export function createPlaybackBindingController(args: {
    */
   const armBufferPauseUpgrade = (video: HTMLVideoElement) => {
     clearBufferUpgradeTimer();
-    // The PLAYER context, not the room one. This upgrade re-reads the element
-    // and re-broadcasts what it finds, so only a change of page/element can make
-    // it stale. Reading `playbackContextGeneration` here tied it to the room
-    // instead: sharing your own video switches the shared url, which bumps that
-    // counter, so the upgrade was dropped by the very event that had just
-    // published the `buffering` it exists to correct (#258).
+    // This upgrade has two premises, and it must verify BOTH — it re-reads the
+    // local element, and it broadcasts what it finds to a room.
+    //
+    // Element/page side: `playerContextGeneration`, which only a real navigation
+    // moves. Reading `playbackContextGeneration` here instead tied the upgrade to
+    // the ROOM's generation, and sharing your own video switches the shared url —
+    // so the upgrade was dropped by the very event that had just published the
+    // `buffering` it exists to correct (#258).
+    //
+    // Room side: the room CODE, not that generation. A room switch or leave
+    // resets the playback sync state while the page and the element carry on
+    // unchanged, so without this the timer armed in room A would fire into room
+    // B and broadcast this page's old pause over whatever B is playing. The room
+    // code is the honest discriminator: it is untouched by our own share
+    // confirming (the case #258 needed to survive) and necessarily changes on a
+    // switch or leave (`room-state-controller` resets on both).
     const playerContextGeneration = args.runtimeState.playerContextGeneration;
+    const armedRoomCode = args.runtimeState.activeRoomCode;
     const classifiedPauseStartedAt = args.runtimeState.pauseStartedAt;
     pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
       pauseBufferUpgradeTimerId = null;
       if (
-        playerContextGeneration !== args.runtimeState.playerContextGeneration
+        playerContextGeneration !== args.runtimeState.playerContextGeneration ||
+        args.runtimeState.activeRoomCode !== armedRoomCode
       ) {
         return;
       }

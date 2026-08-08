@@ -3209,6 +3209,9 @@ test("playback binding controller keeps a buffer-pause upgrade across a room-lev
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.lastUserGestureAt = 0;
+  // A share happens inside a room, and that room does not change when our own
+  // share confirms — which is what lets the upgrade survive here.
+  runtimeState.activeRoomCode = "ROOM01";
   let now = 5_000;
   const broadcasts: string[] = [];
   const originalSetTimeout = globalThis.window.setTimeout;
@@ -3264,6 +3267,77 @@ test("playback binding controller keeps a buffer-pause upgrade across a room-lev
 
     assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
     assert.equal(broadcasts.includes("pause"), true);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.restore();
+  }
+});
+
+test("playback binding controller drops a buffer-pause upgrade after a room switch", async () => {
+  // The other half of the same premise (Codex review on #260). Switching rooms
+  // resets the playback sync state while the page and the `<video>` element
+  // carry on unchanged, so the page-scoped generation alone would let room A's
+  // timer fire into room B — re-broadcasting this page's old pause over whatever
+  // B is playing, and stopping every member of a room we just joined.
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 0;
+  runtimeState.activeRoomCode = "ROOM01";
+  let now = 5_000;
+  const broadcasts: string[] = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const scheduledTimers: Array<{ cb: () => void; ms: number }> = [];
+  globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
+    if (typeof callback === "function") {
+      scheduledTimers.push({ cb: callback as () => void, ms: ms ?? 0 });
+    }
+    return scheduledTimers.length;
+  }) as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    now = 5_100;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+
+    const upgradeTimer = scheduledTimers.find((timer) => timer.ms === 1_500);
+    assert.notEqual(upgradeTimer, undefined);
+    broadcasts.length = 0;
+
+    // What a room switch does (`room-state-controller` handleSyncStatus): the
+    // room code moves, and the playback sync state is reset.
+    runtimeState.activeRoomCode = "ROOM02";
+    invalidatePlaybackContext(runtimeState);
+    now = 6_600;
+    upgradeTimer?.cb();
+    await Promise.resolve();
+
+    assert.deepEqual(broadcasts, []);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.restore();
