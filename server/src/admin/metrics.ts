@@ -121,6 +121,15 @@ export type MetricsCollector = {
    */
   recordRoomsExpiredDeleted: (roomCount: number) => void;
   /**
+   * This process runs a room reaper, so its sweep series belongs on /metrics.
+   *
+   * Not exported unconditionally: the standalone global admin builds the same
+   * collector (`global-admin-app.ts`) and never creates a reaper, so an
+   * always-on series would sit at 0 there forever and the "rate dropped to 0"
+   * rule would call a healthy admin process a stalled reaper (#254 review).
+   */
+  declareRoomReaper: () => void;
+  /**
    * One expiry sweep finished. Incremented on EVERY pass, including the ones
    * that found nothing — a sweep that collects no rooms is the normal state of
    * a healthy reaper, so only a counter that moves regardless can tell "idle"
@@ -240,6 +249,7 @@ export function createMetricsCollector(options: {
     help: "Total room expiry sweeps the reaper completed, grouped by outcome",
     samples: new Map(),
   };
+  let roomReaperDeclared = false;
   const messageDurationHistogram: HistogramMetric = {
     help: "Duration of monitored message handler paths in seconds",
     buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
@@ -505,15 +515,23 @@ export function createMetricsCollector(options: {
       // many rooms it collected: an idle sweep and a dead timer look identical
       // through the deletion counters, and with steady traffic the lazy read
       // path can empty the expiry backlog before every sweep (#254 review).
-      "# HELP bili_syncplay_room_reaper_sweeps_total Total room expiry sweeps the reaper completed, grouped by outcome",
-      "# TYPE bili_syncplay_room_reaper_sweeps_total counter",
-      ...ROOM_REAPER_SWEEP_RESULTS.map((result) =>
-        formatMetricLine(
-          "bili_syncplay_room_reaper_sweeps_total",
-          ensureCounterSample(roomReaperSweepCounter, { result }).value,
-          { result },
-        ),
-      ),
+      //
+      // Only where a reaper exists. The standalone global admin scrapes the
+      // same collector without ever creating one, and a permanent zero there
+      // would make the "rate dropped to 0" rule fire on a healthy process.
+      ...(roomReaperDeclared
+        ? [
+            "# HELP bili_syncplay_room_reaper_sweeps_total Total room expiry sweeps the reaper completed, grouped by outcome",
+            "# TYPE bili_syncplay_room_reaper_sweeps_total counter",
+            ...ROOM_REAPER_SWEEP_RESULTS.map((result) =>
+              formatMetricLine(
+                "bili_syncplay_room_reaper_sweeps_total",
+                ensureCounterSample(roomReaperSweepCounter, { result }).value,
+                { result },
+              ),
+            ),
+          ]
+        : []),
       "# HELP bili_syncplay_ws_connection_rejected_total Total rejected websocket upgrades",
       "# TYPE bili_syncplay_ws_connection_rejected_total counter",
       formatMetricLine(
@@ -673,6 +691,15 @@ export function createMetricsCollector(options: {
         return;
       }
       incrementCounter(roomsExpiredDeletedCounter, {}, roomCount);
+    },
+    declareRoomReaper() {
+      roomReaperDeclared = true;
+      // Seeded here rather than on the first sweep, so a room node that has not
+      // swept yet still exports both series — otherwise the very first scrape
+      // after a restart is indistinguishable from a process with no reaper.
+      for (const result of ROOM_REAPER_SWEEP_RESULTS) {
+        ensureCounterSample(roomReaperSweepCounter, { result });
+      }
     },
     recordRoomReaperSweep(result) {
       incrementCounter(roomReaperSweepCounter, { result });

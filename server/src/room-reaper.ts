@@ -13,10 +13,18 @@ export function createRoomReaper(options: {
   intervalMs: number;
   deleteExpiredRooms: (now: number) => Promise<ExpiredRoomSweepCounts>;
   logEvent: LogEvent;
-  metricsCollector?: Pick<MetricsCollector, "recordRoomReaperSweep">;
+  metricsCollector?: Pick<
+    MetricsCollector,
+    "declareRoomReaper" | "recordRoomReaperSweep"
+  >;
   now?: () => number;
 }): RoomReaper {
   const now = options.now ?? Date.now;
+
+  // Declared here rather than at the wiring site: existing is what makes the
+  // series meaningful, so the two cannot drift apart. A process without a
+  // reaper never reaches this line and never exports the series.
+  options.metricsCollector?.declareRoomReaper();
 
   async function runNow(): Promise<number> {
     try {

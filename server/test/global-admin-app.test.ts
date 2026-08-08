@@ -326,3 +326,57 @@ test("global admin server queries and closes rooms through shared cluster state"
     await globalAdmin.close();
   }
 });
+
+test("global admin does not export a reaper heartbeat it can never move", async () => {
+  const server = await createGlobalAdminServer(
+    getDefaultSecurityConfig(),
+    getDefaultPersistenceConfig(),
+    {
+      adminConfig: {
+        username: "admin",
+        passwordHash: `sha256:${sha256Hex("secret-123")}`,
+        sessionSecret: "session-secret-123",
+        sessionTtlMs: 60_000,
+        role: "admin",
+        sessionStoreProvider: "memory",
+        eventStoreProvider: "memory",
+        auditStoreProvider: "memory",
+      },
+      serviceVersion: "0.0.0-global-admin-metrics-test",
+    },
+  );
+
+  await new Promise<void>((resolve, reject) => {
+    server.httpServer.listen(0, "127.0.0.1", () => resolve());
+    server.httpServer.once("error", reject);
+  });
+
+  const address = server.httpServer.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to determine test server address.");
+  }
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/metrics`);
+    assert.equal(response.status, 200);
+    const body = await response.text();
+
+    // This process builds the same collector as a room node but never creates a
+    // RoomReaper, so the sweep series would sit at 0 here forever — and the
+    // runbook's "rate dropped to 0 means the reaper stalled" rule would fire on
+    // a perfectly healthy admin instance (#254 review).
+    assert.equal(
+      body.includes("bili_syncplay_room_reaper_sweeps_total"),
+      false,
+    );
+    // Still a real metrics endpoint, so the absence above is about this series
+    // and not about the scrape failing.
+    assert.equal(body.includes("bili_syncplay_connections"), true);
+    // The reclaimed-rooms counter stays, deliberately: admin reads go through
+    // `resolveRoom`, which deletes a room found already past its expiry, so
+    // this process really can reclaim rooms even with no reaper.
+    assert.match(body, /^bili_syncplay_rooms_expired_deleted_total \d+$/m);
+  } finally {
+    await server.close();
+  }
+});

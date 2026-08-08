@@ -72,6 +72,11 @@ export async function createGlobalAdminServer(
     runtimeStore,
     generateToken,
     logEvent,
+    // This process runs no reaper, but its admin reads still go through
+    // `resolveRoom`, which deletes a room found already past its expiry. Those
+    // reclamations are real and belong in the counter — unlike the sweep
+    // series, which stays absent here because nothing can ever move it.
+    metricsCollector,
     now,
   });
   const {

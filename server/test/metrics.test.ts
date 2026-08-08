@@ -230,12 +230,21 @@ test("metrics collector counts reclaimed rooms apart from reaper sweeps", async 
   // process and a wedged reaper.
   const initial = await metrics.render();
   assert.match(initial, /^bili_syncplay_rooms_expired_deleted_total 0$/m);
-  // Both outcomes pre-seeded, so "never failed" is distinguishable from
-  // "metric absent" on the panel whose whole job is telling a sweeping reaper
-  // from a stopped one.
+  // Absent until a reaper declares itself. The standalone global admin builds
+  // this same collector and never creates one, so an always-on series would
+  // sit at 0 there and make "rate dropped to 0" fire on a healthy process.
+  assert.equal(
+    initial.includes("bili_syncplay_room_reaper_sweeps_total"),
+    false,
+  );
+
+  metrics.declareRoomReaper();
+  const declared = await metrics.render();
+  // Once declared, both outcomes are pre-seeded even before the first sweep, so
+  // "never failed" and "has not swept yet" stay distinguishable from "absent".
   for (const result of ["ok", "error"]) {
     assert.match(
-      initial,
+      declared,
       new RegExp(
         `^bili_syncplay_room_reaper_sweeps_total\\{result="${result}"\\} 0$`,
         "m",
@@ -268,6 +277,7 @@ test("metrics collector counts reclaimed rooms apart from reaper sweeps", async 
   // Sweep liveness is a separate series on purpose: both counters above stay
   // flat on a healthy but idle reaper, and the lazy read path can keep the
   // reclaimed count climbing after the reaper has died.
+  metrics.declareRoomReaper();
   metrics.recordRoomReaperSweep("ok");
   metrics.recordRoomReaperSweep("ok");
   metrics.recordRoomReaperSweep("error");

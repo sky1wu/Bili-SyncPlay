@@ -80,6 +80,7 @@ test("room reaper stop() waits for the sweep in flight", async () => {
 
 test("room reaper records every sweep, including the ones that collect nothing", async () => {
   const sweeps: string[] = [];
+  let declared = 0;
   const outcomes: Array<{
     deletedRooms: number;
     orphanedIndexEntries: number;
@@ -95,7 +96,12 @@ test("room reaper records every sweep, including the ones that collect nothing",
       outcomes.shift() ?? { deletedRooms: 0, orphanedIndexEntries: 0 },
     logEvent: (event) => logged.push(event),
     metricsCollector: {
-      recordRoomReaperSweep: (result) => sweeps.push(result),
+      declareRoomReaper: () => {
+        declared += 1;
+      },
+      recordRoomReaperSweep: (result) => {
+        sweeps.push(result);
+      },
     },
     now: () => 10,
   });
@@ -113,11 +119,15 @@ test("room reaper records every sweep, including the ones that collect nothing",
   // deletion event goes quiet, so only a per-pass signal separates "idle" from
   // "stopped".
   assert.deepEqual(sweeps, ["ok", "ok", "ok"]);
+  // Declared once, at construction — a process that never builds a reaper must
+  // not export the series at all, or "rate dropped to 0" fires on it forever.
+  assert.equal(declared, 1);
   assert.deepEqual(logged, ["room_expired_deleted", "room_expired_deleted"]);
 });
 
 test("room reaper records a failed sweep under its own result", async () => {
   const sweeps: string[] = [];
+  let declared = 0;
   const reaper = createRoomReaper({
     intervalMs: 60_000,
     deleteExpiredRooms: async () => {
@@ -125,7 +135,12 @@ test("room reaper records a failed sweep under its own result", async () => {
     },
     logEvent: () => undefined,
     metricsCollector: {
-      recordRoomReaperSweep: (result) => sweeps.push(result),
+      declareRoomReaper: () => {
+        declared += 1;
+      },
+      recordRoomReaperSweep: (result) => {
+        sweeps.push(result);
+      },
     },
     now: () => 10,
   });
@@ -140,4 +155,8 @@ test("room reaper records a failed sweep under its own result", async () => {
   // every minute is as broken as one that stopped, and `events_total` carries
   // no `reason` label to filter the failure log by.
   assert.deepEqual(sweeps, ["error"]);
+  // Declared at construction, so the series exists even for a reaper whose
+  // every sweep fails — otherwise the failure counter would have nothing to
+  // sit beside.
+  assert.equal(declared, 1);
 });
