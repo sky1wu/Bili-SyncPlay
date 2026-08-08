@@ -107,8 +107,22 @@ function isProgrammaticPlaybackStateCompatible(args: {
 }): boolean {
   return (
     args.eventPlayState === args.signaturePlayState ||
+    // Applied `playing`, element still loading: it reports `buffering`.
     (args.eventPlayState === "buffering" &&
-      args.signaturePlayState === "playing")
+      args.signaturePlayState === "playing") ||
+    // The mirror, and the one #258 exposed: applying a remote `buffering` never
+    // starts playback (`applyPendingPlaybackApplication` deliberately neither
+    // seeks past nor resumes for it), so on an element that is already paused
+    // the apply's own `seeking`/`canplay`/`seeked` echoes report `paused` — the
+    // only thing a paused element can report about itself. Judging that
+    // incompatible let the echo escape suppression and broadcast `paused` back,
+    // stopping every member of a room that was merely buffering.
+    //
+    // A genuine user pause inside the same window is NOT lost to this: it is let
+    // through by the explicit-user-action bypass below, which this branch runs
+    // after.
+    (args.eventPlayState === "paused" &&
+      args.signaturePlayState === "buffering")
   );
 }
 

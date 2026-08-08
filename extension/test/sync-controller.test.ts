@@ -352,9 +352,12 @@ test("sync controller invalidates a queued remote-stop pause on playback reset",
       harness.runtimeState.playbackContextGeneration,
       previousGeneration + 1,
     );
-    assert.equal(harness.runtimeState.pauseStartedAt, 0);
-    assert.equal(harness.runtimeState.pauseClassifiedAsBuffer, false);
     assert.equal(pauseCalls, 0);
+    // The room-level reset must NOT touch the local pause classification: the
+    // element is still sitting in the very pause it describes, and the pending
+    // buffer-pause upgrade verifies itself against these fields (#258).
+    assert.equal(harness.runtimeState.pauseStartedAt, 9_900);
+    assert.equal(harness.runtimeState.pauseClassifiedAsBuffer, true);
   } finally {
     windowHarness.restore();
   }
@@ -2001,6 +2004,119 @@ test("sync controller broadcasts paused once buffer-pause upgrade window elapses
     harness.runtimeMessages[0] as { payload: { playState: string } }
   ).payload;
   assert.equal(payload.playState, "paused");
+});
+
+test("sync controller reports paused for a paused video whose last broadcast was buffering", async () => {
+  // #258: `intendedPlayState` is written to whatever was last broadcast, so a
+  // single buffer-classified pause used to latch every later read of a plainly
+  // paused element to `buffering` — including the share snapshot, and including
+  // the upgrade re-broadcast that exists to undo it. The state below is what the
+  // real flow holds after a load-time buffer pause has been broadcast and its
+  // window has elapsed.
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({ paused: true, readyState: 4, currentTime: 40 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.intendedPlayState = "buffering";
+  harness.runtimeState.pauseStartedAt = 20_000;
+  harness.runtimeState.pauseClassifiedAsBuffer = false;
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+
+  harness.controller = createSyncController({
+    runtimeState: harness.runtimeState,
+    lastAppliedVersionByActor: new Map(),
+    broadcastLogState: { key: null, at: 0 },
+    ignoredSelfPlaybackLogState: { key: null, at: 0 },
+    localIntentGuardMs: 500,
+    pauseHoldMs: 1_000,
+    initialRoomStatePauseHoldMs: 1_500,
+    remoteEchoSuppressionMs: 800,
+    remotePlayTransitionGuardMs: 500,
+    remoteFollowPlayingWindowMs: 3_000,
+    programmaticApplyWindowMs: 700,
+    userGestureGraceMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    remotePauseDebounceMs: 0,
+    duplicateBroadcastWindowMs: 1_000,
+    nextSeq: () => 1,
+    markBroadcastAt: () => {},
+    getMonotonicNow: () => 21_700,
+    debugLog: (message) => harness.debugLogs.push(message),
+    shouldLogHeartbeat: () => true,
+    sendPlaybackUpdate: async (payload) => {
+      harness.runtimeMessages.push({
+        type: "content:playback-update",
+        payload,
+      });
+      return null;
+    },
+    requestRoomStateHydration: async () => null,
+    getVideoElement: () => video,
+    getCurrentPlaybackVideo: async () => sharedVideo,
+    getSharedVideo: () => sharedVideo,
+    normalizeUrl: (url) => url?.trim() ?? null,
+    notifyRoomStateToasts: () => {},
+    maybeShowSharedVideoToast: () => {},
+  });
+
+  await harness.controller.broadcastPlayback(video, "pause");
+
+  assert.equal(harness.runtimeMessages.length, 1);
+  const latchedPayload = (
+    harness.runtimeMessages[0] as { payload: { playState: string } }
+  ).payload;
+  assert.equal(latchedPayload.playState, "paused");
+});
+
+test("sync controller suppresses the echo of a remote buffering applied to an already-paused element", async () => {
+  // #260 review. Applying a remote `buffering` never starts playback, so on an
+  // element that is already paused the apply's own `canplay`/`seeking` echoes
+  // report `paused` — the only thing that element can say about itself. The
+  // programmatic signature says `buffering`, and judging the two incompatible
+  // let the echo escape and broadcast `paused` back at a room that was merely
+  // buffering, stopping everyone in it.
+  const harness = createControllerHarness();
+  const sharedVideo = {
+    videoId: "BV1xx411c7mD",
+    url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+    title: "Video",
+  };
+  const video = createVideo({ paused: true, readyState: 4, currentTime: 40 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.hasReceivedInitialRoomState = true;
+  harness.runtimeState.localMemberId = "local-member";
+  harness.runtimeState.activeRoomCode = "ROOM01";
+  harness.runtimeState.activeSharedUrl = sharedVideo.url;
+  // The state left behind by applying a remote `buffering`.
+  harness.runtimeState.intendedPlayState = "buffering";
+  harness.runtimeState.programmaticApplySignature = {
+    url: sharedVideo.url,
+    playState: "buffering",
+    currentTime: 40,
+    playbackRate: 1,
+  };
+  harness.runtimeState.programmaticApplyAt = 20_000;
+  harness.runtimeState.programmaticApplyUntil = 20_700;
+  harness.runtimeState.programmaticApplyScope = "all";
+  harness.setSharedVideo(sharedVideo);
+  harness.setCurrentPlaybackVideo(sharedVideo);
+  harness.setVideoElement(video);
+  harness.setNow(20_100);
+
+  await harness.controller.broadcastPlayback(video, "canplay");
+
+  assert.deepEqual(harness.runtimeMessages, []);
 });
 
 test("sync controller suppresses local end-pause broadcasts from non-sharer autoplay guard", async () => {

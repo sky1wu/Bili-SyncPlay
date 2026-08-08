@@ -147,14 +147,21 @@ export function createPlaybackBindingController(args: {
    */
   const armBufferPauseUpgrade = (video: HTMLVideoElement) => {
     clearBufferUpgradeTimer();
-    const playbackContextGeneration =
-      args.runtimeState.playbackContextGeneration;
+    // The premise is "this element, still in the pause I classified, still in
+    // the membership I was armed under" — which is exactly what
+    // `playerSessionGeneration` tracks, so it is the only context check needed.
+    //
+    // Not the ROOM's generation: sharing your own video switches the shared url
+    // and bumps that counter, which killed this upgrade on every share and left
+    // the room on a stale `buffering` (#258). And not a captured room CODE
+    // either: `ROOM01 → null → ROOM01` inside the window restores the captured
+    // value while the leave has already ended the session the pause belonged to.
+    const playerSessionGeneration = args.runtimeState.playerSessionGeneration;
     const classifiedPauseStartedAt = args.runtimeState.pauseStartedAt;
     pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
       pauseBufferUpgradeTimerId = null;
       if (
-        playbackContextGeneration !==
-        args.runtimeState.playbackContextGeneration
+        playerSessionGeneration !== args.runtimeState.playerSessionGeneration
       ) {
         return;
       }

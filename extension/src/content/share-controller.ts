@@ -1,5 +1,5 @@
 import type { PlaybackState, SharedVideo } from "@bili-syncplay/protocol";
-import { getPlayState, getVideoElement } from "./player-binding";
+import { getReportedPlayState, getVideoElement } from "./player-binding";
 import {
   createSharePayload as createPageSharePayload,
   resolvePageSharedVideo,
@@ -70,6 +70,10 @@ export function createShareController(args: {
   getActiveCorrectionBaseRate: (
     url: string | undefined | null,
   ) => number | null;
+  /** See {@link getReportedPlayState}; the share snapshot reports through it. */
+  bufferPauseUpgradeMs: number;
+  /** Monotonic clock, matching every other window measured in this codebase. */
+  getMonotonicNow: () => number;
   debugLog: (message: string) => void;
 }): ShareController {
   function canUsePageSnapshot(pathname: string): boolean {
@@ -187,7 +191,19 @@ export function createShareController(args: {
             playbackRate:
               args.getActiveCorrectionBaseRate(sharedVideo.url) ??
               video.playbackRate,
-            playState: getPlayState(video, args.runtimeState.intendedPlayState),
+            // Same classification the broadcast funnel uses. A share snapshot
+            // is a full play state on the wire, so it must be able to say
+            // `paused` for a video that is paused — reporting `buffering` there
+            // tells receivers "we are trying to play", and they neither pause
+            // for it nor let their pause hold act on it (#258).
+            playState: getReportedPlayState({
+              video,
+              pauseClassifiedAsBuffer:
+                args.runtimeState.pauseClassifiedAsBuffer,
+              pauseStartedAt: args.runtimeState.pauseStartedAt,
+              now: args.getMonotonicNow(),
+              bufferPauseUpgradeMs: args.bufferPauseUpgradeMs,
+            }),
           }
         : null,
       actorId: args.runtimeState.localMemberId ?? "local",

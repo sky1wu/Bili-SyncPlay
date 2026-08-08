@@ -69,6 +69,8 @@ const shareController = createShareController({
   refreshFestivalBridge: (input) => festivalBridge.refreshSnapshot(input),
   getActiveCorrectionBaseRate: (url) =>
     syncController.getActiveCorrectionBaseRate(normalizeUrl(url)),
+  bufferPauseUpgradeMs: BUFFER_PAUSE_UPGRADE_MS,
+  getMonotonicNow: () => performance.now(),
   debugLog,
 });
 const autoShareNextController = createAutoShareNextController({
