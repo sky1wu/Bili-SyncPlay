@@ -18,7 +18,7 @@ import {
 import {
   applyPendingPlaybackApplication as applyPendingPlaybackApplicationWithBinding,
   createProgrammaticPlaybackSignature,
-  getPlayState,
+  getReportedPlayState,
   pauseVideo,
 } from "./player-binding";
 import {
@@ -273,6 +273,25 @@ export function createSyncController(args: {
     args.runtimeState.pauseHoldUntil = monotonicNow() + durationMs;
   }
 
+  /**
+   * The play state this client would publish for `video` right now. Every
+   * reporter in this file — the broadcast funnel and each diagnostic trace —
+   * reads it from here so a trace can never disagree with the message it
+   * describes. See {@link getReportedPlayState}.
+   */
+  function reportedPlayState(
+    video: HTMLVideoElement,
+    now = monotonicNow(),
+  ): PlaybackState["playState"] {
+    return getReportedPlayState({
+      video,
+      pauseClassifiedAsBuffer: args.runtimeState.pauseClassifiedAsBuffer,
+      pauseStartedAt: args.runtimeState.pauseStartedAt,
+      now,
+      bufferPauseUpgradeMs: args.bufferPauseUpgradeMs,
+    });
+  }
+
   function armProgrammaticApplyWindow(
     signature: ReturnType<typeof createProgrammaticPlaybackSignature>,
     reason: "pending" | "apply",
@@ -307,6 +326,7 @@ export function createSyncController(args: {
     debugLog: args.debugLog,
     userGestureGraceMs: args.userGestureGraceMs,
     programmaticApplyWindowMs: args.programmaticApplyWindowMs,
+    bufferPauseUpgradeMs: args.bufferPauseUpgradeMs,
     getMonotonicNow: args.getMonotonicNow,
     armProgrammaticApplyWindow,
   });
@@ -335,9 +355,15 @@ export function createSyncController(args: {
     softApply.clearSoftApplyCooldown();
     args.runtimeState.lastLocalPlaybackVersion = null;
     args.runtimeState.intendedPlaybackRate = 1;
-    args.runtimeState.lastBufferSignalAt = 0;
-    args.runtimeState.pauseStartedAt = 0;
-    args.runtimeState.pauseClassifiedAsBuffer = false;
+    // The pause classification (`lastBufferSignalAt`, `pauseStartedAt`,
+    // `pauseClassifiedAsBuffer`) is deliberately NOT cleared here. It describes
+    // the local `<video>` element, and this reset runs for room-level events —
+    // above all the confirmation of our OWN share, which does not end the pause
+    // the element is sitting in. Clearing it there discarded the evidence the
+    // pending buffer-pause upgrade verifies itself against, so the upgrade that
+    // should have corrected the room's `buffering` to `paused` dropped silently
+    // on every share (#258). A real navigation still clears it, through
+    // `resetUserGestureState`, which is where the element genuinely changes.
     roomConfirmedBroadcast = null;
     args.runtimeState.lastNonSharedGuardUrl = null;
     args.runtimeState.lastExplicitPlaybackAction = null;
@@ -773,9 +799,9 @@ export function createSyncController(args: {
     eventSource: LocalPlaybackEventSource;
     now: number;
   }): PlaybackState["playState"] {
-    const basePlayState = getPlayState(
+    const basePlayState = reportedPlayState(
       argsForBroadcast.video,
-      args.runtimeState.intendedPlayState,
+      argsForBroadcast.now,
     );
     // Mirrors `derivePlaybackSyncIntent`'s `hasActiveExplicitUserAction`: a seek
     // that predates a forced pause was invalidated by it and is not a user
@@ -843,16 +869,12 @@ export function createSyncController(args: {
       return "playing";
     }
 
-    if (
-      basePlayState === "paused" &&
-      args.runtimeState.pauseClassifiedAsBuffer &&
-      args.runtimeState.pauseStartedAt > 0 &&
-      argsForBroadcast.now - args.runtimeState.pauseStartedAt <
-        args.bufferPauseUpgradeMs
-    ) {
-      return "buffering";
-    }
-
+    // The buffer-pause window is NOT re-checked here: `basePlayState` already
+    // came from `getReportedPlayState`, which owns that classification for every
+    // reporter. Restating it locally is what let the two disagree — the old
+    // `intendedPlayState` latch made `basePlayState` `buffering` before this
+    // branch could run, so the branch never fired and its window never bounded
+    // anything (#258).
     return basePlayState;
   }
 
@@ -884,7 +906,7 @@ export function createSyncController(args: {
           eventSource,
           currentVideoUrl: null,
           normalizedCurrentVideoUrl: null,
-          playState: getPlayState(video, args.runtimeState.intendedPlayState),
+          playState: reportedPlayState(video, now),
           currentTime: video.currentTime,
           playbackRate: video.playbackRate,
         }),
@@ -916,7 +938,7 @@ export function createSyncController(args: {
             eventSource,
             currentVideoUrl: null,
             normalizedCurrentVideoUrl: null,
-            playState: getPlayState(video, args.runtimeState.intendedPlayState),
+            playState: reportedPlayState(video, now),
             currentTime: video.currentTime,
             playbackRate: video.playbackRate,
           }),
@@ -950,7 +972,7 @@ export function createSyncController(args: {
           eventSource,
           currentVideoUrl: null,
           normalizedCurrentVideoUrl: null,
-          playState: getPlayState(video, args.runtimeState.intendedPlayState),
+          playState: reportedPlayState(video, now),
           currentTime: video.currentTime,
           playbackRate: video.playbackRate,
         }),
@@ -972,7 +994,7 @@ export function createSyncController(args: {
         eventSource,
         currentVideoUrl: currentVideo.url,
         normalizedCurrentVideoUrl,
-        playState: getPlayState(video, args.runtimeState.intendedPlayState),
+        playState: reportedPlayState(video, now),
         currentTime: video.currentTime,
         playbackRate: video.playbackRate,
       }),
@@ -1016,10 +1038,7 @@ export function createSyncController(args: {
           args.debugLog(
             `Skip broadcast ${formatPlaybackDiagnostic({
               actor: args.runtimeState.localMemberId,
-              playState: getPlayState(
-                video,
-                args.runtimeState.intendedPlayState,
-              ),
+              playState: reportedPlayState(video, now),
               url: currentVideo.url,
               localTime: video.currentTime,
               targetTime: video.currentTime,
@@ -1035,7 +1054,7 @@ export function createSyncController(args: {
             eventSource,
             currentVideoUrl: currentVideo.url,
             normalizedCurrentVideoUrl,
-            playState: getPlayState(video, args.runtimeState.intendedPlayState),
+            playState: reportedPlayState(video, now),
             currentTime: video.currentTime,
             playbackRate: video.playbackRate,
           }),
@@ -1083,10 +1102,7 @@ export function createSyncController(args: {
           args.debugLog(
             `Skip broadcast ${formatPlaybackDiagnostic({
               actor: args.runtimeState.localMemberId,
-              playState: getPlayState(
-                video,
-                args.runtimeState.intendedPlayState,
-              ),
+              playState: reportedPlayState(video, now),
               url: currentVideo.url,
               localTime: video.currentTime,
               targetTime: video.currentTime,
@@ -1102,7 +1118,7 @@ export function createSyncController(args: {
             eventSource,
             currentVideoUrl: currentVideo.url,
             normalizedCurrentVideoUrl,
-            playState: getPlayState(video, args.runtimeState.intendedPlayState),
+            playState: reportedPlayState(video, now),
             currentTime: video.currentTime,
             playbackRate: video.playbackRate,
           }),
@@ -1138,7 +1154,7 @@ export function createSyncController(args: {
           normalizedCurrentVideoUrl,
           explicitNonSharedPlaybackUrl:
             args.runtimeState.explicitNonSharedPlaybackUrl,
-          playState: getPlayState(video, args.runtimeState.intendedPlayState),
+          playState: reportedPlayState(video, now),
           lastExplicitPlaybackAction:
             args.runtimeState.lastExplicitPlaybackAction,
           now,
@@ -1156,7 +1172,7 @@ export function createSyncController(args: {
           eventSource,
           currentVideoUrl: currentVideo.url,
           normalizedCurrentVideoUrl,
-          playState: getPlayState(video, args.runtimeState.intendedPlayState),
+          playState: reportedPlayState(video, now),
           currentTime: video.currentTime,
           playbackRate: video.playbackRate,
         }),

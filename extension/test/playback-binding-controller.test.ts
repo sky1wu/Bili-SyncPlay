@@ -4,6 +4,7 @@ import type { SharedVideo } from "@bili-syncplay/protocol";
 import {
   createContentRuntimeState,
   invalidatePlaybackContext,
+  resetUserGestureState,
 } from "../src/content/runtime-state";
 import { installClockStubs } from "./clock-stubs";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
@@ -3135,7 +3136,7 @@ test("playback binding controller re-broadcasts paused after buffer-pause upgrad
   }
 });
 
-test("playback binding controller drops a buffer-pause upgrade from an older playback context", async () => {
+test("playback binding controller drops a buffer-pause upgrade from an older page context", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   runtimeState.lastUserGestureAt = 0;
@@ -3184,12 +3185,85 @@ test("playback binding controller drops a buffer-pause upgrade from an older pla
     const upgradeTimer = scheduledTimers.find((timer) => timer.ms === 1_500);
     assert.notEqual(upgradeTimer, undefined);
     broadcasts.length = 0;
-    invalidatePlaybackContext(runtimeState);
+    // A navigation — the only thing that replaces the page's player context, and
+    // the reason this upgrade must not fire. A ROOM-level invalidation is a
+    // different question, covered by the test below.
+    resetUserGestureState(runtimeState);
     upgradeTimer?.cb();
     await Promise.resolve();
 
-    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
     assert.deepEqual(broadcasts, []);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.restore();
+  }
+});
+
+test("playback binding controller keeps a buffer-pause upgrade across a room-level playback reset", async () => {
+  // The regression behind #258. Sharing your own video switches the room's
+  // shared url, which resets the playback sync state — and that reset used to
+  // take the pending buffer-pause upgrade with it. The room had just been told
+  // `buffering` by the share snapshot, and the upgrade is the only thing that
+  // ever corrects it to `paused`, so losing it here strands every member on a
+  // state the sharer left long ago.
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.lastUserGestureAt = 0;
+  let now = 5_000;
+  const broadcasts: string[] = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const scheduledTimers: Array<{ cb: () => void; ms: number }> = [];
+  globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
+    if (typeof callback === "function") {
+      scheduledTimers.push({ cb: callback as () => void, ms: ms ?? 0 });
+    }
+    return scheduledTimers.length;
+  }) as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    now = 5_100;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+
+    const upgradeTimer = scheduledTimers.find((timer) => timer.ms === 1_500);
+    assert.notEqual(upgradeTimer, undefined);
+    broadcasts.length = 0;
+
+    // What the share confirmation does: bump the room-scoped generation. The
+    // page, the element and the pause it is sitting in are all unchanged.
+    invalidatePlaybackContext(runtimeState);
+    now = 6_600;
+    upgradeTimer?.cb();
+    await Promise.resolve();
+
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+    assert.equal(broadcasts.includes("pause"), true);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.restore();

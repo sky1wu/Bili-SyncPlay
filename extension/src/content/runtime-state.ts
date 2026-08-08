@@ -101,8 +101,26 @@ export interface ContentRuntimeState {
   hydrationReady: boolean;
   hasReceivedInitialRoomState: boolean;
   pendingRoomStateHydration: boolean;
-  /** Invalidates delayed work that captured an older room/page playback context. */
+  /**
+   * Invalidates delayed work that captured an older ROOM playback context —
+   * anything decided from the room's shared video, such as a queued load-pause
+   * or a broadcast in flight. A shared-url switch bumps it, because the decision
+   * that scheduled that work is the thing that just went stale.
+   */
   playbackContextGeneration: number;
+  /**
+   * Invalidates delayed work that captured an older PAGE/player context.
+   *
+   * Deliberately separate from [[playbackContextGeneration]]: a room-level
+   * shared-url switch does not end the pause the local `<video>` element is
+   * sitting in, so delayed work whose premise is purely local must not be
+   * dropped by it. The buffer-pause upgrade is exactly that work — it re-reads
+   * the element and re-broadcasts what it finds — and sharing your own video
+   * always switches the shared url, so reading the room-scoped counter there
+   * killed the upgrade on every share and left the room on a stale `buffering`
+   * (#258). Only a real navigation (via [[resetUserGestureState]]) bumps this.
+   */
+  playerContextGeneration: number;
   intendedPlayState: PlaybackState["playState"];
   intendedPlaybackRate: number;
   lastLocalIntentAt: number;
@@ -329,6 +347,11 @@ export interface ContentRuntimeState {
  */
 export function resetUserGestureState(state: ContentRuntimeState): void {
   invalidatePlaybackContext(state);
+  // A navigation replaces the page's player context as well as the room's, and
+  // it is the ONLY thing that does. The pause fields cleared below describe the
+  // element this page is leaving, so delayed work anchored on them (the
+  // buffer-pause upgrade) must go with them.
+  state.playerContextGeneration += 1;
   state.lastUserGestureAt = GESTURE_NEVER_AT;
   state.lastUserGestureInPlayerAt = GESTURE_NEVER_AT;
   state.lastRateControlGestureAt = GESTURE_NEVER_AT;
@@ -362,6 +385,7 @@ export function createContentRuntimeState(): ContentRuntimeState {
     hasReceivedInitialRoomState: false,
     pendingRoomStateHydration: true,
     playbackContextGeneration: 0,
+    playerContextGeneration: 0,
     intendedPlayState: "paused",
     intendedPlaybackRate: 1,
     lastLocalIntentAt: 0,

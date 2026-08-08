@@ -98,6 +98,98 @@ test("keeps playback snapshot outside of a room", () => {
   );
 });
 
+test("share controller reports a paused video as paused once its buffer-pause window has elapsed", () => {
+  // #258: the snapshot went out as `buffering` for a video that had been sitting
+  // paused since page load, because the old `getPlayState` answered from
+  // `intendedPlayState` (the last thing broadcast) instead of the element. A
+  // receiver neither pauses for `buffering` nor lets its pause hold act on it,
+  // so the joiner's fresh tab autoplayed and pulled the whole room into play.
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/video/BV199W9zEEcH",
+    pathname: "/video/BV199W9zEEcH",
+    title: "New Video_哔哩哔哩",
+    video: {
+      currentTime: 6.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  // The load-time buffer pause was broadcast, so the intent latched to it.
+  runtimeState.intendedPlayState = "buffering";
+  runtimeState.pauseStartedAt = 8_000;
+  runtimeState.pauseClassifiedAsBuffer = true;
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    // 1.7s after the pause: past the window, so this is a real pause.
+    getMonotonicNow: () => 9_700,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 7,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getCurrentSharePayload()?.playback?.playState,
+      "paused",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("share controller still reports buffering inside the buffer-pause window", () => {
+  // The other polarity: a genuine player hiccup must NOT be shared as `paused`,
+  // or sharing mid-stall would stop the room.
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/video/BV199W9zEEcH",
+    pathname: "/video/BV199W9zEEcH",
+    title: "New Video_哔哩哔哩",
+    video: {
+      currentTime: 6.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.intendedPlayState = "buffering";
+  runtimeState.pauseStartedAt = 8_000;
+  runtimeState.pauseClassifiedAsBuffer = true;
+
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    // 0.5s after the pause: still inside the window.
+    getMonotonicNow: () => 8_500,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 7,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => null,
+    debugLog: () => {},
+  });
+
+  try {
+    assert.equal(
+      controller.getCurrentSharePayload()?.playback?.playState,
+      "buffering",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
 test("share controller keeps playback snapshot while switching to another shared video in-room", () => {
   const dom = installDomStub({
     href: "https://www.bilibili.com/video/BV199W9zEEcH",
@@ -120,6 +212,8 @@ test("share controller keeps playback snapshot while switching to another shared
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
     getFestivalSnapshot: () => null,
@@ -165,6 +259,8 @@ test("share controller resolves bangumi season pages through page snapshot", asy
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 3,
     getFestivalSnapshot: () => null,
@@ -209,6 +305,8 @@ test("share controller does not reuse cached bangumi snapshot synchronously", ()
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 4,
     getFestivalSnapshot: () => ({
@@ -253,6 +351,8 @@ test("share controller reuses matching cached bangumi snapshot for current page 
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 5,
     getFestivalSnapshot: () => ({
@@ -301,6 +401,8 @@ test("share controller reuses cached bangumi snapshot by active episode id witho
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 6,
     getFestivalSnapshot: () => ({
@@ -348,6 +450,8 @@ test("share controller reuses cached bangumi snapshot by active cid without titl
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
     getFestivalSnapshot: () => ({
@@ -395,6 +499,8 @@ test("share controller rejects same-title cached bangumi snapshot from another p
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 6,
     getFestivalSnapshot: () => ({
@@ -440,6 +546,8 @@ test("share controller rejects cached bangumi snapshot on festival page", () => 
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 8,
     getFestivalSnapshot: () => ({
@@ -483,6 +591,8 @@ test("share controller reuses cached festival snapshot across trailing slash pat
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 9,
     getFestivalSnapshot: () => ({
@@ -543,6 +653,8 @@ test("share controller reports the room's base rate while a catch-up is running"
       return 1;
     },
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
     getFestivalSnapshot: () => null,
@@ -586,6 +698,8 @@ test("share controller falls back to the element rate with no catch-up running",
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 7,
     getFestivalSnapshot: () => null,
@@ -634,6 +748,8 @@ test("stops falling back to the frozen festival address bar once a snapshot has 
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 1,
     getFestivalSnapshot: () => snapshot,
@@ -669,6 +785,8 @@ test("still resolves the festival address bar before any snapshot has resolved",
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 1,
     getFestivalSnapshot: () => null,
@@ -714,6 +832,8 @@ test("uses the festival address bar again after leaving and returning to the pag
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 1,
     getFestivalSnapshot: () => snapshot,
@@ -778,6 +898,8 @@ test("uses a new festival share URL before that page visit resolves a snapshot",
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 1,
     getFestivalSnapshot: () => snapshot,
@@ -830,6 +952,8 @@ test("discards a festival snapshot refresh that resolves after the page visit ch
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 1,
     getFestivalSnapshot: () => null,

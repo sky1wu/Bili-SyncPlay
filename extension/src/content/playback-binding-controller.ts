@@ -147,14 +147,18 @@ export function createPlaybackBindingController(args: {
    */
   const armBufferPauseUpgrade = (video: HTMLVideoElement) => {
     clearBufferUpgradeTimer();
-    const playbackContextGeneration =
-      args.runtimeState.playbackContextGeneration;
+    // The PLAYER context, not the room one. This upgrade re-reads the element
+    // and re-broadcasts what it finds, so only a change of page/element can make
+    // it stale. Reading `playbackContextGeneration` here tied it to the room
+    // instead: sharing your own video switches the shared url, which bumps that
+    // counter, so the upgrade was dropped by the very event that had just
+    // published the `buffering` it exists to correct (#258).
+    const playerContextGeneration = args.runtimeState.playerContextGeneration;
     const classifiedPauseStartedAt = args.runtimeState.pauseStartedAt;
     pauseBufferUpgradeTimerId = scheduleUpgradeTimer(() => {
       pauseBufferUpgradeTimerId = null;
       if (
-        playbackContextGeneration !==
-        args.runtimeState.playbackContextGeneration
+        playerContextGeneration !== args.runtimeState.playerContextGeneration
       ) {
         return;
       }
