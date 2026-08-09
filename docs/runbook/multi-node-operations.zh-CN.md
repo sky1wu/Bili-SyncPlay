@@ -544,8 +544,18 @@ sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<wind
 
 - `room_store_close_unfinished`——`close_room_store` 没能完成 `QUIT`。
 - `runtime_store_close_unfinished`——`close_runtime_store` 没能完成全部前置工作或
-  `QUIT`；`pendingOperations` 是仍在途的调用方数，`pendingCommands` 是运行时存储 Redis
-  客户端边界仍在途的所有命令数，`pendingOperationBudgetMs` 是调用方与命令的 drain 预算。
+  `QUIT`。三个计数，因为它们回答三个不同的问题，而其中任意一个单独非零都足以让这行
+  日志发出：
+  - `pendingOperations`——仍在等答复的调用方。
+  - `pendingCommands`——运行时存储 Redis 客户端边界上仍在线的命令。
+  - `pendingAttempts`——命令节拍器手里还没放掉的活：一次排队写入的 attempt、一次被
+    追踪的 `add_member`、一次房间 generation 的 pin。一个 attempt 可以跨好几条命令，
+    所以**它正是"attempt 卡在两条命令之间、`pendingCommands` 读作 0"时仍然非零的那
+    个计数**。一条 `quitOutcome: "ok"` 且前两个计数为 0 的降级日志说的就是这种情况，
+    不是自相矛盾。
+
+  `pendingOperationBudgetMs` 是调用方与命令的 drain 预算。
+
 - `admin_command_bus_close_unfinished` 与 `room_event_bus_close_unfinished`——每个受影响的
   `role`（`publisher` / `subscriber`）各报一行，保证一个 socket 的失败不会藏掉另一个。
 

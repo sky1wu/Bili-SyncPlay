@@ -581,10 +581,21 @@ The other Redis-backed shutdown steps use the same bounded-close rule (#270):
 
 - `room_store_close_unfinished` — `close_room_store` could not finish `QUIT`.
 - `runtime_store_close_unfinished` — `close_runtime_store` could not finish
-  all pre-close work or `QUIT`; `pendingOperations` counts live callers,
-  `pendingCommands` counts every command still active at the runtime store's
-  Redis client boundary, and
+  all pre-close work or `QUIT`. Three counts, because they answer three
+  different questions and any one of them alone can be the reason the line was
+  emitted:
+  - `pendingOperations` — live callers still waiting for an answer.
+  - `pendingCommands` — commands still on the wire, counted at the runtime
+    store's Redis client boundary.
+  - `pendingAttempts` — work the command pacer was still holding: a queued
+    write's attempt, a tracked `add_member`, a room-generation pin. An attempt
+    can span several commands, so **this is the count that stays non-zero while
+    an attempt is between two of them and `pendingCommands` reads zero**. A
+    degraded line with `quitOutcome: "ok"` and the first two counts at zero
+    means exactly that, and it is not a contradiction.
+
   `pendingOperationBudgetMs` states the caller/command drain budget.
+
 - `admin_command_bus_close_unfinished` and
   `room_event_bus_close_unfinished` — one line per affected `role`
   (`publisher` / `subscriber`), so one socket's failure cannot hide the other.

@@ -194,8 +194,10 @@ type RuntimeStoreOptions = {
     /** Commands on the wire, counted at the Redis client boundary. */
     pendingCommands: number;
     /**
-     * Whole write attempts still running — an attempt spans several commands,
-     * so this stays non-zero in the gaps where `pendingCommands` reads zero.
+     * Work the command pacer is still holding: a queued write's attempt, a
+     * tracked `add_member`, a room-generation pin. Not all of them span several
+     * commands — the ones that do are why this exists, because it stays
+     * non-zero in the gaps where `pendingCommands` reads zero.
      */
     pendingAttempts: number;
     pendingOperationBudgetMs: number;

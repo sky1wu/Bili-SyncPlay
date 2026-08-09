@@ -586,8 +586,14 @@ The other four Redis facilities follow the same rule (#270):
   out or an upstream shutdown step stopped waiting for it.
 - A non-`ok` result drops the socket and emits the facility's
   `*_close_unfinished` event. The bus reports name the client role; the runtime
-  store also emits when a tracked caller or Redis command remains even if
-  `QUIT` itself answers, and names both counts plus the caller-drain budget.
+  store also emits when a caller, a command, or a pacer-held attempt remains
+  even if `QUIT` itself answers, and names all three counts plus the caller-drain
+  budget. Three, because the drain waits on two predicates that are each blind
+  where the other sees: the command set re-checks and so catches commands issued
+  DURING the drain, but reads empty in the gaps between one attempt's commands;
+  the pacer's set spans those gaps, but snapshots once. Waiting on — or
+  reporting — only the first is how a close could say `pendingCommands: 0` and
+  stay silent (#272 review).
   Bounding without those lines would only move the old
   `server_shutdown_step_failed` silence one layer down.
 - A terminal bus close does not enqueue a second `UNSUBSCRIBE`. The consumer's
