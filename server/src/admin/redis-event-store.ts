@@ -105,6 +105,21 @@ const CLOSE_APPEND_SETTLE_TIMEOUT_MS = 1_500;
  */
 const SHEDDING_REPORT_INTERVAL_MS = 60_000;
 
+/**
+ * How often the shutdown abandonment report may repeat.
+ *
+ * Its own constant, not {@link SHEDDING_REPORT_INTERVAL_MS}: the shedding line
+ * paces a failure that can last hours, this one paces a report that only exists
+ * between `close()` returning and the process leaving — bounded by the force-exit
+ * watchdog. Two behaviours, two constants, even where the value agrees today.
+ *
+ * The value is derived from that watchdog (150s): short enough that a shutdown
+ * tail which keeps losing appends says so more than once, long enough that a
+ * producer logging per session cannot turn each of those log lines into an error
+ * line of its own (#268 review).
+ */
+const CLOSE_REPORT_INTERVAL_MS = 60_000;
+
 export type EventStoreSheddingReason = EventStoreAppendDropReason;
 
 /**
@@ -419,6 +434,8 @@ export async function createRedisEventStore(
   let closeFinished = false;
   let closeReportEmitted = false;
   let reportedClosingAppends = 0;
+  /** Throttle only, for the repeats; nothing depends on it being right. */
+  let lastCloseReportAt: number | undefined;
   const chain = createAppendChain({
     // Arrows, not the methods themselves: a test replaces `quit` after the
     // store exists, and ioredis's methods need their receiver anyway.
@@ -446,6 +463,21 @@ export async function createRedisEventStore(
     if (closeReportEmitted && closingAppends === reportedClosingAppends) {
       return;
     }
+    // Throttled, because a producer whose own shutdown step timed out is not
+    // cancelled and keeps logging: one update per late append is one error line
+    // per log line, on the exact path this issue exists to stop amplifying —
+    // `shedAppend`'s shape reappearing under a different event name in the
+    // shutdown tail (#268 review). Each line supersedes the previous one, so a
+    // process that exits inside the window reports a floor, not a wrong number.
+    const at = now();
+    if (
+      closeReportEmitted &&
+      lastCloseReportAt !== undefined &&
+      at - lastCloseReportAt < CLOSE_REPORT_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastCloseReportAt = at;
     closeReportEmitted = true;
     reportedClosingAppends = closingAppends;
     options.onAppendsAbandonedAtShutdown?.({

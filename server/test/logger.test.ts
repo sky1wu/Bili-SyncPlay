@@ -465,3 +465,40 @@ test("both shutdown outcomes infer error, under the result each one deserves", (
     "error",
   );
 });
+
+test("every append failure moves the counter, not just the ones that get a line", async () => {
+  const writtenLines: string[] = [];
+  const recordedEvents: string[] = [];
+  const clock = 1_000;
+  const { store } = createCapturingEventStore();
+  store.append = () => Promise.reject(new Error("Redis connection is closed"));
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    eventStore: store,
+    logLevel: "error",
+    appendFailureNow: () => clock,
+    metricsCollector: {
+      recordEvent: (event) => {
+        recordedEvents.push(event);
+      },
+    },
+  });
+
+  for (let index = 0; index < 5; index += 1) {
+    logger("room_created", { result: "ok" });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // One line for five failures — which is the point of the throttle, and also
+  // why the magnitude has to live somewhere else. Without the counter an
+  // operator cannot tell five rejections from five million, and the runbook's
+  // own rule is that "how much" is the metric's question (#268 review).
+  assert.equal(writtenLines.length, 1);
+  assert.equal(
+    recordedEvents.filter((event) => event === "runtime_event_append_failed")
+      .length,
+    5,
+  );
+});

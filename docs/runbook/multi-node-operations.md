@@ -454,10 +454,20 @@ The logs carry three facts and make no claim beyond them:
 
 - `runtime_event_append_failed` — an event-store append was rejected. Repeated
   failures are throttled by diagnosis to one line per minute, across business
-  event names. Up to 32 active diagnoses get independent first lines; further
-  diagnoses share one overflow line per minute so the throttle remains bounded.
-  This is the signal for fast Redis rejections, which do not enter the shedding
-  state.
+  event names. Up to 32 active diagnoses get independent first lines; past that
+  the throttle degrades from per-diagnosis to global — the shared overflow line
+  silences **every** untracked diagnosis for a minute, including one whose own
+  slot has just expired and a brand-new one appearing for the first time. Under
+  a high-cardinality error stream, read the counter and not the lines. This is
+  the signal for fast Redis rejections, which do not enter the shedding state,
+  so they move `bili_syncplay_events_total{event="runtime_event_append_failed"}`
+  rather than the drop counter:
+
+```promql
+# How many appends is Redis rejecting outright?
+sum(rate(bili_syncplay_events_total{event="runtime_event_append_failed"}[<window>])) by (instance)
+```
+
 - `runtime_event_appends_dropped` — the store is shedding, for this `reason`.
   Throttled to one line per reason per minute, so a stall that lasts an hour is
   not one line an hour old and a busy node is not one line per dropped event.
@@ -473,11 +483,18 @@ The logs carry three facts and make no claim beyond them:
   than sending a `QUIT` that would queue behind the stuck write), `timed_out`
   (a half-open socket with no write left to blame), `failed` (a `QUIT` that came
   back an error), or `ok` when only `closingAppends` made the shutdown
-  incomplete. Before this budget existed, Redis stalls appeared as a
-  `server_shutdown_step_failed` for `close_event_store` every time. A producer
-  whose own shutdown step timed out can log after `close_event_store` returned;
-  each such late append emits a cumulative update with the new
-  `closingAppends` total.
+  incomplete. `result` says how the close ENDED, not how much was lost — every
+  outcome here loses something, so read `pendingWrites` and `closingAppends` for
+  the magnitude. Before this budget existed, Redis stalls appeared as a
+  `server_shutdown_step_failed` for `close_event_store` every time.
+
+  A producer whose own shutdown step timed out is not cancelled and can log
+  after `close_event_store` returned, so the report repeats with a growing
+  `closingAppends` — throttled to one update per minute, because otherwise each
+  of those log lines would produce an error line of its own. **Each update
+  supersedes the previous one: the other fields are repeated verbatim, not
+  incremental, so aggregate `closingAppends` with `max` and never `sum`.** A
+  process that force-exits inside the window reports a floor.
 
 All three lines are `error` level regardless of `LOG_LEVEL`. The two
 backpressure lines are excluded from the event store on purpose, and append

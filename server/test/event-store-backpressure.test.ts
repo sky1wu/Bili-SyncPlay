@@ -542,44 +542,41 @@ test("close reports appends that arrive after shutdown starts", async () => {
   ]);
 });
 
-test("appends from timed-out producers remain observable after close returns", async () => {
+test("late appends keep updating the shutdown report, throttled instead of one line each", async () => {
+  let clock = 1_000;
   const redis = createFakeEventRedis();
-  const abandoned: Array<{
-    pendingWrites: number;
-    queuedAppends: number;
-    closingAppends: number;
-    quitOutcome: string;
-    budgetMs: number;
-  }> = [];
+  const abandoned: Array<{ closingAppends: number; quitOutcome: string }> = [];
   const store = await createStore(redis.client, {
     closeSettleTimeoutMs: 500,
-    onAppendsAbandonedAtShutdown: (info) => {
-      abandoned.push(info);
+    now: () => clock,
+    onAppendsAbandonedAtShutdown: ({ closingAppends, quitOutcome }) => {
+      abandoned.push({ closingAppends, quitOutcome });
     },
   });
 
   await store.close();
-  await store.append(appendInput(0));
-  await store.append(appendInput(1));
+  for (let index = 0; index < 5; index += 1) {
+    await store.append(appendInput(index));
+  }
 
-  // A timed-out shutdown step keeps running: timeout answers its caller, it
-  // does not cancel the real Promise. Each later log therefore updates the
-  // cumulative shutdown-loss report even though the event store step returned.
+  // A timed-out shutdown step keeps running: the timeout answered its caller,
+  // it did not cancel the real work, so those producers go on logging after
+  // `close_event_store` returned. One update per late append would be one error
+  // line per log line — the amplifier this whole issue exists to remove,
+  // reappearing under a different event name in the shutdown tail (#268
+  // review). `app.ts` gives session cleanup 30s and the force-exit watchdog
+  // 150s, so that tail is long enough to matter.
+  assert.deepEqual(abandoned, [{ closingAppends: 1, quitOutcome: "ok" }]);
+
+  clock += 60_000;
+  await store.append(appendInput(5));
+
+  // Still throttled, still cumulative: the newest line supersedes the previous
+  // one rather than adding to it, so a shutdown that keeps losing appends says
+  // so more than once without saying it per append.
   assert.deepEqual(abandoned, [
-    {
-      pendingWrites: 0,
-      queuedAppends: 0,
-      closingAppends: 1,
-      quitOutcome: "ok",
-      budgetMs: 500,
-    },
-    {
-      pendingWrites: 0,
-      queuedAppends: 0,
-      closingAppends: 2,
-      quitOutcome: "ok",
-      budgetMs: 500,
-    },
+    { closingAppends: 1, quitOutcome: "ok" },
+    { closingAppends: 6, quitOutcome: "ok" },
   ]);
 });
 

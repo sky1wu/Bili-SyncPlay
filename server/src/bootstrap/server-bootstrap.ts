@@ -407,9 +407,16 @@ export async function createServerBootstrapContext(
               // Derived, not hardcoded: a `QUIT` that came back an ERROR is not
               // a timeout, and a query aggregating on `result` would file the
               // two under one diagnosis while the runbook tells operators to
-              // tell them apart (#266 review). A successful `QUIT` can still
-              // accompany `closingAppends > 0`; that is data loss, not a
-              // timeout, so it belongs under `error` (#268).
+              // tell them apart (#266 review).
+              //
+              // `result` says how the CLOSE ended, not how much was lost — and
+              // it has to, because every outcome here loses something and a
+              // loss-based reading would make the field constant. `skipped` and
+              // `timed_out` both mean a budget ran out; `ok` reaching this
+              // callback at all means the close was graceful and `closingAppends`
+              // is what made it incomplete, which is a fault, not a timeout. How
+              // much was lost is `pendingWrites` and `closingAppends` (#268
+              // review).
               result:
                 quitOutcome === "timed_out" || quitOutcome === "skipped"
                   ? "timeout"

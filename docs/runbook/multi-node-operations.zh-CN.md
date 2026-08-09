@@ -442,9 +442,17 @@ sum(increase(bili_syncplay_event_store_appends_dropped_total[<window>])) by (ins
 事实的承诺：
 
 - `runtime_event_append_failed`——event store 的一次 append 被拒绝。相同诊断跨不同业务
-  事件每分钟最多一行；最多 32 种活跃诊断各自保留首行，更多诊断共享每分钟一行的
-  overflow 桶，让限流器本身保持有界。这是 Redis 快速拒绝时的信号；快速拒绝不会进入
-  shedding 状态。
+  事件每分钟最多一行；最多 32 种活跃诊断各自保留首行，超过之后限流就从"按诊断"退化成
+  "全局"——共享的 overflow 行会把**每一种未被追踪的诊断**静音一分钟，包括刚刚过期的老
+  诊断和第一次出现的新诊断。错误文本高基数时，看计数器、不要看日志行。这是 Redis 快速
+  拒绝时的信号；快速拒绝不会进入 shedding 状态，所以它推动的是
+  `bili_syncplay_events_total{event="runtime_event_append_failed"}`，不是丢弃计数器：
+
+```promql
+# Redis 正在直接拒绝多少次 append？
+sum(rate(bili_syncplay_events_total{event="runtime_event_append_failed"}[<window>])) by (instance)
+```
+
 - `runtime_event_appends_dropped`——存储正在丢弃，原因是 `reason`。按原因限流为每分钟
   最多一条，所以持续一小时的僵死不会只留一条一小时前的日志，繁忙节点也不会每丢一条打
   一行。刻意**没有**配对的"已恢复"行：起止配对是一个日志流无法保证的不变量，#266 为此
@@ -455,10 +463,16 @@ sum(increase(bili_syncplay_event_store_appends_dropped_total[<window>])) by (ins
   append，以及/或者优雅关闭没成。`quitOutcome` 说明是哪一种：`skipped`（排空已超时，
   于是直接断 socket，而不是发一条会排在僵死写入后面的 `QUIT`）、`timed_out`（半开的
   socket，且没有任何写入可以归咎）、`failed`（`QUIT` 回了错误），或者在只有
-  `closingAppends` 造成不完整时为 `ok`。在这个预算存在之前，只要 Redis 僵死就必然表现
-  为 `close_event_store` 的 `server_shutdown_step_failed`。某个生产者自己的关服步骤超时
-  后，其真实 Promise 仍可能在 `close_event_store` 返回后才产生日志；每一条这样的晚到
-  append 都会用新的 `closingAppends` 累计值再发一条更新。
+  `closingAppends` 造成不完整时为 `ok`。`result` 说的是这次关闭**怎么结束的**，不是丢了
+  多少——这里每一种结局都有丢失，所以量级要看 `pendingWrites` 和 `closingAppends`。在这
+  个预算存在之前，只要 Redis 僵死就必然表现为 `close_event_store` 的
+  `server_shutdown_step_failed`。
+
+  某个生产者自己的关服步骤超时后并不会被取消，其真实工作仍可能在 `close_event_store`
+  返回后才产生日志，于是这条报告会带着增长的 `closingAppends` 重复——**每分钟最多一
+  条**，否则那些日志行会每行换来一行 error。**后一条取代前一条：除 `closingAppends`
+  外的字段是原样重复、不是增量，所以聚合要用 `max`，绝不能用 `sum`。** 进程在窗口内被
+  强制退出时，最后那条给出的是下界。
 
 这三条日志都固定为 error 级、不受 `LOG_LEVEL` 影响。两条 backpressure 日志被刻意排除
 出 event store，而 append 失败本来就无法写进去，因此 stdout 是它们仅有的输出路径。

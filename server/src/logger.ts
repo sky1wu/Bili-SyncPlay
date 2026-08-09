@@ -123,6 +123,18 @@ export function createStructuredLogger(
   };
 
   const reportAppendFailure = (failedEvent: string, error: unknown): void => {
+    // Counted BEFORE the throttle, and every time. The line answers "what is
+    // broken"; only a counter can answer "how much", and throttling the line
+    // without one leaves an operator unable to tell thirty failures from thirty
+    // million — which is the exact pairing #266 established for the shedding
+    // path, and which `admin_audit_log_append_failed` already gets for free by
+    // going through `logEvent` (#268 review).
+    //
+    // Deliberately `recordEvent` and not `logEvent`: the counter is a local
+    // increment, while routing this through the logger would append it to the
+    // very store that just rejected an append.
+    metricsCollector?.recordEvent("runtime_event_append_failed");
+
     const errorMessage = error instanceof Error ? error.message : String(error);
     const reason =
       error instanceof Error ? `${error.name}:${errorMessage}` : errorMessage;
