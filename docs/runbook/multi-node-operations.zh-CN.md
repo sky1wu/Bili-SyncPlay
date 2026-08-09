@@ -433,7 +433,8 @@ sum(rate(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instanc
   中 `reason` 标签会变，日志只负责给它划出起止。
 - `runtime_event_appends_abandoned_at_shutdown`——`close_event_store` 走到最后仍有事情
   没做完。可能是连接上还有 `pendingWrites` 条命令未应答（此时它直接断开 socket，而不是
-  发 `QUIT`——那会排在它们后面、原样继承同一段等待），也可能是还有一次事故没有闭合，
+  发 `QUIT`——那会排在它们后面、原样继承同一段等待）；`quitTimedOut` 表示优雅关闭本身
+  也耗尽了预算——半开的 socket，且没有任何写入可以归咎；也可能是还有一次事故没有闭合，
   `droppedEvents` 是它到此为止的代价。这是 `..._dropped` 的**另一种结束方式**：一次事故
   要么以 `..._resumed` 结束（存储恢复了），要么以这条结束（进程先走了），不会两者都没有。
   在这个预算存在之前，整件事表现为 `close_event_store` 的 `server_shutdown_step_failed`，

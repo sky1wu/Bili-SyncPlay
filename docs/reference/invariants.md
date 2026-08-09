@@ -431,7 +431,10 @@ overrun `close_event_store`'s budget (#264). The rules:
   `commandQueue` as everything else and pairs replies front-first, so a graceful
   close inherits the exact wait that was just bounded (#264 review). The graceful
   path is still taken when the chain drained — and is bounded too, because a
-  half-open socket swallows `QUIT`'s reply with no write left to blame. Bounding
+  half-open socket swallows `QUIT`'s reply with no write left to blame, and
+  that bound owes the same line as every other one here (#266 review): it just
+  spent the whole budget, and a `close` that returns cleanly is the only thing
+  standing between that and a shutdown recorded as successful. Bounding
   without reporting is the same trade in reverse as in
   [background passes](#a-background-pass-that-cannot-time-out-cannot-be-observed),
   hence `runtime_event_appends_abandoned_at_shutdown`.

@@ -324,17 +324,19 @@ export type RedisEventStoreOptions = {
     droppedEvents: number;
   }) => void;
   /**
-   * `close` reached its budget with writes still outstanding.
-   *
-   * Says nothing about the events — it says `redis.quit()` is about to run
-   * under a live command, which used to be visible only because the shutdown
-   * step itself timed out.
+   * `close` finished with something unfinished. The one degraded-shutdown
+   * signal, and the only thing standing between a bounded close and a silent
+   * one — the overrun used to be visible only because the step itself timed
+   * out.
    */
   onAppendsAbandonedAtShutdown?: (info: {
+    /** Commands still unanswered on the connection when the socket was dropped. */
     pendingWrites: number;
     queuedAppends: number;
     /** What an incident still open at shutdown had cost. 0 when none was open. */
     droppedEvents: number;
+    /** The graceful close ran out of budget too: a half-open socket. */
+    quitTimedOut: boolean;
     budgetMs: number;
   }) => void;
 };
@@ -464,29 +466,40 @@ export async function createRedisEventStore(
   }
 
   /**
-   * The other terminator: shutdown reached the end of `close` with something
-   * unfinished.
+   * The one degraded-shutdown report, at the end of `close`.
    *
-   * Two things can be unfinished, and either one on its own is worth a line:
-   * commands still on the connection that is about to go, and an incident whose
-   * start line would otherwise never be closed. `resumeAppends` cannot close
-   * that incident — the store did not recover, the process is leaving — so
-   * every `runtime_event_appends_dropped` gets exactly one of these two endings
-   * (#266 review).
+   * Three things can be unfinished, and any one of them on its own is worth a
+   * line:
+   *
+   * - commands still on the connection that is about to go;
+   * - an incident whose start line would otherwise never be closed —
+   *   `resumeAppends` cannot close it, because the store did not recover, the
+   *   process is leaving, so every `runtime_event_appends_dropped` gets exactly
+   *   one of these two endings (#266 review);
+   * - a `QUIT` that never came back, which is a half-open socket with no write
+   *   left to blame and which just spent the whole budget. Bounded and silent
+   *   is the trade this whole area exists to refuse: the overrun used to be
+   *   visible only because the shutdown step timed out, so a `close` that
+   *   returns cleanly owes the line instead.
    */
-  function reportUnfinishedAtShutdown(): void {
-    const pendingWrites = pacer.trackedCount();
+  function reportUnfinishedAtShutdown(outcome: {
+    pendingWrites: number;
+    quitTimedOut: boolean;
+  }): void {
     const incident = shedding;
     shedding = null;
-    if (pendingWrites === 0 && incident === null) {
+    if (
+      outcome.pendingWrites === 0 &&
+      !outcome.quitTimedOut &&
+      incident === null
+    ) {
       return;
     }
     options.onAppendsAbandonedAtShutdown?.({
-      // Read AFTER the wait, so this is what outlived the budget rather than
-      // what was outstanding when the budget started.
-      pendingWrites,
+      pendingWrites: outcome.pendingWrites,
       queuedAppends,
       droppedEvents: incident?.droppedEvents ?? 0,
+      quitTimedOut: outcome.quitTimedOut,
       budgetMs: closeSettleTimeoutMs,
     });
   }
@@ -908,15 +921,18 @@ export async function createRedisEventStore(
       // every single time.
       closing = true;
       const drained = await settleWithin(pendingAppend, closeSettleTimeoutMs);
+      let pendingWrites = 0;
+      let quitTimedOut = false;
       if (!drained) {
         // Nothing that has not started may start now: the connection is about
         // to go, and ioredis answers a command issued after it with a rejection
         // — which the logger would turn into one `runtime_event_append_failed`
         // line per queued event, after shutdown reported it was done.
         abandonQueuedAppends = true;
-      }
-      reportUnfinishedAtShutdown();
-      if (!drained) {
+        // Read before the socket goes, and after the wait: this is what
+        // outlived the budget, and `disconnect()` rejects those commands, which
+        // would settle them out of the very count that describes them.
+        pendingWrites = pacer.trackedCount();
         // NOT `quit()`. `QUIT` is an ordinary command on this connection:
         // ioredis appends it to the same `commandQueue` and matches replies in
         // order, so it cannot answer before the write we just gave up on. A
@@ -924,15 +940,16 @@ export async function createRedisEventStore(
         // hand `close_event_store` its timeout back (#264 review). The socket
         // goes instead — there is nothing left to be graceful about.
         redis.disconnect();
-        return;
-      }
-      // The chain drained, so nothing is queued ahead of `QUIT` and it answers
-      // at once — unless the socket is half-open, in which case the reply never
-      // comes and this is the only thing standing between an orderly shutdown
-      // and the same timeout.
-      if (!(await settleWithin(redis.quit(), closeSettleTimeoutMs))) {
+      } else if (!(await settleWithin(redis.quit(), closeSettleTimeoutMs))) {
+        // The chain drained, so nothing was queued ahead of `QUIT` and it
+        // should have answered at once. A reply that never came is a half-open
+        // socket with no write left to blame — and it just spent the whole
+        // budget, which is exactly the overrun that has to be reported rather
+        // than swallowed.
+        quitTimedOut = true;
         redis.disconnect();
       }
+      reportUnfinishedAtShutdown({ pendingWrites, quitTimedOut });
     },
   };
 }

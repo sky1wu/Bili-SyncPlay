@@ -448,7 +448,9 @@ established to be overloaded:
   `close_event_store` with something unfinished. `pendingWrites` commands were
   still outstanding (in which case it dropped the socket rather than sending
   `QUIT`, which would have queued behind them and inherited the same wait),
-  and/or an incident was still open — `droppedEvents` is what it had cost. This
+  `quitTimedOut` says the graceful close ran out of budget too — a half-open
+  socket with no write left to blame — and/or an incident was still open, with
+  `droppedEvents` being what it had cost. This
   is the **other ending** for a `..._dropped` line: an incident closes either
   with `..._resumed` (the store recovered) or with this (the process left
   first), never with neither. Before this budget existed the whole thing

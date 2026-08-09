@@ -507,6 +507,7 @@ test("close gives up on a hung write inside its budget, and says so", async () =
     pendingWrites: number;
     queuedAppends: number;
     droppedEvents: number;
+    quitTimedOut: boolean;
     budgetMs: number;
   }> = [];
   const store = await createStore(redis.client, {
@@ -531,14 +532,34 @@ test("close gives up on a hung write inside its budget, and says so", async () =
   // that just went down, and that used to be visible only because the step
   // timed out.
   assert.deepEqual(abandoned, [
-    { pendingWrites: 1, queuedAppends: 1, droppedEvents: 0, budgetMs: 20 },
+    {
+      pendingWrites: 1,
+      queuedAppends: 1,
+      droppedEvents: 0,
+      quitTimedOut: false,
+      budgetMs: 20,
+    },
   ]);
   hung.release();
 });
 
-test("close falls back to the socket when QUIT itself is not answered", async () => {
+test("close falls back to the socket when QUIT itself is not answered, and says so", async () => {
   const redis = createFakeEventRedis();
-  const store = await createStore(redis.client, { closeSettleTimeoutMs: 20 });
+  const abandoned: Array<{
+    pendingWrites: number;
+    droppedEvents: number;
+    quitTimedOut: boolean;
+  }> = [];
+  const store = await createStore(redis.client, {
+    closeSettleTimeoutMs: 20,
+    onAppendsAbandonedAtShutdown: ({
+      pendingWrites,
+      droppedEvents,
+      quitTimedOut,
+    }) => {
+      abandoned.push({ pendingWrites, droppedEvents, quitTimedOut });
+    },
+  });
 
   // Nothing queued, so the drain succeeds and close takes the graceful path —
   // and then the reply never comes, which is what a half-open connection looks
@@ -549,6 +570,13 @@ test("close falls back to the socket when QUIT itself is not answered", async ()
 
   assert.equal(await settledWithin(store.close(), 500), true);
   assert.equal(redis.disconnectCalls(), 1);
+  // Bounded and silent is the trade this whole area exists to refuse: nothing
+  // else was outstanding, so without this line a Redis failure that consumed
+  // the entire close budget would be recorded as a clean shutdown (#266
+  // review).
+  assert.deepEqual(abandoned, [
+    { pendingWrites: 0, droppedEvents: 0, quitTimedOut: true },
+  ]);
   stalledQuit.release();
 });
 
@@ -729,6 +757,7 @@ test("an incident still open when shutdown gives up is closed by the shutdown li
     pendingWrites: number;
     queuedAppends: number;
     droppedEvents: number;
+    quitTimedOut: boolean;
     budgetMs: number;
   }> = [];
   const store = await createStore(redis.client, {
