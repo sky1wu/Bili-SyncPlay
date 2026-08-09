@@ -393,6 +393,7 @@ export async function createServerBootstrapContext(
           onAppendsAbandonedAtShutdown: ({
             pendingWrites,
             queuedAppends,
+            closingAppends,
             quitOutcome,
             budgetMs,
           }) => {
@@ -400,15 +401,19 @@ export async function createServerBootstrapContext(
               instanceId: persistenceConfig.instanceId,
               pendingWrites,
               queuedAppends,
+              closingAppends,
               quitOutcome,
               budgetMs,
               // Derived, not hardcoded: a `QUIT` that came back an ERROR is not
               // a timeout, and a query aggregating on `result` would file the
               // two under one diagnosis while the runbook tells operators to
-              // tell them apart (#266 review). The two are mutually exclusive —
-              // `pendingWrites > 0` only happens on the path that never sent a
-              // `QUIT` at all.
-              result: quitOutcome === "failed" ? "error" : "timeout",
+              // tell them apart (#266 review). A successful `QUIT` can still
+              // accompany `closingAppends > 0`; that is data loss, not a
+              // timeout, so it belongs under `error` (#268).
+              result:
+                quitOutcome === "timed_out" || quitOutcome === "skipped"
+                  ? "timeout"
+                  : "error",
             });
           },
         })
@@ -496,11 +501,6 @@ export function createSharedServerShutdownSteps(args: {
       run: () =>
         hasClose(args.roomStore) ? args.roomStore.close() : undefined,
     },
-    {
-      name: "close_event_store",
-      run: () =>
-        hasClose(args.eventStore) ? args.eventStore.close() : undefined,
-    },
   ];
 
   if (args.runtimeStore) {
@@ -534,6 +534,15 @@ export function createSharedServerShutdownSteps(args: {
     {
       name: "close_admin_services",
       run: () => args.closeAdminServices(),
+    },
+    // The event store is the structured logger's sink. Close it after every
+    // shared producer so failures from winding those components down can still
+    // land, and so its final abandonment report includes every append refused
+    // after close started (#268).
+    {
+      name: "close_event_store",
+      run: () =>
+        hasClose(args.eventStore) ? args.eventStore.close() : undefined,
     },
   );
 

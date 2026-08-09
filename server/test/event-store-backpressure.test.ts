@@ -408,6 +408,7 @@ test("close gives up on a hung write inside its budget, and says so", async () =
   const abandoned: Array<{
     pendingWrites: number;
     queuedAppends: number;
+    closingAppends: number;
     quitOutcome: string;
     budgetMs: number;
   }> = [];
@@ -436,6 +437,7 @@ test("close gives up on a hung write inside its budget, and says so", async () =
     {
       pendingWrites: 1,
       queuedAppends: 1,
+      closingAppends: 0,
       // Never attempted: the drain had already run out, so the socket went
       // down instead of a `QUIT` that would have queued behind the write.
       quitOutcome: "skipped",
@@ -499,6 +501,86 @@ test("close still flushes a healthy queue, and stays quiet doing it", async () =
   // would abandon replies for no reason.
   assert.equal(redis.quitCalls(), 1);
   assert.equal(redis.disconnectCalls(), 0);
+});
+
+test("close reports appends that arrive after shutdown starts", async () => {
+  const redis = createFakeEventRedis();
+  const blockedQuit = createBlockedWrite();
+  const gracefulClient = redis.client as { quit: () => Promise<unknown> };
+  gracefulClient.quit = () => blockedQuit.write();
+  const abandoned: Array<{
+    pendingWrites: number;
+    queuedAppends: number;
+    closingAppends: number;
+    quitOutcome: string;
+    budgetMs: number;
+  }> = [];
+  const store = await createStore(redis.client, {
+    closeSettleTimeoutMs: 500,
+    onAppendsAbandonedAtShutdown: (info) => {
+      abandoned.push(info);
+    },
+  });
+
+  const closing = store.close();
+  await store.append(appendInput(0));
+  await store.append(appendInput(1));
+  blockedQuit.release();
+  await closing;
+
+  // The queue and QUIT are healthy; the report exists solely because those
+  // two records arrived after `closing` became true and were accepted without
+  // being written. Before #268 this loss had no log or scrapeable counter.
+  assert.deepEqual(abandoned, [
+    {
+      pendingWrites: 0,
+      queuedAppends: 0,
+      closingAppends: 2,
+      quitOutcome: "ok",
+      budgetMs: 500,
+    },
+  ]);
+});
+
+test("appends from timed-out producers remain observable after close returns", async () => {
+  const redis = createFakeEventRedis();
+  const abandoned: Array<{
+    pendingWrites: number;
+    queuedAppends: number;
+    closingAppends: number;
+    quitOutcome: string;
+    budgetMs: number;
+  }> = [];
+  const store = await createStore(redis.client, {
+    closeSettleTimeoutMs: 500,
+    onAppendsAbandonedAtShutdown: (info) => {
+      abandoned.push(info);
+    },
+  });
+
+  await store.close();
+  await store.append(appendInput(0));
+  await store.append(appendInput(1));
+
+  // A timed-out shutdown step keeps running: timeout answers its caller, it
+  // does not cancel the real Promise. Each later log therefore updates the
+  // cumulative shutdown-loss report even though the event store step returned.
+  assert.deepEqual(abandoned, [
+    {
+      pendingWrites: 0,
+      queuedAppends: 0,
+      closingAppends: 1,
+      quitOutcome: "ok",
+      budgetMs: 500,
+    },
+    {
+      pendingWrites: 0,
+      queuedAppends: 0,
+      closingAppends: 2,
+      quitOutcome: "ok",
+      budgetMs: 500,
+    },
+  ]);
 });
 
 test("a queued write does not reach a connection close already gave up on", async () => {

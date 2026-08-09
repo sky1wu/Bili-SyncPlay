@@ -132,6 +132,11 @@ export class EventStoreUnavailableError extends Error {
  */
 export type EventStoreQuitOutcome = AppendChainQuitOutcome;
 
+export type EventStoreCloseReport = AppendChainCloseReport & {
+  /** Appends refused because `close()` had already started. */
+  closingAppends: number;
+};
+
 const MERGE_LEGACY_COUNTS_LUA = `
 if KEYS[1] == KEYS[2] then
   return 0
@@ -372,7 +377,7 @@ export type RedisEventStoreOptions = {
    * one — the overrun used to be visible only because the step itself timed
    * out.
    */
-  onAppendsAbandonedAtShutdown?: (info: AppendChainCloseReport) => void;
+  onAppendsAbandonedAtShutdown?: (info: EventStoreCloseReport) => void;
 };
 
 export async function createRedisEventStore(
@@ -409,6 +414,11 @@ export async function createRedisEventStore(
   const closeSettleTimeoutMs =
     options.closeSettleTimeoutMs ?? CLOSE_APPEND_SETTLE_TIMEOUT_MS;
   const metricsCollector = options.metricsCollector;
+  let unfinishedCloseReport: AppendChainCloseReport | undefined;
+  let closingAppends = 0;
+  let closeFinished = false;
+  let closeReportEmitted = false;
+  let reportedClosingAppends = 0;
   const chain = createAppendChain({
     // Arrows, not the methods themselves: a test replaces `quit` after the
     // store exists, and ioredis's methods need their receiver anyway.
@@ -425,9 +435,29 @@ export async function createRedisEventStore(
     closeSettleTimeoutMs,
     makeUnavailableError: () => new EventStoreUnavailableError(),
     onCloseUnfinished: (report) => {
-      options.onAppendsAbandonedAtShutdown?.(report);
+      unfinishedCloseReport = report;
     },
   });
+
+  function reportCloseAbandonment(): void {
+    if (!unfinishedCloseReport && closingAppends === 0) {
+      return;
+    }
+    if (closeReportEmitted && closingAppends === reportedClosingAppends) {
+      return;
+    }
+    closeReportEmitted = true;
+    reportedClosingAppends = closingAppends;
+    options.onAppendsAbandonedAtShutdown?.({
+      ...(unfinishedCloseReport ?? {
+        pendingWrites: 0,
+        queuedAppends: 0,
+        quitOutcome: "ok",
+        budgetMs: closeSettleTimeoutMs,
+      }),
+      closingAppends,
+    });
+  }
   /** Throttle only. Two entries at most, and nothing depends on them being right. */
   const lastSheddingReportAtByReason = new Map<
     EventStoreSheddingReason,
@@ -727,19 +757,28 @@ export async function createRedisEventStore(
         () => performAppendWrite(input, timestamp, details, runtimeEvent),
         {
           // A dropped event still answers with the record the caller built. The
-          // caller is the structured logger, which turns a rejection into one
-          // `runtime_event_append_failed` line on stdout — so rejecting here
-          // would answer a Redis stall with one error line per log line, on the
-          // exact path already established to be overloaded. Drops are reported
-          // in aggregate instead, by `shedAppend`. This is the policy half the
-          // chain deliberately does not own; `redis-audit-store` chose the
-          // opposite for records that may not go missing quietly.
+          // caller is the structured logger, which turns a rejection into a
+          // `runtime_event_append_failed` line on stdout. That line is now
+          // throttled, but rejecting would still make every caller handle the
+          // same dependency failure. Drops are reported in aggregate instead,
+          // by `shedAppend`. This is the policy half the chain deliberately
+          // does not own; `redis-audit-store` chose the opposite for records
+          // that may not go missing quietly.
           onRefused: (reason) => {
             // Shutdown is not a fault, and the events it loses are reported by
             // `onAppendsAbandonedAtShutdown` instead — counting them here would
             // move a metric nothing can scrape any more (the metrics server is
             // already closed) and file an orderly close under a failure reason.
-            if (reason !== "closing") {
+            if (reason === "closing") {
+              closingAppends += 1;
+              // A shutdown-step timeout answers the orchestrator without
+              // cancelling the real producer. If that producer logs only after
+              // this store's own close step returned, there is no later "final"
+              // callback to include it in; publish a cumulative update now.
+              if (closeFinished) {
+                reportCloseAbandonment();
+              }
+            } else {
               shedAppend(reason);
             }
             return runtimeEvent;
@@ -805,6 +844,8 @@ export async function createRedisEventStore(
     },
     async close() {
       await chain.close();
+      closeFinished = true;
+      reportCloseAbandonment();
     },
   };
 }

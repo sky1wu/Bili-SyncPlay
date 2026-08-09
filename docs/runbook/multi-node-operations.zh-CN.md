@@ -438,23 +438,30 @@ sum(rate(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instanc
 sum(increase(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance)
 ```
 
-**"还在不在丢"和"丢了多少"看指标，不要看日志。** 日志只给两条事实，不做任何超出
+**"还在不在丢"和"丢了多少"看指标，不要看日志。** 日志只给三条事实，不做任何超出
 事实的承诺：
 
+- `runtime_event_append_failed`——event store 的一次 append 被拒绝。相同诊断跨不同业务
+  事件每分钟最多一行；最多 32 种活跃诊断各自保留首行，更多诊断共享每分钟一行的
+  overflow 桶，让限流器本身保持有界。这是 Redis 快速拒绝时的信号；快速拒绝不会进入
+  shedding 状态。
 - `runtime_event_appends_dropped`——存储正在丢弃，原因是 `reason`。按原因限流为每分钟
   最多一条，所以持续一小时的僵死不会只留一条一小时前的日志，繁忙节点也不会每丢一条打
   一行。刻意**没有**配对的"已恢复"行：起止配对是一个日志流无法保证的不变量，#266 为此
   花了四轮复审去找配对断掉的各种状态。
 - `runtime_event_appends_abandoned_at_shutdown`——`close_event_store` 走到最后仍有事情
   没做完：`pendingWrites` 次 append 的命令没有全部应答（数的是 append 次数、不是 Redis
-  命令条数——一次 append 会发三到四条），以及/或者优雅关闭没成。`quitOutcome` 说明是哪
-  一种：`skipped`（排空已超时，于是直接断 socket，而不是发一条会排在僵死写入后面的
-  `QUIT`）、`timed_out`（半开的 socket，且没有任何写入可以归咎）、`failed`（`QUIT` 回
-  了错误）。在这个预算存在之前，这些情况一律表现为 `close_event_store` 的
-  `server_shutdown_step_failed`，且只要 Redis 僵死就必然发生。
+  命令条数——一次 append 会发三到四条）、`close` 开始后到达的 `closingAppends` 次
+  append，以及/或者优雅关闭没成。`quitOutcome` 说明是哪一种：`skipped`（排空已超时，
+  于是直接断 socket，而不是发一条会排在僵死写入后面的 `QUIT`）、`timed_out`（半开的
+  socket，且没有任何写入可以归咎）、`failed`（`QUIT` 回了错误），或者在只有
+  `closingAppends` 造成不完整时为 `ok`。在这个预算存在之前，只要 Redis 僵死就必然表现
+  为 `close_event_store` 的 `server_shutdown_step_failed`。某个生产者自己的关服步骤超时
+  后，其真实 Promise 仍可能在 `close_event_store` 返回后才产生日志；每一条这样的晚到
+  append 都会用新的 `closingAppends` 累计值再发一条更新。
 
-这两条日志都固定为 error 级、不受 `LOG_LEVEL` 影响——它们被刻意排除出 event store，
-stdout 是它们仅有的输出路径。
+这三条日志都固定为 error 级、不受 `LOG_LEVEL` 影响。两条 backpressure 日志被刻意排除
+出 event store，而 append 失败本来就无法写进去，因此 stdout 是它们仅有的输出路径。
 
 与 reaper 和心跳一样，这个上限只约束存储等多久，并不约束命令本身：这个客户端同样没有
 设置 `commandTimeout`。在存储发现僵死**之前**发出的读取仍然暴露；Redis 僵死但我们没有
