@@ -64,6 +64,18 @@ const MAX_PENDING_APPENDS = 1_000;
 const READ_APPEND_SETTLE_TIMEOUT_MS = 1_000;
 
 /**
+ * How long the read's own commands may take once it has been let through.
+ *
+ * A liveness backstop, not a health judgement: the judgement is the
+ * head-of-connection check, and this catches the one read that slips past it
+ * because the stall began after the check and before the command. Same order
+ * and same reasoning as {@link APPEND_TIMEOUT_MS} — long enough that ordinary
+ * latency never trips it, short enough that the answer does not wait on Node's
+ * default 300s `requestTimeout` (#269 review).
+ */
+const READ_COMMAND_TIMEOUT_MS = 5_000;
+
+/**
  * How long `close` may wait for the chain to drain, and separately for `QUIT`.
  *
  * Both, so the arithmetic matters: worst case is twice this, and it has to stay
@@ -332,6 +344,7 @@ export type RedisEventStoreOptions = {
   appendTimeoutMs?: number;
   maxPendingAppends?: number;
   readSettleTimeoutMs?: number;
+  readCommandTimeoutMs?: number;
   closeSettleTimeoutMs?: number;
   metricsCollector?: Pick<
     MetricsCollector,
@@ -391,6 +404,8 @@ export async function createRedisEventStore(
   const now = options.now ?? Date.now;
   const readSettleTimeoutMs =
     options.readSettleTimeoutMs ?? READ_APPEND_SETTLE_TIMEOUT_MS;
+  const readCommandTimeoutMs =
+    options.readCommandTimeoutMs ?? READ_COMMAND_TIMEOUT_MS;
   const closeSettleTimeoutMs =
     options.closeSettleTimeoutMs ?? CLOSE_APPEND_SETTLE_TIMEOUT_MS;
   const metricsCollector = options.metricsCollector;
@@ -406,6 +421,7 @@ export async function createRedisEventStore(
     appendTimeoutMs,
     maxPendingAppends,
     readSettleTimeoutMs,
+    readCommandTimeoutMs,
     closeSettleTimeoutMs,
     makeUnavailableError: () => new EventStoreUnavailableError(),
     onCloseUnfinished: (report) => {
@@ -657,8 +673,9 @@ export async function createRedisEventStore(
   async function queryEvents(
     query: GlobalEventStoreQuery,
   ): Promise<GlobalEventStoreQueryResult> {
-    await chain.settleForRead();
-    const rawEntries = await redis.xrevrange(streamKey, "+", "-");
+    const rawEntries = await chain.runRead(() =>
+      redis.xrevrange(streamKey, "+", "-"),
+    );
     const parsedEvents = rawEntries
       .map(([id, fieldValues]) => {
         const fields: Record<string, string> = {};
@@ -738,9 +755,12 @@ export async function createRedisEventStore(
       if (eventNames.length === 0) {
         return {};
       }
-      await chain.settleForRead();
-      await mergeLegacyCountsIfNeeded();
-      const values = await redis.hmget(countsKey, ...eventNames);
+      // The whole read, not just the last command: `mergeLegacyCountsIfNeeded`
+      // is an `EVAL` on this same connection and hangs exactly as readily.
+      const values = await chain.runRead(async () => {
+        await mergeLegacyCountsIfNeeded();
+        return await redis.hmget(countsKey, ...eventNames);
+      });
       return Object.fromEntries(
         eventNames.map((name, i) => [
           name,
@@ -756,25 +776,31 @@ export async function createRedisEventStore(
       if (eventNames.length === 0) {
         return {};
       }
-      await chain.settleForRead();
-      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
-        return Object.fromEntries(eventNames.map((name) => [name, 0]));
-      }
-
       return Object.fromEntries(
-        await Promise.all(
-          eventNames.map(async (name) => {
-            if (isWindowIndexedEvent(name)) {
-              await pruneEventWindowIndexIfNeeded(name, toMs);
-            }
-            const total = await redis.zcount(
-              eventWindowIndexKey(windowIndexKeyPrefix, name),
-              fromMs,
-              toMs,
-            );
-            return [name, total];
-          }),
-        ),
+        await chain.runRead(async () => {
+          if (
+            !Number.isFinite(fromMs) ||
+            !Number.isFinite(toMs) ||
+            fromMs > toMs
+          ) {
+            return eventNames.map((name) => [name, 0] as const);
+          }
+          return await Promise.all(
+            eventNames.map(async (name) => {
+              // A ZREMRANGEBYSCORE, on the read path and on this connection —
+              // inside the bound with everything else it is queued behind.
+              if (isWindowIndexedEvent(name)) {
+                await pruneEventWindowIndexIfNeeded(name, toMs);
+              }
+              const total = await redis.zcount(
+                eventWindowIndexKey(windowIndexKeyPrefix, name),
+                fromMs,
+                toMs,
+              );
+              return [name, total] as const;
+            }),
+          );
+        }),
       );
     },
     async close() {

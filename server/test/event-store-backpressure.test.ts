@@ -14,7 +14,13 @@ import {
  * connection or a blocked server does, and neither is something a unit test can
  * arrange — so the client is the seam (#264).
  */
-function createFakeEventRedis(options: { xadd?: () => Promise<string> } = {}): {
+function createFakeEventRedis(
+  options: {
+    xadd?: () => Promise<string>;
+    /** Injected the same way `xadd` is, so the read path gets a seam too. */
+    xrevrange?: () => Promise<Array<[string, string[]]>>;
+  } = {},
+): {
   client: RedisEventStoreClient;
   xaddCalls: () => number;
   quitCalls: () => number;
@@ -79,7 +85,10 @@ function createFakeEventRedis(options: { xadd?: () => Promise<string> } = {}): {
       }),
     xtrim: () => command("xtrim", async () => "OK"),
     xrange: () => command("xrange", async () => []),
-    xrevrange: () => command("xrevrange", async () => []),
+    xrevrange: () =>
+      command("xrevrange", async () =>
+        options.xrevrange ? await options.xrevrange() : [],
+      ),
     hset: () => command("hset", async () => "OK"),
     hmget: (_key, ...fields) =>
       command("hmget", async () => fields.map(() => null)),
@@ -620,6 +629,36 @@ test("the shedding line is throttled per reason, and never paired", async () => 
     assert.deepEqual(dropped, ["overflow", "stalled", "stalled"]);
   } finally {
     hung.release();
+    await store.close();
+  }
+});
+
+test("a read that slipped past the check still ends in an answer", async () => {
+  // The residual the head-of-connection check cannot cover: it is evidence
+  // about the past, and this stall begins in the gap between the check and the
+  // command. Nothing is in flight when the read is admitted; the read's own
+  // command is the one that hangs.
+  const hungRead = createBlockedWrite();
+  const redis = createFakeEventRedis({
+    xrevrange: async () => {
+      await hungRead.write();
+      return [];
+    },
+  });
+  const store = await createStore(redis.client, {
+    readSettleTimeoutMs: 20,
+    readCommandTimeoutMs: 30,
+    closeSettleTimeoutMs: 200,
+  });
+
+  try {
+    // Without this bound the caller waits until Node's default 300s
+    // `requestTimeout` kills the request (#269 review).
+    const query = Promise.resolve(store.query({ page: 1, pageSize: 10 }));
+    assert.equal(await settledWithin(query, 500), true);
+    await assert.rejects(query, /not answering/);
+  } finally {
+    hungRead.release();
     await store.close();
   }
 });

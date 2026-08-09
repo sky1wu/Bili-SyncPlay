@@ -40,6 +40,15 @@ const MAX_PENDING_APPENDS = 1_000;
 const READ_APPEND_SETTLE_TIMEOUT_MS = 1_000;
 
 /**
+ * How long the query's own commands may take once it has been let through.
+ *
+ * Same backstop, same value and same reasoning as the event store's: the health
+ * judgement is the head-of-connection check, and this catches the one read that
+ * slips past it because the stall began after the check (#269 review).
+ */
+const READ_COMMAND_TIMEOUT_MS = 5_000;
+
+/**
  * How long `close` may wait for the chain to drain, and separately for `QUIT`.
  *
  * Worst case is twice this, and it shares `close_admin_services`' default 5s
@@ -133,6 +142,7 @@ export type RedisAuditStoreOptions = {
   appendTimeoutMs?: number;
   maxPendingAppends?: number;
   readSettleTimeoutMs?: number;
+  readCommandTimeoutMs?: number;
   closeSettleTimeoutMs?: number;
   /**
    * `close` finished with something unfinished — records still on the wire, or
@@ -257,6 +267,8 @@ export async function createRedisAuditStore(
       options.maxPendingAppends ?? Math.min(maxLen, MAX_PENDING_APPENDS),
     readSettleTimeoutMs:
       options.readSettleTimeoutMs ?? READ_APPEND_SETTLE_TIMEOUT_MS,
+    readCommandTimeoutMs:
+      options.readCommandTimeoutMs ?? READ_COMMAND_TIMEOUT_MS,
     closeSettleTimeoutMs:
       options.closeSettleTimeoutMs ?? CLOSE_APPEND_SETTLE_TIMEOUT_MS,
     makeUnavailableError: () => new AuditStoreUnavailableError("read"),
@@ -355,11 +367,11 @@ export async function createRedisAuditStore(
     async query(query: AuditLogQuery): Promise<GlobalAuditQueryResult> {
       // Was `await pendingAppend` — an unbounded wait on the entire write
       // queue, which is why the audit page hung for exactly as long as Redis
-      // did. Now bounded, and refused outright while the write path is stalled:
-      // the read goes out on the same connection, behind a command that is not
-      // coming back (#267).
-      await chain.settleForRead();
-      const rawEntries = await redis.xrevrange(streamKey, "+", "-");
+      // did. Now bounded on both sides: not issued at all while the connection
+      // is not answering, and bounded once it is (#267, #269 review).
+      const rawEntries = await chain.runRead(() =>
+        redis.xrevrange(streamKey, "+", "-"),
+      );
       const parsedRecords = rawEntries
         .map(([id, fieldValues]) => {
           const fields: Record<string, string> = {};

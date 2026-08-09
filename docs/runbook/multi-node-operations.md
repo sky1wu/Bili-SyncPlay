@@ -418,7 +418,14 @@ write has not answered inside the read's own 1s budget is **refused** with `503
 event_store_unavailable` rather than issued behind a command that is not coming
 back. That budget is the read's, not the 5s append cap's: the cap is long
 because tripping it costs events, and a read that waited that long has already
-failed the operator. A 503 here means Redis, not the admin
+failed the operator.
+
+A read that was already on its way when the stall began cannot be caught by that
+check — nothing observed before a command is issued can see a stall that starts
+after it. Those get a 5s bound on their own commands and the same 503, so the
+request always ends in an answer rather than in Node's 300s request timeout. It
+is one read per stall, not one per poll: the next poll finds the stalled write at
+the head of the connection and is refused before anything is sent. A 503 here means Redis, not the admin
 process — check Redis first, then retry. What shedding protects is the process,
 not the page.
 

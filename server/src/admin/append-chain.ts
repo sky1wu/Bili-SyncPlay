@@ -97,7 +97,22 @@ export type AppendChainOptions = {
    * has to stay comfortably inside the shutdown step's budget.
    */
   closeSettleTimeoutMs: number;
-  /** Thrown by {@link AppendChain.settleForRead} when the write path is stalled. */
+  /**
+   * How long the read's OWN commands may take once it has been let through.
+   *
+   * A liveness backstop, not a health judgement — the health judgement is the
+   * head-of-connection check in {@link AppendChain.runRead}. This exists for the
+   * one read that slips past it: a stall that begins between the check and the
+   * command, which no check made before issuing can see. Without it that
+   * request ends only when Node's default 300s `requestTimeout` kills it (#269
+   * review).
+   *
+   * Generous on purpose, and for the same reason the append cap is: it must
+   * never trip on ordinary latency, only on a connection that has stopped
+   * answering.
+   */
+  readCommandTimeoutMs: number;
+  /** Thrown by {@link AppendChain.runRead} when the connection is not answering. */
   makeUnavailableError: () => Error;
   /**
    * `close` finished with something unfinished. The one degraded-shutdown
@@ -132,14 +147,20 @@ export type AppendChain = {
     handlers: AppendChainHandlers<T>,
   ) => Promise<T>;
   /**
-   * Read-your-writes, best effort, bounded.
+   * Run a read against the same connection, under the two bounds it needs.
    *
-   * Rejects with `makeUnavailableError()` rather than waiting when the write
-   * path is stalled: under that failure the queued writes have not landed
-   * anyway, so waiting converts a slightly stale answer into no answer — on the
-   * page an operator opens precisely to find out what is going wrong.
+   * Before: read-your-writes is best effort and bounded, and the read is not
+   * issued at all when the connection is not answering — under that failure the
+   * queued writes have not landed anyway, so waiting converts a slightly stale
+   * answer into no answer, on the page an operator opens precisely to find out
+   * what is going wrong.
+   *
+   * After: the read's own commands are bounded too. Neither bound substitutes
+   * for the other — the first stops a read being issued per poll for the whole
+   * length of a stall, the second stops the one read that was already in flight
+   * when the stall began from hanging until Node's 300s request timeout.
    */
-  settleForRead: () => Promise<void>;
+  runRead: <T>(read: () => Promise<T>) => Promise<T>;
   close: () => Promise<void>;
 };
 
@@ -156,6 +177,7 @@ export function createAppendChain(options: AppendChainOptions): AppendChain {
     appendTimeoutMs,
     maxPendingAppends,
     readSettleTimeoutMs,
+    readCommandTimeoutMs,
     closeSettleTimeoutMs,
   } = options;
   // Only for the per-write cap and the record of writes that outlived one; the
@@ -250,7 +272,7 @@ export function createAppendChain(options: AppendChainOptions): AppendChain {
 
       return await appendPromise;
     },
-    async settleForRead() {
+    async runRead(read) {
       // Refused, not delayed. Waiting longer was the wrong lever: the read that
       // follows goes out on the same connection, behind the write that is not
       // answering, and never comes back — while the admin console polls on a
@@ -289,6 +311,25 @@ export function createAppendChain(options: AppendChainOptions): AppendChain {
       if (!headAnswered) {
         throw options.makeUnavailableError();
       }
+
+      // The check above is evidence about the past, and the only kind there is:
+      // the read is queued behind whatever is on the connection at the instant
+      // it is ISSUED, and a stall beginning in the gap between the two is
+      // invisible to any check made before it (#269 review). Verifying the head
+      // again right here would not close that gap and would break the case this
+      // whole path protects — on a node with a queue the head is almost always
+      // a write issued milliseconds ago and not yet answered, so requiring an
+      // answered head would refuse every read on a Redis that is merely behind.
+      //
+      // So the residual is answered where it actually lands: the read's own
+      // commands get a bound, and the caller gets an answer either way. It
+      // costs one refused read at the onset of a stall — the next poll sees the
+      // stalled write at the head and is refused before anything is issued.
+      const call = read();
+      if (!(await settleWithin(call, readCommandTimeoutMs))) {
+        throw options.makeUnavailableError();
+      }
+      return await call;
     },
     async close() {
       // Blocks new appends, but deliberately not the ones already chained: on a

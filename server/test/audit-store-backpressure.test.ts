@@ -25,7 +25,13 @@ const ACTOR: AdminSession = {
  * connection or a blocked server does, and neither is something a unit test can
  * arrange — so the client is the seam (#267).
  */
-function createFakeAuditRedis(options: { xadd?: () => Promise<string> } = {}): {
+function createFakeAuditRedis(
+  options: {
+    xadd?: () => Promise<string>;
+    /** Injected the same way `xadd` is, so the read path gets a seam too. */
+    xrevrange?: () => Promise<Array<[string, string[]]>>;
+  } = {},
+): {
   client: RedisAuditStoreClient;
   xaddCalls: () => number;
   quitCalls: () => number;
@@ -77,7 +83,10 @@ function createFakeAuditRedis(options: { xadd?: () => Promise<string> } = {}): {
         return `${nextStreamId}-0`;
       }),
     xtrim: () => command("xtrim", async () => "OK"),
-    xrevrange: () => command("xrevrange", async () => []),
+    xrevrange: () =>
+      command("xrevrange", async () =>
+        options.xrevrange ? await options.xrevrange() : [],
+      ),
   };
 
   return {
@@ -532,4 +541,54 @@ test("a record close already gave up on is reported lost, not answered as writte
   assert.equal(await refusalReasonOf(second), "closing");
   await first.catch(() => undefined);
   assert.equal(redis.xaddCalls(), 1);
+});
+
+test("a read that slipped past the check still ends in an answer", async () => {
+  // The residual the head-of-connection check cannot cover: it is evidence
+  // about the past, and this stall begins in the gap between the check and the
+  // command. Here that is arranged exactly — nothing is in flight when the read
+  // is admitted, and the read's own command is the one that hangs.
+  const hungRead = createBlockedWrite();
+  const redis = createFakeAuditRedis({
+    xrevrange: async () => {
+      await hungRead.write();
+      return [];
+    },
+  });
+  const store = await createStore(redis.client, {
+    readSettleTimeoutMs: 20,
+    readCommandTimeoutMs: 30,
+    closeSettleTimeoutMs: 200,
+  });
+
+  try {
+    // Without this bound the caller waits until Node's default 300s
+    // `requestTimeout` kills the request (#269 review). The command itself
+    // cannot be cancelled either way — what changes is that the operator gets
+    // an answer.
+    const query = Promise.resolve(store.query({ page: 1, pageSize: 10 }));
+    assert.equal(await settledWithin(query, 500), true);
+    await assert.rejects(query, /not answering/);
+  } finally {
+    hungRead.release();
+    await store.close();
+  }
+});
+
+test("an ordinary read is not touched by the command bound", async () => {
+  const redis = createFakeAuditRedis();
+  const store = await createStore(redis.client, {
+    readSettleTimeoutMs: 20,
+    readCommandTimeoutMs: 30,
+    closeSettleTimeoutMs: 200,
+  });
+
+  try {
+    // The other half: a backstop that fired on a working Redis would be worse
+    // than the hang it exists for.
+    const result = await store.query({ page: 1, pageSize: 10 });
+    assert.deepEqual(result, { items: [], total: 0 });
+  } finally {
+    await store.close();
+  }
 });

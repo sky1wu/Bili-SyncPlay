@@ -459,6 +459,20 @@ event_store_unavailable`), not delayed. The fix for an unbounded queue is
   question is whether the connection is ANSWERING, and only the command at its
   head can answer it — inside the READ's own budget, not the cap's. Two
   behaviours, two constants, again.
+- **That check is evidence about the past, so the read needs a bound of its own
+  too.** The read is queued behind whatever is on the connection at the instant
+  it is ISSUED, and a stall that begins between the check and the command is
+  invisible to any check made before it. Re-verifying the head right there does
+  not close the gap and breaks the case the path protects — on a node with a
+  queue the head is almost always a write issued milliseconds ago and not yet
+  answered, so requiring an answered head would refuse every read on a Redis
+  that is merely behind. So the two bounds split the work, and neither
+  substitutes for the other: the head check stops a read being issued per poll
+  for the whole length of a stall, and the read's own command timeout stops the
+  one read already in flight when the stall began from waiting on Node's default
+  300s `requestTimeout` (#269 review). It costs one refused read at the onset of
+  a stall — the next poll finds the stalled write at the head and is refused
+  before anything is issued.
 - **`close` drains, bounded, then drops the socket — `QUIT` is not an escape
   hatch.** Dropping the queue outright would lose the shutdown's own events on
   every clean restart, and waiting unbounded makes the step fail on every hung
@@ -486,7 +500,8 @@ One connection, replies in order. That is what makes `disconnect` the only
 bounded close, and it is what the read refusal is derived from. It is also the
 limit of that refusal: the store can only refuse on evidence from one of ITS OWN
 commands, so a read issued while Redis is hung with nothing of ours in flight to
-notice it by is still exposed. Closing that needs either a separate
+notice it by is not refused — it is bounded and answered as unavailable instead,
+which is the best a caller-side bound can do. Closing that needs either a separate
 read connection or a `commandTimeout` — the same deferred decision as in #261
 and #263, and all three should be weighed together. A test fixture for this
 store is only worth trusting if it models the ordering; one that lets each call
