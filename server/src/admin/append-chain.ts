@@ -112,7 +112,10 @@ export type AppendChainOptions = {
    * answering.
    */
   readCommandTimeoutMs: number;
-  /** Thrown by {@link AppendChain.runRead} when the connection is not answering. */
+  /**
+   * Thrown by {@link AppendChain.runRead} when the connection is not answering:
+   * either before the read is issued, or after its own bound ran out.
+   */
   makeUnavailableError: () => Error;
   /**
    * `close` finished with something unfinished. The one degraded-shutdown
@@ -207,6 +210,21 @@ export function createAppendChain(options: AppendChainOptions): AppendChain {
    * {@link AppendChain.settleForRead}.
    */
   let writeInFlight: Promise<void> = Promise.resolve();
+  /**
+   * Reads that outlived their own bound and have still not answered.
+   *
+   * A read that timed out is evidence of exactly the same thing a write past
+   * its cap is — the connection has stopped answering — and until this existed
+   * only the write side left any. On a node whose appends are quiet, or shed,
+   * nothing was in flight for the head check to look at, so every poll issued
+   * another read and left another closure in ioredis's queue: the per-poll
+   * growth this whole path exists to stop, reappearing on the read side (#269
+   * review).
+   *
+   * A count rather than a flag because reads, unlike the serial write chain,
+   * can be outstanding several at a time.
+   */
+  let stalledReads = 0;
 
   async function capped<T>(write: () => Promise<T>): Promise<T> {
     const call = write();
@@ -279,7 +297,11 @@ export function createAppendChain(options: AppendChainOptions): AppendChain {
       // timer, so ioredis's queue grows a read and a closure per poll for as
       // long as the stall lasts (#266 review). This first check is only the
       // fast path: the cap has already fired, so there is nothing to wait for.
-      if (writeIsStalled) {
+      // Two kinds of evidence, one question. `writeIsStalled` is a write past
+      // its cap; `stalledReads` is a read past its own bound — both mean the
+      // connection is not answering, and both make this the fast path that
+      // refuses without waiting for anything.
+      if (writeIsStalled || stalledReads > 0) {
         throw options.makeUnavailableError();
       }
 
@@ -327,6 +349,14 @@ export function createAppendChain(options: AppendChainOptions): AppendChain {
       // stalled write at the head and is refused before anything is issued.
       const call = read();
       if (!(await settleWithin(call, readCommandTimeoutMs))) {
+        // The command cannot be cancelled, so the caller is answered and the
+        // command is REMEMBERED. Forgetting it is what let the next poll sail
+        // through the check above and queue another read behind this one.
+        stalledReads += 1;
+        const release = (): void => {
+          stalledReads -= 1;
+        };
+        void call.then(release, release);
         throw options.makeUnavailableError();
       }
       return await call;

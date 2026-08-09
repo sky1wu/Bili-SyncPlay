@@ -575,6 +575,77 @@ test("a read that slipped past the check still ends in an answer", async () => {
   }
 });
 
+test("a read that timed out stops the next poll from queueing another", async () => {
+  const hungRead = createBlockedWrite();
+  const redis = createFakeAuditRedis({
+    xrevrange: async () => {
+      await hungRead.write();
+      return [];
+    },
+  });
+  const store = await createStore(redis.client, {
+    readSettleTimeoutMs: 20,
+    readCommandTimeoutMs: 30,
+    closeSettleTimeoutMs: 200,
+  });
+
+  try {
+    await assert.rejects(
+      Promise.resolve(store.query({ page: 1, pageSize: 10 })),
+      /not answering/,
+    );
+    const issuedAfterFirst = redis.issued().length;
+
+    // Nothing was ever written on this store, so the head check has no write to
+    // look at — and before the timed-out read was remembered, that let every
+    // 15s poll issue another one and leave another closure in ioredis's queue.
+    // A read past its bound is the same evidence a write past its cap is.
+    await assert.rejects(
+      Promise.resolve(store.query({ page: 1, pageSize: 10 })),
+      /not answering/,
+    );
+    assert.equal(redis.issued().length, issuedAfterFirst);
+  } finally {
+    hungRead.release();
+    await store.close();
+  }
+});
+
+test("a read refused for a stalled connection recovers once it answers", async () => {
+  const hungRead = createBlockedWrite({ blockedCalls: 1 });
+  const redis = createFakeAuditRedis({
+    xrevrange: async () => {
+      await hungRead.write();
+      return [];
+    },
+  });
+  const store = await createStore(redis.client, {
+    readSettleTimeoutMs: 20,
+    readCommandTimeoutMs: 30,
+    closeSettleTimeoutMs: 200,
+  });
+
+  try {
+    await assert.rejects(
+      Promise.resolve(store.query({ page: 1, pageSize: 10 })),
+      /not answering/,
+    );
+
+    // The other half: remembering a stalled read must not be a one-way door, or
+    // a single slow moment takes the audit page down until the process
+    // restarts.
+    hungRead.release();
+    await delay(20);
+    assert.deepEqual(await store.query({ page: 1, pageSize: 10 }), {
+      items: [],
+      total: 0,
+    });
+  } finally {
+    hungRead.release();
+    await store.close();
+  }
+});
+
 test("an ordinary read is not touched by the command bound", async () => {
   const redis = createFakeAuditRedis();
   const store = await createStore(redis.client, {

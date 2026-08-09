@@ -424,8 +424,10 @@ A read that was already on its way when the stall began cannot be caught by that
 check — nothing observed before a command is issued can see a stall that starts
 after it. Those get a 5s bound on their own commands and the same 503, so the
 request always ends in an answer rather than in Node's 300s request timeout. It
-is one read per stall, not one per poll: the next poll finds the stalled write at
-the head of the connection and is refused before anything is sent. A 503 here means Redis, not the admin
+is one read per stall, not one per poll: a read that ran out of its bound is
+remembered exactly as a write past its cap is, so the next poll is refused
+before anything is sent — including on a node whose appends are quiet or already
+being shed, where there is no write in flight to notice the stall by. A 503 here means Redis, not the admin
 process — check Redis first, then retry. What shedding protects is the process,
 not the page.
 

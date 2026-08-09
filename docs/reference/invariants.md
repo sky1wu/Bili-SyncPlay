@@ -459,6 +459,17 @@ event_store_unavailable`), not delayed. The fix for an unbounded queue is
   question is whether the connection is ANSWERING, and only the command at its
   head can answer it — inside the READ's own budget, not the cap's. Two
   behaviours, two constants, again.
+- **A read past its own bound is the same evidence a write past its cap is, and
+  has to be remembered the same way.** The first version of the bound answered
+  the caller and forgot the command. On a node whose appends are quiet — or shed
+  — nothing was in flight for the head check to look at, so the next poll sailed
+  through it and queued another read behind the first, and the per-poll growth
+  this whole section exists to stop reappeared on the read side (#269 review).
+  Timing out is not the end of a command; it is the start of knowing the
+  connection is bad. A count, not a flag, because reads can be outstanding
+  several at a time where the write chain is serial — and it is released when
+  the command finally answers, or a single slow moment would take the admin page
+  down until the process restarts.
 - **That check is evidence about the past, so the read needs a bound of its own
   too.** The read is queued behind whatever is on the connection at the instant
   it is ISSUED, and a stall that begins between the check and the command is
@@ -471,8 +482,8 @@ event_store_unavailable`), not delayed. The fix for an unbounded queue is
   for the whole length of a stall, and the read's own command timeout stops the
   one read already in flight when the stall began from waiting on Node's default
   300s `requestTimeout` (#269 review). It costs one refused read at the onset of
-  a stall — the next poll finds the stalled write at the head and is refused
-  before anything is issued.
+  a stall — the next poll finds the connection unanswered and is refused before
+  anything is issued.
 - **`close` drains, bounded, then drops the socket — `QUIT` is not an escape
   hatch.** Dropping the queue outright would lose the shutdown's own events on
   every clean restart, and waiting unbounded makes the step fail on every hung
@@ -499,9 +510,10 @@ event_store_unavailable`), not delayed. The fix for an unbounded queue is
 One connection, replies in order. That is what makes `disconnect` the only
 bounded close, and it is what the read refusal is derived from. It is also the
 limit of that refusal: the store can only refuse on evidence from one of ITS OWN
-commands, so a read issued while Redis is hung with nothing of ours in flight to
-notice it by is not refused — it is bounded and answered as unavailable instead,
-which is the best a caller-side bound can do. Closing that needs either a separate
+commands, so the FIRST request into a stall — whichever it is — is not refused.
+It is bounded and answered as unavailable, and it becomes the evidence that
+refuses the next one. That is the best a caller-side bound can do; closing it
+entirely needs either a separate read connection or a `commandTimeout`. Closing that needs either a separate
 read connection or a `commandTimeout` — the same deferred decision as in #261
 and #263, and all three should be weighed together. A test fixture for this
 store is only worth trusting if it models the ordering; one that lets each call
