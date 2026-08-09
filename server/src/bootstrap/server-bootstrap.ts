@@ -288,6 +288,14 @@ export async function createServerBootstrapContext(
       ...report,
       // A rejected `QUIT` is an error; a reply that never arrived spent the
       // wait budget. Keep that distinction queryable in every close report.
+      //
+      // `ok` reaches this helper only from the runtime store, whose report also
+      // fires on abandoned callers/commands — and those exist precisely because
+      // a drain budget ran out, so `timeout` is the right diagnosis there. The
+      // event store's own mapping differs for a reason: `closingAppends` is not
+      // a budget expiry, so a graceful `QUIT` with appends refused after close
+      // is a fault (#268). Same field, two derivations, because the underlying
+      // question is "what made this close incomplete" and the answers differ.
       result: report.quitOutcome === "failed" ? "error" : "timeout",
     });
   }

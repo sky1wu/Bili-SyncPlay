@@ -65,7 +65,8 @@ test("a QUIT that answers late, but inside the budget, still counts as graceful"
   assert.equal(disconnectCalls(), 0);
 });
 
-test("closing multiple connections waits for every result before rethrowing an unexpected error", async () => {
+test("a connection whose disconnect throws still gets its report", async () => {
+  const reports: Array<{ role: string; quitOutcome: string }> = [];
   const second = createConnection(() => new Promise(() => undefined));
   const first = {
     quit: () => Promise.reject(new Error("QUIT failed")),
@@ -74,17 +75,53 @@ test("closing multiple connections waits for every result before rethrowing an u
     },
   };
 
+  await quitAllWithin(
+    [
+      { role: "first", connection: first },
+      { role: "second", connection: second.connection },
+    ],
+    20,
+    ({ role, quitOutcome }) => {
+      reports.push({ role, quitOutcome });
+    },
+  );
+
+  // Letting `disconnect()` throw out of `quitWithin` skipped the caller's
+  // report — on the one connection whose close failed hardest, which is the
+  // one an operator most needs told about. The process is exiting either way,
+  // so the answer is worth more than the exception (#270 review).
+  assert.deepEqual(reports, [
+    { role: "first", quitOutcome: "failed" },
+    { role: "second", quitOutcome: "timed_out" },
+  ]);
+  // `Promise.all` would have surfaced the first rejection immediately and
+  // hidden the second connection's eventual forced close from the caller.
+  assert.equal(second.disconnectCalls(), 1);
+});
+
+test("closing multiple connections waits for every result before rethrowing an unexpected error", async () => {
+  const first = createConnection(() =>
+    Promise.reject(new Error("QUIT failed")),
+  );
+  const second = createConnection(() => new Promise(() => undefined));
+
+  // An `onCloseUnfinished` that throws is a bug in the caller, not a Redis
+  // failure, and it must still not cost the other connection its forced close.
   await assert.rejects(
     quitAllWithin(
       [
-        { role: "first", connection: first },
+        { role: "first", connection: first.connection },
         { role: "second", connection: second.connection },
       ],
       20,
+      ({ role }) => {
+        if (role === "first") {
+          throw new Error("report failed");
+        }
+      },
     ),
-    /disconnect failed/,
+    /report failed/,
   );
-  // `Promise.all` would have surfaced the first rejection immediately and
-  // hidden the second connection's eventual forced close from the caller.
+  assert.equal(first.disconnectCalls(), 1);
   assert.equal(second.disconnectCalls(), 1);
 });

@@ -189,6 +189,13 @@ export async function createRedisRoomEventBus(
         subscribeClient.off("message", listener);
       }
       subscribers.clear();
+      // Reset with the set it belongs to. `releaseSubscription`'s precondition
+      // is `subscribed && subscribers.size === 0`, so leaving this true makes
+      // that condition permanently satisfied — harmless only for as long as the
+      // `closing` guard happens to cover every caller, which is exactly the
+      // kind of "no state left behind" cleanup this repo asks to grep for
+      // (#270 review).
+      subscribed = false;
       // `QUIT` ends subscriber mode too. Do not queue another `UNSUBSCRIBE`
       // here: an earlier consumer unsubscribe can already be stuck on this
       // socket, and awaiting a second one would make the bounded QUIT and its

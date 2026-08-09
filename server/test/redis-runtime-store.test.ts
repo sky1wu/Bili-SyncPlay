@@ -175,6 +175,7 @@ test("redis runtime store close gives up on a Redis that never answers QUIT, and
     {
       pendingOperations: 0,
       pendingCommands: 0,
+      pendingAttempts: 0,
       pendingOperationBudgetMs: 5_000,
       quitOutcome: "timed_out",
       budgetMs: 20,
@@ -228,10 +229,17 @@ test("redis runtime store bounds its pre-QUIT drain and counts every active Redi
   await store.close();
   assert.ok(Date.now() - startedAt < 1_000);
   assert.equal(disconnectCalls, 1);
+  // Three numbers because they answer three different questions, and the drain
+  // waits on both of the last two: `pendingCommands` is what is on the wire and
+  // reads zero in the gaps between one attempt's commands, while
+  // `pendingAttempts` counts whole attempts and stays non-zero across exactly
+  // those gaps. Reporting only the first is how a close could say
+  // `pendingCommands: 0` and skip the report entirely (#270 review).
   assert.deepEqual(unfinished, [
     {
       pendingOperations: 1,
       pendingCommands: 3,
+      pendingAttempts: 1,
       pendingOperationBudgetMs: 20,
       quitOutcome: "timed_out",
       budgetMs: 20,

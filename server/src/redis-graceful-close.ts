@@ -59,12 +59,21 @@ export async function quitWithin(
   budgetMs: number,
 ): Promise<RedisQuitOutcome> {
   let failed = false;
-  const quitting = connection.quit().then(
-    () => undefined,
-    () => {
-      failed = true;
-    },
-  );
+  // `quit()` itself can throw synchronously on a client that is already gone.
+  // Letting that escape would skip the `disconnect()` below and leak the very
+  // socket this function exists to close.
+  let quitting: Promise<void>;
+  try {
+    quitting = connection.quit().then(
+      () => undefined,
+      () => {
+        failed = true;
+      },
+    );
+  } catch {
+    failed = true;
+    quitting = Promise.resolve();
+  }
   const answered = await settleWithin(quitting, budgetMs);
   const outcome: RedisQuitOutcome = !answered
     ? "timed_out"
@@ -76,7 +85,14 @@ export async function quitWithin(
     // budget; one that came back an error left the socket in a state nobody
     // vouched for. Either way it goes down here rather than outliving the
     // process's own shutdown.
-    connection.disconnect();
+    try {
+      connection.disconnect();
+    } catch {
+      // Swallowed on purpose: the caller reports this outcome, and throwing
+      // here would skip that report on the one connection that most needs it —
+      // the process is exiting either way, so the answer is worth more than the
+      // exception (#270 review).
+    }
   }
   return outcome;
 }

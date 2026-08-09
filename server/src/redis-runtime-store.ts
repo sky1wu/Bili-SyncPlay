@@ -189,8 +189,15 @@ type RuntimeStoreOptions = {
   ) => void;
   /** Report callers, commands, or a graceful close abandoned at shutdown. */
   onCloseUnfinished?: (info: {
+    /** Callers still waiting for an answer. */
     pendingOperations: number;
+    /** Commands on the wire, counted at the Redis client boundary. */
     pendingCommands: number;
+    /**
+     * Whole write attempts still running — an attempt spans several commands,
+     * so this stays non-zero in the gaps where `pendingCommands` reads zero.
+     */
+    pendingAttempts: number;
     pendingOperationBudgetMs: number;
     quitOutcome: RedisQuitOutcome;
     budgetMs: number;
@@ -1855,10 +1862,28 @@ export async function createRedisRuntimeStore(
       // "a timeout is not a cancel" gap `settle` closes for the session chain —
       // so wait for the chain releases too, bounded so a dead Redis cannot
       // stretch the close step (#242 review).
+      //
+      // TWO predicates, because they answer different questions and each is
+      // blind where the other sees. `activeRedisCommands` is what is on the
+      // wire right now: it catches commands issued DURING the drain, which a
+      // one-shot snapshot misses — but it reads empty whenever an operation is
+      // between two of its commands, and exiting there would send `QUIT` under
+      // the next one. `commandPacer` holds whole attempts (`withAttemptTimeout`
+      // caps `operation()`, not a single command), so it stays non-empty across
+      // exactly that gap — but it snapshots once. Waiting on only the first is
+      // how a close could report `pendingCommands: 0` and skip the report
+      // entirely, which is "bounded but silent", the one outcome this whole
+      // area exists to refuse (#270 review).
       await settleWithin(
         (async () => {
-          while (activeRedisCommands.size > 0) {
-            await Promise.allSettled(Array.from(activeRedisCommands));
+          while (
+            activeRedisCommands.size > 0 ||
+            commandPacer.trackedCount() > 0
+          ) {
+            await Promise.allSettled([
+              ...Array.from(activeRedisCommands),
+              commandPacer.settleTracked(pendingOperationTimeoutMs),
+            ]);
           }
         })(),
         pendingOperationTimeoutMs,
@@ -1868,15 +1893,18 @@ export async function createRedisRuntimeStore(
       // graceful close began, not the (usually zero) cleanup count afterwards.
       const pendingOperationsAtQuit = pendingOperations.size;
       const pendingCommandsAtQuit = activeRedisCommands.size;
+      const pendingAttemptsAtQuit = commandPacer.trackedCount();
       const quitOutcome = await quitWithin(redis, closeQuitTimeoutMs);
       if (
         pendingOperationsAtQuit > 0 ||
         pendingCommandsAtQuit > 0 ||
+        pendingAttemptsAtQuit > 0 ||
         quitOutcome !== "ok"
       ) {
         options.onCloseUnfinished?.({
           pendingOperations: pendingOperationsAtQuit,
           pendingCommands: pendingCommandsAtQuit,
+          pendingAttempts: pendingAttemptsAtQuit,
           pendingOperationBudgetMs: pendingOperationTimeoutMs,
           quitOutcome,
           budgetMs: closeQuitTimeoutMs,
