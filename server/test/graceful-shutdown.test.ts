@@ -554,3 +554,16 @@ test("the reconciler is stopped before the room store it talks to is closed", as
   // Reversing these two lets a SCAN/GET/EVAL in flight hit a closed connection.
   assert.deepEqual(order, ["stop_room_index_reconciler", "close_room_store"]);
 });
+
+test("the event store closes after every shared log producer", () => {
+  const steps = createSharedServerShutdownSteps({
+    roomStore: createInMemoryRoomStore({ now: () => 0 }),
+    roomIndexReconciler: null,
+    eventStore: inertEventStore,
+    adminCommandBus: createInMemoryAdminCommandBus(() => 0),
+    roomEventBus: createInMemoryRoomEventBus(),
+    closeAdminServices: async () => undefined,
+  });
+
+  assert.equal(steps.at(-1)?.name, "close_event_store");
+});

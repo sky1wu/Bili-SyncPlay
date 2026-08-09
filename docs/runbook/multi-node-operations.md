@@ -450,7 +450,23 @@ sum(increase(bili_syncplay_event_store_appends_dropped_total[<window>])) by (ins
 ```
 
 **Read the metric, not the logs, for "is it still happening" and "how much".**
-The logs carry two facts and make no claim beyond them:
+The logs carry three facts and make no claim beyond them:
+
+- `runtime_event_append_failed` — an event-store append was rejected. Repeated
+  failures are throttled by diagnosis to one line per minute, across business
+  event names. Up to 32 active diagnoses get independent first lines; past that
+  the throttle degrades from per-diagnosis to global — the shared overflow line
+  silences **every** untracked diagnosis for a minute, including one whose own
+  slot has just expired and a brand-new one appearing for the first time. Under
+  a high-cardinality error stream, read the counter and not the lines. This is
+  the signal for fast Redis rejections, which do not enter the shedding state,
+  so they move `bili_syncplay_events_total{event="runtime_event_append_failed"}`
+  rather than the drop counter:
+
+```promql
+# How many appends is Redis rejecting outright?
+sum(rate(bili_syncplay_events_total{event="runtime_event_append_failed"}[<window>])) by (instance)
+```
 
 - `runtime_event_appends_dropped` — the store is shedding, for this `reason`.
   Throttled to one line per reason per minute, so a stall that lasts an hour is
@@ -461,16 +477,28 @@ The logs carry two facts and make no claim beyond them:
 - `runtime_event_appends_abandoned_at_shutdown` — shutdown reached the end of
   `close_event_store` with something unfinished: `pendingWrites` appends whose
   commands had not all answered (appends, not Redis commands — one append issues
-  three or four), and/or a graceful close that did not work. `quitOutcome` says
-  which: `skipped` (the drain had already run out, so the socket was dropped
-  rather than sending a `QUIT` that would queue behind the stuck write),
-  `timed_out` (a half-open socket with no write left to blame), `failed` (a
-  `QUIT` that came back an error). Before this budget existed, all of it
-  appeared as a `server_shutdown_step_failed` for `close_event_store`, every
-  single time Redis was hung.
+  three or four), `closingAppends` appends that arrived after `close` started,
+  and/or a graceful close that did not work. `quitOutcome` says which:
+  `skipped` (the drain had already run out, so the socket was dropped rather
+  than sending a `QUIT` that would queue behind the stuck write), `timed_out`
+  (a half-open socket with no write left to blame), `failed` (a `QUIT` that came
+  back an error), or `ok` when only `closingAppends` made the shutdown
+  incomplete. `result` says how the close ENDED, not how much was lost — every
+  outcome here loses something, so read `pendingWrites` and `closingAppends` for
+  the magnitude. Before this budget existed, Redis stalls appeared as a
+  `server_shutdown_step_failed` for `close_event_store` every time.
 
-Both lines are `error` level regardless of `LOG_LEVEL` — they are excluded from
-the event store on purpose, so stdout is the only path they have.
+  A producer whose own shutdown step timed out is not cancelled and can log
+  after `close_event_store` returned, so the report repeats with a growing
+  `closingAppends` — throttled to one update per minute, because otherwise each
+  of those log lines would produce an error line of its own. **Each update
+  supersedes the previous one: the other fields are repeated verbatim, not
+  incremental, so aggregate `closingAppends` with `max` and never `sum`.** A
+  process that force-exits inside the window reports a floor.
+
+All three lines are `error` level regardless of `LOG_LEVEL`. The two
+backpressure lines are excluded from the event store on purpose, and append
+failures cannot be written there, so stdout is their only path.
 
 As with the reaper and the heartbeat, the cap bounds how long the store waits,
 not the command: this client sets no `commandTimeout` either. A read issued
