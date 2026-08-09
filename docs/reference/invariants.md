@@ -440,14 +440,50 @@ overrun `close_event_store`'s budget (#264). The rules:
   point must not be issued at all.** The chain is serial, so `await
 pendingAppend` made a read wait for every queued write to be ISSUED and
   answered one after another — round trips that had not started yet. Bounding
-  that wait leaves the read queued behind only the write in flight. But once
-  that write is past its own cap, the read will not come back either, and a
-  longer wait is the wrong lever entirely: the admin console polls events and
-  the overview every 15s, so each poll leaves another read and its closure in
-  ioredis's queue for as long as the stall lasts — timer-driven growth of
-  exactly the kind this section exists to stop (#266 review). So the read is
-  refused (`503 event_store_unavailable`), not delayed. The fix for an unbounded
-  queue is never a bound on how long you wait for it.
+  that wait leaves the read queued behind only the write in flight. But if that
+  write is not answering, the read will not come back either, and a longer wait
+  is the wrong lever entirely: the admin console polls events and the overview
+  every 15s, so each poll leaves another read and its closure in ioredis's queue
+  for as long as the stall lasts — timer-driven growth of exactly the kind this
+  section exists to stop (#266 review). So the read is refused (`503
+event_store_unavailable`), not delayed. The fix for an unbounded queue is
+  never a bound on how long you wait for it.
+- **"Did the queue drain" is not the question a read has to answer.** The first
+  bounded version waited on the chain and then issued the read regardless of the
+  answer, refusing only once the append cap had fired — which is 5s away,
+  because the cap is long on purpose (tripping it costs records). Every read in
+  between went out behind a command that was never coming back, so the defect
+  the bound existed to remove survived it (#269 review). A deep queue on a Redis
+  that is merely behind does not drain inside the budget either, so refusing on
+  that answer would take the console down on a Redis that is working. The
+  question is whether the connection is ANSWERING, and only the command at its
+  head can answer it — inside the READ's own budget, not the cap's. Two
+  behaviours, two constants, again.
+- **A read past its own bound is the same evidence a write past its cap is, and
+  has to be remembered the same way.** The first version of the bound answered
+  the caller and forgot the command. On a node whose appends are quiet — or shed
+  — nothing was in flight for the head check to look at, so the next poll sailed
+  through it and queued another read behind the first, and the per-poll growth
+  this whole section exists to stop reappeared on the read side (#269 review).
+  Timing out is not the end of a command; it is the start of knowing the
+  connection is bad. A count, not a flag, because reads can be outstanding
+  several at a time where the write chain is serial — and it is released when
+  the command finally answers, or a single slow moment would take the admin page
+  down until the process restarts.
+- **That check is evidence about the past, so the read needs a bound of its own
+  too.** The read is queued behind whatever is on the connection at the instant
+  it is ISSUED, and a stall that begins between the check and the command is
+  invisible to any check made before it. Re-verifying the head right there does
+  not close the gap and breaks the case the path protects — on a node with a
+  queue the head is almost always a write issued milliseconds ago and not yet
+  answered, so requiring an answered head would refuse every read on a Redis
+  that is merely behind. So the two bounds split the work, and neither
+  substitutes for the other: the head check stops a read being issued per poll
+  for the whole length of a stall, and the read's own command timeout stops the
+  one read already in flight when the stall began from waiting on Node's default
+  300s `requestTimeout` (#269 review). It costs one refused read at the onset of
+  a stall — the next poll finds the connection unanswered and is refused before
+  anything is issued.
 - **`close` drains, bounded, then drops the socket — `QUIT` is not an escape
   hatch.** Dropping the queue outright would lose the shutdown's own events on
   every clean restart, and waiting unbounded makes the step fail on every hung
@@ -473,14 +509,63 @@ pendingAppend` made a read wait for every queued write to be ISSUED and
 
 One connection, replies in order. That is what makes `disconnect` the only
 bounded close, and it is what the read refusal is derived from. It is also the
-limit of that refusal: the store can only refuse once one of ITS OWN commands
-has outlived a cap, so a read issued before that, or while Redis is hung with no
-write of ours in flight, is still exposed. Closing that needs either a separate
+limit of that refusal: the store can only refuse on evidence from one of ITS OWN
+commands, so the FIRST request into a stall — whichever it is — is not refused.
+It is bounded and answered as unavailable, and it becomes the evidence that
+refuses the next one. That is the best a caller-side bound can do; closing it
+entirely needs either a separate read connection or a `commandTimeout`. Closing that needs either a separate
 read connection or a `commandTimeout` — the same deferred decision as in #261
 and #263, and all three should be weighed together. A test fixture for this
 store is only worth trusting if it models the ordering; one that lets each call
 settle on its own will happily prove that reads and shutdown sail past a hung
 write.
+
+## Which record may be shed is a property of the record, not of the queue
+
+`redis-audit-store` had the same chain as the event store, link for link, and
+the same three consequences (#267). What it could not have was the same answer:
+an audit record is the only thing in the system that says who closed a room or
+kicked a member, so shedding it quietly is not a trade anybody may make on an
+operator's behalf. The rules that fell out:
+
+- **Extract the mechanism, keep the policy at the call site.** The four bounds
+  are now `admin/append-chain.ts`, and the two stores differ only in what their
+  `onRefused` / `onAbandonedAtShutdown` handlers do — the event store returns
+  the record it built, the audit store throws. Writing the chain a second time
+  by hand is exactly the shape that cost #242 six duplicate findings, half of
+  them "fixed A, missed the isomorphic B".
+- **What makes shedding affordable is the feed rate, and it is not a constant of
+  the design.** The event store cannot reject, because its caller is the
+  structured logger and a rejection becomes one stdout error line per log line.
+  The audit chain is fed by admin actions at human rate, so one line per refusal
+  is a cost it can pay — and the line is `admin_audit_log_append_failed`, which
+  `action-service.writeAudit` already caught long before any of this.
+- **Do not add a counter for a question an existing series already answers.**
+  The event store needed
+  `bili_syncplay_event_store_appends_dropped_total` because its drops were
+  otherwise silent. Audit refusals are not: `metricsCollector.recordEvent` runs
+  on every `logEvent` regardless of `LOG_LEVEL` or sampling, so
+  `bili_syncplay_events_total{event="admin_audit_log_append_failed"}` answers
+  "still happening?" and "how much?" with no new surface at all.
+- **The admin action still succeeds, and that is why the loss must be loud.**
+  The audit write has always been fire-and-forget; taking admin controls offline
+  during a Redis outage would be the worse failure. Since the action happens
+  either way, the only thing standing between a lost accountability record and
+  nobody knowing is the refusal being visible.
+- **A shutdown step's budget belongs to the step, not to a component in it.**
+  `close_admin_services` closes the admin session store _and_ the audit store,
+  and the session store's `await redis.quit()` was unbounded and runs first — so
+  bounding only the audit store would have left the step failing on exactly the
+  same Redis, having never reached the half that was fixed. `quitWithin` is
+  shared by all three closes for that reason, and the two are now settled
+  together rather than awaited in sequence, so a rejection from one cannot skip
+  the other's close.
+
+Still unbounded at the time of writing: `redis-room-store`,
+`redis-runtime-store`, `redis-admin-command-bus` and `redis-room-event-bus` all
+end their `close()` with a bare `await redis.quit()`, each inside its own
+shutdown step. The mechanism to fix them is already extracted; what each one
+needs decided is its budget and whether it owes a report.
 
 ## Test fixtures must not cast past the checker
 

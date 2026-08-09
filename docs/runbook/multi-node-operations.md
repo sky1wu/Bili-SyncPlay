@@ -413,10 +413,21 @@ stream reads low, but the process keeps its memory and shutdown still finishes
 (#264).
 
 It does **not** keep the events page available. Reads share the one connection
-with the writes and Redis answers in order, so once the store knows the
-connection is stalled it **refuses** admin reads with `503
-event_store_unavailable` rather than issuing a command that would queue behind
-the stuck write and never return. A 503 here means Redis, not the admin
+with the writes and Redis answers in order, so a read whose head-of-connection
+write has not answered inside the read's own 1s budget is **refused** with `503
+event_store_unavailable` rather than issued behind a command that is not coming
+back. That budget is the read's, not the 5s append cap's: the cap is long
+because tripping it costs events, and a read that waited that long has already
+failed the operator.
+
+A read that was already on its way when the stall began cannot be caught by that
+check — nothing observed before a command is issued can see a stall that starts
+after it. Those get a 5s bound on their own commands and the same 503, so the
+request always ends in an answer rather than in Node's 300s request timeout. It
+is one read per stall, not one per poll: a read that ran out of its bound is
+remembered exactly as a write past its cap is, so the next poll is refused
+before anything is sent — including on a node whose appends are quiet or already
+being shed, where there is no write in flight to notice the stall by. A 503 here means Redis, not the admin
 process — check Redis first, then retry. What shedding protects is the process,
 not the page.
 
@@ -485,6 +496,58 @@ curl -fsS http://<global-admin>:8788/readyz
 sudo journalctl -u bili-syncplay-room-node-a --since "30 min ago"
 sudo journalctl -u bili-syncplay-global-admin --since "30 min ago"
 ```
+
+### Why is an audit record missing, or the audit page returning 503?
+
+Only with `ADMIN_AUDIT_STORE_PROVIDER=redis`. That store writes the same kind of
+Redis chain as the event store and hits the same bounds when Redis stops
+answering, but it makes the **opposite** trade with them (#267).
+
+An audit record is an accountability record — nothing else in the system says
+who closed a room or kicked a member — so it is never shed quietly. Past either
+bound the append is **refused**, and every refusal becomes one
+`admin_audit_log_append_failed` line on stdout plus one increment of
+`bili_syncplay_events_total{event="admin_audit_log_append_failed"}`. That is the
+signal to alert on; there is no separate drop counter, because this one already
+answers "still happening?" and "how much?" statelessly. It can afford a line per
+refusal where the event store could not: the audit chain is fed by admin actions
+at human rate, not by every log line.
+
+**The admin action itself still succeeds.** The audit write has always been
+fire-and-forget, and taking admin controls offline during a Redis outage would
+be the worse failure. What is lost is the record, so reconstruct from the
+runtime event list (which the same action also produced) for the window the
+refusals cover.
+
+```promql
+# Are audit records being lost right now?
+sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<window>])) by (instance)
+```
+
+Like every other `bili_syncplay_events_total` series, this one appears on the
+first occurrence and not before, so write alerts as a `rate`/`increase` (absence
+is simply no data) rather than expecting the series to exist on a healthy node.
+
+Reads behave exactly as the event store's do: once the store knows the write
+path is stalled it **refuses** the audit query with `503
+audit_store_unavailable` rather than issuing a command that would queue behind
+the stuck write and never return. A 503 here means Redis, not the admin
+process — check Redis first, then retry.
+
+At shutdown, `close_admin_services` closes the admin session store and the audit
+store, and both are now bounded:
+
+- `admin_audit_appends_abandoned_at_shutdown` — same fields and same
+  `quitOutcome` vocabulary as `runtime_event_appends_abandoned_at_shutdown`.
+- `admin_session_store_close_unfinished` — the session store's `QUIT` did not
+  work, so its socket was dropped. It runs first in the step, so before this
+  bound existed it could spend the whole 5s budget on its own and the audit
+  store's close was never even reached.
+
+Before either bound, `close_admin_services` was a guaranteed
+`server_shutdown_step_failed` whenever Redis was hung. As everywhere else here,
+the bound is on how long we wait, not on the command: this client sets no
+`commandTimeout` either.
 
 ## Post-Change Regression Checklist
 

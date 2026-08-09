@@ -1,6 +1,10 @@
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
-import { createRetryPacer, settleWithin } from "../retry-pacer.js";
+import {
+  createAppendChain,
+  type AppendChainCloseReport,
+  type AppendChainQuitOutcome,
+} from "./append-chain.js";
 import { shouldIncludeRuntimeEvent } from "./event-visibility.js";
 import {
   isWindowIndexedEvent,
@@ -60,6 +64,18 @@ const MAX_PENDING_APPENDS = 1_000;
 const READ_APPEND_SETTLE_TIMEOUT_MS = 1_000;
 
 /**
+ * How long the read's own commands may take once it has been let through.
+ *
+ * A liveness backstop, not a health judgement: the judgement is the
+ * head-of-connection check, and this catches the one read that slips past it
+ * because the stall began after the check and before the command. Same order
+ * and same reasoning as {@link APPEND_TIMEOUT_MS} — long enough that ordinary
+ * latency never trips it, short enough that the answer does not wait on Node's
+ * default 300s `requestTimeout` (#269 review).
+ */
+const READ_COMMAND_TIMEOUT_MS = 5_000;
+
+/**
  * How long `close` may wait for the chain to drain, and separately for `QUIT`.
  *
  * Both, so the arithmetic matters: worst case is twice this, and it has to stay
@@ -109,23 +125,12 @@ export class EventStoreUnavailableError extends Error {
 }
 
 /**
- * How the graceful close went.
- *
- * Three outcomes, not two, because `settleWithin` answers "did it settle" and
- * a `QUIT` that settles with a rejection settled just fine — while leaving the
- * connection in a state nobody checked, and the shutdown recorded as clean
- * (#266 review). `skipped` is the path that never tried: the drain had already
- * run out, so the socket went down instead.
+ * How the graceful close went. See {@link AppendChainQuitOutcome} — three
+ * outcomes, not two, because a `QUIT` that settles with a REJECTION settled
+ * just fine while leaving the connection in a state nobody checked (#266
+ * review).
  */
-export type EventStoreQuitOutcome = "ok" | "skipped" | "failed" | "timed_out";
-
-/** Distinguishes "the cap won the race" from "the write failed". */
-class EventStoreAppendTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`Event store append did not answer within ${timeoutMs}ms.`);
-    this.name = "EventStoreAppendTimeoutError";
-  }
-}
+export type EventStoreQuitOutcome = AppendChainQuitOutcome;
 
 const MERGE_LEGACY_COUNTS_LUA = `
 if KEYS[1] == KEYS[2] then
@@ -339,6 +344,7 @@ export type RedisEventStoreOptions = {
   appendTimeoutMs?: number;
   maxPendingAppends?: number;
   readSettleTimeoutMs?: number;
+  readCommandTimeoutMs?: number;
   closeSettleTimeoutMs?: number;
   metricsCollector?: Pick<
     MetricsCollector,
@@ -366,22 +372,7 @@ export type RedisEventStoreOptions = {
    * one — the overrun used to be visible only because the step itself timed
    * out.
    */
-  onAppendsAbandonedAtShutdown?: (info: {
-    /**
-     * Appends whose Redis commands had not all answered when the socket was
-     * dropped.
-     *
-     * Appends, not commands: one append issues an `XADD` and then two or three
-     * more in parallel, and the cap tracks the batch as one call. Counting
-     * commands would need per-command tracking the cap has no use for, and the
-     * operationally useful unit is events anyway — one append is one event
-     * (#266 review).
-     */
-    pendingWrites: number;
-    queuedAppends: number;
-    quitOutcome: EventStoreQuitOutcome;
-    budgetMs: number;
-  }) => void;
+  onAppendsAbandonedAtShutdown?: (info: AppendChainCloseReport) => void;
 };
 
 export async function createRedisEventStore(
@@ -413,27 +404,30 @@ export async function createRedisEventStore(
   const now = options.now ?? Date.now;
   const readSettleTimeoutMs =
     options.readSettleTimeoutMs ?? READ_APPEND_SETTLE_TIMEOUT_MS;
+  const readCommandTimeoutMs =
+    options.readCommandTimeoutMs ?? READ_COMMAND_TIMEOUT_MS;
   const closeSettleTimeoutMs =
     options.closeSettleTimeoutMs ?? CLOSE_APPEND_SETTLE_TIMEOUT_MS;
   const metricsCollector = options.metricsCollector;
-  // Only for the per-write cap and the record of writes that outlived one; the
-  // chain paces itself, so the backoff schedule goes unused. Same use as
-  // `maintenance-pass`.
-  const pacer = createRetryPacer({
-    initialDelayMs: appendTimeoutMs,
-    maxDelayMs: appendTimeoutMs,
+  const chain = createAppendChain({
+    // Arrows, not the methods themselves: a test replaces `quit` after the
+    // store exists, and ioredis's methods need their receiver anyway.
+    connection: {
+      quit: () => redis.quit(),
+      disconnect: () => {
+        redis.disconnect();
+      },
+    },
+    appendTimeoutMs,
+    maxPendingAppends,
+    readSettleTimeoutMs,
+    readCommandTimeoutMs,
+    closeSettleTimeoutMs,
+    makeUnavailableError: () => new EventStoreUnavailableError(),
+    onCloseUnfinished: (report) => {
+      options.onAppendsAbandonedAtShutdown?.(report);
+    },
   });
-  let closing = false;
-  /**
-   * Set once `close` gave up waiting. Read by every link that has not started
-   * yet, because the line after it closes the connection they would write on.
-   */
-  let abandonQueuedAppends = false;
-  let pendingAppend = Promise.resolve();
-  /** Appends chained but not yet settled, including the one writing right now. */
-  let queuedAppends = 0;
-  /** Whether the write in flight has already lost its race against the cap. */
-  let writeIsStalled = false;
   /** Throttle only. Two entries at most, and nothing depends on them being right. */
   const lastSheddingReportAtByReason = new Map<
     EventStoreSheddingReason,
@@ -461,39 +455,6 @@ export async function createRedisEventStore(
     // another append: without this the report would re-enter and report itself.
     lastSheddingReportAtByReason.set(reason, at);
     options.onAppendsDropped?.({ reason });
-  }
-
-  /**
-   * The one degraded-shutdown report, at the end of `close`.
-   *
-   * A single fact about a single moment, which is why it survived the
-   * simplification that removed the shedding pair: nothing has to be matched up
-   * with it later, so there is no invariant to break. Two things can be
-   * unfinished, and either on its own is worth a line:
-   *
-   * - appends whose commands had not all answered when the socket went;
-   * - a graceful close that did not work: `QUIT` never came back (a half-open
-   *   socket with no write left to blame, having just spent the whole budget)
-   *   or came back an error. Bounded and silent is the trade this whole area
-   *   exists to refuse: the overrun used to be visible only because the
-   *   shutdown step timed out, so a `close` that returns cleanly owes the line
-   *   instead.
-   */
-  function reportUnfinishedAtShutdown(outcome: {
-    pendingWrites: number;
-    quitOutcome: EventStoreQuitOutcome;
-  }): void {
-    const quitWorked =
-      outcome.quitOutcome === "ok" || outcome.quitOutcome === "skipped";
-    if (outcome.pendingWrites === 0 && quitWorked) {
-      return;
-    }
-    options.onAppendsAbandonedAtShutdown?.({
-      pendingWrites: outcome.pendingWrites,
-      queuedAppends,
-      quitOutcome: outcome.quitOutcome,
-      budgetMs: closeSettleTimeoutMs,
-    });
   }
 
   async function mergeLegacyCountsIfNeeded() {
@@ -641,26 +602,6 @@ export async function createRedisEventStore(
     );
   }
 
-  /**
-   * Read-your-writes, best effort.
-   *
-   * The reason it is only best effort: the chain is the write path, and joining
-   * it unconditionally is what made every admin read hang for exactly as long
-   * as Redis was hung — the read had no stake in those writes beyond seeing
-   * them, and under a stall it would not have seen them by waiting anyway.
-   */
-  async function settleQueuedAppendsForRead(): Promise<void> {
-    // Refused, not delayed. Waiting longer was the wrong lever: the read that
-    // follows goes out on the same connection, behind the write that is not
-    // answering, and never comes back — while the admin console polls events
-    // and the overview every 15s, so ioredis's queue grows a read and a closure
-    // per poll for as long as the stall lasts (#266 review).
-    if (writeIsStalled) {
-      throw new EventStoreUnavailableError();
-    }
-    await settleWithin(pendingAppend, readSettleTimeoutMs);
-  }
-
   /** Every Redis command one event costs, as one promise for the cap to race. */
   async function performAppendWrite(
     input: GlobalEventStoreAppendInput,
@@ -729,45 +670,12 @@ export async function createRedisEventStore(
     } satisfies RuntimeEvent;
   }
 
-  async function writeEvent(
-    input: GlobalEventStoreAppendInput,
-    timestamp: string,
-    details: string,
-    runtimeEvent: RuntimeEvent,
-  ): Promise<RuntimeEvent> {
-    const call = performAppendWrite(input, timestamp, details, runtimeEvent);
-    try {
-      return await pacer.capAttempt(
-        call,
-        appendTimeoutMs,
-        () => new EventStoreAppendTimeoutError(appendTimeoutMs),
-      );
-    } catch (error) {
-      if (!(error instanceof EventStoreAppendTimeoutError)) {
-        throw error;
-      }
-      // The commands are still on the connection and nothing can cancel them.
-      // So the chain does NOT move on — running the next event's XADD on top
-      // would leave two writes outstanding against a dependency that has
-      // answered neither, and would land them out of order if it recovered.
-      // What changes is only that `append` stops queueing behind this write.
-      writeIsStalled = true;
-      try {
-        return await call;
-      } finally {
-        // Safe as a plain flag rather than a per-call token: the chain runs one
-        // write at a time, so the write that set this is the write that clears
-        // it.
-        writeIsStalled = false;
-      }
-    }
-  }
-
   async function queryEvents(
     query: GlobalEventStoreQuery,
   ): Promise<GlobalEventStoreQueryResult> {
-    await settleQueuedAppendsForRead();
-    const rawEntries = await redis.xrevrange(streamKey, "+", "-");
+    const rawEntries = await chain.runRead(() =>
+      redis.xrevrange(streamKey, "+", "-"),
+    );
     const parsedEvents = rawEntries
       .map(([id, fieldValues]) => {
         const fields: Record<string, string> = {};
@@ -815,45 +723,30 @@ export async function createRedisEventStore(
         details: { ...input.data },
       };
 
-      // A dropped event still answers with the record the caller built. The
-      // caller is the structured logger, which turns a rejection into one
-      // `runtime_event_append_failed` line on stdout — so rejecting here would
-      // answer a Redis stall with one error line per log line, on the exact
-      // path already established to be overloaded. Drops are reported in
-      // aggregate instead, by `shedAppend`.
-      if (closing) {
-        return Promise.resolve(runtimeEvent);
-      }
-      if (writeIsStalled) {
-        shedAppend("stalled");
-        return Promise.resolve(runtimeEvent);
-      }
-      if (queuedAppends >= maxPendingAppends) {
-        // Redis is answering, just slower than events arrive. Nothing else
-        // would ever stop this queue growing: the per-write cap never fires
-        // while every write eventually lands.
-        shedAppend("overflow");
-        return Promise.resolve(runtimeEvent);
-      }
-
-      queuedAppends += 1;
-      const appendPromise = pendingAppend.then(async () => {
-        try {
-          if (abandonQueuedAppends) {
+      return chain.run(
+        () => performAppendWrite(input, timestamp, details, runtimeEvent),
+        {
+          // A dropped event still answers with the record the caller built. The
+          // caller is the structured logger, which turns a rejection into one
+          // `runtime_event_append_failed` line on stdout — so rejecting here
+          // would answer a Redis stall with one error line per log line, on the
+          // exact path already established to be overloaded. Drops are reported
+          // in aggregate instead, by `shedAppend`. This is the policy half the
+          // chain deliberately does not own; `redis-audit-store` chose the
+          // opposite for records that may not go missing quietly.
+          onRefused: (reason) => {
+            // Shutdown is not a fault, and the events it loses are reported by
+            // `onAppendsAbandonedAtShutdown` instead — counting them here would
+            // move a metric nothing can scrape any more (the metrics server is
+            // already closed) and file an orderly close under a failure reason.
+            if (reason !== "closing") {
+              shedAppend(reason);
+            }
             return runtimeEvent;
-          }
-          return await writeEvent(input, timestamp, details, runtimeEvent);
-        } finally {
-          queuedAppends -= 1;
-        }
-      });
-
-      pendingAppend = appendPromise.then(
-        () => undefined,
-        () => undefined,
+          },
+          onAbandonedAtShutdown: () => runtimeEvent,
+        },
       );
-
-      return appendPromise;
     },
     async query(query) {
       return await queryEvents(query);
@@ -862,9 +755,12 @@ export async function createRedisEventStore(
       if (eventNames.length === 0) {
         return {};
       }
-      await settleQueuedAppendsForRead();
-      await mergeLegacyCountsIfNeeded();
-      const values = await redis.hmget(countsKey, ...eventNames);
+      // The whole read, not just the last command: `mergeLegacyCountsIfNeeded`
+      // is an `EVAL` on this same connection and hangs exactly as readily.
+      const values = await chain.runRead(async () => {
+        await mergeLegacyCountsIfNeeded();
+        return await redis.hmget(countsKey, ...eventNames);
+      });
       return Object.fromEntries(
         eventNames.map((name, i) => [
           name,
@@ -880,82 +776,35 @@ export async function createRedisEventStore(
       if (eventNames.length === 0) {
         return {};
       }
-      await settleQueuedAppendsForRead();
-      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
-        return Object.fromEntries(eventNames.map((name) => [name, 0]));
-      }
-
       return Object.fromEntries(
-        await Promise.all(
-          eventNames.map(async (name) => {
-            if (isWindowIndexedEvent(name)) {
-              await pruneEventWindowIndexIfNeeded(name, toMs);
-            }
-            const total = await redis.zcount(
-              eventWindowIndexKey(windowIndexKeyPrefix, name),
-              fromMs,
-              toMs,
-            );
-            return [name, total];
-          }),
-        ),
+        await chain.runRead(async () => {
+          if (
+            !Number.isFinite(fromMs) ||
+            !Number.isFinite(toMs) ||
+            fromMs > toMs
+          ) {
+            return eventNames.map((name) => [name, 0] as const);
+          }
+          return await Promise.all(
+            eventNames.map(async (name) => {
+              // A ZREMRANGEBYSCORE, on the read path and on this connection —
+              // inside the bound with everything else it is queued behind.
+              if (isWindowIndexedEvent(name)) {
+                await pruneEventWindowIndexIfNeeded(name, toMs);
+              }
+              const total = await redis.zcount(
+                eventWindowIndexKey(windowIndexKeyPrefix, name),
+                fromMs,
+                toMs,
+              );
+              return [name, total] as const;
+            }),
+          );
+        }),
       );
     },
     async close() {
-      // Blocks new appends, but deliberately not the ones already chained: on a
-      // healthy shutdown the queue is a write or two deep and drains in
-      // milliseconds, and dropping those would lose the shutdown's own events
-      // every single time.
-      closing = true;
-      const drained = await settleWithin(pendingAppend, closeSettleTimeoutMs);
-      let pendingWrites = 0;
-      let quitOutcome: EventStoreQuitOutcome = "skipped";
-      if (!drained) {
-        // Nothing that has not started may start now: the connection is about
-        // to go, and ioredis answers a command issued after it with a rejection
-        // — which the logger would turn into one `runtime_event_append_failed`
-        // line per queued event, after shutdown reported it was done.
-        abandonQueuedAppends = true;
-        // Read before the socket goes, and after the wait: this is what
-        // outlived the budget, and `disconnect()` rejects those commands, which
-        // would settle them out of the very count that describes them.
-        pendingWrites = pacer.trackedCount();
-        // NOT `quit()`. `QUIT` is an ordinary command on this connection:
-        // ioredis appends it to the same `commandQueue` and matches replies in
-        // order, so it cannot answer before the write we just gave up on. A
-        // graceful close would inherit the exact wait that was just bounded and
-        // hand `close_event_store` its timeout back (#264 review). The socket
-        // goes instead — there is nothing left to be graceful about.
-        redis.disconnect();
-      } else {
-        // The chain drained, so nothing was queued ahead of `QUIT` and it
-        // should have answered at once. Three outcomes, not two: `settleWithin`
-        // answers "did it settle", and a `QUIT` that settles with a rejection
-        // settled just fine while leaving the connection in a state nobody
-        // checked (#266 review). So the rejection is caught here rather than
-        // absorbed, and only a clean answer counts as a graceful close.
-        let quitFailed = false;
-        const quitting = redis.quit().then(
-          () => undefined,
-          () => {
-            quitFailed = true;
-          },
-        );
-        const quitAnswered = await settleWithin(quitting, closeSettleTimeoutMs);
-        quitOutcome = !quitAnswered
-          ? "timed_out"
-          : quitFailed
-            ? "failed"
-            : "ok";
-        if (quitOutcome !== "ok") {
-          // A reply that never came is a half-open socket that just spent the
-          // whole budget; one that came back an error left the socket in a
-          // state nobody vouched for. Either way it goes down here rather than
-          // outliving the process's own shutdown.
-          redis.disconnect();
-        }
-      }
-      reportUnfinishedAtShutdown({ pendingWrites, quitOutcome });
+      await chain.close();
     },
   };
 }

@@ -143,6 +143,15 @@ before changing the code it describes.
   may pair because a timer makes each tick discrete — **a pattern's guarantee
   comes from its precondition, not from its shape**. And reporting must not
   route through the thing it reports on.
+- **Which record may be shed is a property of the record** (#267): the audit
+  store has the same chain as the event store and the opposite answer, so the
+  four bounds live in `admin/append-chain.ts` and only the `onRefused` handler
+  differs — an audit record is an accountability record, and its refusal is
+  affordable only because admin actions feed it at human rate. It needs no new
+  counter: `events_total{event="admin_audit_log_append_failed"}` already answers
+  both questions. And a shutdown step's budget belongs to the step, not to a
+  component in it — `close_admin_services` also closes the admin session store,
+  which runs first, so bounding one half fixes nothing.
 - **One-shot broadcasts need a retry trail** (#242): most `room_state_updated`
   sends are repeated by the next update, but the share-ownership resync and the
   runtime index reaper's announcement are not — losing one loses the room until a

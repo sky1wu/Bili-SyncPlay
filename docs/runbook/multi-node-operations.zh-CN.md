@@ -405,10 +405,21 @@ WebSocket 客户端。先读**该节点自己的日志**再去信外部视图，
 当 Redis 不再回应时它会**丢弃**而不是排队：列表变得不完整、所有基于这条流算出来的
 计数都会偏低，但进程的内存不会涨、关服也仍然能收尾（#264）。
 
-它**并不能**让事件页保持可用。读写共用同一条连接、Redis 按序应答，所以一旦存储发现
-连接已经僵死，后台读取会被直接**拒绝**并返回 `503 event_store_unavailable`，而不是发
-出一条会排在僵死写入后面、永远回不来的命令。这里的 503 指向的是 Redis、不是后台进程：
-先查 Redis，恢复后重试。丢弃保住的是进程，不是页面。
+它**并不能**让事件页保持可用。读写共用同一条连接、Redis 按序应答，所以只要队首那条
+写入没有在读取**自己**的 1s 预算内回应，读取就会被直接**拒绝**并返回
+`503 event_store_unavailable`，而不是发到一条回不来的命令后面。这个预算属于读取，不是
+那个 5s 的 append 上限：上限设得长是因为触发一次要丢事件，而等那么久的读取早就把运维
+辜负了。
+
+僵死开始时**已经在路上**的那次读取，这道检查抓不到——发出命令之前观察到的任何东西，都
+看不见发出之后才开始的僵死。这类读取由它自己命令上的 5s 界兜底，同样返回 503，所以请求
+总会有一个答复，而不是耗到 Node 的 300s 请求超时。每次僵死漏出的是**一次**，不是每轮
+轮询一次：一次用尽预算的读取会像超过上限的写入一样被记住，所以下一次轮询在发出任何
+命令之前就被拒绝——即使这个节点的 append 很安静、或者正在被丢弃，没有任何写入在途可以
+用来发现僵死。
+
+这里的 503 指向的是 Redis、不是后台进程：先查 Redis，恢复后重试。丢弃保住的是进程，
+不是页面。
 
 信号是 `bili_syncplay_event_store_appends_dropped_total`，它的 `reason` 标签就是
 诊断结论：
@@ -466,6 +477,47 @@ curl -fsS http://<global-admin>:8788/readyz
 sudo journalctl -u bili-syncplay-room-node-a --since "30 min ago"
 sudo journalctl -u bili-syncplay-global-admin --since "30 min ago"
 ```
+
+### 为什么审计记录丢了，或者审计页返回 503？
+
+只在 `ADMIN_AUDIT_STORE_PROVIDER=redis` 时出现。这个存储写的是和 event store 同构的
+Redis 链，Redis 不回应时撞上同样的两道边界，但对边界做的是**相反**的取舍（#267）。
+
+审计记录是问责记录——房间是谁关的、成员是谁踢的，全系统只有它说得清——所以绝不静默
+丢弃。越过任一边界，写入会被**拒绝**，每一次拒绝都会在 stdout 留下一行
+`admin_audit_log_append_failed`，并让
+`bili_syncplay_events_total{event="admin_audit_log_append_failed"}` 加一。告警看这个
+就够了：不需要另设丢弃计数器，因为它已经无状态地回答了"还在不在发生"和"发生了多少"。
+这里付得起"一次拒绝一行日志"的代价，而 event store 付不起——审计链由管理动作按人的
+速度喂养，不是由每一条日志。
+
+**管理动作本身仍然成功。** 审计写入一直是发后不理的，而在 Redis 故障期间把管理能力
+一并下线是更坏的失败。丢的是记录，所以要按拒绝日志覆盖的那段窗口，从运行时事件列表
+（同一次动作也会产生一条）去重建。
+
+```promql
+# 现在正在丢审计记录吗？
+sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<window>])) by (instance)
+```
+
+和其他所有 `bili_syncplay_events_total` 序列一样，它在第一次出现之后才会存在，所以告警
+要写成 `rate`/`increase`（序列不存在就是没有数据），不要指望健康节点上能看到这条序列。
+
+读取的行为与 event store 完全一致：一旦存储发现写入路径已僵死，审计查询会被直接
+**拒绝**并返回 `503 audit_store_unavailable`，而不是发出一条会排在僵死写入后面、永远
+回不来的命令。这里的 503 指向的是 Redis、不是后台进程：先查 Redis，恢复后重试。
+
+关服时 `close_admin_services` 会依次关闭管理会话存储与审计存储，现在两者都是有界的：
+
+- `admin_audit_appends_abandoned_at_shutdown`——字段与 `quitOutcome` 的词汇表和
+  `runtime_event_appends_abandoned_at_shutdown` 完全相同。
+- `admin_session_store_close_unfinished`——会话存储的 `QUIT` 没成，于是断掉了 socket。
+  它在这一步里排在前面，所以在这道边界存在之前，它自己就能把 5s 预算花光，审计存储的
+  关闭根本轮不到执行。
+
+在这两道边界之前，只要 Redis 僵死，`close_admin_services` 必然是一次
+`server_shutdown_step_failed`。和这里其他地方一样，边界约束的是我们等多久、不是命令
+本身：这个客户端同样没有设置 `commandTimeout`。
 
 ## 变更后回归清单
 

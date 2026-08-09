@@ -12,6 +12,7 @@ import {
   type SyncServerDependencies,
 } from "../src/app.js";
 import { createInMemoryAdminSessionStore } from "../src/admin/auth-store.js";
+import { AuditStoreUnavailableError } from "../src/admin/redis-audit-store.js";
 import type { AdminRole, AdminSession } from "../src/admin/types.js";
 
 const ALLOWED_ORIGIN = "chrome-extension://allowed-extension";
@@ -2061,6 +2062,43 @@ test("admin login backend outages surface as 500 and do not count toward throttl
       body: { username: "admin", password: "secret-123" },
     });
     assert.equal(recovered.status, 200);
+  } finally {
+    await server.close();
+  }
+});
+
+test("an audit list refused by a stalled store answers 503, not 500", async () => {
+  const server = await startAdminServer({
+    ...adminDependencies(),
+    // The store refuses the read rather than issuing it, because the command
+    // would queue behind a write that is not answering (#267). What the router
+    // does with that refusal is what this test is about.
+    auditStoreOverride: {
+      append: () => {
+        throw new AuditStoreUnavailableError("stalled");
+      },
+      query: () => {
+        throw new AuditStoreUnavailableError("read");
+      },
+    },
+  });
+
+  try {
+    const token = await login(server.httpBaseUrl);
+    const response = await requestJson(
+      server.httpBaseUrl,
+      "/api/admin/audit-logs?page=1&pageSize=10",
+      { token },
+    );
+
+    // 503 and a code of its own, not the catch-all 500: the console can tell an
+    // operator that Redis is the problem and that retrying is worth it, which
+    // "internal_error" cannot.
+    assert.equal(response.status, 503);
+    assert.equal(
+      (response.body.error as { code: string }).code,
+      "audit_store_unavailable",
+    );
   } finally {
     await server.close();
   }

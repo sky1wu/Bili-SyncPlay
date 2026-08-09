@@ -53,6 +53,7 @@ export function createAdminServices(args: {
   createRoomQueryService?: typeof createAdminRoomQueryService;
   getRequestIpKey?: (request: IncomingMessage) => string;
   adminSessionStoreOverride?: AdminSessionStore;
+  auditStoreOverride?: GlobalAuditStore;
 }): Promise<{
   adminRouter: ReturnType<typeof createAdminRouter>;
   close: () => Promise<void>;
@@ -73,6 +74,17 @@ export function createAdminServices(args: {
             keyPrefix: getRedisAdminSessionKeyPrefix(
               args.persistenceConfig.redisNamespace,
             ),
+            onCloseUnfinished: ({ quitOutcome, budgetMs }) => {
+              args.logEvent("admin_session_store_close_unfinished", {
+                instanceId: args.persistenceConfig.instanceId,
+                quitOutcome,
+                budgetMs,
+                // Derived, not hardcoded: a `QUIT` that came back an ERROR is
+                // not a timeout, and a query aggregating on `result` would file
+                // the two under one diagnosis (#266 review).
+                result: quitOutcome === "failed" ? "error" : "timeout",
+              });
+            },
           },
         );
         adminSessionStore = redisAdminSessionStore;
@@ -81,13 +93,30 @@ export function createAdminServices(args: {
         adminSessionStore = createInMemoryAdminSessionStore();
       }
 
-      if (args.adminConfig.auditStoreProvider === "redis") {
+      if (args.auditStoreOverride) {
+        auditLogService = args.auditStoreOverride;
+      } else if (args.adminConfig.auditStoreProvider === "redis") {
         const redisAuditStore = await createRedisAuditStore(
           args.persistenceConfig.redisUrl,
           {
             streamKey: getRedisAuditStreamKey(
               args.persistenceConfig.redisNamespace,
             ),
+            onCloseUnfinished: ({
+              pendingWrites,
+              queuedAppends,
+              quitOutcome,
+              budgetMs,
+            }) => {
+              args.logEvent("admin_audit_appends_abandoned_at_shutdown", {
+                instanceId: args.persistenceConfig.instanceId,
+                pendingWrites,
+                queuedAppends,
+                quitOutcome,
+                budgetMs,
+                result: quitOutcome === "failed" ? "error" : "timeout",
+              });
+            },
           },
         );
         auditLogService = redisAuditStore;
@@ -219,8 +248,20 @@ export function createAdminServices(args: {
     return {
       adminRouter,
       async close() {
-        await closeAdminSessionStore?.();
-        await closeAuditLogService?.();
+        // Settled together, not awaited in sequence: the two hold independent
+        // Redis connections with no ordering between them, so a rejection from
+        // the first would otherwise skip the second's close entirely and leak a
+        // connection past a shutdown that reported it was done. Both are
+        // internally bounded (#267), so this step no longer depends on Redis
+        // answering at all.
+        const closed = await Promise.allSettled([
+          closeAdminSessionStore?.(),
+          closeAuditLogService?.(),
+        ]);
+        const failed = closed.find((outcome) => outcome.status === "rejected");
+        if (failed?.status === "rejected") {
+          throw failed.reason;
+        }
       },
     };
   })();

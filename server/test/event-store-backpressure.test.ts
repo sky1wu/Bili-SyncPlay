@@ -14,7 +14,13 @@ import {
  * connection or a blocked server does, and neither is something a unit test can
  * arrange — so the client is the seam (#264).
  */
-function createFakeEventRedis(options: { xadd?: () => Promise<string> } = {}): {
+function createFakeEventRedis(
+  options: {
+    xadd?: () => Promise<string>;
+    /** Injected the same way `xadd` is, so the read path gets a seam too. */
+    xrevrange?: () => Promise<Array<[string, string[]]>>;
+  } = {},
+): {
   client: RedisEventStoreClient;
   xaddCalls: () => number;
   quitCalls: () => number;
@@ -79,7 +85,10 @@ function createFakeEventRedis(options: { xadd?: () => Promise<string> } = {}): {
       }),
     xtrim: () => command("xtrim", async () => "OK"),
     xrange: () => command("xrange", async () => []),
-    xrevrange: () => command("xrevrange", async () => []),
+    xrevrange: () =>
+      command("xrevrange", async () =>
+        options.xrevrange ? await options.xrevrange() : [],
+      ),
     hset: () => command("hset", async () => "OK"),
     hmget: (_key, ...fields) =>
       command("hmget", async () => fields.map(() => null)),
@@ -315,35 +324,80 @@ test("a read is refused, not queued, while the connection is not answering", asy
 });
 
 test("a read still waits, briefly, for a queue that is merely slow", async () => {
-  const slow = createBlockedWrite();
-  const redis = createFakeEventRedis({ xadd: slow.write });
+  let streamId = 0;
+  const redis = createFakeEventRedis({
+    // Every write ANSWERS — just slowly enough that ten of them cannot drain
+    // inside the read's budget. Modelling "slow" as a write that never comes
+    // back is what let the earlier version of this test pass while the real
+    // slow case was broken (#269 review).
+    xadd: async () => {
+      await delay(15);
+      streamId += 1;
+      return `${streamId}-0`;
+    },
+  });
   const store = await createStore(redis.client, {
-    // The cap has NOT fired: Redis is answering, just behind. Refusing here
-    // would take the admin console down on a Redis that is merely slow.
+    // The cap has NOT fired, and would not for another minute: Redis is
+    // answering, just behind. Refusing here would take the admin console down
+    // on a Redis that is working.
     appendTimeoutMs: 60_000,
-    readSettleTimeoutMs: 20,
-    closeSettleTimeoutMs: 200,
+    maxPendingAppends: 20,
+    readSettleTimeoutMs: 60,
+    closeSettleTimeoutMs: 2_000,
   });
 
   try {
-    const appends = Array.from({ length: 5 }, (_, index) =>
+    const appends = Array.from({ length: 10 }, (_, index) =>
       store.append(appendInput(index)),
     );
     const query = store.query({ page: 1, pageSize: 10 });
+
+    assert.equal(await settledWithin(Promise.resolve(query), 500), true);
+    // The read went out with writes still queued behind it. `await
+    // pendingAppend` used to make it wait for all ten round trips, most of
+    // which had not even been issued.
+    const issuedAtRead = redis.issued().indexOf("xrevrange");
+    const xaddsBeforeRead = redis
+      .issued()
+      .slice(0, issuedAtRead)
+      .filter((command) => command === "xadd").length;
+    assert.ok(
+      xaddsBeforeRead < 10,
+      `expected the read to precede some writes, saw ${xaddsBeforeRead}`,
+    );
+
+    assert.equal(await settledWithin(Promise.all(appends), 2_000), true);
+  } finally {
+    await store.close();
+  }
+});
+
+test("a read is refused before the append cap has even fired", async () => {
+  const hung = createBlockedWrite();
+  const redis = createFakeEventRedis({ xadd: hung.write });
+  const store = await createStore(redis.client, {
+    // The cap is a minute away and will not fire during this test. That is the
+    // production shape: the cap is 5s because tripping it costs events, while
+    // the read's budget is 1s because an operator waiting longer has already
+    // been failed. Waiting for the cap before refusing left every read in
+    // between queued behind a command that was not coming back (#269 review).
+    appendTimeoutMs: 60_000,
+    readSettleTimeoutMs: 20,
+    closeSettleTimeoutMs: 20,
+  });
+
+  try {
+    void store.append(appendInput(0));
     await delay(60);
 
-    // Four of those five writes have not been ISSUED yet — the chain is serial
-    // — so `await pendingAppend` made the read wait for four round trips that
-    // had not even started. Now it waits for one.
-    assert.deepEqual(redis.issued().slice(-2), ["xadd", "xrevrange"]);
-
-    slow.release();
-    assert.equal(
-      await settledWithin(Promise.all([query, ...appends]), 500),
-      true,
+    const issuedBefore = redis.issued().length;
+    await assert.rejects(
+      Promise.resolve(store.query({ page: 1, pageSize: 10 })),
+      /not answering/,
     );
+    assert.equal(redis.issued().length, issuedBefore);
   } finally {
-    slow.release();
+    hung.release();
     await store.close();
   }
 });
@@ -575,6 +629,36 @@ test("the shedding line is throttled per reason, and never paired", async () => 
     assert.deepEqual(dropped, ["overflow", "stalled", "stalled"]);
   } finally {
     hung.release();
+    await store.close();
+  }
+});
+
+test("a read that slipped past the check still ends in an answer", async () => {
+  // The residual the head-of-connection check cannot cover: it is evidence
+  // about the past, and this stall begins in the gap between the check and the
+  // command. Nothing is in flight when the read is admitted; the read's own
+  // command is the one that hangs.
+  const hungRead = createBlockedWrite();
+  const redis = createFakeEventRedis({
+    xrevrange: async () => {
+      await hungRead.write();
+      return [];
+    },
+  });
+  const store = await createStore(redis.client, {
+    readSettleTimeoutMs: 20,
+    readCommandTimeoutMs: 30,
+    closeSettleTimeoutMs: 200,
+  });
+
+  try {
+    // Without this bound the caller waits until Node's default 300s
+    // `requestTimeout` kills the request (#269 review).
+    const query = Promise.resolve(store.query({ page: 1, pageSize: 10 }));
+    assert.equal(await settledWithin(query, 500), true);
+    await assert.rejects(query, /not answering/);
+  } finally {
+    hungRead.release();
     await store.close();
   }
 });
