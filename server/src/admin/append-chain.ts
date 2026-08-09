@@ -176,9 +176,22 @@ export function createAppendChain(options: AppendChainOptions): AppendChain {
   let queuedAppends = 0;
   /** Whether the write in flight has already lost its race against the cap. */
   let writeIsStalled = false;
+  /**
+   * The write at the head of the connection, error-swallowed, or a settled
+   * promise when nothing is outstanding.
+   *
+   * The only thing that can tell a reader whether the connection is ANSWERING,
+   * which is a different question from whether the queue drained — see
+   * {@link AppendChain.settleForRead}.
+   */
+  let writeInFlight: Promise<void> = Promise.resolve();
 
   async function capped<T>(write: () => Promise<T>): Promise<T> {
     const call = write();
+    writeInFlight = call.then(
+      () => undefined,
+      () => undefined,
+    );
     try {
       return await pacer.capAttempt(
         call,
@@ -242,11 +255,40 @@ export function createAppendChain(options: AppendChainOptions): AppendChain {
       // follows goes out on the same connection, behind the write that is not
       // answering, and never comes back — while the admin console polls on a
       // timer, so ioredis's queue grows a read and a closure per poll for as
-      // long as the stall lasts (#266 review).
+      // long as the stall lasts (#266 review). This first check is only the
+      // fast path: the cap has already fired, so there is nothing to wait for.
       if (writeIsStalled) {
         throw options.makeUnavailableError();
       }
-      await settleWithin(pendingAppend, readSettleTimeoutMs);
+
+      // Captured before the wait: this is the command the read would be queued
+      // behind.
+      const headWrite = writeInFlight;
+      const [, headAnswered] = await Promise.all([
+        // Read-your-writes, best effort. The chain is the write path, and
+        // joining it unconditionally is what made every admin read hang for
+        // exactly as long as Redis was hung.
+        settleWithin(pendingAppend, readSettleTimeoutMs),
+        settleWithin(headWrite, readSettleTimeoutMs),
+      ]);
+
+      // "Did the queue drain" is NOT the question, and answering it was the
+      // defect: a deep queue on a Redis that is merely behind does not drain
+      // inside this budget either, and refusing there would take the admin
+      // console down on a Redis that is working. The question is whether the
+      // connection is ANSWERING, and only the command at its head can say. If
+      // that one has not come back inside the read's own budget, neither will
+      // the read — and the console's next poll would leave another closure in
+      // ioredis's queue, for as long as it lasts.
+      //
+      // Its own budget, deliberately, not the append cap: the cap is long
+      // because tripping it costs records, while a read that waits that long
+      // has already failed the operator. Two behaviours, two constants — and
+      // waiting for the cap to fire first was the hole this closed (#269
+      // review).
+      if (!headAnswered) {
+        throw options.makeUnavailableError();
+      }
     },
     async close() {
       // Blocks new appends, but deliberately not the ones already chained: on a

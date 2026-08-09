@@ -440,14 +440,25 @@ overrun `close_event_store`'s budget (#264). The rules:
   point must not be issued at all.** The chain is serial, so `await
 pendingAppend` made a read wait for every queued write to be ISSUED and
   answered one after another — round trips that had not started yet. Bounding
-  that wait leaves the read queued behind only the write in flight. But once
-  that write is past its own cap, the read will not come back either, and a
-  longer wait is the wrong lever entirely: the admin console polls events and
-  the overview every 15s, so each poll leaves another read and its closure in
-  ioredis's queue for as long as the stall lasts — timer-driven growth of
-  exactly the kind this section exists to stop (#266 review). So the read is
-  refused (`503 event_store_unavailable`), not delayed. The fix for an unbounded
-  queue is never a bound on how long you wait for it.
+  that wait leaves the read queued behind only the write in flight. But if that
+  write is not answering, the read will not come back either, and a longer wait
+  is the wrong lever entirely: the admin console polls events and the overview
+  every 15s, so each poll leaves another read and its closure in ioredis's queue
+  for as long as the stall lasts — timer-driven growth of exactly the kind this
+  section exists to stop (#266 review). So the read is refused (`503
+event_store_unavailable`), not delayed. The fix for an unbounded queue is
+  never a bound on how long you wait for it.
+- **"Did the queue drain" is not the question a read has to answer.** The first
+  bounded version waited on the chain and then issued the read regardless of the
+  answer, refusing only once the append cap had fired — which is 5s away,
+  because the cap is long on purpose (tripping it costs records). Every read in
+  between went out behind a command that was never coming back, so the defect
+  the bound existed to remove survived it (#269 review). A deep queue on a Redis
+  that is merely behind does not drain inside the budget either, so refusing on
+  that answer would take the console down on a Redis that is working. The
+  question is whether the connection is ANSWERING, and only the command at its
+  head can answer it — inside the READ's own budget, not the cap's. Two
+  behaviours, two constants, again.
 - **`close` drains, bounded, then drops the socket — `QUIT` is not an escape
   hatch.** Dropping the queue outright would lose the shutdown's own events on
   every clean restart, and waiting unbounded makes the step fail on every hung
@@ -473,9 +484,9 @@ pendingAppend` made a read wait for every queued write to be ISSUED and
 
 One connection, replies in order. That is what makes `disconnect` the only
 bounded close, and it is what the read refusal is derived from. It is also the
-limit of that refusal: the store can only refuse once one of ITS OWN commands
-has outlived a cap, so a read issued before that, or while Redis is hung with no
-write of ours in flight, is still exposed. Closing that needs either a separate
+limit of that refusal: the store can only refuse on evidence from one of ITS OWN
+commands, so a read issued while Redis is hung with nothing of ours in flight to
+notice it by is still exposed. Closing that needs either a separate
 read connection or a `commandTimeout` — the same deferred decision as in #261
 and #263, and all three should be weighed together. A test fixture for this
 store is only worth trusting if it models the ordering; one that lets each call

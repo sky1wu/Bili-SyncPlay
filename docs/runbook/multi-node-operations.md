@@ -413,10 +413,12 @@ stream reads low, but the process keeps its memory and shutdown still finishes
 (#264).
 
 It does **not** keep the events page available. Reads share the one connection
-with the writes and Redis answers in order, so once the store knows the
-connection is stalled it **refuses** admin reads with `503
-event_store_unavailable` rather than issuing a command that would queue behind
-the stuck write and never return. A 503 here means Redis, not the admin
+with the writes and Redis answers in order, so a read whose head-of-connection
+write has not answered inside the read's own 1s budget is **refused** with `503
+event_store_unavailable` rather than issued behind a command that is not coming
+back. That budget is the read's, not the 5s append cap's: the cap is long
+because tripping it costs events, and a read that waited that long has already
+failed the operator. A 503 here means Redis, not the admin
 process — check Redis first, then retry. What shedding protects is the process,
 not the page.
 
@@ -512,6 +514,10 @@ refusals cover.
 # Are audit records being lost right now?
 sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<window>])) by (instance)
 ```
+
+Like every other `bili_syncplay_events_total` series, this one appears on the
+first occurrence and not before, so write alerts as a `rate`/`increase` (absence
+is simply no data) rather than expecting the series to exist on a healthy node.
 
 Reads behave exactly as the event store's do: once the store knows the write
 path is stalled it **refuses** the audit query with `503
