@@ -125,6 +125,17 @@ before changing the code it describes.
   shutdown step. The cap is derived from what a late pass costs (the heartbeat's
   from `NODE_HEARTBEAT_TTL_MS`), and belongs to the caller — neither Redis
   client has a `commandTimeout`.
+- **An unbounded write queue turns a stalled dependency into a growing one**
+  (#264): `redis-event-store`'s append chain is fed by every log line, so it
+  needs both a per-write cap and a depth limit — neither substitutes for the
+  other. Past either, appends are shed and answer successfully, because
+  rejecting means one stdout error line per log line. Every drop goes on the
+  counter, one line per incident goes in the log. The cap does not release the
+  chain, a read never joins the queue it is reading about, and `close` drains
+  inside a budget and then `disconnect()`s — `QUIT` is a command on the same
+  ordered queue, so it inherits the wait it was meant to escape. One connection
+  with in-order replies is also the limit of all of this, and a fixture that
+  does not model it will prove things that are not true.
 - **One-shot broadcasts need a retry trail** (#242): most `room_state_updated`
   sends are repeated by the next update, but the share-ownership resync and the
   runtime index reaper's announcement are not — losing one loses the room until a

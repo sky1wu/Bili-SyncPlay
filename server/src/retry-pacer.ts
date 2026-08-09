@@ -18,7 +18,9 @@
  *   against a dependency call gives up on the wrapper, never on the call. Every
  *   caller therefore has to answer two questions the cap cannot: do not start
  *   another call while this one is unanswered, and do not close the connection
- *   under it. {@link RetryPacer.settleTracked} is the second answer.
+ *   under it. {@link RetryPacer.settleTracked} is the second answer, and
+ *   {@link settleWithin} is the same answer for a caller holding its own
+ *   promise (`redis-event-store`'s append chain).
  * - **One stop switch**, readable as a flag and awaitable as a promise, because
  *   callers need both (`if (stopped())` in a loop, `race([call, whenStopped()])`
  *   when parked on someone else's promise).
@@ -28,6 +30,71 @@
  */
 
 import { clampTimerIntervalMs } from "./timers.js";
+
+function bounded<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  onTimeout: (resolve: () => void, reject: (error: Error) => void) => void,
+): Promise<T | void> {
+  let handle: ReturnType<typeof setTimeout> | null = null;
+  return Promise.race([
+    work,
+    new Promise<void>((resolve, reject) => {
+      handle = setTimeout(
+        () => {
+          onTimeout(resolve, reject);
+        },
+        // Clamped at BOTH ends, and the upper one is the surprising half: a
+        // delay past the 32-bit limit does not mean "very late", it makes
+        // Node fire after ~1ms. Every cap here is derived from a caller's
+        // configuration — `heartbeatTimeoutMs` from `NODE_HEARTBEAT_TTL_MS`,
+        // for one — and those settings only have to be positive integers, so
+        // one absurd value would turn every capped call into an instant
+        // timeout instead of a slow one (#265 review). Same limit
+        // `clampTimerIntervalMs` exists for; this is the other place a delay
+        // reaches `setTimeout`.
+        clampTimerIntervalMs(Math.max(timeoutMs, 1)),
+      );
+    }),
+  ]).finally(() => {
+    if (handle !== null) {
+      clearTimeout(handle);
+    }
+  });
+}
+
+/**
+ * Wait for `work` to settle, but never longer than `timeoutMs`.
+ *
+ * Answers the caller's real question — "did it finish, or did I give up on
+ * it?" — rather than resolving indistinguishably either way, because the two
+ * cases lead somewhere different: a caller that gave up is about to close a
+ * connection under a command that is still on it, and owes somebody a word
+ * about that.
+ *
+ * The standalone half of {@link RetryPacer.settleTracked}, for a caller that
+ * already holds the promise it needs to wait on and does not need the pacer to
+ * remember it. `work`'s rejection is absorbed: giving up and failing are
+ * different answers, and this function only reports the first.
+ */
+export async function settleWithin(
+  work: Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let settled = false;
+  const answered = work.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  await bounded(answered, timeoutMs, (resolve) => {
+    resolve();
+  });
+  return settled;
+}
 
 export type RetryPacerOptions = {
   initialDelayMs: number;
@@ -82,38 +149,6 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
   const stoppedSignal = new Promise<void>((resolve) => {
     signalStopped = resolve;
   });
-
-  function bounded<T>(
-    work: Promise<T>,
-    timeoutMs: number,
-    onTimeout: (resolve: () => void, reject: (error: Error) => void) => void,
-  ): Promise<T | void> {
-    let handle: ReturnType<typeof setTimeout> | null = null;
-    return Promise.race([
-      work,
-      new Promise<void>((resolve, reject) => {
-        handle = setTimeout(
-          () => {
-            onTimeout(resolve, reject);
-          },
-          // Clamped at BOTH ends, and the upper one is the surprising half: a
-          // delay past the 32-bit limit does not mean "very late", it makes
-          // Node fire after ~1ms. Every cap here is derived from a caller's
-          // configuration — `heartbeatTimeoutMs` from `NODE_HEARTBEAT_TTL_MS`,
-          // for one — and those settings only have to be positive integers, so
-          // one absurd value would turn every capped call into an instant
-          // timeout instead of a slow one (#265 review). Same limit
-          // `clampTimerIntervalMs` exists for; this is the other place a delay
-          // reaches `setTimeout`.
-          clampTimerIntervalMs(Math.max(timeoutMs, 1)),
-        );
-      }),
-    ]).finally(() => {
-      if (handle !== null) {
-        clearTimeout(handle);
-      }
-    });
-  }
 
   return {
     delayFor(attempt) {

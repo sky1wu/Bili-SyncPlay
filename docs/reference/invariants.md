@@ -382,6 +382,69 @@ Adding one there would bound the request path (`get_room` / `update_room`) too,
 which is a separate decision with its own retry semantics to weigh — deliberately
 not taken in #261.
 
+## An unbounded write queue turns a stalled dependency into a growing one
+
+`redis-event-store` serialises appends on a promise chain so the stream's order
+matches the events' order. Nothing capped any link of it, and the queue is fed by
+**every** structured log line — so the first XADD that never answered turned each
+subsequent log line into another closure holding its own event payload, with no
+bound and no dedupe. Memory grew with the log rate for as long as Redis stayed
+hung, `queryEvents` waited on the same chain and so did every count on the admin
+overview, and `close` was `await pendingAppend` and therefore guaranteed to
+overrun `close_event_store`'s budget (#264). The rules:
+
+- **A queue that cannot refuse work is not bounded by anything.** The per-write
+  cap and the depth limit answer two different failures and neither substitutes
+  for the other: the cap fires when Redis stops answering, and the depth limit
+  when Redis answers more slowly than events arrive — a state in which no cap
+  ever fires and the queue grows forever. Both are needed.
+- **Shedding is the right trade here, and is not elsewhere.** The event stream is
+  observability data with a `MAXLEN` of its own; losing entries costs an
+  incomplete list, which the drop counter and the bracketing log lines then say
+  out loud. That is the opposite of `pending-resync-queue`, where a dropped
+  record is gone for good — see [one-shot broadcasts](#one-shot-broadcasts-need-a-retry-trail-repeated-ones-do-not).
+- **A dropped append answers its caller successfully.** The caller is the
+  structured logger, which turns a rejection into a `runtime_event_append_failed`
+  line on stdout — so rejecting would answer a Redis stall with one error line
+  per log line, on the path already established to be overloaded. Drops are
+  reported in aggregate instead: every drop on the counter, one line per incident
+  in the log. For the same reason the transition flag is set BEFORE the report is
+  emitted, because that report comes straight back through `append`.
+- **The cap does not release the chain.** It flips the store into shedding; the
+  link itself still waits for the real answer. Letting the chain advance would
+  put a second write on a connection that has answered neither, and would land
+  them out of order if Redis recovered — the ordering the chain exists for.
+- **A read must not join the write queue it is trying to read about.** The chain
+  is serial, so `await pendingAppend` made a read wait for every queued write to
+  be ISSUED and answered one after another — round trips that had not started
+  yet. Bounding it leaves the read queued behind only the one write in flight.
+  It does not, and cannot, get the read past that write: one connection, replies
+  matched in order (below).
+- **`close` drains, bounded, then drops the socket — `QUIT` is not an escape
+  hatch.** Dropping the queue outright would lose the shutdown's own events on
+  every clean restart, and waiting unbounded makes the step fail on every hung
+  one. So: wait for the chain inside a budget, and past it stop the links that
+  have not started, because a command issued on a connection that is going away
+  is rejected and the logger turns that back into one
+  `runtime_event_append_failed` per queued event, after shutdown reported it was
+  done. Then `disconnect()`, NOT `quit()`: ioredis puts `QUIT` on the same
+  `commandQueue` as everything else and pairs replies front-first, so a graceful
+  close inherits the exact wait that was just bounded (#264 review). The graceful
+  path is still taken when the chain drained — and is bounded too, because a
+  half-open socket swallows `QUIT`'s reply with no write left to blame. Bounding
+  without reporting is the same trade in reverse as in
+  [background passes](#a-background-pass-that-cannot-time-out-cannot-be-observed),
+  hence `runtime_event_appends_abandoned_at_shutdown`.
+
+One connection, replies in order. That is what makes `disconnect` the only
+bounded close, and it is also the limit of the read-side bound: an admin read
+issued while Redis has genuinely stopped answering still queues behind the write
+in flight and stops with it. Fixing THAT needs either a separate read connection
+or a `commandTimeout` — the same deferred decision as in #261 and #263, and all
+three should be weighed together. A test fixture for this store is only worth
+trusting if it models the ordering; one that lets each call settle on its own
+will happily prove that reads and shutdown sail past a hung write.
+
 ## Test fixtures must not cast past the checker
 
 Every package's `test/**` is inside `npm run typecheck` — otherwise a signature

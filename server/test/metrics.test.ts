@@ -373,3 +373,57 @@ test("metrics collector can rebind to the effective runtime store", async () => 
   assert.equal(rendered.includes("bili_syncplay_connections 1"), true);
   assert.equal(rendered.includes("bili_syncplay_active_rooms 1"), true);
 });
+
+test("metrics collector exports event store drops only where a store can drop", async () => {
+  const metrics = createMetricsCollector({
+    runtimeStore: createInMemoryRuntimeStore(() => 0),
+    roomStore: {
+      async countRooms() {
+        return 0;
+      },
+    },
+  });
+
+  // Absent by default: the in-memory event store is a synchronous array push
+  // and cannot drop, so an always-on zero here would read as a completeness
+  // guarantee the default deployment does not actually make.
+  const initial = await metrics.render();
+  assert.equal(
+    initial.includes("bili_syncplay_event_store_appends_dropped_total"),
+    false,
+  );
+
+  metrics.declareEventStoreAppends();
+  const declared = await metrics.render();
+  // Seeded on declaration, so the first scrape after a restart already says
+  // "nothing dropped" rather than saying nothing at all.
+  for (const reason of ["stalled", "overflow", "closing"]) {
+    assert.match(
+      declared,
+      new RegExp(
+        `^bili_syncplay_event_store_appends_dropped_total\\{reason="${reason}"\\} 0$`,
+        "m",
+      ),
+    );
+  }
+
+  metrics.recordEventStoreAppendDropped("stalled");
+  metrics.recordEventStoreAppendDropped("stalled");
+  metrics.recordEventStoreAppendDropped("overflow");
+  const counted = await metrics.render();
+  // The two reasons are different diagnoses — a Redis that has stopped
+  // answering versus one that is merely behind — and they lead to different
+  // fixes, so they must not share a series.
+  assert.match(
+    counted,
+    /^bili_syncplay_event_store_appends_dropped_total\{reason="stalled"\} 2$/m,
+  );
+  assert.match(
+    counted,
+    /^bili_syncplay_event_store_appends_dropped_total\{reason="overflow"\} 1$/m,
+  );
+  assert.match(
+    counted,
+    /^bili_syncplay_event_store_appends_dropped_total\{reason="closing"\} 0$/m,
+  );
+});

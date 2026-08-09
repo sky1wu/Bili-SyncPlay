@@ -399,6 +399,50 @@ WebSocket 客户端。先读**该节点自己的日志**再去信外部视图，
 与 reaper 一样，这个上限只约束心跳等多久，并不约束命令本身：runtime store 的客户端
 同样没有设置 `commandTimeout`。
 
+### 后台事件列表少了事件？
+
+仅在 `ADMIN_EVENT_STORE_PROVIDER=redis` 时出现。该存储为每条日志写一串 Redis 命令，
+当 Redis 不再回应时它会**丢弃**而不是排队：列表变得不完整、所有基于这条流算出来的
+计数都会偏低，但进程的内存不会涨、事件页仍然能答、关服也仍然能收尾（#264）。
+
+信号是 `bili_syncplay_event_store_appends_dropped_total`，它的 `reason` 标签就是
+诊断结论：
+
+- `reason="stalled"`——在途的那次写入已超过它 5s 的上限。Redis 已经不回应了：连接
+  僵死或 Redis 被阻塞。在此期间记录的每一条日志都会被丢弃。
+- `reason="overflow"`——Redis 在回应，只是比事件产生的速度慢，其后排队的深度达到了
+  1000 条上限。存储是落后，不是坏了；与 reaper 的 `skipped` 是同一种读法。
+- `reason="closing"`——关服时 2s 的排空预算耗尽，队列里仍有未写入的事件。在 Redis
+  本来就僵死的节点上出现属于预期。
+
+```promql
+sum(rate(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance, reason)
+```
+
+日志按**一次事故两行**给出，而不是每丢一条打一行——后者等于在已经被证明过载的那条
+路径上输出最大音量：
+
+- `runtime_event_appends_dropped`——开始丢弃，`reason` 同上。
+- `runtime_event_appends_resumed`——丢弃结束，`droppedEvents` 是整次事故的总代价。
+- `runtime_event_appends_abandoned_at_shutdown`——`close_event_store` 在自己的预算内
+  返回，但连接上仍有 `pendingWrites` 条命令未应答，于是直接断开 socket，而不是发
+  `QUIT`（那会排在它们后面、原样继承同一段等待）。在这个预算存在之前，这种情况表现为
+  `close_event_store` 的 `server_shutdown_step_failed`，且只要 Redis 僵死就必然发生。
+
+与 reaper 和心跳一样，这个上限只约束存储等多久，并不约束命令本身：这个客户端同样没有
+设置 `commandTimeout`。而且它是一条连接、应答按顺序配对，所以 Redis 真正不再应答时，
+后台读取仍会排在在途写入后面并跟着停住——事件页不可用的原因，与这个 Redis 上其他一切
+不可用的原因是同一个。这次消除的是"读取还要等完整个**写入队列**"这一段：Redis 变慢时
+那意味着数千次甚至还没发出的往返。
+
+它**不**影响告警。`bili_syncplay_*` 指标是进程内计数器，经 `/metrics` 暴露；
+error 级日志无条件写 stdout。两条路都不经过 event store。会丢数据的只有后台事件
+列表和概览页上的计数。
+
+Room Node 与独立部署的 Global Admin 都会对同一个 Redis 跑这个存储，两边都会上报。
+默认的内存实现（未设置 `ADMIN_EVENT_STORE_PROVIDER`）是一次同步的数组写入，不可能
+丢弃，因此完全不导出这个指标。
+
 排障时优先同时查看：
 
 ```bash

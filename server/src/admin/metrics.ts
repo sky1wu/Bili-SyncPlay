@@ -57,6 +57,27 @@ const ROOM_REAPER_SWEEP_RESULTS = ["ok", "error", "skipped"] as const;
 
 export type RoomReaperSweepResult = (typeof ROOM_REAPER_SWEEP_RESULTS)[number];
 
+// Why the event store refused to queue a log line for writing. Pre-seeded for
+// the same reason as the sweep results: "never dropped anything" and "this
+// build does not report drops" must not render the same way, on the one metric
+// whose job is saying the event list stopped being complete.
+//
+//  - `stalled`:  the Redis write in flight is past its own cap, so the store
+//                is shedding until it answers.
+//  - `overflow`: Redis is answering, just slower than events arrive, and the
+//                queue behind it hit its depth limit.
+//  - `closing`:  shutdown reached its budget with writes still queued. Expected
+//                on a hung shutdown, and not counted as a degradation anywhere
+//                else, so this is the only place it is visible.
+const EVENT_STORE_APPEND_DROP_REASONS = [
+  "stalled",
+  "overflow",
+  "closing",
+] as const;
+
+export type EventStoreAppendDropReason =
+  (typeof EVENT_STORE_APPEND_DROP_REASONS)[number];
+
 export type MonitoredMessageType =
   | "video:share"
   | "playback:update"
@@ -144,6 +165,23 @@ export type MetricsCollector = {
    * behind (#262 review).
    */
   recordRoomReaperSweep: (result: RoomReaperSweepResult) => void;
+  /**
+   * This process writes runtime events to a store that can shed them.
+   *
+   * Gated for the same reason as {@link MetricsCollector.declareRoomReaper}:
+   * the in-memory event store is a synchronous array push and can never drop,
+   * so an always-on series would promise a completeness signal that the default
+   * deployment does not actually have.
+   */
+  declareEventStoreAppends: () => void;
+  /**
+   * One runtime event the store refused to queue for writing.
+   *
+   * The only real-time signal that the admin event list has gone incomplete:
+   * the accompanying log line is emitted once per incident, not once per drop,
+   * so the magnitude lives here.
+   */
+  recordEventStoreAppendDropped: (reason: EventStoreAppendDropReason) => void;
   render: () => Promise<string>;
 };
 
@@ -258,6 +296,11 @@ export function createMetricsCollector(options: {
     samples: new Map(),
   };
   let roomReaperDeclared = false;
+  const eventStoreAppendDroppedCounter: CounterMetric = {
+    help: "Total runtime events the event store dropped instead of queueing, grouped by reason",
+    samples: new Map(),
+  };
+  let eventStoreAppendsDeclared = false;
   const messageDurationHistogram: HistogramMetric = {
     help: "Duration of monitored message handler paths in seconds",
     buckets: DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
@@ -540,6 +583,24 @@ export function createMetricsCollector(options: {
             ),
           ]
         : []),
+      // The completeness signal for the admin event list: while this rises, the
+      // list is missing events and every count derived from the stream is low.
+      // Only where a store that can shed exists, so the in-memory default does
+      // not export a permanent zero that looks like a completeness guarantee.
+      ...(eventStoreAppendsDeclared
+        ? [
+            "# HELP bili_syncplay_event_store_appends_dropped_total Total runtime events the event store dropped instead of queueing, grouped by reason",
+            "# TYPE bili_syncplay_event_store_appends_dropped_total counter",
+            ...EVENT_STORE_APPEND_DROP_REASONS.map((reason) =>
+              formatMetricLine(
+                "bili_syncplay_event_store_appends_dropped_total",
+                ensureCounterSample(eventStoreAppendDroppedCounter, { reason })
+                  .value,
+                { reason },
+              ),
+            ),
+          ]
+        : []),
       "# HELP bili_syncplay_ws_connection_rejected_total Total rejected websocket upgrades",
       "# TYPE bili_syncplay_ws_connection_rejected_total counter",
       formatMetricLine(
@@ -699,6 +760,18 @@ export function createMetricsCollector(options: {
         return;
       }
       incrementCounter(roomsExpiredDeletedCounter, {}, roomCount);
+    },
+    declareEventStoreAppends() {
+      eventStoreAppendsDeclared = true;
+      // Same reasoning as the sweep results below: seeded on declaration, so
+      // the first scrape after a restart already carries the explicit zeros
+      // rather than looking like a build that cannot report drops at all.
+      for (const reason of EVENT_STORE_APPEND_DROP_REASONS) {
+        ensureCounterSample(eventStoreAppendDroppedCounter, { reason });
+      }
+    },
+    recordEventStoreAppendDropped(reason) {
+      incrementCounter(eventStoreAppendDroppedCounter, { reason });
     },
     declareRoomReaper() {
       roomReaperDeclared = true;

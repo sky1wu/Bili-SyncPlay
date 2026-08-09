@@ -404,6 +404,63 @@ different questions: "others cannot see it" and "it knows why".
 As with the reaper, the cap only bounds how long the heartbeat waits, not the
 command: the runtime store's client sets no `commandTimeout` either.
 
+### Why is the admin event list missing events?
+
+Only with `ADMIN_EVENT_STORE_PROVIDER=redis`. That store writes one chain of
+Redis commands per logged event, and when Redis stops answering it **sheds**
+rather than queueing: the list goes incomplete and every count derived from the
+stream reads low, but the process keeps its memory, the events page keeps
+answering, and shutdown still finishes (#264).
+
+`bili_syncplay_event_store_appends_dropped_total` is the signal, and its
+`reason` label is the diagnosis:
+
+- `reason="stalled"` — the write in flight is past its 5s cap. Redis has stopped
+  answering: a stalled connection or a blocked server. Everything logged for as
+  long as it lasts is dropped.
+- `reason="overflow"` — Redis is answering, just slower than events arrive, and
+  the queue behind it reached its 1000-event depth limit. The store is behind,
+  not broken; the same reading as the reaper's `skipped`.
+- `reason="closing"` — shutdown reached its 2s drain budget with writes still
+  queued. Expected on a node whose Redis was already stalled.
+
+```promql
+sum(rate(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance, reason)
+```
+
+The log lines bracket each incident instead of repeating per dropped event — one
+line per drop would be the loudest possible output on the path already
+established to be overloaded:
+
+- `runtime_event_appends_dropped` — shedding started, with the `reason` above.
+- `runtime_event_appends_resumed` — shedding ended; `droppedEvents` is what the
+  whole incident cost.
+- `runtime_event_appends_abandoned_at_shutdown` — `close_event_store` returned on
+  its own budget with `pendingWrites` commands still outstanding, and dropped the
+  socket rather than sending `QUIT` (which would have queued behind them and
+  inherited the same wait). Before that budget existed this appeared as a
+  `server_shutdown_step_failed` for `close_event_store`, every single time Redis
+  was hung.
+
+As with the reaper and the heartbeat, the cap bounds how long the store waits,
+not the command: this client sets no `commandTimeout` either. Since it is one
+connection with replies matched in order, an admin read issued while Redis has
+genuinely stopped answering still queues behind the write in flight and stops
+with it — the events page is unavailable for the same reason everything else on
+that Redis is. What the bound removed is the read waiting on the whole **write
+queue** ahead of it, which under a slow Redis meant thousands of round trips
+that had not even been issued yet.
+
+What this does **not** affect: alerting. `bili_syncplay_*` metrics are in-process
+counters served from `/metrics`, and error-level logs go to stdout
+unconditionally. Neither path goes through the event store. The admin event list
+and the counts on the overview page are the only things that lose data.
+
+Room nodes and the standalone global admin both run this store against the same
+Redis, and both report. The in-memory default (`ADMIN_EVENT_STORE_PROVIDER`
+unset) is a synchronous array push that cannot drop, and exports no series at
+all.
+
 When troubleshooting, check these together first:
 
 ```bash
