@@ -388,15 +388,29 @@
   Redis 故障期间把管理能力一并下线是更坏的失败。既然动作无论如何都会发生，那么"丢了
   一条问责记录"和"没人知道"之间，就只剩下"拒绝是否可见"这一道。
 - **关服步骤的预算属于步骤，不属于步骤里的某个组件。** `close_admin_services` 关的是
-  管理会话存储**和**审计存储，而会话存储那句无界的 `await redis.quit()` 还排在前面
-  ——只修审计存储的话，同一个 Redis 照样让这一步失败，而且根本走不到被修好的那一半。
-  `quitWithin` 因此被三处关闭共用；这两个关闭现在也改为一起 settle 而不是顺序 await，
-  这样其中一个抛出就不会跳过另一个的关闭。
+  管理会话存储**和**审计存储，而会话存储那句 `await redis.quit()` 原本也是无界的——
+  只修审计存储的话，同一个 Redis 照样会让这一步失败。两个关闭现在一起 settle，而不是
+  顺序 await，所以其中一个抛出不会跳过另一个的关闭。现在所有有界的 Redis 关闭都共用
+  `quitWithin`；策略与预算仍留在各自调用点。
 
-写作本文时仍然无界的：`redis-room-store`、`redis-runtime-store`、
-`redis-admin-command-bus`、`redis-room-event-bus` 的 `close()` 末尾都是一句裸的
-`await redis.quit()`，各自处在自己的关服步骤里。机制已经抽好了，每一处还需要定的是
-它的预算，以及它是否欠一条上报。
+另外四个 Redis 设施也遵守同一规则（#270）：
+
+- `redis-room-store`、`redis-admin-command-bus`、`redis-room-event-bus` 各自独占默认
+  5s 关服步骤。它们给 `QUIT` 4s，给关服调度与降级上报留下 1s。两个总线通过
+  `quitAllWithin` 并发关闭 publisher 与 subscriber；其中的 `allSettled` 保证一端关闭
+  出错不会藏掉另一端 socket 的结果。
+- `redis-runtime-store` 独占 15s 的特殊步骤。最坏情况是：收束后的队列用 5s 等在途尝试
+  和刻意不设超时的在线调用方，再用 5s 等所有越过调用方等待的 Redis 命令真正结束，
+  最后用 4s 等 `QUIT`；合计 14s，同样留下 1s 余量。每条命令都在运行时存储的 Redis
+  客户端边界登记（包括直接读取与 `MULTI.exec()`），所以调用方已超时或上游关服步骤已
+  放弃等待，都不会让命令从关服上报中消失。
+- 非 `ok` 结果会断开 socket，并发出对应设施的 `*_close_unfinished` 事件。总线的上报
+  还带客户端角色；运行时存储只要仍有已跟踪调用方或 Redis 命令，即使 `QUIT` 自己成功
+  也会上报，并带上两类数量与调用方 drain 预算。只有边界却没有这些行，只会把原先
+  `server_shutdown_step_failed` 的沉默下移一层。
+- 总线的终态关闭不再追加第二条 `UNSUBSCRIBE`。consumer 的普通退订可能正是半开 socket
+  已经不回答的命令；`QUIT` 本来也会退出订阅模式，直接进入它的边界才能保证强制断开
+  兜底可达。关服以外的逐命令边界仍属于 #271 的连接级策略。
 
 ## 测试夹具不得把类型检查绕过去
 

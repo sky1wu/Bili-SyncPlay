@@ -554,18 +554,37 @@ operator's behalf. The rules that fell out:
   nobody knowing is the refusal being visible.
 - **A shutdown step's budget belongs to the step, not to a component in it.**
   `close_admin_services` closes the admin session store _and_ the audit store,
-  and the session store's `await redis.quit()` was unbounded and runs first — so
-  bounding only the audit store would have left the step failing on exactly the
-  same Redis, having never reached the half that was fixed. `quitWithin` is
-  shared by all three closes for that reason, and the two are now settled
-  together rather than awaited in sequence, so a rejection from one cannot skip
-  the other's close.
+  and the session store's `await redis.quit()` was unbounded — so bounding only
+  the audit store would have left the step failing on exactly the same Redis.
+  The two are settled together rather than awaited in sequence, so a rejection
+  from one cannot skip the other's close. `quitWithin` is now shared by every
+  bounded Redis close; the policy and the budget remain at each call site.
 
-Still unbounded at the time of writing: `redis-room-store`,
-`redis-runtime-store`, `redis-admin-command-bus` and `redis-room-event-bus` all
-end their `close()` with a bare `await redis.quit()`, each inside its own
-shutdown step. The mechanism to fix them is already extracted; what each one
-needs decided is its budget and whether it owes a report.
+The other four Redis facilities follow the same rule (#270):
+
+- `redis-room-store`, `redis-admin-command-bus` and `redis-room-event-bus` each
+  own a default 5s shutdown step. Their `QUIT` budget is 4s, leaving one second
+  for shutdown bookkeeping and the degraded report. The two buses close their
+  publisher and subscriber concurrently through `quitAllWithin`, whose
+  `allSettled` keeps one close error from hiding the other socket's result.
+- `redis-runtime-store` owns the 15s exception. Its worst case is 5s for the
+  wound-down queue and any deliberately uncapped live caller, 5s more for every
+  Redis command that outlived that caller wait, then 4s for `QUIT`: 14s,
+  with the same one-second margin. Every command is registered at the runtime
+  store's Redis client boundary (including direct reads and `MULTI.exec()`), so
+  the close report does not lose one merely because its caller already timed
+  out or an upstream shutdown step stopped waiting for it.
+- A non-`ok` result drops the socket and emits the facility's
+  `*_close_unfinished` event. The bus reports name the client role; the runtime
+  store also emits when a tracked caller or Redis command remains even if
+  `QUIT` itself answers, and names both counts plus the caller-drain budget.
+  Bounding without those lines would only move the old
+  `server_shutdown_step_failed` silence one layer down.
+- A terminal bus close does not enqueue a second `UNSUBSCRIBE`. The consumer's
+  ordinary unsubscribe may already be the command a half-open socket stopped
+  answering; `QUIT` also exits subscriber mode, and going straight to its bound
+  is what keeps the forced-disconnect fallback reachable. Per-command bounds
+  outside shutdown remain the separate connection-wide policy in #271.
 
 ## Test fixtures must not cast past the checker
 

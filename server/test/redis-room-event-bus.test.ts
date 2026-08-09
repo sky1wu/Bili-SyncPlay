@@ -3,6 +3,7 @@ import test from "node:test";
 import { Redis } from "ioredis";
 import { createRedisRoomEventBus } from "../src/redis-room-event-bus.js";
 import type { RoomEventBusMessage } from "../src/room-event-bus.js";
+import { createFakeRedisPubSubClient } from "./redis-pubsub-test-helpers.js";
 
 const REDIS_URL = process.env.REDIS_URL;
 
@@ -22,6 +23,48 @@ async function waitUntil(
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
+
+test("redis room event bus closes and reports both clients when QUIT never answers", async () => {
+  const publisher = createFakeRedisPubSubClient(
+    () => new Promise(() => undefined),
+  );
+  const subscriber = createFakeRedisPubSubClient(
+    () => new Promise(() => undefined),
+  );
+  const unfinished: Array<{
+    role: string;
+    quitOutcome: string;
+    budgetMs: number;
+  }> = [];
+  const bus = await createRedisRoomEventBus("redis://unused", {
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+    closeQuitTimeoutMs: 20,
+    onCloseUnfinished: (info) => {
+      unfinished.push(info);
+    },
+  });
+  // Model the terminal state reached after the consumer's unsubscribe has
+  // already been sent but Redis stopped answering it. `close()` must go
+  // straight to bounded QUIT instead of waiting on a second UNSUBSCRIBE.
+  await bus.subscribe(() => undefined);
+  subscriber.client.unsubscribe = () => new Promise(() => undefined);
+
+  const startedAt = Date.now();
+  await bus.close();
+  assert.ok(Date.now() - startedAt < 1_000);
+  assert.equal(publisher.disconnectCalls(), 1);
+  assert.equal(subscriber.disconnectCalls(), 1);
+  assert.deepEqual(
+    unfinished.sort((left, right) => left.role.localeCompare(right.role)),
+    [
+      { role: "publisher", quitOutcome: "timed_out", budgetMs: 20 },
+      { role: "subscriber", quitOutcome: "timed_out", budgetMs: 20 },
+    ],
+  );
+});
 
 test("redis room event bus delivers published events across instances", async (t) => {
   if (!REDIS_URL) {

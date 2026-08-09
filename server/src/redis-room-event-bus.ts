@@ -1,9 +1,17 @@
-import { Redis } from "ioredis";
 import { performance } from "node:perf_hooks";
 import type { MetricsCollector } from "./admin/metrics.js";
+import { quitAllWithin, type RedisQuitReport } from "./redis-graceful-close.js";
+import {
+  createRedisPubSubClientPair,
+  type RedisPubSubClientPair,
+} from "./redis-pubsub-client.js";
 import type { RoomEventBus, RoomEventBusMessage } from "./room-event-bus.js";
 
 const DEFAULT_ROOM_EVENT_CHANNEL = "bsp:room-events";
+
+/** Both clients close concurrently inside this facility's default 5s step. */
+const CLOSE_QUIT_TIMEOUT_MS = 4_000;
+type RoomEventBusClientRole = "publisher" | "subscriber";
 
 function parseMessage(payload: string): RoomEventBusMessage | null {
   try {
@@ -70,6 +78,9 @@ export async function createRedisRoomEventBus(
     ) => void;
     onInvalidMessage?: (payload: string) => void;
     onHandlerError?: (message: RoomEventBusMessage, error: unknown) => void;
+    closeQuitTimeoutMs?: number;
+    onCloseUnfinished?: (info: RedisQuitReport<RoomEventBusClientRole>) => void;
+    redisClients?: RedisPubSubClientPair;
     metricsCollector?: Pick<
       MetricsCollector,
       | "observeRedisRoomEventBusPublishDuration"
@@ -77,14 +88,10 @@ export async function createRedisRoomEventBus(
     >;
   } = {},
 ): Promise<RoomEventBus & { close: () => Promise<void> }> {
-  const publishClient = new Redis(redisUrl, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  const subscribeClient = new Redis(redisUrl, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
+  const { publisher: publishClient, subscriber: subscribeClient } =
+    options.redisClients ?? createRedisPubSubClientPair(redisUrl);
+  const closeQuitTimeoutMs =
+    options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const channel = options.channel ?? DEFAULT_ROOM_EVENT_CHANNEL;
   const subscribers = new Map<
     (message: RoomEventBusMessage) => Promise<void> | void,
@@ -182,10 +189,18 @@ export async function createRedisRoomEventBus(
         subscribeClient.off("message", listener);
       }
       subscribers.clear();
-      if (subscribed) {
-        await subscribeClient.unsubscribe(channel);
-      }
-      await Promise.all([publishClient.quit(), subscribeClient.quit()]);
+      // `QUIT` ends subscriber mode too. Do not queue another `UNSUBSCRIBE`
+      // here: an earlier consumer unsubscribe can already be stuck on this
+      // socket, and awaiting a second one would make the bounded QUIT and its
+      // forced-disconnect fallback unreachable (#270 review).
+      await quitAllWithin<RoomEventBusClientRole>(
+        [
+          { role: "publisher", connection: publishClient },
+          { role: "subscriber", connection: subscribeClient },
+        ],
+        closeQuitTimeoutMs,
+        options.onCloseUnfinished,
+      );
     },
   };
 }

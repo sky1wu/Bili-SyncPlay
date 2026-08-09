@@ -1,12 +1,50 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRedisAdminCommandBus } from "../src/redis-admin-command-bus.js";
+import { createFakeRedisPubSubClient } from "./redis-pubsub-test-helpers.js";
 
 const REDIS_URL = process.env.REDIS_URL;
 
 function createChannelPrefix(prefix: string): string {
   return `${prefix}:${Date.now()}:${Math.random().toString(16).slice(2)}:`;
 }
+
+test("redis admin command bus closes and reports both clients when QUIT never answers", async () => {
+  const publisher = createFakeRedisPubSubClient(
+    () => new Promise(() => undefined),
+  );
+  const subscriber = createFakeRedisPubSubClient(
+    () => new Promise(() => undefined),
+  );
+  const unfinished: Array<{
+    role: string;
+    quitOutcome: string;
+    budgetMs: number;
+  }> = [];
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+    closeQuitTimeoutMs: 20,
+    onCloseUnfinished: (info) => {
+      unfinished.push(info);
+    },
+  });
+
+  const startedAt = Date.now();
+  await bus.close();
+  assert.ok(Date.now() - startedAt < 1_000);
+  assert.equal(publisher.disconnectCalls(), 1);
+  assert.equal(subscriber.disconnectCalls(), 1);
+  assert.deepEqual(
+    unfinished.sort((left, right) => left.role.localeCompare(right.role)),
+    [
+      { role: "publisher", quitOutcome: "timed_out", budgetMs: 20 },
+      { role: "subscriber", quitOutcome: "timed_out", budgetMs: 20 },
+    ],
+  );
+});
 
 test("redis admin command bus routes commands to the target instance and returns results", async (t) => {
   if (!REDIS_URL) {

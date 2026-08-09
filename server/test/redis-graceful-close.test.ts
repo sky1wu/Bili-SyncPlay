@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { quitWithin } from "../src/redis-graceful-close.js";
+import { quitAllWithin, quitWithin } from "../src/redis-graceful-close.js";
 
 function createConnection(quit: () => Promise<unknown>): {
   connection: { quit: () => Promise<unknown>; disconnect: () => void };
@@ -63,4 +63,28 @@ test("a QUIT that answers late, but inside the budget, still counts as graceful"
   // socket drop on a Redis that is merely a little slow.
   assert.equal(await quitWithin(connection, 500), "ok");
   assert.equal(disconnectCalls(), 0);
+});
+
+test("closing multiple connections waits for every result before rethrowing an unexpected error", async () => {
+  const second = createConnection(() => new Promise(() => undefined));
+  const first = {
+    quit: () => Promise.reject(new Error("QUIT failed")),
+    disconnect: () => {
+      throw new Error("disconnect failed");
+    },
+  };
+
+  await assert.rejects(
+    quitAllWithin(
+      [
+        { role: "first", connection: first },
+        { role: "second", connection: second.connection },
+      ],
+      20,
+    ),
+    /disconnect failed/,
+  );
+  // `Promise.all` would have surfaced the first rejection immediately and
+  // hidden the second connection's eventual forced close from the caller.
+  assert.equal(second.disconnectCalls(), 1);
 });

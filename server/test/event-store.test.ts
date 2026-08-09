@@ -352,18 +352,22 @@ test("in-memory event store hides system events by default and can include them 
   assert.equal(fullView.total, 3);
 });
 
-test("the maintenance timers' own events are hidden alongside their siblings", async () => {
+test("bounded shutdown plumbing events are hidden alongside their siblings", async () => {
   const store = createEventStore();
   // Every `node_heartbeat_*` is plumbing — it says nothing about a room — and
-  // the `*_abandoned_at_shutdown` lines are what a bounded `stop()` now emits
-  // in place of the `server_shutdown_step_failed` these used to cause (#261,
-  // #263). Leaving them visible puts shutdown-degraded noise in the operator's
-  // default event feed exactly when Redis is stalled and it is longest.
+  // bounded stop/close paths now emit their own degraded lines in place of the
+  // `server_shutdown_step_failed` they used to cause (#261, #263, #270).
+  // Leaving them visible puts shutdown-degraded noise in the operator's default
+  // event feed exactly when Redis is stalled and it is longest.
   const hidden = [
+    "admin_command_bus_close_unfinished",
     "node_heartbeat_abandoned_at_shutdown",
     "node_heartbeat_skipped",
+    "room_event_bus_close_unfinished",
     "room_index_reconcile_abandoned_at_shutdown",
     "room_reaper_sweep_abandoned_at_shutdown",
+    "room_store_close_unfinished",
+    "runtime_store_close_unfinished",
   ];
   for (const [index, event] of hidden.entries()) {
     await store.append({

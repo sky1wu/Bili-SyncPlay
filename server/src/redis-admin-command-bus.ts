@@ -1,12 +1,20 @@
-import { Redis } from "ioredis";
 import type {
   AdminCommand,
   AdminCommandBus,
   AdminCommandResult,
 } from "./admin-command-bus.js";
+import { quitAllWithin, type RedisQuitReport } from "./redis-graceful-close.js";
+import {
+  createRedisPubSubClientPair,
+  type RedisPubSubClientPair,
+} from "./redis-pubsub-client.js";
 
 const DEFAULT_COMMAND_CHANNEL_PREFIX = "bsp:admin-command:";
 const DEFAULT_RESULT_CHANNEL_PREFIX = "bsp:admin-command-result:";
+
+/** Both clients close concurrently inside this facility's default 5s step. */
+const CLOSE_QUIT_TIMEOUT_MS = 4_000;
+type AdminCommandBusClientRole = "publisher" | "subscriber";
 
 function commandChannel(prefix: string, instanceId: string): string {
   return `${prefix}${instanceId}`;
@@ -126,20 +134,21 @@ export async function createRedisAdminCommandBus(
     commandChannelPrefix?: string;
     resultChannelPrefix?: string;
     onInvalidMessage?: (kind: "command" | "result", payload: string) => void;
+    closeQuitTimeoutMs?: number;
+    onCloseUnfinished?: (
+      info: RedisQuitReport<AdminCommandBusClientRole>,
+    ) => void;
+    redisClients?: RedisPubSubClientPair;
   } = {},
 ): Promise<AdminCommandBus & { close: () => Promise<void> }> {
   const commandChannelPrefix =
     options.commandChannelPrefix ?? DEFAULT_COMMAND_CHANNEL_PREFIX;
   const resultChannelPrefix =
     options.resultChannelPrefix ?? DEFAULT_RESULT_CHANNEL_PREFIX;
-  const publishClient = new Redis(redisUrl, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-  const subscribeClient = new Redis(redisUrl, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
+  const { publisher: publishClient, subscriber: subscribeClient } =
+    options.redisClients ?? createRedisPubSubClientPair(redisUrl);
+  const closeQuitTimeoutMs =
+    options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const handlers = new Map<
     string,
     (command: AdminCommand) => Promise<AdminCommandResult>
@@ -266,7 +275,14 @@ export async function createRedisAdminCommandBus(
     async close() {
       closing = true;
       handlers.clear();
-      await Promise.all([publishClient.quit(), subscribeClient.quit()]);
+      await quitAllWithin<AdminCommandBusClientRole>(
+        [
+          { role: "publisher", connection: publishClient },
+          { role: "subscriber", connection: subscribeClient },
+        ],
+        closeQuitTimeoutMs,
+        options.onCloseUnfinished,
+      );
     },
   };
 }

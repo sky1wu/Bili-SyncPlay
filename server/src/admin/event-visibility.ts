@@ -16,11 +16,13 @@
  */
 const HIDDEN_SYSTEM_EVENTS = new Set([
   "admin_audit_log_append_failed",
+  "admin_command_bus_close_unfinished",
   "node_heartbeat_abandoned_at_shutdown",
   "node_heartbeat_failed",
   "node_heartbeat_sent",
   "node_heartbeat_skipped",
   "redis_runtime_store_operation_failed",
+  "room_event_bus_close_unfinished",
   "room_event_bus_error",
   "room_event_bus_invalid_message",
   "room_event_consumed",
@@ -29,8 +31,10 @@ const HIDDEN_SYSTEM_EVENTS = new Set([
   "room_event_published",
   "room_index_reconcile_abandoned_at_shutdown",
   "room_reaper_sweep_abandoned_at_shutdown",
+  "room_store_close_unfinished",
   "runtime_index_reaper_failed",
   "runtime_index_sessions_reaped",
+  "runtime_store_close_unfinished",
   "server_shutdown_step_failed",
 ]);
 

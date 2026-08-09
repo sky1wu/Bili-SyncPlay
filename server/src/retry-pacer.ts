@@ -122,6 +122,8 @@ export type RetryPacer = {
     timeoutMs: number,
     makeTimeoutError: () => Error,
   ) => Promise<T>;
+  /** Remember an uncapped call until it really answers, preserving its result. */
+  trackCall: <T>(call: Promise<T>) => Promise<T>;
   /** Calls that have not answered yet. */
   trackedCount: () => number;
   /**
@@ -150,6 +152,18 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
     signalStopped = resolve;
   });
 
+  function trackCall<T>(call: Promise<T>): Promise<T> {
+    const answered = call.then(
+      () => undefined,
+      () => undefined,
+    );
+    trackedCalls.add(answered);
+    void answered.finally(() => {
+      trackedCalls.delete(answered);
+    });
+    return call;
+  }
+
   return {
     delayFor(attempt) {
       return Math.min(initialDelayMs * 2 ** (attempt - 1), maxDelayMs);
@@ -177,18 +191,11 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
       });
     },
     async capAttempt(call, timeoutMs, makeTimeoutError) {
-      const answered = call.then(
-        () => undefined,
-        () => undefined,
-      );
-      trackedCalls.add(answered);
-      void answered.finally(() => {
-        trackedCalls.delete(answered);
-      });
-      return (await bounded(call, timeoutMs, (_resolve, reject) => {
+      return (await bounded(trackCall(call), timeoutMs, (_resolve, reject) => {
         reject(makeTimeoutError());
       })) as Awaited<typeof call>;
     },
+    trackCall,
     trackedCount() {
       return trackedCalls.size;
     },

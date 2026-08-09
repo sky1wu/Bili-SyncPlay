@@ -78,3 +78,19 @@ test("settleWithin does not hold the event loop open after the work settles", as
   // defect an `unref`'d timer hides and this one would not.
   assert.equal(countRefdTimers(), before);
 });
+
+test("trackCall preserves the real outcome while counting an unanswered call", async () => {
+  const pacer = createRetryPacer({ initialDelayMs: 1, maxDelayMs: 1 });
+  let resolveCall!: (value: string) => void;
+  const call = new Promise<string>((resolve) => {
+    resolveCall = resolve;
+  });
+
+  const tracked = pacer.trackCall(call);
+  assert.equal(pacer.trackedCount(), 1);
+  resolveCall("answered");
+  assert.equal(await tracked, "answered");
+  await Promise.resolve();
+  assert.equal(pacer.trackedCount(), 0);
+  pacer.stop();
+});
