@@ -373,11 +373,16 @@ up in every hand-written copy:
   the rule: it is what makes the tick after a timeout a `stalled` rather than an
   `overlapped`.
 
-The cap belongs to the caller, not to the connection: neither the room store's
-nor the runtime store's client has a `commandTimeout`, so the command itself
-stays out on the socket. `heartbeatNode` in particular is a direct `MULTI` —
-it does not go through the write queue, so the queue's own
-`pendingOperationTimeoutMs` never applied to it.
+The cap belongs to the caller, not to the connection. #271 settled the other
+half — see [Two layers bound a Redis command](#two-layers-bound-a-redis-command) —
+and the split it landed on keeps this rule intact: the room store's client now
+carries a `commandTimeout`, the runtime store's deliberately does not, and
+neither changes what the cap here is for. A backstop several seconds out answers
+whoever is still holding the command; it cannot answer a tick that already gave
+up, and it cannot tell the next tick whether the previous one is still
+outstanding. `heartbeatNode` in particular is a direct `MULTI` — it does not go
+through the write queue, so the queue's own `pendingOperationTimeoutMs` never
+applied to it.
 Adding one there would bound the request path (`get_room` / `update_room`) too,
 which is a separate decision with its own retry semantics to weigh — deliberately
 not taken in #261.
@@ -523,9 +528,15 @@ limit of that refusal: the store can only refuse on evidence from one of ITS OWN
 commands, so the FIRST request into a stall — whichever it is — is not refused.
 It is bounded and answered as unavailable, and it becomes the evidence that
 refuses the next one. That is the best a caller-side bound can do; closing it
-entirely needs either a separate read connection or a `commandTimeout`. Closing that needs either a separate
-read connection or a `commandTimeout` — the same deferred decision as in #261
-and #263, and all three should be weighed together. A test fixture for this
+entirely needs a separate read connection.
+
+A `commandTimeout` is NOT the other way out, and #271 is where that was settled
+for both append-chain stores. It would race the per-write cap, reject the
+command from underneath it and clear `writeIsStalled` — the very evidence the
+refusal is derived from — turning a chain that freezes and sheds cheaply into
+one that grinds a command per timeout while letting every poll back onto a dead
+connection. A backstop is a liveness bound; it cannot substitute for a bound
+whose output is evidence. A test fixture for this
 store is only worth trusting if it models the ordering; one that lets each call
 settle on its own will happily prove that reads and shutdown sail past a hung
 write.
@@ -600,7 +611,55 @@ The other four Redis facilities follow the same rule (#270):
   ordinary unsubscribe may already be the command a half-open socket stopped
   answering; `QUIT` also exits subscriber mode, and going straight to its bound
   is what keeps the forced-disconnect fallback reachable. Per-command bounds
-  outside shutdown remain the separate connection-wide policy in #271.
+  outside shutdown are the connection-wide policy below.
+
+## Two layers bound a Redis command
+
+#261, #263, #264, #267 and #270 were one defect — a Redis that accepts commands
+and stops answering leaves some caller waiting with no bound — found by five
+different symptoms. Each was closed when its symptom stopped, so the same
+deferred question came back five times. #271 answered it, and the answer is a
+distinction rather than a number.
+
+- **A deadline** is per-behaviour, derived from what its caller can promise, and
+  **decides what happens next**: shed, refuse, retry, abort. `append-chain`'s
+  per-write cap, its read bound, `pendingOperationTimeoutMs`, the admin command
+  bus's reply timer. Different numbers because different questions.
+- **`commandTimeout` is a liveness backstop.** One question — has this
+  connection stopped answering? — so one magnitude for every connection that
+  takes it (`REDIS_COMMAND_TIMEOUT_MS`, 5s), derived from Redis's latency
+  distribution rather than from any caller's patience. It never decides what
+  happens next; it only guarantees something does.
+
+A connection needs at least one, and four of the seven had neither. So:
+
+- **The declaration is required, not the option.** Every client is built by
+  `createBoundedRedisClient`, whose `RedisCommandBound` argument is either the
+  backstop or a named caller-side deadline. `redis-client-bounds.test.ts` keeps
+  `new Redis` out of every other module, because the option's absence is
+  invisible in a diff — which is how it stayed invisible five times.
+- **A backstop cannot replace a bound whose output is evidence.** Both
+  append-chain stores are exempt for this reason and not merely because they are
+  already bounded: `writeIsStalled` is what the read refusal is derived from, and
+  a `commandTimeout` racing the per-write cap would clear it.
+- **It bounds the caller's wait, not the connection's queue.** ioredis keeps a
+  timed-out command in `commandQueue` so later replies stay aligned. Every depth
+  limit here — `maxPendingAppends`, the runtime store's command admission — is
+  still the only thing bounding memory, and none may be retired on the strength
+  of the option. Proved, not assumed, in `redis-command-timeout.test.ts`.
+- **A threshold that cannot tell slow from dead is the failure to avoid.** It
+  sits far above ordinary latency, because tripping it on a Redis that is merely
+  behind converts a degraded dependency into a failed one on every connection at
+  once.
+- **Bounded still owes a report.** A connection whose commands now fail owes the
+  caller a diagnosis, not just an error: a stalled session store answers 503
+  `admin_session_store_unavailable` — never 401, which would read as a logout —
+  and logs `admin_session_store_command_failed` with the Redis detail the
+  response withholds from an unauthenticated caller.
+- **Cleanup on the same connection is not the answer.** Where a request brackets
+  its real work with commands on the stalled connection, those rejections must
+  not replace the result: the admin command bus's `finally` `UNSUBSCRIBE` would
+  otherwise throw over the `command_timeout` result the stall exists to produce.
 
 ## Test fixtures must not cast past the checker
 

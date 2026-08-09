@@ -1,4 +1,4 @@
-import { Redis } from "ioredis";
+import { createBoundedRedisClient } from "./redis-command-timeout.js";
 import type { ClosableRedisConnection } from "./redis-graceful-close.js";
 
 export type RedisMessageListener = (channel: string, payload: string) => void;
@@ -25,10 +25,16 @@ export type RedisPubSubClientPair = {
 export function createRedisPubSubClientPair(
   redisUrl: string,
 ): RedisPubSubClientPair {
+  // Four connections — both buses' publisher and subscriber — and none of them
+  // had any bound before #271. Every command here is request/response and
+  // small: `PUBLISH` on the room broadcast path, `SUBSCRIBE` / `UNSUBSCRIBE`
+  // around a request or a consumer's lifetime. Neither bus has a caller-side
+  // deadline on those: the admin command bus times out the REPLY it waits for,
+  // which is a different promise from the `SUBSCRIBE` that precedes it and the
+  // `UNSUBSCRIBE` in its `finally`.
   const createClient = () =>
-    new Redis(redisUrl, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
+    createBoundedRedisClient(redisUrl, {
+      bound: "command_timeout",
     }) as RedisPubSubClient;
   return {
     publisher: createClient(),

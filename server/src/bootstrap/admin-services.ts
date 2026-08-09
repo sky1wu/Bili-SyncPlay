@@ -74,6 +74,24 @@ export function createAdminServices(args: {
             keyPrefix: getRedisAdminSessionKeyPrefix(
               args.persistenceConfig.redisNamespace,
             ),
+            onCommandFailed: ({ operation, error }) => {
+              // The detail the 503 withholds: `authenticate` runs before any
+              // credential is accepted, so its response is reachable by an
+              // unauthenticated caller and the Redis error belongs here rather
+              // than in the body.
+              //
+              // One line per failed command, which is one per admin request at
+              // worst — the request rate bounds it, and the admin API is rate
+              // limited. And it does not route through the thing it reports on:
+              // `logEvent` writes to the event store's separate connection
+              // (#266).
+              args.logEvent("admin_session_store_command_failed", {
+                instanceId: args.persistenceConfig.instanceId,
+                operation,
+                result: "error",
+                error: error instanceof Error ? error.message : String(error),
+              });
+            },
             onCloseUnfinished: ({ quitOutcome, budgetMs }) => {
               args.logEvent("admin_session_store_close_unfinished", {
                 instanceId: args.persistenceConfig.instanceId,

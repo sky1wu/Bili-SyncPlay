@@ -13,6 +13,7 @@ import {
 } from "../src/app.js";
 import { createInMemoryAdminSessionStore } from "../src/admin/auth-store.js";
 import { AuditStoreUnavailableError } from "../src/admin/redis-audit-store.js";
+import { AdminSessionStoreUnavailableError } from "../src/redis-admin-session-store.js";
 import type { AdminRole, AdminSession } from "../src/admin/types.js";
 
 const ALLOWED_ORIGIN = "chrome-extension://allowed-extension";
@@ -2062,6 +2063,56 @@ test("admin login backend outages surface as 500 and do not count toward throttl
       body: { username: "admin", password: "secret-123" },
     });
     assert.equal(recovered.status, 200);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a stalled session store answers 503, and does not look like a logout", async () => {
+  const sessions = new Map<string, AdminSession>();
+  let stalled = false;
+  const server = await startAdminServer({
+    ...adminDependencies(),
+    // `authenticate` is the FIRST Redis command of every admin request, and
+    // before #271 it had no bound at all: a Redis that stopped answering hung
+    // every request there, ahead of any route. Now it is answered — and the two
+    // wrong answers are both worth pinning. 500 tells an operator to file a bug
+    // about a dependency outage; 401 logs them out over a Redis blip and, on a
+    // console that redirects to the login page, hides the outage entirely.
+    adminSessionStoreOverride: {
+      async save(tokenId: string, session: AdminSession) {
+        sessions.set(tokenId, session);
+      },
+      async get(tokenId: string) {
+        if (stalled) {
+          throw new AdminSessionStoreUnavailableError("get");
+        }
+        return sessions.get(tokenId) ?? null;
+      },
+      async delete(tokenId: string) {
+        sessions.delete(tokenId);
+      },
+    },
+  });
+
+  try {
+    const token = await login(server.httpBaseUrl);
+    stalled = true;
+    const response = await requestJson(server.httpBaseUrl, "/api/admin/rooms", {
+      token,
+    });
+
+    assert.equal(response.status, 503);
+    assert.equal(
+      (response.body.error as { code: string }).code,
+      "admin_session_store_unavailable",
+    );
+    // The Redis error itself is not in the body: this response is reachable
+    // before any credential has been accepted.
+    assert.equal(
+      (response.body.error as { message: string }).message,
+      "Admin session store is unavailable.",
+    );
   } finally {
     await server.close();
   }

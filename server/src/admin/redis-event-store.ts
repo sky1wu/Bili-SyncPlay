@@ -1,5 +1,5 @@
-import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
+import { createBoundedRedisClient } from "../redis-command-timeout.js";
 import {
   createAppendChain,
   type AppendChainCloseReport,
@@ -401,13 +401,20 @@ export async function createRedisEventStore(
 ): Promise<GlobalEventStore & { close: () => Promise<void> }> {
   const redis =
     options.redisClient ??
-    (new Redis(redisUrl, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
-      // Deliberately no `commandTimeout`: it would bound the admin console's
-      // reads on this connection too, and that is the same decision deferred by
-      // #261 and #263 for the room store and the runtime store. The bound this
-      // store owns is on its own queue, which is what made the stall unbounded.
+    // Evaluated with the other six in #271 and exempted, which is the opposite
+    // conclusion from the four that took the backstop — and for a reason that
+    // only exists here. `append-chain` derives its answers from EVIDENCE about
+    // this connection: `writeIsStalled` is set when a write outlives
+    // `APPEND_TIMEOUT_MS`, and it is what lets a read refuse instantly instead
+    // of being issued onto a dead connection (#269). A backstop would race that
+    // cap, reject the command from underneath it, and clear the flag — turning a
+    // chain that freezes and sheds cheaply into one that grinds a command per
+    // timeout while letting every poll back onto the connection. Bounding was
+    // never the gap here; the chain bounds the append, the read and the close.
+    (createBoundedRedisClient(redisUrl, {
+      bound: "caller",
+      boundedBy:
+        "append-chain: APPEND_TIMEOUT_MS per write, READ_COMMAND_TIMEOUT_MS per read, CLOSE_APPEND_SETTLE_TIMEOUT_MS on close",
     }) as RedisEventStoreClient);
   const streamKey = options.streamKey ?? DEFAULT_EVENT_STREAM_KEY;
   const countsKey = options.countsKey ?? DEFAULT_EVENT_COUNTS_KEY;

@@ -133,3 +133,47 @@ test("redis admin command bus reports stale target when no subscriber responds",
     await bus.close();
   }
 });
+
+test("a failing cleanup UNSUBSCRIBE does not replace the request's answer", async () => {
+  // `request` runs three commands on the subscriber connection: SUBSCRIBE, the
+  // reply wait, and an UNSUBSCRIBE in a `finally`. Only the middle one is the
+  // answer. Since #271 gave this client a `commandTimeout`, a stalled Redis
+  // rejects the cleanup instead of hanging in it — and an unguarded `finally`
+  // would throw that rejection over a well-formed result, precisely on the
+  // stall the `command_timeout` result exists to describe.
+  const publisher = createFakeRedisPubSubClient(async () => "OK");
+  const subscriber = createFakeRedisPubSubClient(async () => "OK", {
+    unsubscribe: async () => {
+      throw new Error("Command timed out");
+    },
+  });
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    // Nothing replies, so the reply timer produces the answer.
+    const result = await bus.request(
+      {
+        kind: "kick_member",
+        requestId: "request-1",
+        targetInstanceId: "instance-1",
+        roomCode: "ABC123",
+        memberId: "member-1",
+        requestedAt: 1,
+      },
+      20,
+    );
+
+    assert.equal(result.status, "stale_target");
+    assert.equal(
+      result.status === "stale_target" ? result.code : null,
+      "command_timeout",
+    );
+  } finally {
+    await bus.close();
+  }
+});

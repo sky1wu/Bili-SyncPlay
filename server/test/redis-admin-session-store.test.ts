@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AdminSessionStoreUnavailableError,
   createAdminSessionTokenId,
   createRedisAdminSessionStore,
   type RedisAdminSessionStoreClient,
@@ -98,7 +99,14 @@ test("admin auth service shares redis-backed sessions across store instances", a
   }
 });
 
-function createFakeSessionRedis(quit: () => Promise<unknown>): {
+function createFakeSessionRedis(
+  quit: () => Promise<unknown>,
+  commands: Partial<
+    Pick<RedisAdminSessionStoreClient, "del" | "hgetall"> & {
+      exec: () => Promise<unknown>;
+    }
+  > = {},
+): {
   client: RedisAdminSessionStoreClient;
   disconnectCalls: () => number;
 } {
@@ -106,7 +114,7 @@ function createFakeSessionRedis(quit: () => Promise<unknown>): {
   const multi: RedisAdminSessionStoreMulti = {
     hset: () => multi,
     pexpire: () => multi,
-    exec: async () => [],
+    exec: commands.exec ?? (async () => []),
   };
   return {
     client: {
@@ -115,8 +123,8 @@ function createFakeSessionRedis(quit: () => Promise<unknown>): {
       disconnect: () => {
         disconnectCalls += 1;
       },
-      del: async () => 1,
-      hgetall: async () => ({}),
+      del: commands.del ?? (async () => 1),
+      hgetall: commands.hgetall ?? (async () => ({})),
       multi: () => multi,
     },
     disconnectCalls: () => disconnectCalls,
@@ -165,4 +173,86 @@ test("an ordinary close stays graceful and stays quiet", async () => {
   // shutdown where it matters.
   assert.equal(unfinishedCalls, 0);
   assert.equal(redis.disconnectCalls(), 0);
+});
+
+test("a command the connection never answers becomes an unavailable-store error", async () => {
+  // What `commandTimeout` produces once the connection stops replying: an
+  // ordinary rejected command, on the path that runs before any route (#271).
+  // Modelled as the rejection, not as the hang, because the timer lives in
+  // ioredis and what this store owns is the answer it turns that into.
+  const stall = new Error("Command timed out");
+  const redis = createFakeSessionRedis(async () => "OK", {
+    hgetall: async () => {
+      throw stall;
+    },
+  });
+  const reported: Array<{ operation: string; error: unknown }> = [];
+  const store = await createRedisAdminSessionStore("redis://unused", {
+    redisClient: redis.client,
+    onCommandFailed: (info) => {
+      reported.push(info);
+    },
+  });
+
+  const failure = await store.get("token-id").then(
+    () => null,
+    (error: unknown) => error,
+  );
+
+  assert.ok(failure instanceof AdminSessionStoreUnavailableError);
+  assert.equal(failure.operation, "get");
+  // Reachable by an unauthenticated caller, so it carries no Redis detail. The
+  // detail goes to the operator instead — bounded is not the same as silent.
+  assert.equal(failure.message, "Admin session store is unavailable.");
+  assert.deepEqual(reported, [{ operation: "get", error: stall }]);
+});
+
+test("a write that never lands is reported as a save, not as a lost session", async () => {
+  const redis = createFakeSessionRedis(async () => "OK", {
+    exec: async () => {
+      throw new Error("Command timed out");
+    },
+  });
+  const reported: string[] = [];
+  const store = await createRedisAdminSessionStore("redis://unused", {
+    redisClient: redis.client,
+    onCommandFailed: ({ operation }) => {
+      reported.push(operation);
+    },
+  });
+
+  await assert.rejects(
+    store.save("token-id", {
+      id: "session-1",
+      adminId: "admin-1",
+      username: "admin",
+      role: "admin",
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      lastSeenAt: 1,
+    } satisfies AdminSession),
+    AdminSessionStoreUnavailableError,
+  );
+  assert.deepEqual(reported, ["save"]);
+});
+
+test("an unreadable session stays a null, not a dependency outage", async () => {
+  // The discriminating half: only the Redis CALL is wrapped, never the parsing
+  // around it. A hash this store cannot interpret is a missing session — the
+  // same answer as an absent key — and folding it into the outage diagnosis
+  // would answer 503 to a caller holding a token that is simply no good, and
+  // would hide a defect in this module behind Redis.
+  const redis = createFakeSessionRedis(async () => "OK", {
+    hgetall: async () => ({ id: "session-1", role: "sorcerer" }),
+  });
+  let reportedCalls = 0;
+  const store = await createRedisAdminSessionStore("redis://unused", {
+    redisClient: redis.client,
+    onCommandFailed: () => {
+      reportedCalls += 1;
+    },
+  });
+
+  assert.equal(await store.get("token-id"), null);
+  assert.equal(reportedCalls, 0);
 });

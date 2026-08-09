@@ -348,9 +348,11 @@ which failure it is, and they need different repairs:
   previous sweep still inside its cap is the `skipped` label above instead, and
   is neither logged nor counted as a failure.
 
-The cap only bounds how long the reaper waits, not the command itself — the room
-store's client still sets no `commandTimeout`, so the command stays out on the
-connection until Redis or the socket ends it.
+The cap only bounds how long the reaper waits, not the command itself. Since
+#271 the room store's client also carries a `commandTimeout` backstop, so the
+command does end on its own — but several seconds later, and as a rejection to
+whoever was still holding it, not as an answer to the tick that already gave up.
+See [Which Redis connections bound their commands](#which-redis-connections-bound-their-commands).
 
 A rate of 0 is an observation, not a diagnosis. Every tick records an outcome,
 including one that gave up on a hung sweep, so a flat series means no tick
@@ -402,7 +404,10 @@ different questions: "others cannot see it" and "it knows why".
   was already stalled; on its own it explains nothing else.
 
 As with the reaper, the cap only bounds how long the heartbeat waits, not the
-command: the runtime store's client sets no `commandTimeout` either.
+command — and the runtime store's client is one of the three that deliberately
+carries no `commandTimeout`, because `pendingOperationTimeoutMs` already answers
+every caller on it. The command stays out on the connection until Redis or the
+socket ends it.
 
 ### Why is the admin event list missing events?
 
@@ -501,9 +506,13 @@ backpressure lines are excluded from the event store on purpose, and append
 failures cannot be written there, so stdout is their only path.
 
 As with the reaper and the heartbeat, the cap bounds how long the store waits,
-not the command: this client sets no `commandTimeout` either. A read issued
+not the command: this client is the second of the three that deliberately sets
+no `commandTimeout`. Here the reason is not just that a caller-side bound
+already exists — a backstop would race the per-write cap and clear
+`writeIsStalled`, which is the evidence the read path refuses on. A read issued
 before the store noticed the stall is still exposed, and so is one issued while
-Redis is hung with no write of ours in flight to notice it by.
+Redis is hung with no write of ours in flight to notice it by; that residual is
+what the read's own command bound answers.
 
 What this does **not** affect: alerting. `bili_syncplay_*` metrics are in-process
 counters served from `/metrics`, and error-level logs go to stdout
@@ -573,9 +582,17 @@ store, and both are now bounded:
   audit store's close from being reached.
 
 Before either bound, `close_admin_services` was a guaranteed
-`server_shutdown_step_failed` whenever Redis was hung. As everywhere else here,
-the bound is on how long we wait, not on the command: this client sets no
-`commandTimeout` either.
+`server_shutdown_step_failed` whenever Redis was hung. The bound above is on how
+long we wait; since #271 this client's commands are separately bounded by a
+`commandTimeout`, which is what turned a stalled session lookup from an
+unbounded hang on every admin request into a 503:
+
+- `admin_session_store_command_failed` — a session `save` / `get` / `delete`
+  failed, with `operation` and the underlying error. The HTTP response is a 503
+  `admin_session_store_unavailable` carrying no Redis detail, because
+  `authenticate` runs before any credential is accepted. **Not a 401**: a Redis
+  blip must not read as a logout. One line per failed command, bounded by the
+  admin API's own request limit.
 
 The other Redis-backed shutdown steps use the same bounded-close rule (#270):
 
@@ -611,9 +628,55 @@ an unexpected implementation error. A terminal room-event bus close skips a
 second `UNSUBSCRIBE`, because a half-open socket may already be stuck on the
 consumer's first one and `QUIT` itself exits subscriber mode.
 
-These bounds still govern how long the caller waits; they do not add an
-ioredis `commandTimeout`. That separate, connection-wide policy is tracked in
-#271.
+These bounds govern how long the caller waits. The connection-wide policy that
+bounds the command itself is separate, and is below.
+
+### Which Redis connections bound their commands
+
+Settled in #271, after the same defect — a Redis that accepts commands and stops
+answering — was found by five different symptoms (#261, #263, #264, #267, #270).
+There are two layers and they are not interchangeable:
+
+- **A deadline** is per-behaviour and derived from what its caller can promise.
+  It also decides what happens next: shed, refuse, retry.
+- **`commandTimeout` is a liveness backstop.** One question — has this
+  connection stopped answering? — so one magnitude for every connection that
+  takes it, derived from Redis's latency distribution rather than any caller's
+  patience. `REDIS_COMMAND_TIMEOUT_MS` is 5s. It never decides what happens
+  next; it only makes sure something does.
+
+A connection needs at least one. Four had neither until #271:
+
+| Connection                                 | Command bound                               |
+| ------------------------------------------ | ------------------------------------------- |
+| room store                                 | `commandTimeout`                            |
+| admin session store                        | `commandTimeout`                            |
+| room event bus (publisher + subscriber)    | `commandTimeout`                            |
+| admin command bus (publisher + subscriber) | `commandTimeout`                            |
+| runtime store                              | caller-side: `pendingOperationTimeoutMs`    |
+| admin event store                          | caller-side: the append chain's four bounds |
+| admin audit store                          | caller-side: the append chain's four bounds |
+
+Every client is built by `createBoundedRedisClient`, which takes a **required**
+declaration of which of the two it has; `server/test/redis-client-bounds.test.ts`
+enforces that no connection is built anywhere else. That is the part of #271
+that is not a threshold: the option's absence was invisible in a diff five times
+running.
+
+Two things `commandTimeout` deliberately does **not** do, both verified against
+ioredis in `server/test/redis-command-timeout.test.ts`:
+
+- It does not take the command off the connection. ioredis keeps the timed-out
+  command in its queue so later replies stay aligned, so **it bounds the
+  caller's wait, not the connection's queue depth** — every depth limit in this
+  server is still the only thing bounding memory.
+- It does not distinguish slow from dead. It is set far above ordinary latency
+  precisely so a Redis that is merely behind is not converted into a failed one.
+
+Operationally: a Redis that stops answering now produces _failed commands_ on
+those four connections rather than silence. Expect `room_persist_failed`,
+`room_event_publish_failed` and `admin_session_store_command_failed` where an
+outage used to show up as requests that never returned.
 
 ## Post-Change Regression Checklist
 

@@ -351,8 +351,10 @@ sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<窗口>])) by (
   回应，于是没有再发一条。它总是跟在一次 timeout 之后；单独看到它，说明僵死还在
   持续。若上一轮还在上限**之内**，那属于上面的 `skipped`，既不记日志也不算失败。
 
-这个上限只约束 reaper 等多久，并不约束命令本身——房间存储的客户端仍然没有设置
-`commandTimeout`，命令会一直挂在连接上，直到 Redis 或 socket 了结它。
+这个上限只约束 reaper 等多久，并不约束命令本身。自 #271 起房间存储的客户端另有一道
+`commandTimeout` 兜底，命令确实会自己结束——但要晚上几秒，而且是抛给当时还持有它的
+调用方，不是回答那次已经放弃的触发。见
+[哪些 Redis 连接约束了命令本身](#哪些-redis-连接约束了命令本身)。
 
 速率为 0 是观测，不是结论。每一次触发都会记下结果，包括放弃等待僵死扫描的那一
 次，所以序列彻底不动意味着根本没有任何一次触发产出。先分辨原因再动手：
@@ -396,8 +398,9 @@ WebSocket 客户端。先读**该节点自己的日志**再去信外部视图，
 - `node_heartbeat_abandoned_at_shutdown`——节点关闭时还有一拍没回应，于是不再等。
   在 Redis 本来就僵死的节点上出现属于预期；它本身不额外说明任何问题。
 
-与 reaper 一样，这个上限只约束心跳等多久，并不约束命令本身：runtime store 的客户端
-同样没有设置 `commandTimeout`。
+与 reaper 一样，这个上限只约束心跳等多久，并不约束命令本身——runtime store 的客户端
+是刻意不设 `commandTimeout` 的三个之一，因为 `pendingOperationTimeoutMs` 已经答复了
+这条连接上的每一个调用方。命令会一直挂在连接上，直到 Redis 或 socket 了结它。
 
 ### 后台事件列表少了事件？
 
@@ -477,9 +480,11 @@ sum(rate(bili_syncplay_events_total{event="runtime_event_append_failed"}[<window
 这三条日志都固定为 error 级、不受 `LOG_LEVEL` 影响。两条 backpressure 日志被刻意排除
 出 event store，而 append 失败本来就无法写进去，因此 stdout 是它们仅有的输出路径。
 
-与 reaper 和心跳一样，这个上限只约束存储等多久，并不约束命令本身：这个客户端同样没有
-设置 `commandTimeout`。在存储发现僵死**之前**发出的读取仍然暴露；Redis 僵死但我们没有
-任何写入在途、因而无从发现时，也一样。
+与 reaper 和心跳一样，这个上限只约束存储等多久，并不约束命令本身：这个客户端是刻意
+不设 `commandTimeout` 的第二个。这里的理由不止"已有调用方一侧的界"——兜底会与每次写
+的上限抢跑并清掉 `writeIsStalled`，而那正是读取路径据以拒绝的证据。在存储发现僵死
+**之前**发出的读取仍然暴露；Redis 僵死但我们没有任何写入在途、因而无从发现时，也一样
+——这段残余由读取自己的命令上限答复。
 
 它**不**影响告警。`bili_syncplay_*` 指标是进程内计数器，经 `/metrics` 暴露；
 error 级日志无条件写 stdout。两条路都不经过 event store。会丢数据的只有后台事件
@@ -537,8 +542,14 @@ sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<wind
   关闭根本轮不到执行。
 
 在这两道边界之前，只要 Redis 僵死，`close_admin_services` 必然是一次
-`server_shutdown_step_failed`。和这里其他地方一样，边界约束的是我们等多久、不是命令
-本身：这个客户端同样没有设置 `commandTimeout`。
+`server_shutdown_step_failed`。上面这道边界约束的是我们等多久；自 #271 起这个客户端的
+命令另有 `commandTimeout` 约束，正是它把"僵死的会话查询无界挂住每一个后台请求"变成了
+一个 503：
+
+- `admin_session_store_command_failed`——会话 `save` / `get` / `delete` 失败，带
+  `operation` 与底层错误。HTTP 响应是 503 `admin_session_store_unavailable`，正文
+  不含任何 Redis 细节，因为 `authenticate` 跑在任何凭据被接受**之前**。**不是 401**：
+  一次 Redis 抖动不该读作一次登出。每条失败命令一行，由后台 API 自己的限流兜住速率。
 
 另外四个 Redis 关服步骤也采用同一条有界关闭规则（#270）：
 
@@ -567,8 +578,47 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 第二条 `UNSUBSCRIBE`，因为半开 socket 可能已卡在 consumer 发出的第一条，而 `QUIT`
 本身就会退出订阅模式。
 
-这些边界仍只约束调用方等多久，并没有给 ioredis 增加 `commandTimeout`；后者是影响整条
-连接的另一项策略，由 #271 单独跟踪。
+这些边界约束的是调用方等多久。约束命令本身的那项连接级策略是另一回事，见下。
+
+### 哪些 Redis 连接约束了命令本身
+
+#271 定案，此前同一个缺陷——Redis 接收命令却不再应答——被五个不同症状分别找到
+（#261、#263、#264、#267、#270）。这里有两层，互不替代：
+
+- **deadline（期限）** 是按行为定的，从"这个调用方能承诺什么"倒推，并且**决定接下来
+  做什么**：丢弃、拒绝、还是重试。
+- **`commandTimeout` 是活性兜底。** 它只回答一个问题——这条连接是不是不再应答了——
+  所以对所有采用它的连接是**同一个量级**，从 Redis 的时延分布倒推，而不是从任何调用方
+  的耐心倒推。`REDIS_COMMAND_TIMEOUT_MS` 为 5s。它从不决定接下来做什么，只保证有人做。
+
+一条连接至少要有其中一层。到 #271 之前，有四条两层都没有：
+
+| 连接                                   | 命令一侧的界                            |
+| -------------------------------------- | --------------------------------------- |
+| 房间存储                               | `commandTimeout`                        |
+| 管理会话存储                           | `commandTimeout`                        |
+| 房间事件总线（publisher + subscriber） | `commandTimeout`                        |
+| 管理命令总线（publisher + subscriber） | `commandTimeout`                        |
+| 运行时存储                             | 调用方一侧：`pendingOperationTimeoutMs` |
+| 管理事件存储                           | 调用方一侧：append 链的四道界           |
+| 管理审计存储                           | 调用方一侧：append 链的四道界           |
+
+所有客户端都由 `createBoundedRedisClient` 构造，它**强制**要求声明采用了两层中的哪
+一层；`server/test/redis-client-bounds.test.ts` 保证没有别处再建连接。这是 #271 里
+不属于"定阈值"的那一半：这个选项的缺席在 diff 里连续五次都看不出来。
+
+`commandTimeout` 刻意**不**做的两件事，均在
+`server/test/redis-command-timeout.test.ts` 里对着 ioredis 验证过：
+
+- **它不会把命令从连接上取下来。** ioredis 会把超时的命令留在队列里以保持后续回复对
+  齐，所以**它约束的是调用方等多久，不是连接上的队列深度**——本服务里每一道深度限制
+  仍然是唯一约束内存的东西。
+- **它分不清"慢"和"死"。** 阈值被刻意放在普通时延之上很远，就是为了不把"只是落后的
+  Redis"判成"失败的 Redis"。
+
+运维含义：Redis 停止应答时，这四条连接现在产出的是**失败的命令**而不是沉默。原本表现
+为"请求再也不返回"的故障，现在会表现为 `room_persist_failed`、
+`room_event_publish_failed` 和 `admin_session_store_command_failed`。
 
 ## 变更后回归清单
 

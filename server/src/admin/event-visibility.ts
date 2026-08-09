@@ -17,6 +17,7 @@
 const HIDDEN_SYSTEM_EVENTS = new Set([
   "admin_audit_log_append_failed",
   "admin_command_bus_close_unfinished",
+  "admin_session_store_command_failed",
   "node_heartbeat_abandoned_at_shutdown",
   "node_heartbeat_failed",
   "node_heartbeat_sent",

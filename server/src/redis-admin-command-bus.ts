@@ -258,7 +258,15 @@ export async function createRedisAdminCommandBus(
 
         return await responsePromise;
       } finally {
-        await subscribeClient.unsubscribe(replyChannel);
+        // Cleanup, not part of the answer. This `UNSUBSCRIBE` runs on the very
+        // connection whose trouble is the likeliest reason we are here, and
+        // letting it reject would replace a well-formed result — including the
+        // `command_timeout` one produced two lines up — with a Redis error, so
+        // the one path that already handles a dead target would start throwing
+        // instead. Unreachable before #271 gave this connection a
+        // `commandTimeout`; reachable now, which is the point of writing it
+        // down rather than discovering it.
+        await subscribeClient.unsubscribe(replyChannel).catch(() => undefined);
       }
     },
     async subscribe(instanceId, handler) {

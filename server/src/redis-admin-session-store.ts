@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { Redis } from "ioredis";
 import type { AdminRole, AdminSession } from "./admin/types.js";
 import type { AdminSessionStore } from "./admin-session-store.js";
+import { createBoundedRedisClient } from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 
 const DEFAULT_ADMIN_SESSION_KEY_PREFIX = "bsp:admin:session:";
@@ -40,6 +40,29 @@ export type RedisAdminSessionStoreClient = {
   hgetall: (key: string) => Promise<Record<string, string>>;
   multi: () => RedisAdminSessionStoreMulti;
 };
+
+/** Which command failed, which is also all an unauthenticated caller may learn. */
+export type AdminSessionStoreOperation = "save" | "get" | "delete";
+
+/**
+ * The session store's Redis connection did not answer.
+ *
+ * A dependency failure, not a bug and not an authentication failure, and the
+ * router owes it a 503 for both reasons: retrying once Redis recovers is right,
+ * and a 401 would log an operator out over a Redis blip. Carries no detail in
+ * its message on purpose — `authenticate` runs before any credential is
+ * accepted, so this message is reachable by an unauthenticated caller, and the
+ * underlying error goes to `onCommandFailed` instead (#271).
+ */
+export class AdminSessionStoreUnavailableError extends Error {
+  readonly operation: AdminSessionStoreOperation;
+
+  constructor(operation: AdminSessionStoreOperation) {
+    super("Admin session store is unavailable.");
+    this.name = "AdminSessionStoreUnavailableError";
+    this.operation = operation;
+  }
+}
 
 function sessionKey(prefix: string, tokenId: string): string {
   return `${prefix}${tokenId}`;
@@ -95,14 +118,30 @@ export async function createRedisAdminSessionStore(
       quitOutcome: RedisQuitOutcome;
       budgetMs: number;
     }) => void;
+    /**
+     * A command failed, with the detail the HTTP response deliberately omits.
+     *
+     * The whole point of giving this connection a `commandTimeout` was to stop
+     * a stalled Redis hanging every admin request; answering it with a bare 503
+     * and no server-side trace would just move the silence (#271).
+     */
+    onCommandFailed?: (info: {
+      operation: AdminSessionStoreOperation;
+      error: unknown;
+    }) => void;
     redisClient?: RedisAdminSessionStoreClient;
   } = {},
 ): Promise<AdminSessionStore & { close: () => Promise<void> }> {
   const redis =
     options.redisClient ??
-    (new Redis(redisUrl, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
+    // The FIRST command of every authenticated admin request, and until #271 an
+    // unbounded one: a Redis that stopped answering hung every request at
+    // `authenticate`, before any route ran, until Node's 300s `requestTimeout`
+    // killed the socket. Nothing here is large — one `HGETALL` of a handful of
+    // fields — so the backstop cannot be tripped by a legitimately slow read the
+    // way an admin console query might be.
+    (createBoundedRedisClient(redisUrl, {
+      bound: "command_timeout",
     }) as RedisAdminSessionStoreClient);
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
@@ -111,32 +150,53 @@ export async function createRedisAdminSessionStore(
 
   await redis.connect();
 
+  /**
+   * Wrap ONLY the Redis call, never the parsing around it: a defect in this
+   * module has to keep reading as a 500, and folding it into the dependency's
+   * diagnosis is how a bug hides behind an outage.
+   */
+  async function guarded<T>(
+    operation: AdminSessionStoreOperation,
+    call: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await call();
+    } catch (error) {
+      options.onCommandFailed?.({ operation, error });
+      throw new AdminSessionStoreUnavailableError(operation);
+    }
+  }
+
   return {
     async save(tokenId, session) {
       const ttlMs = session.expiresAt - now();
       const key = sessionKey(keyPrefix, tokenId);
 
       if (ttlMs <= 0) {
-        await redis.del(key);
+        await guarded("save", () => redis.del(key));
         return;
       }
 
-      await redis
-        .multi()
-        .hset(key, {
-          id: session.id,
-          adminId: session.adminId,
-          username: session.username,
-          role: session.role,
-          createdAt: String(session.createdAt),
-          expiresAt: String(session.expiresAt),
-          lastSeenAt: String(session.lastSeenAt),
-        })
-        .pexpire(key, ttlMs)
-        .exec();
+      await guarded("save", () =>
+        redis
+          .multi()
+          .hset(key, {
+            id: session.id,
+            adminId: session.adminId,
+            username: session.username,
+            role: session.role,
+            createdAt: String(session.createdAt),
+            expiresAt: String(session.expiresAt),
+            lastSeenAt: String(session.lastSeenAt),
+          })
+          .pexpire(key, ttlMs)
+          .exec(),
+      );
     },
     async get(tokenId) {
-      const raw = await redis.hgetall(sessionKey(keyPrefix, tokenId));
+      const raw = await guarded("get", () =>
+        redis.hgetall(sessionKey(keyPrefix, tokenId)),
+      );
       if (Object.keys(raw).length === 0) {
         return null;
       }
@@ -158,7 +218,9 @@ export async function createRedisAdminSessionStore(
       }
 
       if (expiresAt <= now()) {
-        await redis.del(sessionKey(keyPrefix, tokenId));
+        await guarded("delete", () =>
+          redis.del(sessionKey(keyPrefix, tokenId)),
+        );
         return null;
       }
 
@@ -173,7 +235,7 @@ export async function createRedisAdminSessionStore(
       });
     },
     async delete(tokenId) {
-      await redis.del(sessionKey(keyPrefix, tokenId));
+      await guarded("delete", () => redis.del(sessionKey(keyPrefix, tokenId)));
     },
     async close() {
       // `QUIT` is an ordinary command on this connection, so an unbounded wait

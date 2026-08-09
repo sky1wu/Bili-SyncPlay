@@ -1,5 +1,5 @@
-import { Redis } from "ioredis";
 import type { RoomListQuery } from "./admin/types.js";
+import { createBoundedRedisClient } from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 import { getRedisRoomStoreKeys } from "./redis-namespace.js";
 import {
@@ -402,9 +402,15 @@ export async function createRedisRoomStore(
 > {
   const redis =
     options.redisClient ??
-    (new Redis(redisUrl, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
+    // Twenty-odd command sites on the WebSocket join / leave / reap path, and
+    // until #271 not one of them had any bound: a Redis that stopped answering
+    // hung the join itself. Wrapping each site caller-side would have been
+    // twenty copies of one mechanism, which is exactly what this repo extracts
+    // instead of writing twice. Callers already treat a rejected command as
+    // "unknown, not absent" (see `resolveRoom` and the runtime teardown queue in
+    // `room-service`), so a timeout enters a path that already exists.
+    (createBoundedRedisClient(redisUrl, {
+      bound: "command_timeout",
     }) as RedisRoomStoreClient);
   const { roomKeyPrefix, roomsByExpiryKey } = getRedisRoomStoreKeys(
     options.namespace,

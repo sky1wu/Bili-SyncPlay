@@ -123,8 +123,8 @@ before changing the code it describes.
   waits for the real call but only inside its budget — reporting it when the
   budget was not enough, since that overrun used to be visible as a failed
   shutdown step. The cap is derived from what a late pass costs (the heartbeat's
-  from `NODE_HEARTBEAT_TTL_MS`), and belongs to the caller — neither Redis
-  client has a `commandTimeout`.
+  from `NODE_HEARTBEAT_TTL_MS`), and belongs to the caller — a connection-wide
+  `commandTimeout` answers a different question and cannot stand in for it.
 - **An unbounded write queue turns a stalled dependency into a growing one**
   (#264): `redis-event-store`'s append chain is fed by every log line, so it
   needs both a per-write cap and a depth limit — neither substitutes for the
@@ -152,6 +152,17 @@ before changing the code it describes.
   both questions. And a shutdown step's budget belongs to the step, not to a
   component in it — `close_admin_services` also closes the admin session store,
   which runs first, so bounding one half fixes nothing.
+- **Two layers bound a Redis command** (#271): a **deadline** is per-behaviour,
+  derived from what its caller can promise, and decides what happens next;
+  `commandTimeout` is a **liveness backstop** — one question, so one magnitude
+  for every connection that takes it, and it decides nothing. A connection needs
+  at least one, so `createBoundedRedisClient` takes a required declaration of
+  which, and `redis-client-bounds.test.ts` keeps `new Redis` out of every other
+  module — the option's absence was invisible in a diff five times running. The
+  backstop cannot replace a bound whose output is evidence (`writeIsStalled`),
+  it bounds the caller's wait and not ioredis's queue, so no depth limit retires
+  because of it, and bounded still owes a report: 503 with a diagnosis, never
+  401, and never a cleanup rejection thrown over a real result.
 - **One-shot broadcasts need a retry trail** (#242): most `room_state_updated`
   sends are repeated by the next update, but the share-ownership resync and the
   runtime index reaper's announcement are not — losing one loses the room until a

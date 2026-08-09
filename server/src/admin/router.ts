@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AdminActionError } from "./action-service.js";
+import { AdminSessionStoreUnavailableError } from "../redis-admin-session-store.js";
 import { AuditStoreUnavailableError } from "./redis-audit-store.js";
 import { EventStoreUnavailableError } from "./redis-event-store.js";
 import {
@@ -168,6 +169,21 @@ export function createAdminRouter(options: AdminRouterOptions) {
           // point — issuing it would queue a command that never returns behind
           // the one already stuck (#266 review).
           sendError(response, 503, "event_store_unavailable", error.message);
+          return true;
+        }
+        if (error instanceof AdminSessionStoreUnavailableError) {
+          // 503 for the same reason as the two stores below, on the path that
+          // runs BEFORE any of them: `authenticate` is the first Redis command
+          // of every admin request, and until #271 a stalled session store hung
+          // it with no bound at all. A 401 would be worse than a 500 here — it
+          // would log an operator out over a Redis blip — so the store answers
+          // with its own type rather than an absent session.
+          sendError(
+            response,
+            503,
+            "admin_session_store_unavailable",
+            error.message,
+          );
           return true;
         }
         if (error instanceof AuditStoreUnavailableError) {

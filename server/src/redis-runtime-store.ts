@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { Redis } from "ioredis";
 import type { MetricsCollector } from "./admin/metrics.js";
+import { createBoundedRedisClient } from "./redis-command-timeout.js";
 import type { ActiveRoom, ClusterNodeStatus, Session } from "./types.js";
 import {
   createInMemoryRuntimeStore,
@@ -709,9 +709,20 @@ export async function createRedisRuntimeStore(
   options: RuntimeStoreOptions = {},
 ): Promise<RuntimeStore & { close: () => Promise<void> }> {
   const rawRedis = (options.redisClient ??
-    new Redis(redisUrl, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
+    // Exempted in #271, and the only one of the three exemptions that is purely
+    // "a deadline already answers everybody". Every command here goes through
+    // `commandPacer.capAttempt` at `pendingOperationTimeoutMs`, so no caller
+    // waits without a bound; a backstop of the same magnitude behind it would
+    // only decide which of two timeouts wins the race.
+    //
+    // What it WOULD add is settling the commands the cap gave up on, so
+    // `activeRedisCommands` and the pacer's tracked set empty out on their own.
+    // Left for its own change: those four overlapping tracking sets are what
+    // made two of #272's fixes untestable, and retiring any of them is a
+    // refactor with its own review, not a side effect of setting an option.
+    createBoundedRedisClient(redisUrl, {
+      bound: "caller",
+      boundedBy: "commandPacer.capAttempt at pendingOperationTimeoutMs",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
