@@ -482,6 +482,53 @@ store is only worth trusting if it models the ordering; one that lets each call
 settle on its own will happily prove that reads and shutdown sail past a hung
 write.
 
+## Which record may be shed is a property of the record, not of the queue
+
+`redis-audit-store` had the same chain as the event store, link for link, and
+the same three consequences (#267). What it could not have was the same answer:
+an audit record is the only thing in the system that says who closed a room or
+kicked a member, so shedding it quietly is not a trade anybody may make on an
+operator's behalf. The rules that fell out:
+
+- **Extract the mechanism, keep the policy at the call site.** The four bounds
+  are now `admin/append-chain.ts`, and the two stores differ only in what their
+  `onRefused` / `onAbandonedAtShutdown` handlers do — the event store returns
+  the record it built, the audit store throws. Writing the chain a second time
+  by hand is exactly the shape that cost #242 six duplicate findings, half of
+  them "fixed A, missed the isomorphic B".
+- **What makes shedding affordable is the feed rate, and it is not a constant of
+  the design.** The event store cannot reject, because its caller is the
+  structured logger and a rejection becomes one stdout error line per log line.
+  The audit chain is fed by admin actions at human rate, so one line per refusal
+  is a cost it can pay — and the line is `admin_audit_log_append_failed`, which
+  `action-service.writeAudit` already caught long before any of this.
+- **Do not add a counter for a question an existing series already answers.**
+  The event store needed
+  `bili_syncplay_event_store_appends_dropped_total` because its drops were
+  otherwise silent. Audit refusals are not: `metricsCollector.recordEvent` runs
+  on every `logEvent` regardless of `LOG_LEVEL` or sampling, so
+  `bili_syncplay_events_total{event="admin_audit_log_append_failed"}` answers
+  "still happening?" and "how much?" with no new surface at all.
+- **The admin action still succeeds, and that is why the loss must be loud.**
+  The audit write has always been fire-and-forget; taking admin controls offline
+  during a Redis outage would be the worse failure. Since the action happens
+  either way, the only thing standing between a lost accountability record and
+  nobody knowing is the refusal being visible.
+- **A shutdown step's budget belongs to the step, not to a component in it.**
+  `close_admin_services` closes the admin session store _and_ the audit store,
+  and the session store's `await redis.quit()` was unbounded and runs first — so
+  bounding only the audit store would have left the step failing on exactly the
+  same Redis, having never reached the half that was fixed. `quitWithin` is
+  shared by all three closes for that reason, and the two are now settled
+  together rather than awaited in sequence, so a rejection from one cannot skip
+  the other's close.
+
+Still unbounded at the time of writing: `redis-room-store`,
+`redis-runtime-store`, `redis-admin-command-bus` and `redis-room-event-bus` all
+end their `close()` with a bare `await redis.quit()`, each inside its own
+shutdown step. The mechanism to fix them is already extracted; what each one
+needs decided is its budget and whether it owes a report.
+
 ## Test fixtures must not cast past the checker
 
 Every package's `test/**` is inside `npm run typecheck` — otherwise a signature

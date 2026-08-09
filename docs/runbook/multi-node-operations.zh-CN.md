@@ -467,6 +467,44 @@ sudo journalctl -u bili-syncplay-room-node-a --since "30 min ago"
 sudo journalctl -u bili-syncplay-global-admin --since "30 min ago"
 ```
 
+### 为什么审计记录丢了，或者审计页返回 503？
+
+只在 `ADMIN_AUDIT_STORE_PROVIDER=redis` 时出现。这个存储写的是和 event store 同构的
+Redis 链，Redis 不回应时撞上同样的两道边界，但对边界做的是**相反**的取舍（#267）。
+
+审计记录是问责记录——房间是谁关的、成员是谁踢的，全系统只有它说得清——所以绝不静默
+丢弃。越过任一边界，写入会被**拒绝**，每一次拒绝都会在 stdout 留下一行
+`admin_audit_log_append_failed`，并让
+`bili_syncplay_events_total{event="admin_audit_log_append_failed"}` 加一。告警看这个
+就够了：不需要另设丢弃计数器，因为它已经无状态地回答了"还在不在发生"和"发生了多少"。
+这里付得起"一次拒绝一行日志"的代价，而 event store 付不起——审计链由管理动作按人的
+速度喂养，不是由每一条日志。
+
+**管理动作本身仍然成功。** 审计写入一直是发后不理的，而在 Redis 故障期间把管理能力
+一并下线是更坏的失败。丢的是记录，所以要按拒绝日志覆盖的那段窗口，从运行时事件列表
+（同一次动作也会产生一条）去重建。
+
+```promql
+# 现在正在丢审计记录吗？
+sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<window>])) by (instance)
+```
+
+读取的行为与 event store 完全一致：一旦存储发现写入路径已僵死，审计查询会被直接
+**拒绝**并返回 `503 audit_store_unavailable`，而不是发出一条会排在僵死写入后面、永远
+回不来的命令。这里的 503 指向的是 Redis、不是后台进程：先查 Redis，恢复后重试。
+
+关服时 `close_admin_services` 会依次关闭管理会话存储与审计存储，现在两者都是有界的：
+
+- `admin_audit_appends_abandoned_at_shutdown`——字段与 `quitOutcome` 的词汇表和
+  `runtime_event_appends_abandoned_at_shutdown` 完全相同。
+- `admin_session_store_close_unfinished`——会话存储的 `QUIT` 没成，于是断掉了 socket。
+  它在这一步里排在前面，所以在这道边界存在之前，它自己就能把 5s 预算花光，审计存储的
+  关闭根本轮不到执行。
+
+在这两道边界之前，只要 Redis 僵死，`close_admin_services` 必然是一次
+`server_shutdown_step_failed`。和这里其他地方一样，边界约束的是我们等多久、不是命令
+本身：这个客户端同样没有设置 `commandTimeout`。
+
 ## 变更后回归清单
 
 - 新建房间、加入房间、共享视频、播放 / 暂停 / seek 同步正常。
