@@ -147,6 +147,7 @@ Firefox 确定性 lane 始终使用回环 HTTPS fixture server，因为 Selenium
 - 每种受支持路由有独立 fixture contract。
 - 普通视频、多 P、番剧、festival、两种稍后再看路径使用不同 ID 和标题，防止用例因值相同而误通过。
 - 提供可控制的 metadata 延迟、buffering、视频元素重建、自动连播和快速连续导航。
+- 为 `playback.user.hold-fast-forward` 提供与当前 Bilibili 语义一致的键盘契约：短按 ArrowRight 仍是 5 秒 seek，持续按住并进入重复 keydown 后才把 live rate 临时切到 3×，keyup 恢复长按开始时保存的 rate；场景必须用浏览器键盘 API 驱动这条页面路径，不能由测试直接写媒体属性。
 - 媒体为短小、自有或明确可再分发的测试资源；至少包含足够时长执行 seek、倍速和 ended 场景。
 
 ## 3. 总体架构
@@ -263,8 +264,8 @@ fixture 不暴露 extension store 的任意写接口。`snapshot()` 只读取用
 Page model 只封装稳定交互，不承担业务判定：
 
 - `PopupPage`：服务器地址、房间表单、邀请、成员、共享视频卡片、设置和日志；实例记录它来自 action popup 还是普通扩展页，活动-tab-dependent 操作拒绝在普通扩展页实例上执行。
-- `BilibiliPage`：视频元素、页面身份、可见 toast、页内分享按钮、导航和 fixture 控制面。
-- `AdminPage`：登录；通过真实侧栏菜单分别导航到 overview、rooms、events、audit、config，并核验 path、页头标题、唯一选中项和目标页面内容；处理房间详情、治理确认和结果。
+- `BilibiliPage`：视频元素、页面身份、可见 toast、页内分享按钮、导航、真实键盘长按/释放和 fixture 控制面。
+- `AdminPage`：登录与已有 token 的身份恢复重试；通过真实侧栏菜单分别导航到 overview、rooms、events、audit、config，并核验 path、页头标题、唯一选中项和目标页面内容；处理房间详情、治理确认和结果。
 
 业务断言放在 oracle；例如 `PopupPage.shareCurrentVideo()` 只点击并处理 confirm，是否同步成功由 room/playback oracle 判断。
 
@@ -299,6 +300,8 @@ performance.now() / sample sequence
 - 采样间隔和连续稳定次数。
 
 具体数值由 Phase 0 结合当前 `playback-reconcile.ts` 阈值和 Windows 实测校准，未经基线数据不在本文拍脑袋固定。
+
+长按快进 oracle 先通过真实房间状态制造一个尚未结束的 rate-only soft apply 会话，再由页面夹具响应真实 ArrowRight hold/release。采样须同时证明四件事：发起端确实短暂进入 3×；该手势触发并被服务端接受的快照仍携带按住前的房间基础倍速；接收端在基础倍速下跟进发起端超出普通播放推进量的位置；释放后双方在稳定窗口内保持同一基础倍速。永久倍速操作、直接写 `HTMLVideoElement` 或只看最终倍率均不能替代这些证据。两个单因素负向对照分别把 ArrowRight 错认成永久倍速接管、以及让 ArrowRight 不刷新一般用户手势；前者只能因倍率污染失败，后者只能因位置跳跃未及时传播失败，夹具未进入 3× 或纠偏前置条件不成立不能算有效红灯。
 
 跨时钟场景通过 E2E-only WSL launcher 使用现有 `ServerBootstrapDependencies.now` 注入点控制服务端逻辑墙钟，不修改 Windows 或 WSL 系统时钟，也不改变浏览器本地单调钟。每次正向实现或负向对照都创建全新的 server 进程、房间和浏览器 profiles：先固定注入 `+D`，直到 `sync:ping` 原始样本与 popup 已发布诊断值一致；随后在时长 `T` 内把偏移从 `+D` 线性降到 `0`，其中 `D >= max(5_000ms, 4 × playing 动态位置容差)`、`T >= 2 × CLOCK_SYNC_INTERVAL_MS` 且以毫秒计 `T > D`。因此注入时钟以 `1 - D/T` 的正速率前进，取整后的服务端时间与播放版本也不得倒退，但滤波后的 `clockOffsetMs` 会落后于当前原始钟差。runner 必须从每次 pong 的原始 out/in 分量和 popup 值证明两者之差至少大于 playing 动态位置容差，并在这个滞后窗口让 owner 连续产生新的 playing 快照；未形成该滞后、任一版本时间倒退或诊断缺失都属于夹具失败。正确实现只用本地单调到达锚点，须持续进入稳定窗口；负向对照仅临时在当前代码中恢复 `estimatedServerNow = localNow + clockOffsetMs` 再减 `playback.serverTime` 的 #210 前位置补偿，必须因滞后的估计持续过度外推而越过容差。进程终身固定的 `+D`/`-D` 会让偏移同时进入估计值与快照时间而抵消，不能作为这项负向对照。
 
