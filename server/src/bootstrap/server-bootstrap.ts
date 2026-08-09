@@ -402,7 +402,13 @@ export async function createServerBootstrapContext(
               queuedAppends,
               quitOutcome,
               budgetMs,
-              result: "timeout",
+              // Derived, not hardcoded: a `QUIT` that came back an ERROR is not
+              // a timeout, and a query aggregating on `result` would file the
+              // two under one diagnosis while the runbook tells operators to
+              // tell them apart (#266 review). The two are mutually exclusive —
+              // `pendingWrites > 0` only happens on the path that never sent a
+              // `QUIT` at all.
+              result: quitOutcome === "failed" ? "error" : "timeout",
             });
           },
         })

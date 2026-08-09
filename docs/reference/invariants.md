@@ -430,9 +430,8 @@ overrun `close_event_store`'s budget (#264). The rules:
   structured logger, which turns a rejection into a `runtime_event_append_failed`
   line on stdout — so rejecting would answer a Redis stall with one error line
   per log line, on the path already established to be overloaded. Drops are
-  reported in aggregate instead: every drop on the counter, one line per incident
-  in the log. For the same reason the transition flag is set BEFORE the report is
-  emitted, because that report comes straight back through `append`.
+  reported in aggregate instead: every drop on the counter, and a shedding line
+  throttled to one per reason per minute.
 - **The cap does not release the chain.** It flips the store into shedding; the
   link itself still waits for the real answer. Letting the chain advance would
   put a second write on a connection that has answered neither, and would land

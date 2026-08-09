@@ -327,3 +327,21 @@ test("backpressure lines infer error level, whatever satisfies it", () => {
     "error",
   );
 });
+
+test("both shutdown outcomes infer error, under the result each one deserves", () => {
+  // `failed` is a `QUIT` that came back an error; `timed_out` and `skipped` are
+  // budgets running out. A query aggregating on `result` would file the two
+  // under one diagnosis if the field were hardcoded (#266 review).
+  assert.equal(
+    inferLogLevel("runtime_event_appends_abandoned_at_shutdown", {
+      result: "error",
+    }),
+    "error",
+  );
+  assert.equal(
+    inferLogLevel("runtime_event_appends_abandoned_at_shutdown", {
+      result: "timeout",
+    }),
+    "error",
+  );
+});
