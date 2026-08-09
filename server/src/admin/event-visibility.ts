@@ -9,11 +9,10 @@
  * `room_persist_failed` and `room_index_reconcile_failed`, so their `reason`
  * variants are not listed here either.
  *
- * Deliberately absent, despite being infrastructure:
- * `runtime_event_appends_dropped` and `runtime_event_appends_resumed`. They are
- * not a statement about the server, they are a statement about THIS LIST —
- * that it is missing events, and how many (#264). Hiding them would leave the
- * gap they explain sitting in plain sight with the explanation switched off.
+ * The `runtime_event_appends_*` lines are absent because they never reach the
+ * store to be filtered: `EVENT_STORE_EXCLUDED_EVENTS` in `logger.ts` keeps the
+ * event store's own backpressure reports out of the event store (#266 review).
+ * If that exclusion is ever lifted, they belong here.
  */
 const HIDDEN_SYSTEM_EVENTS = new Set([
   "admin_audit_log_append_failed",
@@ -30,7 +29,6 @@ const HIDDEN_SYSTEM_EVENTS = new Set([
   "room_event_published",
   "room_index_reconcile_abandoned_at_shutdown",
   "room_reaper_sweep_abandoned_at_shutdown",
-  "runtime_event_appends_abandoned_at_shutdown",
   "runtime_index_reaper_failed",
   "runtime_index_sessions_reaped",
   "server_shutdown_step_failed",

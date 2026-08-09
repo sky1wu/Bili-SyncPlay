@@ -409,8 +409,13 @@ command: the runtime store's client sets no `commandTimeout` either.
 Only with `ADMIN_EVENT_STORE_PROVIDER=redis`. That store writes one chain of
 Redis commands per logged event, and when Redis stops answering it **sheds**
 rather than queueing: the list goes incomplete and every count derived from the
-stream reads low, but the process keeps its memory, the events page keeps
-answering, and shutdown still finishes (#264).
+stream reads low, but the process keeps its memory and shutdown still finishes
+(#264).
+
+It does **not** keep the events page available. Reads share the one connection
+with the writes and Redis answers in order, so a query issued while Redis is
+hung queues behind the write in flight and stops with it — see the end of this
+section. What shedding protects is the process, not the page.
 
 `bili_syncplay_event_store_appends_dropped_total` is the signal, and its
 `reason` label is the diagnosis:

@@ -67,6 +67,42 @@ test("structured logger excludes successful node heartbeats from event storage",
   ]);
 });
 
+test("structured logger keeps the event store's own backpressure reports out of it", async () => {
+  const writtenLines: string[] = [];
+  const { appendedEvents, store } = createCapturingEventStore();
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    eventStore: store,
+  });
+
+  logger("runtime_event_appends_dropped", {
+    reason: "stalled",
+    result: "error",
+  });
+  logger("runtime_event_appends_resumed", {
+    reason: "stalled",
+    droppedEvents: 12,
+    result: "ok",
+  });
+  logger("runtime_event_appends_abandoned_at_shutdown", {
+    pendingWrites: 1,
+    result: "timeout",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // These lines are the event store reporting on its own write queue, so
+  // routing them through that queue is reflexive: the resumed line takes the
+  // slot that just freed, which puts the store one event away from shedding
+  // again and produces a resumed/dropped pair per completed write under a
+  // steady overload (#266 review).
+  assert.deepEqual(appendedEvents, []);
+  // Still on stdout, where an operator and the log pipeline can see them —
+  // excluded from the store is not the same as silenced.
+  assert.equal(writtenLines.length, 3);
+});
+
 test("structured logger stamps default info level on emitted events", () => {
   const writtenLines: string[] = [];
   const logger = createStructuredLogger({

@@ -357,6 +357,8 @@ export async function createRedisEventStore(
   const appendTimeoutMs = options.appendTimeoutMs ?? APPEND_TIMEOUT_MS;
   const maxPendingAppends =
     options.maxPendingAppends ?? Math.min(maxLen, MAX_PENDING_APPENDS);
+  /** The low watermark. See {@link endSheddingIfRecovered} for why it is not the limit. */
+  const resumeAtQueuedAppends = Math.floor(maxPendingAppends / 2);
   const readSettleTimeoutMs =
     options.readSettleTimeoutMs ?? READ_APPEND_SETTLE_TIMEOUT_MS;
   const closeSettleTimeoutMs =
@@ -399,14 +401,21 @@ export async function createRedisEventStore(
 
   function shedAppend(reason: EventStoreSheddingReason): void {
     countDroppedAppend(reason);
-    if (shedding !== null) {
+    if (shedding !== null && shedding.reason === reason) {
       shedding.droppedEvents += 1;
       return;
     }
-    // Recorded BEFORE the callback: the report is a log line, which comes
-    // straight back here as another append, and a second transition report
-    // would be the start of a loop rather than a second incident.
-    shedding = { reason, droppedEvents: 1 };
+    // A new incident, or one whose diagnosis changed under it. `overflow`
+    // becoming `stalled` is Redis going from behind to not answering at all,
+    // and those need different repairs — reporting the whole incident under
+    // whichever stage it happened to start in would call a dead Redis a slow
+    // one (#266 review). The count carries over, because it is still one
+    // incident, told in the stage it is now in.
+    //
+    // Recorded BEFORE the callback, which is a log line and could come back
+    // here as another append: a second transition report would be the start of
+    // a loop rather than a second incident.
+    shedding = { reason, droppedEvents: (shedding?.droppedEvents ?? 0) + 1 };
     options.onAppendsDropped?.({ reason });
   }
 
@@ -417,6 +426,26 @@ export async function createRedisEventStore(
     const { reason, droppedEvents } = shedding;
     shedding = null;
     options.onAppendsResumed?.({ reason, droppedEvents });
+  }
+
+  /**
+   * End the incident once the store is comfortably accepting again.
+   *
+   * Driven by a write settling rather than by the next `append`, because that
+   * append may never come: a node whose traffic went quiet during the stall
+   * would log a start with no end, and an operator reading that has no way to
+   * tell an incident that ended from one still running (#266 review).
+   *
+   * Well below the depth limit, not at it. Resuming the moment one slot frees
+   * leaves the store one event away from shedding again, which under a steady
+   * overload is a resumed/dropped pair per completed write — the per-line noise
+   * this whole design exists to avoid, moved to the other edge.
+   */
+  function endSheddingIfRecovered(): void {
+    if (closing || writeIsStalled || queuedAppends > resumeAtQueuedAppends) {
+      return;
+    }
+    resumeAppends();
   }
 
   async function mergeLegacyCountsIfNeeded() {
@@ -751,7 +780,6 @@ export async function createRedisEventStore(
         shedAppend("overflow");
         return Promise.resolve(runtimeEvent);
       }
-      resumeAppends();
 
       queuedAppends += 1;
       const appendPromise = pendingAppend.then(async () => {
@@ -763,6 +791,7 @@ export async function createRedisEventStore(
           return await writeEvent(input, timestamp, details, runtimeEvent);
         } finally {
           queuedAppends -= 1;
+          endSheddingIfRecovered();
         }
       });
 

@@ -127,6 +127,36 @@ function createBlockedWrite(options: { blockedCalls?: number } = {}): {
   };
 }
 
+/** A write that answers one call at a time, so a test can hold the queue at its limit. */
+function createSteppedWrite(): {
+  write: () => Promise<string>;
+  step: () => void;
+  releaseAll: () => void;
+} {
+  const waiting: Array<() => void> = [];
+  let released = false;
+  let calls = 0;
+  return {
+    write: async () => {
+      calls += 1;
+      const id = calls;
+      if (!released) {
+        await new Promise<void>((resolve) => waiting.push(resolve));
+      }
+      return `${id}-0`;
+    },
+    step: () => {
+      waiting.shift()?.();
+    },
+    releaseAll: () => {
+      released = true;
+      while (waiting.length > 0) {
+        waiting.shift()?.();
+      }
+    },
+  };
+}
+
 /**
  * Local rather than the production `settleWithin`, so a defect in that helper
  * cannot make these tests agree with the code they are checking.
@@ -295,12 +325,109 @@ test("shedding ends when the write answers, and reports what the incident cost",
 
     hung.release();
     await stalling;
-    await store.append(appendInput(3));
 
-    // The magnitude an operator needs: the metric counts drops as they happen,
-    // this says what the whole incident cost once it is over.
+    // Reported off the write settling, with NO further append. A low-traffic
+    // node whose logs went quiet during the stall would otherwise be left with
+    // a dropped line and no end to it, and nothing in the log would separate
+    // "recovered" from "still down" (#266 review).
+    //
+    // The magnitude is the point of the line: the metric counts drops as they
+    // happen, this says what the whole incident cost once it is over.
     assert.deepEqual(resumed, [{ reason: "stalled", droppedEvents: 2 }]);
   } finally {
+    await store.close();
+  }
+});
+
+test("an overflow that becomes a stall is re-reported as a stall", async () => {
+  const hung = createBlockedWrite();
+  const redis = createFakeEventRedis({ xadd: hung.write });
+  const dropped: string[] = [];
+  const store = await createStore(redis.client, {
+    appendTimeoutMs: 40,
+    maxPendingAppends: 2,
+    closeSettleTimeoutMs: 20,
+    onAppendsDropped: ({ reason }) => {
+      dropped.push(reason);
+    },
+  });
+
+  try {
+    // Redis is behind, not dead: the depth limit trips first, while the write
+    // in flight is still inside its cap.
+    void store.append(appendInput(0));
+    void store.append(appendInput(1));
+    void store.append(appendInput(2));
+    assert.deepEqual(dropped, ["overflow"]);
+
+    // ...and then the same write blows its cap. Carrying the first stage's
+    // reason to the end of the incident would report a Redis that stopped
+    // answering as one that is merely slow, and the two need different repairs.
+    await delay(80);
+    void store.append(appendInput(3));
+    assert.deepEqual(dropped, ["overflow", "stalled"]);
+
+    // Still one incident, not two — the count carries across the stages.
+    void store.append(appendInput(4));
+    assert.deepEqual(dropped, ["overflow", "stalled"]);
+  } finally {
+    hung.release();
+    await store.close();
+  }
+});
+
+test("holding the queue at its limit does not log a line per freed slot", async () => {
+  const stepped = createSteppedWrite();
+  const redis = createFakeEventRedis({ xadd: stepped.write });
+  const dropped: string[] = [];
+  const resumed: Array<{ reason: string; droppedEvents: number }> = [];
+  const store = await createStore(redis.client, {
+    appendTimeoutMs: 60_000,
+    maxPendingAppends: 4,
+    closeSettleTimeoutMs: 200,
+    onAppendsDropped: ({ reason }) => {
+      dropped.push(reason);
+    },
+    onAppendsResumed: (info) => {
+      resumed.push(info);
+    },
+  });
+  const appends: Array<Promise<unknown> | unknown> = [];
+
+  try {
+    // Four queued, the fifth refused.
+    for (let index = 0; index < 5; index += 1) {
+      appends.push(store.append(appendInput(index)));
+    }
+    assert.deepEqual(dropped, ["overflow"]);
+
+    // Now hold the edge: free exactly one slot, refill it, overload again.
+    // This is what a Redis that is steadily a little too slow looks like.
+    //
+    // The first wait is load-bearing: `append` is synchronous up to the `.then`
+    // that chains it, so the first write has not reached the client yet and
+    // there would be nothing to step.
+    await delay(20);
+    stepped.step();
+    await delay(20);
+    appends.push(store.append(appendInput(5)));
+    appends.push(store.append(appendInput(6)));
+
+    // Still one incident and one line. Resuming the moment a single slot frees
+    // leaves the store one event away from shedding again, so a sustained
+    // overload would log a resumed/dropped pair per completed write — the
+    // per-line noise this whole design exists to avoid, moved to the other
+    // edge (#266 review).
+    assert.deepEqual(resumed, []);
+    assert.deepEqual(dropped, ["overflow"]);
+
+    // And when it really does recover, the incident is closed exactly once,
+    // carrying what it cost: two refused at the door, across both phases.
+    stepped.releaseAll();
+    await Promise.all(appends);
+    assert.deepEqual(resumed, [{ reason: "overflow", droppedEvents: 2 }]);
+  } finally {
+    stepped.releaseAll();
     await store.close();
   }
 });

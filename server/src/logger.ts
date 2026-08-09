@@ -3,7 +3,24 @@ import type { GlobalEventStore } from "./admin/global-event-store.js";
 import type { MetricsCollector } from "./admin/metrics.js";
 import type { RuntimeStore } from "./runtime-store.js";
 
-const EVENT_STORE_EXCLUDED_EVENTS = new Set(["node_heartbeat_sent"]);
+/**
+ * Events that go to stdout and the metrics, but never to the event store.
+ *
+ * `node_heartbeat_sent` is here for volume. The `runtime_event_appends_*` lines
+ * are here for a different reason: they are the event store reporting on its
+ * own write queue, so routing them through that queue is reflexive. Feeding
+ * them back in makes the report compete for the capacity it is reporting about
+ * — a resumed line takes the slot that just freed, which puts the store one
+ * event away from shedding again and produces a resumed/dropped pair per
+ * completed write at a steady overload (#266 review). The dropped line could
+ * never land anyway: it is emitted precisely when the store is shedding.
+ */
+const EVENT_STORE_EXCLUDED_EVENTS = new Set([
+  "node_heartbeat_sent",
+  "runtime_event_appends_abandoned_at_shutdown",
+  "runtime_event_appends_dropped",
+  "runtime_event_appends_resumed",
+]);
 
 const LEVEL_PRIORITY: Record<LogLevel, number> = {
   debug: 10,
