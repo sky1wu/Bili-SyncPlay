@@ -74,6 +74,17 @@ const CLOSE_APPEND_SETTLE_TIMEOUT_MS = 1_500;
 /** Reported once per incident, unlike the metric, which counts every drop. */
 export type EventStoreSheddingReason = EventStoreAppendDropReason;
 
+/**
+ * How the graceful close went.
+ *
+ * Three outcomes, not two, because `settleWithin` answers "did it settle" and
+ * a `QUIT` that settles with a rejection settled just fine — while leaving the
+ * connection in a state nobody checked, and the shutdown recorded as clean
+ * (#266 review). `skipped` is the path that never tried: the drain had already
+ * run out, so the socket went down instead.
+ */
+export type EventStoreQuitOutcome = "ok" | "skipped" | "failed" | "timed_out";
+
 /** Distinguishes "the cap won the race" from "the write failed". */
 class EventStoreAppendTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -330,13 +341,21 @@ export type RedisEventStoreOptions = {
    * out.
    */
   onAppendsAbandonedAtShutdown?: (info: {
-    /** Commands still unanswered on the connection when the socket was dropped. */
+    /**
+     * Appends whose Redis commands had not all answered when the socket was
+     * dropped.
+     *
+     * Appends, not commands: one append issues an `XADD` and then two or three
+     * more in parallel, and the cap tracks the batch as one call. Counting
+     * commands would need per-command tracking the cap has no use for, and the
+     * operationally useful unit is events anyway — one append is one event
+     * (#266 review).
+     */
     pendingWrites: number;
     queuedAppends: number;
     /** What an incident still open at shutdown had cost. 0 when none was open. */
     droppedEvents: number;
-    /** The graceful close ran out of budget too: a half-open socket. */
-    quitTimedOut: boolean;
+    quitOutcome: EventStoreQuitOutcome;
     budgetMs: number;
   }) => void;
 };
@@ -476,30 +495,29 @@ export async function createRedisEventStore(
    *   `resumeAppends` cannot close it, because the store did not recover, the
    *   process is leaving, so every `runtime_event_appends_dropped` gets exactly
    *   one of these two endings (#266 review);
-   * - a `QUIT` that never came back, which is a half-open socket with no write
-   *   left to blame and which just spent the whole budget. Bounded and silent
-   *   is the trade this whole area exists to refuse: the overrun used to be
-   *   visible only because the shutdown step timed out, so a `close` that
-   *   returns cleanly owes the line instead.
+   * - a graceful close that did not work: `QUIT` never came back (a half-open
+   *   socket with no write left to blame, having just spent the whole budget)
+   *   or came back an error. Bounded and silent is the trade this whole area
+   *   exists to refuse: the overrun used to be visible only because the
+   *   shutdown step timed out, so a `close` that returns cleanly owes the line
+   *   instead.
    */
   function reportUnfinishedAtShutdown(outcome: {
     pendingWrites: number;
-    quitTimedOut: boolean;
+    quitOutcome: EventStoreQuitOutcome;
   }): void {
     const incident = shedding;
     shedding = null;
-    if (
-      outcome.pendingWrites === 0 &&
-      !outcome.quitTimedOut &&
-      incident === null
-    ) {
+    const quitWorked =
+      outcome.quitOutcome === "ok" || outcome.quitOutcome === "skipped";
+    if (outcome.pendingWrites === 0 && quitWorked && incident === null) {
       return;
     }
     options.onAppendsAbandonedAtShutdown?.({
       pendingWrites: outcome.pendingWrites,
       queuedAppends,
       droppedEvents: incident?.droppedEvents ?? 0,
-      quitTimedOut: outcome.quitTimedOut,
+      quitOutcome: outcome.quitOutcome,
       budgetMs: closeSettleTimeoutMs,
     });
   }
@@ -922,7 +940,7 @@ export async function createRedisEventStore(
       closing = true;
       const drained = await settleWithin(pendingAppend, closeSettleTimeoutMs);
       let pendingWrites = 0;
-      let quitTimedOut = false;
+      let quitOutcome: EventStoreQuitOutcome = "skipped";
       if (!drained) {
         // Nothing that has not started may start now: the connection is about
         // to go, and ioredis answers a command issued after it with a rejection
@@ -940,16 +958,35 @@ export async function createRedisEventStore(
         // hand `close_event_store` its timeout back (#264 review). The socket
         // goes instead — there is nothing left to be graceful about.
         redis.disconnect();
-      } else if (!(await settleWithin(redis.quit(), closeSettleTimeoutMs))) {
+      } else {
         // The chain drained, so nothing was queued ahead of `QUIT` and it
-        // should have answered at once. A reply that never came is a half-open
-        // socket with no write left to blame — and it just spent the whole
-        // budget, which is exactly the overrun that has to be reported rather
-        // than swallowed.
-        quitTimedOut = true;
-        redis.disconnect();
+        // should have answered at once. Three outcomes, not two: `settleWithin`
+        // answers "did it settle", and a `QUIT` that settles with a rejection
+        // settled just fine while leaving the connection in a state nobody
+        // checked (#266 review). So the rejection is caught here rather than
+        // absorbed, and only a clean answer counts as a graceful close.
+        let quitFailed = false;
+        const quitting = redis.quit().then(
+          () => undefined,
+          () => {
+            quitFailed = true;
+          },
+        );
+        const quitAnswered = await settleWithin(quitting, closeSettleTimeoutMs);
+        quitOutcome = !quitAnswered
+          ? "timed_out"
+          : quitFailed
+            ? "failed"
+            : "ok";
+        if (quitOutcome !== "ok") {
+          // A reply that never came is a half-open socket that just spent the
+          // whole budget; one that came back an error left the socket in a
+          // state nobody vouched for. Either way it goes down here rather than
+          // outliving the process's own shutdown.
+          redis.disconnect();
+        }
       }
-      reportUnfinishedAtShutdown({ pendingWrites, quitTimedOut });
+      reportUnfinishedAtShutdown({ pendingWrites, quitOutcome });
     },
   };
 }

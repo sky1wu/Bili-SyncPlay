@@ -507,7 +507,7 @@ test("close gives up on a hung write inside its budget, and says so", async () =
     pendingWrites: number;
     queuedAppends: number;
     droppedEvents: number;
-    quitTimedOut: boolean;
+    quitOutcome: string;
     budgetMs: number;
   }> = [];
   const store = await createStore(redis.client, {
@@ -536,7 +536,9 @@ test("close gives up on a hung write inside its budget, and says so", async () =
       pendingWrites: 1,
       queuedAppends: 1,
       droppedEvents: 0,
-      quitTimedOut: false,
+      // Never attempted: the drain had already run out, so the socket went
+      // down instead of a `QUIT` that would have queued behind the write.
+      quitOutcome: "skipped",
       budgetMs: 20,
     },
   ]);
@@ -548,16 +550,16 @@ test("close falls back to the socket when QUIT itself is not answered, and says 
   const abandoned: Array<{
     pendingWrites: number;
     droppedEvents: number;
-    quitTimedOut: boolean;
+    quitOutcome: string;
   }> = [];
   const store = await createStore(redis.client, {
     closeSettleTimeoutMs: 20,
     onAppendsAbandonedAtShutdown: ({
       pendingWrites,
       droppedEvents,
-      quitTimedOut,
+      quitOutcome,
     }) => {
-      abandoned.push({ pendingWrites, droppedEvents, quitTimedOut });
+      abandoned.push({ pendingWrites, droppedEvents, quitOutcome });
     },
   });
 
@@ -575,7 +577,7 @@ test("close falls back to the socket when QUIT itself is not answered, and says 
   // the entire close budget would be recorded as a clean shutdown (#266
   // review).
   assert.deepEqual(abandoned, [
-    { pendingWrites: 0, droppedEvents: 0, quitTimedOut: true },
+    { pendingWrites: 0, droppedEvents: 0, quitOutcome: "timed_out" },
   ]);
   stalledQuit.release();
 });
@@ -757,7 +759,7 @@ test("an incident still open when shutdown gives up is closed by the shutdown li
     pendingWrites: number;
     queuedAppends: number;
     droppedEvents: number;
-    quitTimedOut: boolean;
+    quitOutcome: string;
     budgetMs: number;
   }> = [];
   const store = await createStore(redis.client, {
@@ -825,4 +827,37 @@ test("an incident open with nothing left in flight is still closed at shutdown",
 
   assert.deepEqual(resumed, []);
   assert.deepEqual(abandoned, [{ pendingWrites: 0, droppedEvents: 1 }]);
+});
+
+test("a QUIT that answers with an error drops the socket and reports it", async () => {
+  const redis = createFakeEventRedis();
+  const abandoned: Array<{
+    pendingWrites: number;
+    droppedEvents: number;
+    quitOutcome: string;
+  }> = [];
+  const store = await createStore(redis.client, {
+    closeSettleTimeoutMs: 200,
+    onAppendsAbandonedAtShutdown: ({
+      pendingWrites,
+      droppedEvents,
+      quitOutcome,
+    }) => {
+      abandoned.push({ pendingWrites, droppedEvents, quitOutcome });
+    },
+  });
+
+  const failingClient = redis.client as { quit: () => Promise<unknown> };
+  failingClient.quit = () => Promise.reject(new Error("Connection is closed."));
+
+  await store.close();
+
+  // A rejected `QUIT` settles just as promptly as a successful one, so a
+  // "did it settle" answer calls this a graceful close and records a clean
+  // shutdown — with the connection left in a state nobody checked (#266
+  // review).
+  assert.deepEqual(abandoned, [
+    { pendingWrites: 0, droppedEvents: 0, quitOutcome: "failed" },
+  ]);
+  assert.equal(redis.disconnectCalls(), 1);
 });

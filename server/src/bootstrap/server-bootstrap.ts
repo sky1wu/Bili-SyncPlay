@@ -406,7 +406,7 @@ export async function createServerBootstrapContext(
             pendingWrites,
             queuedAppends,
             droppedEvents,
-            quitTimedOut,
+            quitOutcome,
             budgetMs,
           }) => {
             logEvent("runtime_event_appends_abandoned_at_shutdown", {
@@ -415,7 +415,7 @@ export async function createServerBootstrapContext(
               queuedAppends,
               // The other way an incident ends: shutdown got there first.
               droppedEvents,
-              quitTimedOut,
+              quitOutcome,
               budgetMs,
               result: "timeout",
             });

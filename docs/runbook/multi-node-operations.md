@@ -446,11 +446,14 @@ established to be overloaded:
   open, the log lines only bracket it.
 - `runtime_event_appends_abandoned_at_shutdown` — shutdown reached the end of
   `close_event_store` with something unfinished. `pendingWrites` commands were
-  still outstanding (in which case it dropped the socket rather than sending
-  `QUIT`, which would have queued behind them and inherited the same wait),
-  `quitTimedOut` says the graceful close ran out of budget too — a half-open
-  socket with no write left to blame — and/or an incident was still open, with
-  `droppedEvents` being what it had cost. This
+  still unanswered (in which case it dropped the socket rather than sending
+  `QUIT`, which would have queued behind them and inherited the same wait —
+  `quitOutcome="skipped"`), and/or the graceful close did not work
+  (`quitOutcome="timed_out"` is a half-open socket with no write left to blame,
+  `"failed"` is a `QUIT` that came back an error; both drop the socket), and/or
+  an incident was still open, with `droppedEvents` being what it had cost.
+  `pendingWrites` counts appends, not Redis commands — one append issues three
+  or four of them, and one append is one event. This
   is the **other ending** for a `..._dropped` line: an incident closes either
   with `..._resumed` (the store recovered) or with this (the process left
   first), never with neither. Before this budget existed the whole thing
