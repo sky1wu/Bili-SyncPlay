@@ -3,7 +3,35 @@ import type { GlobalEventStore } from "./admin/global-event-store.js";
 import type { MetricsCollector } from "./admin/metrics.js";
 import type { RuntimeStore } from "./runtime-store.js";
 
-const EVENT_STORE_EXCLUDED_EVENTS = new Set(["node_heartbeat_sent"]);
+/**
+ * The event store reporting on its own write queue, which must never go INTO
+ * the event store: routing a report through the queue it describes is
+ * reflexive — it would compete for the capacity it is reporting about — and the
+ * shedding line could never land anyway, since it is emitted precisely when the
+ * store is shedding (#266 review).
+ *
+ * With the store excluded, stdout is the only path these have, so both must
+ * infer `error`: `LOG_LEVEL=warn` deletes anything inferred as `info`, and a
+ * degradation signal a supported configuration silently deletes is not a
+ * signal. Both carry a `result` that already means `error`
+ * (`"error"`/`"timeout"`), so no special case is needed here — but the
+ * requirement is real, and `logger.test.ts` asserts it rather than the
+ * mechanism that happens to satisfy it.
+ */
+const EVENT_STORE_BACKPRESSURE_EVENTS = new Set([
+  "runtime_event_appends_abandoned_at_shutdown",
+  "runtime_event_appends_dropped",
+]);
+
+/** Excluded for volume rather than for reflexivity. */
+const HIGH_VOLUME_EXCLUDED_EVENTS = new Set(["node_heartbeat_sent"]);
+
+function isExcludedFromEventStore(event: string): boolean {
+  return (
+    HIGH_VOLUME_EXCLUDED_EVENTS.has(event) ||
+    EVENT_STORE_BACKPRESSURE_EVENTS.has(event)
+  );
+}
 
 const LEVEL_PRIORITY: Record<LogLevel, number> = {
   debug: 10,
@@ -97,7 +125,7 @@ export function createStructuredLogger(
       emitLine(JSON.stringify(payload));
     }
 
-    if (eventStore && !EVENT_STORE_EXCLUDED_EVENTS.has(event)) {
+    if (eventStore && !isExcludedFromEventStore(event)) {
       // .then() defers the append call so a synchronous throw is routed to
       // .catch() instead of escaping into the logging call site.
       void Promise.resolve()

@@ -8,6 +8,11 @@
  * (#261, #263). Room-lifecycle events stay visible, including
  * `room_persist_failed` and `room_index_reconcile_failed`, so their `reason`
  * variants are not listed here either.
+ *
+ * The `runtime_event_appends_*` lines are absent because they never reach the
+ * store to be filtered: `EVENT_STORE_EXCLUDED_EVENTS` in `logger.ts` keeps the
+ * event store's own backpressure reports out of the event store (#266 review).
+ * If that exclusion is ever lifted, they belong here.
  */
 const HIDDEN_SYSTEM_EVENTS = new Set([
   "admin_audit_log_append_failed",

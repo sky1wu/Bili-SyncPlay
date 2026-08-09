@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { createRetryPacer } from "../src/retry-pacer.js";
+import { createRetryPacer, settleWithin } from "../src/retry-pacer.js";
 import { MAX_TIMER_INTERVAL_MS } from "../src/timers.js";
 
 test("a cap past the 32-bit timer limit does not fire immediately", async () => {
@@ -40,4 +40,41 @@ test("a cap inside the limit still fires", async () => {
   // The call outlived its cap and is still pending — exactly the state
   // `settleTracked` exists for. Bounded, so this test does not sit out the 200ms.
   await pacer.settleTracked(10);
+});
+
+test("settleWithin reports whether the work settled or the budget ran out", async () => {
+  // Both answers matter to the caller, and they lead somewhere different:
+  // `redis-event-store.close` closes the connection either way, but only the
+  // second case owes an operator a line saying a command was still on it.
+  assert.equal(await settleWithin(delay(5, "done"), 200), true);
+  assert.equal(await settleWithin(new Promise(() => undefined), 5), false);
+});
+
+test("settleWithin absorbs a rejection rather than reporting it as a timeout", async () => {
+  // "It failed" is still an answer. Reporting a rejected write as abandoned
+  // would send a shutdown looking for a command that is no longer on the
+  // connection — and would leak the rejection as unhandled besides.
+  assert.equal(
+    await settleWithin(Promise.reject(new Error("boom")), 200),
+    true,
+  );
+});
+
+test("settleWithin does not hold the event loop open after the work settles", async () => {
+  const countRefdTimers = (): number =>
+    process.getActiveResourcesInfo().filter((kind) => kind === "Timeout")
+      .length;
+
+  // A delta, not an absolute count: earlier tests in this file leave their own
+  // timers armed, and this measures only the one `settleWithin` arms.
+  const before = countRefdTimers();
+  const settling = settleWithin(Promise.resolve(), 60_000);
+  const armed = countRefdTimers();
+  await settling;
+
+  assert.equal(armed, before + 1);
+  // A budget timer left armed after an early answer would keep the process
+  // alive for a full minute past a shutdown that already finished — the same
+  // defect an `unref`'d timer hides and this one would not.
+  assert.equal(countRefdTimers(), before);
 });

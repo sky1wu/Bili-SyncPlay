@@ -67,6 +67,36 @@ test("structured logger excludes successful node heartbeats from event storage",
   ]);
 });
 
+test("structured logger keeps the event store's own backpressure reports out of it", async () => {
+  const writtenLines: string[] = [];
+  const { appendedEvents, store } = createCapturingEventStore();
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    eventStore: store,
+  });
+
+  logger("runtime_event_appends_dropped", {
+    reason: "stalled",
+    result: "error",
+  });
+  logger("runtime_event_appends_abandoned_at_shutdown", {
+    pendingWrites: 1,
+    result: "timeout",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // These lines are the event store reporting on its own write queue, so
+  // routing them through that queue is reflexive — and the shedding line could
+  // never land anyway, since it is emitted precisely when the store is
+  // shedding (#266 review).
+  assert.deepEqual(appendedEvents, []);
+  // Still on stdout, where an operator and the log pipeline can see them —
+  // excluded from the store is not the same as silenced.
+  assert.equal(writtenLines.length, 2);
+});
+
 test("structured logger stamps default info level on emitted events", () => {
   const writtenLines: string[] = [];
   const logger = createStructuredLogger({
@@ -248,4 +278,70 @@ test("sampling counter resets per event name and does not leak across names", ()
     (line) => (JSON.parse(line) as { tag: string }).tag,
   );
   assert.deepEqual(tags, ["a", "b", "e"]);
+});
+
+test("the shedding line survives a raised log level", async () => {
+  const writtenLines: string[] = [];
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    logLevel: "warn",
+  });
+
+  // With the store excluded on purpose, stdout is the only path these have,
+  // and this threshold drops anything inferred as `info`. A degradation signal
+  // that a supported configuration silently deletes is not a signal.
+  // No explicit level: these go through the same inference every caller uses,
+  // which is where the rule has to live if bootstrap is not to be the only
+  // thing carrying it.
+  logger("runtime_event_appends_dropped", {
+    reason: "stalled",
+    result: "error",
+  });
+  logger("runtime_event_appends_abandoned_at_shutdown", {
+    pendingWrites: 1,
+    result: "timeout",
+  });
+
+  assert.equal(writtenLines.length, 2);
+  assert.match(
+    writtenLines[1] ?? "",
+    /runtime_event_appends_abandoned_at_shutdown/,
+  );
+});
+
+test("backpressure lines infer error level, whatever satisfies it", () => {
+  // Asserted as the requirement, not as the mechanism: excluded from the event
+  // store on purpose, stdout is all these have, and `LOG_LEVEL=warn` deletes
+  // anything inferred as `info` (#266 review). Today their `result` already
+  // means error; if a future line's does not, this is what says so.
+  assert.equal(
+    inferLogLevel("runtime_event_appends_dropped", { result: "error" }),
+    "error",
+  );
+  assert.equal(
+    inferLogLevel("runtime_event_appends_abandoned_at_shutdown", {
+      result: "timeout",
+    }),
+    "error",
+  );
+});
+
+test("both shutdown outcomes infer error, under the result each one deserves", () => {
+  // `failed` is a `QUIT` that came back an error; `timed_out` and `skipped` are
+  // budgets running out. A query aggregating on `result` would file the two
+  // under one diagnosis if the field were hardcoded (#266 review).
+  assert.equal(
+    inferLogLevel("runtime_event_appends_abandoned_at_shutdown", {
+      result: "error",
+    }),
+    "error",
+  );
+  assert.equal(
+    inferLogLevel("runtime_event_appends_abandoned_at_shutdown", {
+      result: "timeout",
+    }),
+    "error",
+  );
 });

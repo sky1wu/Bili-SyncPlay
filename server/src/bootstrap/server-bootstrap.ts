@@ -373,6 +373,44 @@ export async function createServerBootstrapContext(
           windowIndexKeyPrefix: getRedisEventWindowIndexKeyPrefix(
             persistenceConfig.redisNamespace,
           ),
+          metricsCollector,
+          // Wired here rather than through `loggingHooks`: the standalone
+          // global admin passes no hooks, and it runs the same store against
+          // the same Redis, so routing these through an opt-in would leave the
+          // process most likely to be watching the event list as the one that
+          // never says the list went incomplete.
+          // No explicit level: `logger.ts` pins these to `error` next to the
+          // rule that keeps them out of the event store, because both rules
+          // exist for the same reason and a policy split across two files
+          // drifts apart (#266 review).
+          onAppendsDropped: ({ reason }) => {
+            logEvent("runtime_event_appends_dropped", {
+              instanceId: persistenceConfig.instanceId,
+              reason,
+              result: "error",
+            });
+          },
+          onAppendsAbandonedAtShutdown: ({
+            pendingWrites,
+            queuedAppends,
+            quitOutcome,
+            budgetMs,
+          }) => {
+            logEvent("runtime_event_appends_abandoned_at_shutdown", {
+              instanceId: persistenceConfig.instanceId,
+              pendingWrites,
+              queuedAppends,
+              quitOutcome,
+              budgetMs,
+              // Derived, not hardcoded: a `QUIT` that came back an ERROR is not
+              // a timeout, and a query aggregating on `result` would file the
+              // two under one diagnosis while the runbook tells operators to
+              // tell them apart (#266 review). The two are mutually exclusive —
+              // `pendingWrites > 0` only happens on the path that never sent a
+              // `QUIT` at all.
+              result: quitOutcome === "failed" ? "error" : "timeout",
+            });
+          },
         })
       : createEventStore();
 

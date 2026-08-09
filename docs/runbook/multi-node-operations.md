@@ -404,6 +404,78 @@ different questions: "others cannot see it" and "it knows why".
 As with the reaper, the cap only bounds how long the heartbeat waits, not the
 command: the runtime store's client sets no `commandTimeout` either.
 
+### Why is the admin event list missing events?
+
+Only with `ADMIN_EVENT_STORE_PROVIDER=redis`. That store writes one chain of
+Redis commands per logged event, and when Redis stops answering it **sheds**
+rather than queueing: the list goes incomplete and every count derived from the
+stream reads low, but the process keeps its memory and shutdown still finishes
+(#264).
+
+It does **not** keep the events page available. Reads share the one connection
+with the writes and Redis answers in order, so once the store knows the
+connection is stalled it **refuses** admin reads with `503
+event_store_unavailable` rather than issuing a command that would queue behind
+the stuck write and never return. A 503 here means Redis, not the admin
+process — check Redis first, then retry. What shedding protects is the process,
+not the page.
+
+`bili_syncplay_event_store_appends_dropped_total` is the signal, and its
+`reason` label is the diagnosis:
+
+- `reason="stalled"` — the write in flight is past its 5s cap. Redis has stopped
+  answering: a stalled connection or a blocked server. Everything logged for as
+  long as it lasts is dropped, and admin reads are refused.
+- `reason="overflow"` — Redis is answering, just slower than events arrive, and
+  the queue behind it reached its 1000-event depth limit. The store is behind,
+  not broken; the same reading as the reaper's `skipped`. Reads still work.
+
+```promql
+# Is it shedding right now, and for which reason?
+sum(rate(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance, reason)
+
+# What did an incident cost, over the window you are looking at?
+sum(increase(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance)
+```
+
+**Read the metric, not the logs, for "is it still happening" and "how much".**
+The logs carry two facts and make no claim beyond them:
+
+- `runtime_event_appends_dropped` — the store is shedding, for this `reason`.
+  Throttled to one line per reason per minute, so a stall that lasts an hour is
+  not one line an hour old and a busy node is not one line per dropped event.
+  There is deliberately no matching "resumed" line: a start/end pair is an
+  invariant nothing in a log stream can enforce, and #266 spent four review
+  rounds finding states that broke it.
+- `runtime_event_appends_abandoned_at_shutdown` — shutdown reached the end of
+  `close_event_store` with something unfinished: `pendingWrites` appends whose
+  commands had not all answered (appends, not Redis commands — one append issues
+  three or four), and/or a graceful close that did not work. `quitOutcome` says
+  which: `skipped` (the drain had already run out, so the socket was dropped
+  rather than sending a `QUIT` that would queue behind the stuck write),
+  `timed_out` (a half-open socket with no write left to blame), `failed` (a
+  `QUIT` that came back an error). Before this budget existed, all of it
+  appeared as a `server_shutdown_step_failed` for `close_event_store`, every
+  single time Redis was hung.
+
+Both lines are `error` level regardless of `LOG_LEVEL` — they are excluded from
+the event store on purpose, so stdout is the only path they have.
+
+As with the reaper and the heartbeat, the cap bounds how long the store waits,
+not the command: this client sets no `commandTimeout` either. A read issued
+before the store noticed the stall is still exposed, and so is one issued while
+Redis is hung with no write of ours in flight to notice it by.
+
+What this does **not** affect: alerting. `bili_syncplay_*` metrics are in-process
+counters served from `/metrics`, and error-level logs go to stdout
+unconditionally. Neither path goes through the event store. The admin event list
+and the counts on the overview page are the only things that lose data.
+
+Room nodes and the standalone global admin both run this store against the same
+Redis, and both report. The in-memory default (`ADMIN_EVENT_STORE_PROVIDER`
+unset) is a synchronous array push that cannot drop, and exports no series at
+all.
+
 When troubleshooting, check these together first:
 
 ```bash
