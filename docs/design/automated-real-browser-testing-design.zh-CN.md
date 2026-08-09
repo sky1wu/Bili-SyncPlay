@@ -264,7 +264,7 @@ fixture 不暴露 extension store 的任意写接口。`snapshot()` 只读取用
 
 Page model 只封装稳定交互，不承担业务判定：
 
-- `PopupPage`：服务器地址、房间表单、邀请、成员、共享视频卡片、设置和日志；实例记录它来自 action popup 还是普通扩展页，活动-tab-dependent 操作拒绝在普通扩展页实例上执行。
+- `PopupPage`：服务器地址、房间表单、邀请、成员、共享视频卡片、设置和日志；通过真实高级信息 summary 分别暴露 open/close 操作，close 必须断言服务器地址、页内按钮设置和日志内容重新隐藏。服务器地址 adapter 把普通 `ws://` / `wss://` 保存、空白值回退默认地址、首尾空格裁剪、非法值和入房后换址重连作为独立操作，两个调整操作分别核验输入框回填值及包含该值的“已调整”反馈。实例记录它来自 action popup 还是普通扩展页，活动-tab-dependent 操作拒绝在普通扩展页实例上执行。
 - `BilibiliPage`：视频元素、页面身份、可见 toast、页内分享按钮、导航、真实键盘长按/释放和 fixture 控制面。
 - `AdminPage`：登录与已有 token 的身份恢复重试；通过真实侧栏菜单分别导航到 overview、rooms、events、audit、config，并核验 path、页头标题、唯一选中项和目标页面内容；处理房间选择、详情、每种单项/批量治理确认框的确认与取消，以及批量结果框关闭。取消和结果关闭 helper 必须点击真实按钮并观测稳定窗口内没有治理请求，不能直接调用 React 回调或移除 DOM。
 
@@ -360,9 +360,9 @@ CI 无论成功或失败都上传已通过扫描的 `metadata.json` 和摘要；
 单条场景完成最小完整旅程：
 
 1. owner 打开普通视频夹具。
-2. owner popup 保存随机服务端地址并创建房间。
+2. owner popup 点击高级信息 summary 打开面板，保存随机服务端地址，点击同一 summary 关闭并确认内部内容隐藏，再创建房间。
 3. 从剪贴板读取邀请串。
-4. member popup 保存与 owner 相同的随机服务端地址，再输入邀请串加入。
+4. member popup 同样打开高级信息面板，保存与 owner 相同的随机服务端地址并关闭面板，再输入邀请串加入。
 5. owner 分享当前视频。
 6. member 自动打开共享视频。
 7. 在没有任何 fixture 直接 `play()` 或伪造用户激活的前提下，先断言 owner/member 媒体均从解析起保持静音，再由 owner 依次 play、seek、修改倍速、pause。
