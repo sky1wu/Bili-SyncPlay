@@ -1874,20 +1874,29 @@ export async function createRedisRuntimeStore(
       // how a close could report `pendingCommands: 0` and skip the report
       // entirely, which is "bounded but silent", the one outcome this whole
       // area exists to refuse (#270 review).
-      await settleWithin(
-        (async () => {
-          while (
-            activeRedisCommands.size > 0 ||
-            commandPacer.trackedCount() > 0
-          ) {
-            await Promise.allSettled([
-              ...Array.from(activeRedisCommands),
-              commandPacer.settleTracked(pendingOperationTimeoutMs),
-            ]);
-          }
-        })(),
-        pendingOperationTimeoutMs,
-      );
+      //
+      // The loop belongs to the wait, so it has to end with it. `settleWithin`
+      // answers the caller at the budget but cannot stop what it was waiting
+      // on: left running, a round that finds commands settled and attempts
+      // still outstanding would come back every `pendingOperationTimeoutMs`,
+      // arming a fresh ref'd timer inside `settleTracked` each time — an
+      // unbounded background loop started by a bounded wait, keeping the
+      // process alive long after `close()` said it was done (#272 review).
+      let stopDraining = false;
+      const draining = (async () => {
+        while (
+          !stopDraining &&
+          (activeRedisCommands.size > 0 || commandPacer.trackedCount() > 0)
+        ) {
+          await Promise.allSettled([
+            ...Array.from(activeRedisCommands),
+            commandPacer.settleTracked(pendingOperationTimeoutMs),
+          ]);
+        }
+      })();
+      if (!(await settleWithin(draining, pendingOperationTimeoutMs))) {
+        stopDraining = true;
+      }
       // Sample before `quitWithin` may force-disconnect the socket and reject
       // these promises. This is the count that was still in flight when the
       // graceful close began, not the (usually zero) cleanup count afterwards.
