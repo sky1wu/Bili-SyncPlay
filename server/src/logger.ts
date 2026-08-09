@@ -4,23 +4,39 @@ import type { MetricsCollector } from "./admin/metrics.js";
 import type { RuntimeStore } from "./runtime-store.js";
 
 /**
- * Events that go to stdout and the metrics, but never to the event store.
+ * The event store reporting on its own write queue. Two rules, one list,
+ * because they have one reason (#266 review).
  *
- * `node_heartbeat_sent` is here for volume. The `runtime_event_appends_*` lines
- * are here for a different reason: they are the event store reporting on its
- * own write queue, so routing them through that queue is reflexive. Feeding
- * them back in makes the report compete for the capacity it is reporting about
- * — a resumed line takes the slot that just freed, which puts the store one
- * event away from shedding again and produces a resumed/dropped pair per
- * completed write at a steady overload (#266 review). The dropped line could
- * never land anyway: it is emitted precisely when the store is shedding.
+ * **Never into the event store.** Routing them through the queue they describe
+ * is reflexive: the report competes for the capacity it is reporting about — a
+ * resumed line takes the slot that just freed, which puts the store one event
+ * away from shedding again and yields a resumed/dropped pair per completed
+ * write at a steady overload. The dropped line could never land anyway; it is
+ * emitted precisely when the store is shedding.
+ *
+ * **Always `error`.** Not a severity claim about a recovery, a routing one:
+ * these lines bracket an incident, and the pair has to survive the same
+ * `LOG_LEVEL`. `result: "ok"` on the closing line infers `info`, which
+ * `LOG_LEVEL=warn` drops from stdout — and with the store excluded above, that
+ * left it no output path at all while the opening line stayed visible. A pair
+ * where only the start survives reads as an incident that never ended, which is
+ * the exact failure this whole area exists to prevent.
  */
-const EVENT_STORE_EXCLUDED_EVENTS = new Set([
-  "node_heartbeat_sent",
+const EVENT_STORE_BACKPRESSURE_EVENTS = new Set([
   "runtime_event_appends_abandoned_at_shutdown",
   "runtime_event_appends_dropped",
   "runtime_event_appends_resumed",
 ]);
+
+/** Excluded for volume rather than for reflexivity. */
+const HIGH_VOLUME_EXCLUDED_EVENTS = new Set(["node_heartbeat_sent"]);
+
+function isExcludedFromEventStore(event: string): boolean {
+  return (
+    HIGH_VOLUME_EXCLUDED_EVENTS.has(event) ||
+    EVENT_STORE_BACKPRESSURE_EVENTS.has(event)
+  );
+}
 
 const LEVEL_PRIORITY: Record<LogLevel, number> = {
   debug: 10,
@@ -44,6 +60,11 @@ export function inferLogLevel(
   event: string,
   data: Record<string, unknown>,
 ): LogLevel {
+  // Before the result map, which would call the closing line `info` and let a
+  // raised threshold drop it. See EVENT_STORE_BACKPRESSURE_EVENTS.
+  if (EVENT_STORE_BACKPRESSURE_EVENTS.has(event)) {
+    return "error";
+  }
   const result = data.result;
   if (typeof result === "string") {
     const mapped = LEVEL_BY_RESULT[result];
@@ -114,7 +135,7 @@ export function createStructuredLogger(
       emitLine(JSON.stringify(payload));
     }
 
-    if (eventStore && !EVENT_STORE_EXCLUDED_EVENTS.has(event)) {
+    if (eventStore && !isExcludedFromEventStore(event)) {
       // .then() defers the append call so a synchronous throw is routed to
       // .catch() instead of escaping into the logging call site.
       void Promise.resolve()

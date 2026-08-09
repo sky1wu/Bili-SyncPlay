@@ -72,10 +72,7 @@ const READ_APPEND_SETTLE_TIMEOUT_MS = 1_000;
 const CLOSE_APPEND_SETTLE_TIMEOUT_MS = 1_500;
 
 /** Reported once per incident, unlike the metric, which counts every drop. */
-export type EventStoreSheddingReason = Exclude<
-  EventStoreAppendDropReason,
-  "closing"
->;
+export type EventStoreSheddingReason = EventStoreAppendDropReason;
 
 /** Distinguishes "the cap won the race" from "the write failed". */
 class EventStoreAppendTimeoutError extends Error {
@@ -336,6 +333,8 @@ export type RedisEventStoreOptions = {
   onAppendsAbandonedAtShutdown?: (info: {
     pendingWrites: number;
     queuedAppends: number;
+    /** What an incident still open at shutdown had cost. 0 when none was open. */
+    droppedEvents: number;
     budgetMs: number;
   }) => void;
 };
@@ -407,12 +406,8 @@ export async function createRedisEventStore(
   // permanent zero the declaration gate exists to avoid.
   metricsCollector?.declareEventStoreAppends();
 
-  function countDroppedAppend(reason: EventStoreAppendDropReason): void {
-    metricsCollector?.recordEventStoreAppendDropped(reason);
-  }
-
   function shedAppend(reason: EventStoreSheddingReason): void {
-    countDroppedAppend(reason);
+    metricsCollector?.recordEventStoreAppendDropped(reason);
     if (shedding !== null) {
       // The diagnosis can change mid-incident: `overflow` becoming `stalled` is
       // Redis going from behind to not answering at all, and the two need
@@ -444,10 +439,17 @@ export async function createRedisEventStore(
   /**
    * End the incident once the store is comfortably accepting again.
    *
-   * Driven by a write settling rather than by the next `append`, because that
+   * Driven by a write LANDING rather than by the next `append`, because that
    * append may never come: a node whose traffic went quiet during the stall
    * would log a start with no end, and an operator reading that has no way to
    * tell an incident that ended from one still running (#266 review).
+   *
+   * Landing, not merely settling. A write that finally answers with a rejection
+   * — ioredis rejecting after a disconnect and its retries — leaves the store
+   * able to accept appends but not able to store them, and calling that a
+   * recovery puts a cheerful line immediately before a run of
+   * `runtime_event_append_failed`. Only a write that succeeded shows the store
+   * works again.
    *
    * Well below the depth limit, not at it. Resuming the moment one slot frees
    * leaves the store one event away from shedding again, which under a steady
@@ -455,10 +457,38 @@ export async function createRedisEventStore(
    * this whole design exists to avoid, moved to the other edge.
    */
   function endSheddingIfRecovered(): void {
-    if (closing || writeIsStalled || queuedAppends > resumeAtQueuedAppends) {
+    if (writeIsStalled || queuedAppends > resumeAtQueuedAppends) {
       return;
     }
     resumeAppends();
+  }
+
+  /**
+   * The other terminator: shutdown reached the end of `close` with something
+   * unfinished.
+   *
+   * Two things can be unfinished, and either one on its own is worth a line:
+   * commands still on the connection that is about to go, and an incident whose
+   * start line would otherwise never be closed. `resumeAppends` cannot close
+   * that incident — the store did not recover, the process is leaving — so
+   * every `runtime_event_appends_dropped` gets exactly one of these two endings
+   * (#266 review).
+   */
+  function reportUnfinishedAtShutdown(): void {
+    const pendingWrites = pacer.trackedCount();
+    const incident = shedding;
+    shedding = null;
+    if (pendingWrites === 0 && incident === null) {
+      return;
+    }
+    options.onAppendsAbandonedAtShutdown?.({
+      // Read AFTER the wait, so this is what outlived the budget rather than
+      // what was outstanding when the budget started.
+      pendingWrites,
+      queuedAppends,
+      droppedEvents: incident?.droppedEvents ?? 0,
+      budgetMs: closeSettleTimeoutMs,
+    });
   }
 
   async function mergeLegacyCountsIfNeeded() {
@@ -779,7 +809,6 @@ export async function createRedisEventStore(
       // path already established to be overloaded. Drops are reported in
       // aggregate instead, by `shedAppend`.
       if (closing) {
-        countDroppedAppend("closing");
         return Promise.resolve(runtimeEvent);
       }
       if (writeIsStalled) {
@@ -796,15 +825,26 @@ export async function createRedisEventStore(
 
       queuedAppends += 1;
       const appendPromise = pendingAppend.then(async () => {
+        let landed = false;
         try {
           if (abandonQueuedAppends) {
-            countDroppedAppend("closing");
             return runtimeEvent;
           }
-          return await writeEvent(input, timestamp, details, runtimeEvent);
+          const written = await writeEvent(
+            input,
+            timestamp,
+            details,
+            runtimeEvent,
+          );
+          landed = true;
+          return written;
         } finally {
           queuedAppends -= 1;
-          endSheddingIfRecovered();
+          // Only a write that landed. A rejection settles the queue just as
+          // well but proves nothing about the store working again.
+          if (landed) {
+            endSheddingIfRecovered();
+          }
         }
       });
 
@@ -874,13 +914,9 @@ export async function createRedisEventStore(
         // — which the logger would turn into one `runtime_event_append_failed`
         // line per queued event, after shutdown reported it was done.
         abandonQueuedAppends = true;
-        options.onAppendsAbandonedAtShutdown?.({
-          // Reads AFTER the wait, so this is what outlived the budget rather
-          // than what was outstanding when the budget started.
-          pendingWrites: pacer.trackedCount(),
-          queuedAppends,
-          budgetMs: closeSettleTimeoutMs,
-        });
+      }
+      reportUnfinishedAtShutdown();
+      if (!drained) {
         // NOT `quit()`. `QUIT` is an ordinary command on this connection:
         // ioredis appends it to the same `commandQueue` and matches replies in
         // order, so it cannot answer before the write we just gave up on. A

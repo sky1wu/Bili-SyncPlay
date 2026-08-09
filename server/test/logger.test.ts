@@ -285,3 +285,55 @@ test("sampling counter resets per event name and does not leak across names", ()
   );
   assert.deepEqual(tags, ["a", "b", "e"]);
 });
+
+test("an incident's start and end lines survive the same log level", async () => {
+  const writtenLines: string[] = [];
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    logLevel: "warn",
+  });
+
+  // `result: "ok"` would infer `info`, which this threshold drops — and since
+  // these events are excluded from the event store on purpose, the closing half
+  // of the pair would then have no output path left at all while the opening
+  // half stayed visible (#266 review).
+  // No explicit level: these go through the same inference every caller uses,
+  // which is where the rule has to live if bootstrap is not to be the only
+  // thing keeping the pair together.
+  logger("runtime_event_appends_dropped", {
+    reason: "stalled",
+    result: "error",
+  });
+  logger("runtime_event_appends_resumed", {
+    reason: "stalled",
+    droppedEvents: 12,
+    result: "ok",
+  });
+
+  // A pair where only the start survives the threshold is worse than no pair:
+  // it reads as an incident that never ended.
+  assert.equal(writtenLines.length, 2);
+  assert.match(writtenLines[1] ?? "", /runtime_event_appends_resumed/);
+});
+
+test("an incident bracket is error-level by inference, not by its caller", () => {
+  // The rule lives with the event-store exclusion because they share a reason.
+  // Left to `result`, the closing line infers `info` and a raised LOG_LEVEL
+  // drops it while the opening line survives (#266 review).
+  assert.equal(
+    inferLogLevel("runtime_event_appends_resumed", { result: "ok" }),
+    "error",
+  );
+  assert.equal(
+    inferLogLevel("runtime_event_appends_dropped", { result: "error" }),
+    "error",
+  );
+  assert.equal(
+    inferLogLevel("runtime_event_appends_abandoned_at_shutdown", {
+      result: "timeout",
+    }),
+    "error",
+  );
+});

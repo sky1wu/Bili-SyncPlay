@@ -397,7 +397,7 @@ test("metrics collector exports event store drops only where a store can drop", 
   const declared = await metrics.render();
   // Seeded on declaration, so the first scrape after a restart already says
   // "nothing dropped" rather than saying nothing at all.
-  for (const reason of ["stalled", "overflow", "closing"]) {
+  for (const reason of ["stalled", "overflow"]) {
     assert.match(
       declared,
       new RegExp(
@@ -422,8 +422,9 @@ test("metrics collector exports event store drops only where a store can drop", 
     counted,
     /^bili_syncplay_event_store_appends_dropped_total\{reason="overflow"\} 1$/m,
   );
-  assert.match(
-    counted,
-    /^bili_syncplay_event_store_appends_dropped_total\{reason="closing"\} 0$/m,
-  );
+  // Deliberately no `closing` series: shutdown closes the metrics HTTP server
+  // before the event store, so a counter moved there is never scraped. What
+  // shutdown loses is reported in `runtime_event_appends_abandoned_at_shutdown`
+  // instead (#266 review).
+  assert.equal(counted.includes('reason="closing"'), false);
 });

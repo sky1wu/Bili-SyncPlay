@@ -506,6 +506,7 @@ test("close gives up on a hung write inside its budget, and says so", async () =
   const abandoned: Array<{
     pendingWrites: number;
     queuedAppends: number;
+    droppedEvents: number;
     budgetMs: number;
   }> = [];
   const store = await createStore(redis.client, {
@@ -530,7 +531,7 @@ test("close gives up on a hung write inside its budget, and says so", async () =
   // that just went down, and that used to be visible only because the step
   // timed out.
   assert.deepEqual(abandoned, [
-    { pendingWrites: 1, queuedAppends: 1, budgetMs: 20 },
+    { pendingWrites: 1, queuedAppends: 1, droppedEvents: 0, budgetMs: 20 },
   ]);
   hung.release();
 });
@@ -636,4 +637,163 @@ test("drops reach the metric, in the reason that names the diagnosis", async () 
     hung.release();
     await store.close();
   }
+});
+
+test("a write that answers with an error is not reported as a recovery", async () => {
+  let failNextWrite = true;
+  const redis = createFakeEventRedis({
+    xadd: async () => {
+      if (failNextWrite) {
+        failNextWrite = false;
+        throw new Error("Connection is closed.");
+      }
+      return "1-0";
+    },
+  });
+  const dropped: string[] = [];
+  const resumed: unknown[] = [];
+  const store = await createStore(redis.client, {
+    appendTimeoutMs: 60_000,
+    maxPendingAppends: 1,
+    closeSettleTimeoutMs: 200,
+    onAppendsDropped: ({ reason }) => {
+      dropped.push(reason);
+    },
+    onAppendsResumed: (info) => {
+      resumed.push(info);
+    },
+  });
+
+  try {
+    const failing = store.append(appendInput(0));
+    store.append(appendInput(1));
+    assert.deepEqual(dropped, ["overflow"]);
+
+    await assert.rejects(Promise.resolve(failing), /Connection is closed/);
+    // The queue drained, so the store can accept again — but it cannot store
+    // anything, and calling that a recovery puts a cheerful line immediately
+    // before a run of `runtime_event_append_failed` (#266 review).
+    assert.deepEqual(resumed, []);
+
+    // The incident closes on a write that actually lands.
+    await store.append(appendInput(2));
+    assert.deepEqual(resumed, [
+      { reason: "overflow", startedAsReason: "overflow", droppedEvents: 1 },
+    ]);
+  } finally {
+    await store.close();
+  }
+});
+
+test("an incident that recovers during shutdown is still closed", async () => {
+  const hung = createBlockedWrite({ blockedCalls: 1 });
+  const redis = createFakeEventRedis({ xadd: hung.write });
+  const dropped: string[] = [];
+  const resumed: unknown[] = [];
+  const store = await createStore(redis.client, {
+    appendTimeoutMs: 20,
+    maxPendingAppends: 4,
+    closeSettleTimeoutMs: 200,
+    onAppendsDropped: ({ reason }) => {
+      dropped.push(reason);
+    },
+    onAppendsResumed: (info) => {
+      resumed.push(info);
+    },
+  });
+
+  const stalling = store.append(appendInput(0));
+  await delay(50);
+  store.append(appendInput(1));
+  assert.deepEqual(dropped, ["stalled"]);
+
+  // The write lands inside the drain budget, so shutdown takes the graceful
+  // `QUIT` path and the pending-writes report never fires. A recovery check
+  // that stood down as soon as `closing` was set would leave the dropped line
+  // with no ending at all (#266 review).
+  hung.release();
+  await store.close();
+  await stalling;
+
+  assert.deepEqual(resumed, [
+    { reason: "stalled", startedAsReason: "stalled", droppedEvents: 1 },
+  ]);
+  assert.equal(redis.quitCalls(), 1);
+});
+
+test("an incident still open when shutdown gives up is closed by the shutdown line", async () => {
+  const hung = createBlockedWrite();
+  const redis = createFakeEventRedis({ xadd: hung.write });
+  const resumed: unknown[] = [];
+  const abandoned: Array<{
+    pendingWrites: number;
+    queuedAppends: number;
+    droppedEvents: number;
+    budgetMs: number;
+  }> = [];
+  const store = await createStore(redis.client, {
+    appendTimeoutMs: 20,
+    maxPendingAppends: 4,
+    closeSettleTimeoutMs: 20,
+    onAppendsResumed: (info) => {
+      resumed.push(info);
+    },
+    onAppendsAbandonedAtShutdown: (info) => {
+      abandoned.push(info);
+    },
+  });
+
+  void store.append(appendInput(0));
+  await delay(50);
+  void store.append(appendInput(1));
+  void store.append(appendInput(2));
+
+  await store.close();
+
+  // Not a resume — the store never recovered, the process is leaving. But the
+  // dropped line still gets exactly one ending, and this is the other one:
+  // what the incident had cost by the time shutdown stopped waiting.
+  assert.deepEqual(resumed, []);
+  assert.equal(abandoned.length, 1);
+  assert.equal(abandoned[0]?.droppedEvents, 2);
+  assert.equal(abandoned[0]?.pendingWrites, 1);
+  assert.equal(redis.disconnectCalls(), 1);
+  hung.release();
+});
+
+test("an incident open with nothing left in flight is still closed at shutdown", async () => {
+  const redis = createFakeEventRedis({
+    xadd: async () => {
+      throw new Error("Connection is closed.");
+    },
+  });
+  const resumed: unknown[] = [];
+  const abandoned: Array<{
+    pendingWrites: number;
+    droppedEvents: number;
+  }> = [];
+  const store = await createStore(redis.client, {
+    appendTimeoutMs: 60_000,
+    maxPendingAppends: 1,
+    closeSettleTimeoutMs: 200,
+    onAppendsResumed: (info) => {
+      resumed.push(info);
+    },
+    onAppendsAbandonedAtShutdown: ({ pendingWrites, droppedEvents }) => {
+      abandoned.push({ pendingWrites, droppedEvents });
+    },
+  });
+
+  const failing = store.append(appendInput(0));
+  store.append(appendInput(1));
+  await assert.rejects(Promise.resolve(failing), /Connection is closed/);
+
+  // Nothing is in flight — the write answered, with an error — so the chain
+  // drains and shutdown takes the graceful path. But the incident is still
+  // open: a rejection is not a recovery, so nothing closed it. Reporting only
+  // on outstanding commands would leave this dropped line with no ending.
+  await store.close();
+
+  assert.deepEqual(resumed, []);
+  assert.deepEqual(abandoned, [{ pendingWrites: 0, droppedEvents: 1 }]);
 });

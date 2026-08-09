@@ -66,14 +66,13 @@ export type RoomReaperSweepResult = (typeof ROOM_REAPER_SWEEP_RESULTS)[number];
 //                is shedding until it answers.
 //  - `overflow`: Redis is answering, just slower than events arrive, and the
 //                queue behind it hit its depth limit.
-//  - `closing`:  shutdown reached its budget with writes still queued. Expected
-//                on a hung shutdown, and not counted as a degradation anywhere
-//                else, so this is the only place it is visible.
-const EVENT_STORE_APPEND_DROP_REASONS = [
-  "stalled",
-  "overflow",
-  "closing",
-] as const;
+//
+// Deliberately no `closing` reason. Shutdown closes the metrics HTTP server
+// before it closes the event store (`app.ts`, `global-admin-app.ts`), so a
+// counter moved at that point cannot be scraped — and even reordered, the
+// window is sub-second against a 15s scrape. What shutdown loses is reported in
+// `runtime_event_appends_abandoned_at_shutdown` instead (#266 review).
+const EVENT_STORE_APPEND_DROP_REASONS = ["stalled", "overflow"] as const;
 
 export type EventStoreAppendDropReason =
   (typeof EVENT_STORE_APPEND_DROP_REASONS)[number];

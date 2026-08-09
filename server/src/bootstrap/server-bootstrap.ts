@@ -379,6 +379,10 @@ export async function createServerBootstrapContext(
           // the same Redis, so routing these through an opt-in would leave the
           // process most likely to be watching the event list as the one that
           // never says the list went incomplete.
+          // No explicit level on any of these: `logger.ts` pins the whole
+          // bracket to `error` next to the rule that keeps it out of the event
+          // store, because both rules exist for the same reason and a pair
+          // split across two files drifts apart (#266 review).
           onAppendsDropped: ({ reason }) => {
             logEvent("runtime_event_appends_dropped", {
               instanceId: persistenceConfig.instanceId,
@@ -401,12 +405,15 @@ export async function createServerBootstrapContext(
           onAppendsAbandonedAtShutdown: ({
             pendingWrites,
             queuedAppends,
+            droppedEvents,
             budgetMs,
           }) => {
             logEvent("runtime_event_appends_abandoned_at_shutdown", {
               instanceId: persistenceConfig.instanceId,
               pendingWrites,
               queuedAppends,
+              // The other way an incident ends: shutdown got there first.
+              droppedEvents,
               budgetMs,
               result: "timeout",
             });

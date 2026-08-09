@@ -426,8 +426,6 @@ section. What shedding protects is the process, not the page.
 - `reason="overflow"` — Redis is answering, just slower than events arrive, and
   the queue behind it reached its 1000-event depth limit. The store is behind,
   not broken; the same reading as the reaper's `skipped`.
-- `reason="closing"` — shutdown reached its 1.5s drain budget with writes still
-  queued. Expected on a node whose Redis was already stalled.
 
 ```promql
 sum(rate(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance, reason)
@@ -446,12 +444,23 @@ established to be overloaded:
   a Redis that was behind stopped answering altogether. **The live stage is the
   metric's job, not the log's** — the `reason` label moves while the incident is
   open, the log lines only bracket it.
-- `runtime_event_appends_abandoned_at_shutdown` — `close_event_store` returned on
-  its own budget with `pendingWrites` commands still outstanding, and dropped the
-  socket rather than sending `QUIT` (which would have queued behind them and
-  inherited the same wait). Before that budget existed this appeared as a
-  `server_shutdown_step_failed` for `close_event_store`, every single time Redis
-  was hung.
+- `runtime_event_appends_abandoned_at_shutdown` — shutdown reached the end of
+  `close_event_store` with something unfinished. `pendingWrites` commands were
+  still outstanding (in which case it dropped the socket rather than sending
+  `QUIT`, which would have queued behind them and inherited the same wait),
+  and/or an incident was still open — `droppedEvents` is what it had cost. This
+  is the **other ending** for a `..._dropped` line: an incident closes either
+  with `..._resumed` (the store recovered) or with this (the process left
+  first), never with neither. Before this budget existed the whole thing
+  appeared as a `server_shutdown_step_failed` for `close_event_store`, every
+  single time Redis was hung.
+
+Shutdown drops are not on the metric on purpose: `close_metrics_http_server`
+runs before `close_event_store`, so a counter moved there is never scraped. The
+line above is where that loss is reported.
+
+All three lines are `error` level regardless of `LOG_LEVEL`, so an incident's
+start and end always appear together.
 
 As with the reaper and the heartbeat, the cap bounds how long the store waits,
 not the command: this client sets no `commandTimeout` either. Since it is one
