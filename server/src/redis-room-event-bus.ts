@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import type { MetricsCollector } from "./admin/metrics.js";
+import { connectWithin } from "./redis-command-timeout.js";
 import { quitAllWithin, type RedisQuitReport } from "./redis-graceful-close.js";
 import {
   createRedisPubSubClientPair,
@@ -89,7 +90,16 @@ export async function createRedisRoomEventBus(
   } = {},
 ): Promise<RoomEventBus & { close: () => Promise<void> }> {
   const { publisher: publishClient, subscriber: subscribeClient } =
-    options.redisClients ?? createRedisPubSubClientPair(redisUrl);
+    options.redisClients ??
+    // Exempt: `pending-resync-queue` keeps at most one publish per room out at
+    // a time, and it learns that the previous one is still out there only by
+    // its silence. A backstop would settle it and turn "one publish, retried
+    // when it answers" into one publish per retry (#242, #271).
+    createRedisPubSubClientPair(redisUrl, {
+      bound: "caller",
+      boundedBy:
+        "pending-resync-queue's capAttempt and its in-flight wait; the room event consumer's own handling",
+    });
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const channel = options.channel ?? DEFAULT_ROOM_EVENT_CHANNEL;
@@ -107,7 +117,12 @@ export async function createRedisRoomEventBus(
     options.onConnectionError?.("subscriber", error);
   });
 
-  await Promise.all([publishClient.connect(), subscribeClient.connect()]);
+  // The exemption is about commands; the handshake is not one of them and has
+  // no bound of its own without a `commandTimeout` (#271 review).
+  await Promise.all([
+    connectWithin(publishClient),
+    connectWithin(subscribeClient),
+  ]);
 
   async function ensureSubscription(): Promise<void> {
     if (!subscribed) {

@@ -7,6 +7,7 @@ import { createAuditLogService } from "../admin/audit-log.js";
 import { createInMemoryAdminSessionStore } from "../admin/auth-store.js";
 import { createAdminAuthService } from "../admin/auth-service.js";
 import { createAdminConfigService } from "../admin/config-service.js";
+import { createDiagnosisThrottle } from "../diagnosis-throttle.js";
 import { createAdminLoginRateLimiter } from "../admin/login-rate-limit.js";
 import type { GlobalAuditStore } from "../admin/global-audit-store.js";
 import type { GlobalEventStore } from "../admin/global-event-store.js";
@@ -32,6 +33,18 @@ import type {
   PersistenceConfig,
   SecurityConfig,
 } from "../types.js";
+
+/**
+ * How often a repeated session-store failure diagnosis may be logged.
+ *
+ * Its own constant, not the event store's: that one paces a report driven by
+ * log volume, this one paces a report an unauthenticated caller can drive per
+ * request. Two behaviours, two constants, even where the value agrees today.
+ */
+const SESSION_STORE_FAILURE_REPORT_INTERVAL_MS = 60_000;
+
+/** Three operations; the bound only exists because the throttle is shared. */
+const MAX_TRACKED_SESSION_STORE_FAILURE_OPERATIONS = 8;
 
 export function createAdminServices(args: {
   securityConfig: SecurityConfig;
@@ -59,6 +72,11 @@ export function createAdminServices(args: {
   close: () => Promise<void>;
 }> {
   return (async () => {
+    const sessionStoreFailureThrottle = createDiagnosisThrottle({
+      intervalMs: SESSION_STORE_FAILURE_REPORT_INTERVAL_MS,
+      maxTrackedDiagnoses: MAX_TRACKED_SESSION_STORE_FAILURE_OPERATIONS,
+      now: args.now,
+    });
     let auditLogService: GlobalAuditStore = createAuditLogService();
     let adminSessionStore: AdminSessionStore | undefined;
     let closeAdminSessionStore: (() => Promise<void>) | undefined;
@@ -75,16 +93,32 @@ export function createAdminServices(args: {
               args.persistenceConfig.redisNamespace,
             ),
             onCommandFailed: ({ operation, error }) => {
+              // Counted BEFORE the throttle and every time, because the two
+              // questions are different: the line says what is broken, only a
+              // counter says how much (#266).
+              args.metricsCollector.observeRedisAdminSessionStoreFailure(
+                operation,
+              );
+              // And throttled, because the earlier version of this comment
+              // claimed the admin API is rate limited and it is not: the only
+              // admin HTTP limiter counts login credential failures, so any
+              // caller can drive one `authenticate` — and one line, and one
+              // event-store append — per request with an arbitrary bearer
+              // token, before any credential is checked. A precondition that
+              // does not hold is not a bound (#266's rule, #271's review).
+              //
+              // The vocabulary is three operations, so it never reaches the
+              // throttle's overflow bucket; the bound is there because the
+              // throttle is shared, not because this caller needs it.
+              if (!sessionStoreFailureThrottle.allow(operation)) {
+                return;
+              }
               // The detail the 503 withholds: `authenticate` runs before any
               // credential is accepted, so its response is reachable by an
               // unauthenticated caller and the Redis error belongs here rather
-              // than in the body.
-              //
-              // One line per failed command, which is one per admin request at
-              // worst — the request rate bounds it, and the admin API is rate
-              // limited. And it does not route through the thing it reports on:
-              // `logEvent` writes to the event store's separate connection
-              // (#266).
+              // than in the body. It does not route through the thing it
+              // reports on — `logEvent` writes to the event store's separate
+              // connection (#266).
               args.logEvent("admin_session_store_command_failed", {
                 instanceId: args.persistenceConfig.instanceId,
                 operation,

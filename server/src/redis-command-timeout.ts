@@ -21,12 +21,47 @@
  *   patience. It never decides what happens next; it only makes sure something
  *   does.
  *
- * A connection needs at least one. Four of the seven had neither, and a fifth —
- * the runtime store — had one over its write queue's attempts and nothing over
- * `trackAwaitedOperation`, which is the half a join actually blocks on. That
- * fifth is the reason {@link RedisCommandBound} demands a NAMED deadline rather
- * than a boolean: "this one is bounded" was believed about that connection for
- * as long as nobody had to write down by what.
+ * ## And they do not compose: the backstop is admissible on FEWER connections
+ * ## than it looks
+ *
+ * Nearly every deadline in this server is built on one mechanism (`retry-pacer`,
+ * and the admission gate and maintenance passes over it): **the cap does not
+ * cancel the call, so the call stays tracked, and the fact that it has still not
+ * answered is the evidence that stops the next attempt.** That is why
+ * `ensurePendingCapacity` counts `commandPacer.trackedCount()`, why
+ * `maintenance-pass` reports `stalled`, why `pending-resync-queue` waits on
+ * `inFlight` "rather than pile another on top", and why `append-chain` refuses a
+ * read on `writeIsStalled`.
+ *
+ * A backstop SETTLES those calls. Every one of those bounds then reads the
+ * connection as idle and lets the next attempt out — so the bound stops being a
+ * bound and becomes a rate: one more command per timeout window, for as long as
+ * the stall lasts. Each of them was a review round in its own right (#242, #261,
+ * #263, #266), and the option would undo all four at once.
+ *
+ * So the criterion is not "does this connection already have a bound" — it is:
+ *
+ *   **A connection may take the backstop only if NO caller on it derives a
+ *   bound from a command's failure to answer.**
+ *
+ * Three connections pass: the admin session store (one command per HTTP
+ * request, no retry, no pacer) and the admin command bus's publisher and
+ * subscriber (a reply timer on a `setTimeout`, which is not evidence about the
+ * connection). The other five do not.
+ *
+ * {@link RedisCommandBound} therefore demands a NAMED deadline rather than a
+ * boolean: "this one is bounded" was believed about the runtime store for as
+ * long as nobody had to write down by what — while `trackAwaitedOperation` had
+ * no bound at all.
+ *
+ * ## What that leaves open, deliberately
+ *
+ * The five exempt connections still have command paths with no caller-side
+ * bound: the room store's request path, the runtime store's
+ * `trackAwaitedOperation` and its two plain reads. A stalled Redis still hangs
+ * a join there. That gap is real and it is NOT closeable by this option — the
+ * fix is a cap that keeps the call tracked, or a separate connection for the
+ * paths that want a backstop, and both are derivations with their own review.
  *
  * ## What `commandTimeout` does NOT do
  *

@@ -134,6 +134,14 @@ export async function createRedisAdminCommandBus(
     commandChannelPrefix?: string;
     resultChannelPrefix?: string;
     onInvalidMessage?: (kind: "command" | "result", payload: string) => void;
+    /**
+     * Neither the result nor the fallback result could be published.
+     *
+     * The executor ran the command; only the answer was lost. Reporting it is
+     * all that is left to do, and it is what keeps this from being a bounded
+     * failure that is also a silent one.
+     */
+    onResultPublishFailed?: (command: AdminCommand, error: unknown) => void;
     closeQuitTimeoutMs?: number;
     onCloseUnfinished?: (
       info: RedisQuitReport<AdminCommandBusClientRole>,
@@ -146,7 +154,10 @@ export async function createRedisAdminCommandBus(
   const resultChannelPrefix =
     options.resultChannelPrefix ?? DEFAULT_RESULT_CHANNEL_PREFIX;
   const { publisher: publishClient, subscriber: subscribeClient } =
-    options.redisClients ?? createRedisPubSubClientPair(redisUrl);
+    options.redisClients ??
+    // Admissible: no caller here derives a bound from a command's silence. The
+    // reply timer is a `setTimeout`, not evidence about the connection (#271).
+    createRedisPubSubClientPair(redisUrl, { bound: "command_timeout" });
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const handlers = new Map<
@@ -196,6 +207,18 @@ export async function createRedisAdminCommandBus(
           resultChannel(resultChannelPrefix, command.requestId),
           JSON.stringify(fallback),
         );
+      })
+      // The fallback publish runs on the connection whose failure it is
+      // reporting, so it is the likeliest of the three to fail — and a
+      // rejection out of a `.catch()` handler has nowhere left to go. `void`
+      // does not attach a handler, so under Node's default that is an
+      // `unhandledRejection` and the process exits: a Redis outage escalated
+      // into a crash. Reachable since #271 gave this client a `commandTimeout`;
+      // before that the publish hung here instead, which is not the better
+      // failure (#271 review). The requester is not stranded either way — its
+      // own reply timer answers with `command_timeout`.
+      .catch((error: unknown) => {
+        options.onResultPublishFailed?.(command, error);
       });
   });
 
@@ -217,9 +240,17 @@ export async function createRedisAdminCommandBus(
         resultChannelPrefix,
         command.requestId,
       );
-      await subscribeClient.subscribe(replyChannel);
-
       try {
+        // INSIDE the try, so the `finally` below covers it. A `SUBSCRIBE` that
+        // outlives its `commandTimeout` still reaches Redis and can succeed
+        // once the connection recovers — and this channel is named after the
+        // requestId, so every failed request that subscribed outside this scope
+        // left a subscription behind that nothing would ever remove. A stall
+        // with retries would grow that set on both sides without bound (#271
+        // review). Unsubscribing a channel that never got subscribed is a
+        // no-op, so the cheap direction is the safe one.
+        await subscribeClient.subscribe(replyChannel);
+
         const responsePromise = new Promise<AdminCommandResult>((resolve) => {
           const timeout = setTimeout(() => {
             subscribeClient.off("message", onReply);

@@ -1,4 +1,7 @@
-import { createBoundedRedisClient } from "./redis-command-timeout.js";
+import {
+  createBoundedRedisClient,
+  type RedisCommandBound,
+} from "./redis-command-timeout.js";
 import type { ClosableRedisConnection } from "./redis-graceful-close.js";
 
 export type RedisMessageListener = (channel: string, payload: string) => void;
@@ -21,21 +24,29 @@ export type RedisPubSubClientPair = {
   subscriber: RedisPubSubClient;
 };
 
-/** Keep the two buses' ioredis connection policy in one place. */
+/**
+ * Keep the two buses' ioredis connection policy in one place.
+ *
+ * The two buses do NOT get the same answer, which is why this takes a bound
+ * rather than choosing one (#271):
+ *
+ * - The **admin command bus** may take the backstop. Nothing on it derives a
+ *   bound from a command's silence — `request` times out the REPLY on a
+ *   `setTimeout`, which is a different promise from the `SUBSCRIBE` before it
+ *   and the `UNSUBSCRIBE` after.
+ * - The **room event bus** may not. `pending-resync-queue` waits on the
+ *   publish it already started "rather than pile another on top — at most ONE
+ *   publish per room is ever out there", and that wait ends only when the real
+ *   command answers. A backstop would settle it and turn that bound into one
+ *   publish per retry, for as long as the bus stays hung — the exact defect
+ *   #242 wrote that loop to fix.
+ */
 export function createRedisPubSubClientPair(
   redisUrl: string,
+  bound: RedisCommandBound,
 ): RedisPubSubClientPair {
-  // Four connections — both buses' publisher and subscriber — and none of them
-  // had any bound before #271. Every command here is request/response and
-  // small: `PUBLISH` on the room broadcast path, `SUBSCRIBE` / `UNSUBSCRIBE`
-  // around a request or a consumer's lifetime. Neither bus has a caller-side
-  // deadline on those: the admin command bus times out the REPLY it waits for,
-  // which is a different promise from the `SUBSCRIBE` that precedes it and the
-  // `UNSUBSCRIBE` in its `finally`.
   const createClient = () =>
-    createBoundedRedisClient(redisUrl, {
-      bound: "command_timeout",
-    }) as RedisPubSubClient;
+    createBoundedRedisClient(redisUrl, bound) as RedisPubSubClient;
   return {
     publisher: createClient(),
     subscriber: createClient(),

@@ -152,20 +152,25 @@ before changing the code it describes.
   both questions. And a shutdown step's budget belongs to the step, not to a
   component in it — `close_admin_services` also closes the admin session store,
   which runs first, so bounding one half fixes nothing.
-- **Two layers bound a Redis command** (#271): a **deadline** is per-behaviour,
-  derived from what its caller can promise, and decides what happens next;
-  `commandTimeout` is a **liveness backstop** — one question, so one magnitude
-  for every connection that takes it, and it decides nothing. A connection needs
-  at least one, so `createBoundedRedisClient` takes a required declaration of
-  which — and a caller-side one must NAME the deadline, because "already
-  bounded" was believed about the runtime store while only its write queue was.
-  `redis-client-bounds.test.ts` keeps `new Redis` out of every other module and
-  makes exempt connections open through `connectWithin`, since no per-command
-  deadline reaches the handshake. The backstop cannot replace a bound whose
-  output is evidence (`writeIsStalled`),
-  it bounds the caller's wait and not ioredis's queue, so no depth limit retires
-  because of it, and bounded still owes a report: 503 with a diagnosis, never
-  401, and never a cleanup rejection thrown over a real result.
+- **Two layers bound a Redis command, and they do not compose** (#271): a
+  **deadline** is per-behaviour, derived from what its caller can promise, and
+  decides what happens next; `commandTimeout` is a **liveness backstop** — one
+  question, one magnitude, and it decides nothing. Nearly every deadline here is
+  built on "the cap does not cancel, so the call stays tracked, and its silence
+  is what stops the next attempt" (`ensurePendingCapacity`, `maintenance-pass`'s
+  `stalled`, `pending-resync-queue`'s in-flight wait, `writeIsStalled`), and a
+  backstop SETTLES those calls — turning each bound into a rate of one more
+  command per timeout. So the criterion is not "already bounded" but **no caller
+  on this connection derives a bound from a command's silence**: three qualify,
+  five do not. `createBoundedRedisClient` requires the declaration and a
+  caller-side one must NAME the deadline; `redis-client-bounds.test.ts` keeps
+  `new Redis` in one module and makes exempt connections open through
+  `connectWithin`, since no per-command deadline reaches the handshake. The
+  backstop bounds the caller's wait and not ioredis's queue, so no depth limit
+  retires because of it; exempt does not mean fine (the room store's request
+  path and `trackAwaitedOperation` are still unbounded); and bounded still owes
+  a report: 503 with a diagnosis, never 401, never a cleanup rejection thrown
+  over a real result, and never a precondition nobody enforces.
 - **One-shot broadcasts need a retry trail** (#242): most `room_state_updated`
   sends are repeated by the next update, but the share-ownership resync and the
   runtime index reaper's announcement are not — losing one loses the room until a

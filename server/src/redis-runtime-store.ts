@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { MetricsCollector } from "./admin/metrics.js";
-import { createBoundedRedisClient } from "./redis-command-timeout.js";
+import {
+  connectWithin,
+  createBoundedRedisClient,
+} from "./redis-command-timeout.js";
 import type { ActiveRoom, ClusterNodeStatus, Session } from "./types.js";
 import {
   createInMemoryRuntimeStore,
@@ -709,30 +712,42 @@ export async function createRedisRuntimeStore(
   options: RuntimeStoreOptions = {},
 ): Promise<RuntimeStore & { close: () => Promise<void> }> {
   const rawRedis = (options.redisClient ??
-    // `capAttempt` at `pendingOperationTimeoutMs` covers the durable write
-    // queue's attempts and NOTHING ELSE. `trackAwaitedOperation` — the member
-    // token lookup a join blocks on, the room generation a create pins, the
-    // block and revoke a kick issues — is deliberately outside it (#237), so
-    // those commands had no bound at all. That is the symptom #271 predicted
-    // for this family: a room read hanging a WebSocket join, with the caller
-    // waiting forever rather than being told anything.
+    // Exempt for the same reason as the two append-chain stores, and the reason
+    // is worth stating precisely because a backstop LOOKS right here: this
+    // connection's bounds are derived from EVIDENCE that a command has not
+    // answered, and a backstop destroys exactly that evidence by settling it.
     //
-    // #237's trade was "an answer that can be wrong is worse than a slow one",
-    // and it was made against a caller-side cap that fires on a Redis which is
-    // merely slow. A backstop is not that: it sits far above ordinary latency
-    // and only fires once the connection has stopped answering, and by then the
-    // caller has either given up on its own (the admin command bus's reply
-    // timer) or is hanging with no answer at all. Neither preserved the answer;
-    // one of them at least says so.
+    // Two of them, and each was a review round of its own:
     //
-    // Against the write queue the two bounds race, and the race has no
-    // consequence: both mean "this attempt failed", every queued write is
-    // idempotent, and the queue retries either way. What the backstop adds
-    // there is that the command finally SETTLES, so `heldCommandCapacity`, the
-    // pacer's tracked set and `activeRedisCommands` empty out instead of being
-    // held by a command nobody will ever hear from.
+    // - `ensurePendingCapacity` admits a write only while
+    //   `commandPacer.trackedCount()` is under the cap. That third predicate
+    //   exists because tracking a timed-out command only for draining "let a
+    //   join whose generation read timed out release its pending slot and start
+    //   another read every timeout window, past the configured cap without
+    //   limit" (#242 review). A `commandTimeout` reproduces that verbatim: the
+    //   command settles, the slot frees, and the admission cap degrades from a
+    //   bound on ioredis's queue into a rate of `cap` commands per timeout.
+    // - `maintenance-pass` caps the heartbeat at `heartbeatTimeoutMs` (~7.5s)
+    //   and the room reaper at 30s, both ABOVE a 5s backstop. The backstop would
+    //   win every race, so a tick would record `run_failed` instead of
+    //   `timed_out`, `stalled` would never be reachable, and — the part that is
+    //   not merely cosmetic — the tracker would call the pass finished while its
+    //   command is still queued, so the next tick would run on top of it (#261,
+    //   #263).
+    //
+    // What this does NOT resolve: `trackAwaitedOperation` and the two plain
+    // reads next to it (`isMemberTokenBlocked`, `getRoomGeneration`) have no
+    // caller-side bound at all, so a stalled Redis still hangs a join. The fix
+    // for those is a cap that keeps the call TRACKED — `trackOperation`'s shape,
+    // a few lines below — and for the five writes it also re-opens #237's trade
+    // that an answer which can be wrong is worse than a slow one. That is a
+    // derivation with its own review, not a connection option: no
+    // connection-wide setting can bound those commands without also settling
+    // the ones above.
     createBoundedRedisClient(redisUrl, {
-      bound: "command_timeout",
+      bound: "caller",
+      boundedBy:
+        "the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
@@ -770,7 +785,10 @@ export async function createRedisRuntimeStore(
    */
   const heldCommandCapacity = new Set<Promise<void>>();
 
-  await redis.connect();
+  // The exemption above is about the commands this store issues; the handshake
+  // is not one of them, and without a `commandTimeout` it never times out on a
+  // host that accepts the socket and stops there (#271 review).
+  await connectWithin(redis);
 
   /**
    * Every session-scoped write goes through here: ordered per session, retried

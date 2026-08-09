@@ -99,19 +99,29 @@ test("every source file that builds a connection names its bound", () => {
       [...declarations].sort(([a], [b]) => a.localeCompare(b)),
     ),
     {
-      // Two exemptions, and both for the same narrow reason: a backstop would
-      // race `append-chain`'s per-write cap and clear the `writeIsStalled`
-      // evidence its read refusal is derived from. "Already bounded" is NOT
-      // sufficient on its own — the runtime store looked like that and was
-      // bounded over its write queue only (#271 review).
+      // Five exemptions, all for ONE reason: some caller on that connection
+      // derives a bound from EVIDENCE that a command has not answered, and a
+      // backstop destroys that evidence by settling it — turning the bound into
+      // a rate of one more command per timeout window.
+      //
+      //   append chains  → `writeIsStalled` gates the read refusal (#266, #269)
+      //   runtime store  → `ensurePendingCapacity` counts tracked commands (#242)
+      //   room store     → `maintenance-pass`'s `stalled` for two passes (#261, #263)
+      //   room event bus → `pending-resync-queue` waits on `inFlight` (#242)
+      //
+      // "It is already bounded" is NOT the criterion and must never be read as
+      // one — the runtime store passes that test while `trackAwaitedOperation`
+      // has no bound at all, and the room store's request path has none either
+      // (#271 review).
       "admin/redis-audit-store.ts": ["caller"],
       "admin/redis-event-store.ts": ["caller"],
-      // Four connections' worth from the pub/sub factory alone: it builds a
-      // publisher and a subscriber, and both buses call it.
+      "redis-room-event-bus.ts": ["caller"],
+      "redis-room-store.ts": ["caller"],
+      "redis-runtime-store.ts": ["caller"],
+      // Three connections: one HTTP-request-scoped store, and the command bus's
+      // publisher and subscriber. Nothing on either reads a command's silence.
+      "redis-admin-command-bus.ts": ["command_timeout"],
       "redis-admin-session-store.ts": ["command_timeout"],
-      "redis-pubsub-client.ts": ["command_timeout"],
-      "redis-room-store.ts": ["command_timeout"],
-      "redis-runtime-store.ts": ["command_timeout"],
     },
   );
 });

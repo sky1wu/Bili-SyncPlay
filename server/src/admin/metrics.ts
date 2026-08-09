@@ -128,6 +128,13 @@ export type MetricsCollector = {
     durationMs: number,
   ) => void;
   observeRedisRoomStoreFailure: (operation: string) => void;
+  /**
+   * A session store command failed. Counted for EVERY failure, unlike the log
+   * line beside it: that line is throttled because an unauthenticated caller
+   * can drive one per request, and a throttled line without a counter cannot
+   * tell thirty failures from thirty million (#271 review).
+   */
+  observeRedisAdminSessionStoreFailure: (operation: string) => void;
   observeRedisRoomEventBusPublishDuration: (durationMs: number) => void;
   observeRedisRoomEventBusPublishFailure: () => void;
   recordRoomEventPublishDropped: (eventType: RoomEventType) => void;
@@ -734,6 +741,12 @@ export function createMetricsCollector(options: {
     observeRedisRoomStoreFailure(operation) {
       incrementCounter(redisFailureCounter, {
         component: "room_store",
+        operation,
+      });
+    },
+    observeRedisAdminSessionStoreFailure(operation) {
+      incrementCounter(redisFailureCounter, {
+        component: "admin_session_store",
         operation,
       });
     },

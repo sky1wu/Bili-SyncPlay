@@ -351,9 +351,10 @@ sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<窗口>])) by (
   回应，于是没有再发一条。它总是跟在一次 timeout 之后；单独看到它，说明僵死还在
   持续。若上一轮还在上限**之内**，那属于上面的 `skipped`，既不记日志也不算失败。
 
-这个上限只约束 reaper 等多久，并不约束命令本身。自 #271 起房间存储的客户端另有一道
-`commandTimeout` 兜底，命令确实会自己结束——但要晚上几秒，而且是抛给当时还持有它的
-调用方，不是回答那次已经放弃的触发。见
+这个上限只约束 reaper 等多久，并不约束命令本身：房间存储的客户端没有设
+`commandTimeout`，命令会一直挂在连接上，直到 Redis 或 socket 了结它。这是刻意的，也
+正是 `stalled` 之所以有意义的原因——#271 在这条连接上评估过连接级兜底并**否决**了它，
+因为让命令结算就等于允许下一次触发压在一条从没回来的扫描之上。见
 [哪些 Redis 连接约束了命令本身](#哪些-redis-连接约束了命令本身)。
 
 速率为 0 是观测，不是结论。每一次触发都会记下结果，包括放弃等待僵死扫描的那一
@@ -399,8 +400,9 @@ WebSocket 客户端。先读**该节点自己的日志**再去信外部视图，
   在 Redis 本来就僵死的节点上出现属于预期；它本身不额外说明任何问题。
 
 与 reaper 一样，这个上限只约束心跳等多久，并不约束命令本身——runtime store 的客户端
-是刻意不设 `commandTimeout` 的三个之一，因为 `pendingOperationTimeoutMs` 已经答复了
-这条连接上的每一个调用方。命令会一直挂在连接上，直到 Redis 或 socket 了结它。
+是刻意不设 `commandTimeout` 的五个之一，因为它的写入准入门会统计"活过自己上限的命令"，
+而兜底会把这些命令从那个计数里结算掉。命令会一直挂在连接上，直到 Redis 或 socket
+了结它。
 
 ### 后台事件列表少了事件？
 
@@ -481,8 +483,8 @@ sum(rate(bili_syncplay_events_total{event="runtime_event_append_failed"}[<window
 出 event store，而 append 失败本来就无法写进去，因此 stdout 是它们仅有的输出路径。
 
 与 reaper 和心跳一样，这个上限只约束存储等多久，并不约束命令本身：这个客户端是刻意
-不设 `commandTimeout` 的第二个。这里的理由不止"已有调用方一侧的界"——兜底会与每次写
-的上限抢跑并清掉 `writeIsStalled`，而那正是读取路径据以拒绝的证据。在存储发现僵死
+不设 `commandTimeout` 的五个之一，理由到处都一样——兜底会与每次写的上限抢跑并清掉
+`writeIsStalled`，而那正是读取路径据以拒绝的证据。在存储发现僵死
 **之前**发出的读取仍然暴露；Redis 僵死但我们没有任何写入在途、因而无从发现时，也一样
 ——这段残余由读取自己的命令上限答复。
 
@@ -543,8 +545,8 @@ sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<wind
 
 在这两道边界之前，只要 Redis 僵死，`close_admin_services` 必然是一次
 `server_shutdown_step_failed`。上面这道边界约束的是我们等多久；自 #271 起这个客户端的
-命令另有 `commandTimeout` 约束，正是它把"僵死的会话查询无界挂住每一个后台请求"变成了
-一个 503：
+命令另有 `commandTimeout` 约束——它是仅有的三条可以设兜底的连接之一——正是它把"僵死的
+会话查询无界挂住每一个后台请求"变成了一个 503：
 
 - `admin_session_store_command_failed`——会话 `save` / `get` / `delete` 失败，带
   `operation` 与底层错误。HTTP 响应是 503 `admin_session_store_unavailable`，正文
@@ -592,26 +594,43 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
   的耐心倒推。`REDIS_COMMAND_TIMEOUT_MS` 为 5s。它从不决定接下来做什么，只保证有人做。
 
 一条连接至少要有其中一层。到 #271 之前有四条两层都没有——还有第五条，运行时存储，它
-只在写回队列的 attempt 上有界，而 `trackAwaitedOperation`（WebSocket join 真正阻塞
-的那一半）上什么都没有：
+只在写回队列的 attempt 上有界，而 `trackAwaitedOperation`（WebSocket join 真正阻塞的
+那一半）上什么都没有。
 
-| 连接                                   | 命令一侧的界                  |
-| -------------------------------------- | ----------------------------- |
-| 房间存储                               | `commandTimeout`              |
-| 管理会话存储                           | `commandTimeout`              |
-| 房间事件总线（publisher + subscriber） | `commandTimeout`              |
-| 管理命令总线（publisher + subscriber） | `commandTimeout`              |
-| 运行时存储                             | `commandTimeout`              |
-| 管理事件存储                           | 调用方一侧：append 链的四道界 |
-| 管理审计存储                           | 调用方一侧：append 链的四道界 |
+**但这两层并不能叠加，而这才是决定下表的东西。** 本服务里几乎每一道期限都建立在同一套
+机制上（`retry-pacer`，以及架在它之上的准入门与后台轮次）：上限不取消调用，所以调用
+仍被追踪，而**"它到现在还没应答"这件事本身，就是阻止下一次尝试的证据**。兜底会把这些
+调用结算掉，于是每一道这样的界都会把连接读成空闲并放行下一次尝试——它不再是一道界，
+而变成一个速率：僵死持续多久，就每个超时窗口多压一条命令。所以判据不是"这条连接是不是
+已经有界了"：
+
+> 只有当**这条连接上没有任何调用方从"命令没有应答"里推导出一道界**时，它才可以设兜底。
+
+| 连接                                   | 命令一侧的界     | 理由                                                     |
+| -------------------------------------- | ---------------- | -------------------------------------------------------- |
+| 管理会话存储                           | `commandTimeout` | 每个 HTTP 请求一条命令；无重试、无 pacer                 |
+| 管理命令总线（publisher + subscriber） | `commandTimeout` | 应答计时器是 `setTimeout`，不是关于连接的证据            |
+| 房间存储                               | 调用方一侧       | reaper 与 reconciler 的 `maintenance-pass` `stalled`     |
+| 运行时存储                             | 调用方一侧       | `ensurePendingCapacity` 统计活过上限的命令               |
+| 房间事件总线（publisher + subscriber） | 调用方一侧       | `pending-resync-queue` 每个房间最多只放一条 publish 在外 |
+| 管理事件存储                           | 调用方一侧       | `writeIsStalled` 把控读取拒绝                            |
+| 管理审计存储                           | 调用方一侧       | 同一条 append 链                                         |
+
+**豁免不等于"这里没问题"。** 其中两条仍有完全没有调用方界的命令路径——房间存储的请求
+路径（join 上的 `get_room` / `update_room`），以及运行时存储的 `trackAwaitedOperation`
+和它旁边的两条裸读。僵死的 Redis 在那里依然会挂住一次 join。这个缺口是真实的，而且
+**这个选项修不了它**：要修得靠一道"保持调用被追踪"的上限，或者给需要兜底的路径单独一条
+连接。
 
 所有客户端都由 `createBoundedRedisClient` 构造，它**强制**要求声明采用了两层中的哪
 一层——而且调用方一侧那一层必须**点名**那道期限，因为"这条已经有界了"这句话在运行时
-存储上被相信了很久，只因为没人必须写下"界在哪里"。两条豁免连接的握手由 `connectWithin`
+存储上被相信了很久，只因为没人必须写下"界在哪里"。所有豁免连接的握手由 `connectWithin`
 兜住，那是任何逐命令期限都够不到的地方：`connectTimeout` 只管 TCP 建连、不管其后的
 `INFO`，两者皆无时，bootstrap 会在一个"接受 socket 但什么都不回"的主机上永远等下去。
-`server/test/redis-client-bounds.test.ts` 保证没有别处再建连接。这是 #271 里
-不属于"定阈值"的那一半：这个选项的缺席在 diff 里连续五次都看不出来。
+
+`server/test/redis-client-bounds.test.ts` 把这一切变成检查：`new Redis` 只许出现在一个
+模块里、各处声明被钉住、豁免模块必须走 `connectWithin`。这是 #271 里不属于"定阈值"的
+那一半——这个选项的缺席在 diff 里连续五次都没被看见。
 
 `commandTimeout` 刻意**不**做的两件事，均在
 `server/test/redis-command-timeout.test.ts` 里对着 ioredis 验证过：

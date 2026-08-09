@@ -177,3 +177,116 @@ test("a failing cleanup UNSUBSCRIBE does not replace the request's answer", asyn
     await bus.close();
   }
 });
+
+test("a fallback result that cannot be published is reported, not thrown at the process", async () => {
+  // Three publishes can fail on this path and the third has nowhere to go: the
+  // handler's result publish rejects, its `.catch()` publishes a fallback on
+  // the SAME stalled connection, and that rejection escapes a `void`-ed chain.
+  // Under Node's default that is an `unhandledRejection` and the process exits,
+  // so a Redis outage would take the server down with it. Reachable since #271
+  // gave this client a `commandTimeout`; before that the publish hung instead
+  // (#271 review).
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+
+  const publisher = createFakeRedisPubSubClient(async () => "OK", {
+    publish: async () => {
+      throw new Error("Command timed out");
+    },
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => "OK");
+  const reported: Array<{ requestId: string; error: unknown }> = [];
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    commandChannelPrefix: "cmd:",
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+    onResultPublishFailed: (command, error) => {
+      reported.push({ requestId: command.requestId, error });
+    },
+  });
+
+  try {
+    await bus.subscribe("instance-1", async (command) => ({
+      requestId: command.requestId,
+      targetInstanceId: command.targetInstanceId,
+      executorInstanceId: "instance-1",
+      status: "ok",
+      roomCode: null,
+      completedAt: 1,
+    }));
+
+    subscriber.emitMessage(
+      "cmd:instance-1",
+      JSON.stringify({
+        kind: "kick_member",
+        requestId: "request-1",
+        targetInstanceId: "instance-1",
+        roomCode: "ABC123",
+        memberId: "member-1",
+        requestedAt: 1,
+      }),
+    );
+
+    // Let the handler chain settle: result publish → fallback publish → report.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(reported.length, 1);
+    assert.equal(reported[0]?.requestId, "request-1");
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    await bus.close();
+  }
+});
+
+test("a SUBSCRIBE that outlived its timeout is still unsubscribed", async () => {
+  // The reply channel is named after the requestId, so a subscription left
+  // behind is one per failed request, forever. `commandTimeout` rejects the
+  // caller while the SUBSCRIBE stays on the connection and can still land once
+  // Redis recovers — so the cleanup has to cover the attempt, not just the
+  // success (#271 review).
+  const unsubscribed: string[] = [];
+  const publisher = createFakeRedisPubSubClient(async () => "OK");
+  const subscriber = createFakeRedisPubSubClient(async () => "OK", {
+    subscribe: async () => {
+      throw new Error("Command timed out");
+    },
+    unsubscribe: async (...channels: string[]) => {
+      unsubscribed.push(...channels);
+      return 1;
+    },
+  });
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    resultChannelPrefix: "result:",
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    await assert.rejects(
+      bus.request(
+        {
+          kind: "kick_member",
+          requestId: "request-1",
+          targetInstanceId: "instance-1",
+          roomCode: "ABC123",
+          memberId: "member-1",
+          requestedAt: 1,
+        },
+        20,
+      ),
+    );
+    assert.deepEqual(unsubscribed, ["result:request-1"]);
+  } finally {
+    await bus.close();
+  }
+});

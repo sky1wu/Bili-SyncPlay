@@ -360,6 +360,20 @@ export async function createServerBootstrapContext(
           resultChannelPrefix: getRedisAdminCommandResultChannelPrefix(
             persistenceConfig.redisNamespace,
           ),
+          onResultPublishFailed: (command, error) => {
+            // The command ran; only its answer was lost, and the requester is
+            // already answered by its own reply timer. Bounded by the admin
+            // action rate — a human closing rooms, not a request loop — so it
+            // needs no throttle of its own (#271 review).
+            logEvent("admin_command_result_publish_failed", {
+              instanceId: persistenceConfig.instanceId,
+              commandKind: command.kind,
+              requestId: command.requestId,
+              targetInstanceId: command.targetInstanceId,
+              result: "error",
+              error: error instanceof Error ? error.message : String(error),
+            });
+          },
           onCloseUnfinished: (report) =>
             logRedisCloseUnfinished(
               "admin_command_bus_close_unfinished",

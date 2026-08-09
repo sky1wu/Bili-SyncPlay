@@ -348,11 +348,13 @@ which failure it is, and they need different repairs:
   previous sweep still inside its cap is the `skipped` label above instead, and
   is neither logged nor counted as a failure.
 
-The cap only bounds how long the reaper waits, not the command itself. Since
-#271 the room store's client also carries a `commandTimeout` backstop, so the
-command does end on its own — but several seconds later, and as a rejection to
-whoever was still holding it, not as an answer to the tick that already gave up.
-See [Which Redis connections bound their commands](#which-redis-connections-bound-their-commands).
+The cap only bounds how long the reaper waits, not the command itself: the room
+store's client sets no `commandTimeout`, so the command stays out on the
+connection until Redis or the socket ends it. That is deliberate and it is what
+makes `stalled` mean anything — #271 evaluated a connection-wide backstop here
+and rejected it precisely because settling the command would let the next tick
+sweep on top of one that never came back. See
+[Which Redis connections bound their commands](#which-redis-connections-bound-their-commands).
 
 A rate of 0 is an observation, not a diagnosis. Every tick records an outcome,
 including one that gave up on a hung sweep, so a flat series means no tick
@@ -404,10 +406,10 @@ different questions: "others cannot see it" and "it knows why".
   was already stalled; on its own it explains nothing else.
 
 As with the reaper, the cap only bounds how long the heartbeat waits, not the
-command — and the runtime store's client is one of the three that deliberately
-carries no `commandTimeout`, because `pendingOperationTimeoutMs` already answers
-every caller on it. The command stays out on the connection until Redis or the
-socket ends it.
+command — and the runtime store's client is one of the five that deliberately
+carry no `commandTimeout`, because its write-admission gate counts commands that
+outlived their cap and a backstop would settle them out of that count. The
+command stays out on the connection until Redis or the socket ends it.
 
 ### Why is the admin event list missing events?
 
@@ -506,10 +508,10 @@ backpressure lines are excluded from the event store on purpose, and append
 failures cannot be written there, so stdout is their only path.
 
 As with the reaper and the heartbeat, the cap bounds how long the store waits,
-not the command: this client is the second of the three that deliberately sets
-no `commandTimeout`. Here the reason is not just that a caller-side bound
-already exists — a backstop would race the per-write cap and clear
-`writeIsStalled`, which is the evidence the read path refuses on. A read issued
+not the command: this client is one of the five that deliberately set no
+`commandTimeout`, and the reason is the same one everywhere — a backstop would
+race the per-write cap and clear `writeIsStalled`, which is the evidence the
+read path refuses on. A read issued
 before the store noticed the stall is still exposed, and so is one issued while
 Redis is hung with no write of ours in flight to notice it by; that residual is
 what the read's own command bound answers.
@@ -584,8 +586,9 @@ store, and both are now bounded:
 Before either bound, `close_admin_services` was a guaranteed
 `server_shutdown_step_failed` whenever Redis was hung. The bound above is on how
 long we wait; since #271 this client's commands are separately bounded by a
-`commandTimeout`, which is what turned a stalled session lookup from an
-unbounded hang on every admin request into a 503:
+`commandTimeout` — it is one of only three connections that may take one — and
+that is what turned a stalled session lookup from an unbounded hang on every
+admin request into a 503:
 
 - `admin_session_store_command_failed` — a session `save` / `get` / `delete`
   failed, with `operation` and the underlying error. The HTTP response is a 503
@@ -645,32 +648,52 @@ There are two layers and they are not interchangeable:
   patience. `REDIS_COMMAND_TIMEOUT_MS` is 5s. It never decides what happens
   next; it only makes sure something does.
 
-A connection needs at least one. Four had neither until #271 — and a fifth,
-the runtime store, had one over its write queue's attempts and nothing over
-`trackAwaitedOperation`, which is the half a WebSocket join blocks on:
+A connection needs at least one. Four had neither until #271 — and a fifth, the
+runtime store, had one over its write queue's attempts and nothing over
+`trackAwaitedOperation`, which is the half a WebSocket join blocks on.
 
-| Connection                                 | Command bound                               |
-| ------------------------------------------ | ------------------------------------------- |
-| room store                                 | `commandTimeout`                            |
-| admin session store                        | `commandTimeout`                            |
-| room event bus (publisher + subscriber)    | `commandTimeout`                            |
-| admin command bus (publisher + subscriber) | `commandTimeout`                            |
-| runtime store                              | `commandTimeout`                            |
-| admin event store                          | caller-side: the append chain's four bounds |
-| admin audit store                          | caller-side: the append chain's four bounds |
+**But the two layers do not compose, and that is what decides the table.**
+Nearly every deadline in this server is built on one mechanism (`retry-pacer`,
+plus the admission gate and the maintenance passes over it): the cap does not
+cancel the call, so the call stays tracked, and **the fact that it has still not
+answered is the evidence that stops the next attempt**. A backstop settles those
+calls, so each of those bounds reads the connection as idle and lets the next
+attempt out — it stops being a bound and becomes a rate of one more command per
+timeout window. So the criterion is not "is this connection already bounded":
+
+> A connection may take the backstop only if **no caller on it derives a bound
+> from a command's failure to answer.**
+
+| Connection                                 | Command bound    | Why                                                                     |
+| ------------------------------------------ | ---------------- | ----------------------------------------------------------------------- |
+| admin session store                        | `commandTimeout` | one command per HTTP request; no retry, no pacer                        |
+| admin command bus (publisher + subscriber) | `commandTimeout` | the reply timer is a `setTimeout`, not evidence about the connection    |
+| room store                                 | caller-side      | `maintenance-pass`'s `stalled` for the reaper and the reconciler        |
+| runtime store                              | caller-side      | `ensurePendingCapacity` counts commands that outlived their cap         |
+| room event bus (publisher + subscriber)    | caller-side      | `pending-resync-queue` keeps at most one publish per room out at a time |
+| admin event store                          | caller-side      | `writeIsStalled` gates the read refusal                                 |
+| admin audit store                          | caller-side      | the same append chain                                                   |
+
+**The exemptions are not "already fine".** Two of them still have command paths
+with no caller-side bound at all — the room store's request path (`get_room` /
+`update_room` on join) and the runtime store's `trackAwaitedOperation` plus its
+two plain reads. A stalled Redis still hangs a join there. That gap is real, and
+it is not closeable by this option: the fix is a cap that keeps the call tracked,
+or a separate connection for the paths that want a backstop.
 
 Every client is built by `createBoundedRedisClient`, which takes a **required**
 declaration of which of the two it has — and a caller-side one has to NAME the
 deadline, because "this one is bounded" was believed about the runtime store for
 as long as nobody had to write down by what. `connectWithin` bounds the handshake
-of the two exempt connections, which no per-command deadline reaches:
+of every exempt connection, which no per-command deadline reaches:
 `connectTimeout` covers the TCP connect and not the `INFO` after it, so without
 either, bootstrap could wait forever on a host that accepts the socket and
 answers nothing.
-`server/test/redis-client-bounds.test.ts`
-enforces that no connection is built anywhere else. That is the part of #271
-that is not a threshold: the option's absence was invisible in a diff five times
-running.
+
+`server/test/redis-client-bounds.test.ts` enforces all of it: `new Redis` appears
+in one module, the declarations are pinned, and an exempt module must open
+through `connectWithin`. That is the part of #271 that is not a threshold — the
+option's absence was invisible in a diff five times running.
 
 Two things `commandTimeout` deliberately does **not** do, both verified against
 ioredis in `server/test/redis-command-timeout.test.ts`:

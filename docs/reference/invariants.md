@@ -631,20 +631,35 @@ distinction rather than a number.
   distribution rather than from any caller's patience. It never decides what
   happens next; it only guarantees something does.
 
-A connection needs at least one, and four of the seven had neither. So:
+A connection needs at least one, and four of the seven had neither. But the two
+do NOT compose, and that is the part that decides which connection gets which:
 
-- **The declaration is required, not the option.** Every client is built by
-  `createBoundedRedisClient`, whose `RedisCommandBound` argument is either the
-  backstop or a named caller-side deadline. `redis-client-bounds.test.ts` keeps
-  `new Redis` out of every other module, because the option's absence is
-  invisible in a diff — which is how it stayed invisible five times.
-- **A backstop cannot replace a bound whose output is evidence.** Both
-  append-chain stores are exempt for this reason and NOT merely because they are
-  already bounded: `writeIsStalled` is what the read refusal is derived from, and
-  a `commandTimeout` racing the per-write cap would clear it. "Already bounded"
-  on its own is the claim that failed — the runtime store passed it while being
-  bounded over its write queue's attempts and nothing else, which is why the
-  declaration has to NAME the deadline (#271 review).
+- **A backstop cannot replace a bound whose output is evidence.** Nearly every
+  deadline here is built on one mechanism — the cap does not cancel the call, so
+  the call stays tracked, and **its continued silence is what stops the next
+  attempt**. `ensurePendingCapacity` counting `commandPacer.trackedCount()`
+  (#242), `maintenance-pass` reporting `stalled` (#261, #263),
+  `pending-resync-queue` waiting on `inFlight` (#242), `append-chain` refusing a
+  read on `writeIsStalled` (#266, #269). A backstop settles those calls, so each
+  bound reads the connection as idle and lets the next attempt out: it stops
+  being a bound and becomes a rate of one more command per timeout window. The
+  option would undo all four at once.
+- **So the criterion is not "is it already bounded".** A connection may take the
+  backstop only if NO caller on it derives a bound from a command's failure to
+  answer. Three pass: the admin session store and the admin command bus's two
+  clients. Five do not.
+- **The declaration is required, and it must NAME the deadline.** Every client
+  is built by `createBoundedRedisClient`, whose `RedisCommandBound` is either the
+  backstop or a named caller-side deadline. "This one is bounded" was believed
+  about the runtime store for as long as nobody had to write down by what —
+  while `trackAwaitedOperation` had no bound at all.
+  `redis-client-bounds.test.ts` keeps `new Redis` out of every other module,
+  because the option's absence is invisible in a diff, which is how it stayed
+  invisible five times.
+- **Exempt does not mean fine.** The room store's request path and the runtime
+  store's `trackAwaitedOperation` still have no caller-side bound, so a stalled
+  Redis still hangs a join. The fix is a cap that keeps the call tracked, or a
+  separate connection for the paths that want a backstop — never this option.
 - **An exemption covers commands, not the handshake.** `connect()` runs before
   the store exists and resolves on `ready`; ioredis's `connectTimeout` bounds
   the TCP connect and not the `INFO` after it. Without either bound, bootstrap

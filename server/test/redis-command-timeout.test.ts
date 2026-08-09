@@ -188,9 +188,12 @@ test("commandTimeout answers a caller whose connection stopped replying", async 
 test("without commandTimeout the same caller is never answered", async () => {
   // The control, and the reason the test above proves anything: the fixture is
   // silent in both, so a passing assertion up there has to come from the option
-  // rather than from the fixture recovering. This is also, verbatim, the
-  // pre-#271 behaviour of the room store, the admin session store and both
-  // pub/sub buses.
+  // rather than from the fixture recovering.
+  //
+  // This is also, verbatim, what the five EXEMPT connections still do — and
+  // why the exemption is a trade rather than a free choice. They keep it
+  // because settling the call would destroy the evidence their caller-side
+  // bounds are derived from (#271).
   const fixture = await startSilentRedis();
   const client = new Redis(fixture.url, {
     lazyConnect: true,
