@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   createAdminSessionTokenId,
   createRedisAdminSessionStore,
+  type RedisAdminSessionStoreClient,
+  type RedisAdminSessionStoreMulti,
 } from "../src/redis-admin-session-store.js";
 import { createAdminAuthService } from "../src/admin/auth-service.js";
 import type { AdminSession } from "../src/admin/types.js";
@@ -94,4 +96,73 @@ test("admin auth service shares redis-backed sessions across store instances", a
     await storeA.close();
     await storeB.close();
   }
+});
+
+function createFakeSessionRedis(quit: () => Promise<unknown>): {
+  client: RedisAdminSessionStoreClient;
+  disconnectCalls: () => number;
+} {
+  let disconnectCalls = 0;
+  const multi: RedisAdminSessionStoreMulti = {
+    hset: () => multi,
+    pexpire: () => multi,
+    exec: async () => [],
+  };
+  return {
+    client: {
+      connect: async () => undefined,
+      quit,
+      disconnect: () => {
+        disconnectCalls += 1;
+      },
+      del: async () => 1,
+      hgetall: async () => ({}),
+      multi: () => multi,
+    },
+    disconnectCalls: () => disconnectCalls,
+  };
+}
+
+test("close gives up on a Redis that never answers QUIT, and says so", async () => {
+  const redis = createFakeSessionRedis(() => new Promise(() => undefined));
+  const unfinished: Array<{ quitOutcome: string; budgetMs: number }> = [];
+  const store = await createRedisAdminSessionStore("redis://unused", {
+    redisClient: redis.client,
+    closeQuitTimeoutMs: 20,
+    onCloseUnfinished: (info) => {
+      unfinished.push(info);
+    },
+  });
+
+  // Unbounded, this never returns. It runs FIRST inside `close_admin_services`,
+  // so it used to spend the step's whole 5s budget before the audit store's
+  // close was even reached — a guaranteed failed shutdown step whenever Redis
+  // was hung, and the reason bounding only the audit store would not have
+  // fixed the step (#267).
+  const startedAt = Date.now();
+  await store.close();
+  assert.ok(Date.now() - startedAt < 1_000);
+  assert.equal(redis.disconnectCalls(), 1);
+  // Bounded is not the same as quiet: without this line the overrun would be
+  // invisible, because it no longer times the step out.
+  assert.deepEqual(unfinished, [{ quitOutcome: "timed_out", budgetMs: 20 }]);
+});
+
+test("an ordinary close stays graceful and stays quiet", async () => {
+  const redis = createFakeSessionRedis(async () => "OK");
+  let unfinishedCalls = 0;
+  const store = await createRedisAdminSessionStore("redis://unused", {
+    redisClient: redis.client,
+    closeQuitTimeoutMs: 500,
+    onCloseUnfinished: () => {
+      unfinishedCalls += 1;
+    },
+  });
+
+  await store.close();
+
+  // A degraded line on every clean shutdown would mean nothing on the one
+  // shutdown where it matters.
+  assert.equal(unfinishedCalls, 0);
+  assert.equal(redis.disconnectCalls(), 0);
 });

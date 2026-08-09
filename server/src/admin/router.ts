@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AdminActionError } from "./action-service.js";
+import { AuditStoreUnavailableError } from "./redis-audit-store.js";
 import { EventStoreUnavailableError } from "./redis-event-store.js";
 import {
   requireAdminWriteOrigin,
@@ -167,6 +168,14 @@ export function createAdminRouter(options: AdminRouterOptions) {
           // point — issuing it would queue a command that never returns behind
           // the one already stuck (#266 review).
           sendError(response, 503, "event_store_unavailable", error.message);
+          return true;
+        }
+        if (error instanceof AuditStoreUnavailableError) {
+          // Same 503 for the same reason as the event store's, on the sibling
+          // path: the audit list refused to issue its read because the write
+          // path on that connection is not answering, and retrying once Redis
+          // recovers is exactly right (#267).
+          sendError(response, 503, "audit_store_unavailable", error.message);
           return true;
         }
         if (error instanceof AdminActionError) {

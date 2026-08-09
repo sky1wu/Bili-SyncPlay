@@ -31,6 +31,7 @@ import {
   sendError,
 } from "./ws-session-handler.js";
 import type { AdminSessionStore } from "./admin-session-store.js";
+import type { GlobalAuditStore } from "./admin/global-audit-store.js";
 import type {
   AdminConfig,
   AdminUiConfig,
@@ -85,6 +86,7 @@ export type SyncServerDependencies = {
   logSampling?: Record<string, number>;
   metricsPort?: number;
   adminSessionStoreOverride?: AdminSessionStore;
+  auditStoreOverride?: GlobalAuditStore;
 };
 
 export async function createSyncServer(
@@ -331,6 +333,7 @@ export async function createSyncServer(
     serviceVersion,
     metricsPort: dependencies.metricsPort,
     adminSessionStoreOverride: dependencies.adminSessionStoreOverride,
+    auditStoreOverride: dependencies.auditStoreOverride,
   });
 
   const wss = new WebSocketServer({
