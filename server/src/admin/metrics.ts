@@ -176,9 +176,13 @@ export type MetricsCollector = {
   /**
    * One runtime event the store refused to queue for writing.
    *
-   * The only real-time signal that the admin event list has gone incomplete:
-   * the accompanying log line is emitted once per incident, not once per drop,
-   * so the magnitude lives here.
+   * The only signal that answers "is the admin event list still going
+   * incomplete, and by how much". The accompanying log line is throttled to one
+   * per reason per minute and claims nothing beyond the moment it was written —
+   * deliberately, because a paired start/end line is an invariant a log stream
+   * cannot keep, and #266 spent four review rounds proving it. Rate and
+   * `increase()` over this counter are the questions that pairing was trying to
+   * answer, and it answers them with no state at all.
    */
   recordEventStoreAppendDropped: (reason: EventStoreAppendDropReason) => void;
   render: () => Promise<string>;
