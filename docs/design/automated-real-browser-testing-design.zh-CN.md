@@ -377,7 +377,7 @@ CI 无论成功或失败都上传已通过扫描的 `metadata.json` 和摘要；
 - Popup：输入、确认框、剪贴板、pending/错误和设置持久化。
 - Playback：每种媒体事件、软追赶、hard seek、缓冲和 ended；独立有声变体在默认自动播放策略下验证远端 `play()` rejection 及诊断链路，主同步场景则用初始静音媒体确定性穿过同一生产调用路径。
 - Navigation：五种路由、多 P、festival 快照、自动连播、非共享本地浏览和连续导航竞态。
-- Lifecycle：service worker 终止、离线/在线、服务端重启、tab reload/close、浏览器退出。
+- Lifecycle：service worker 终止、离线/在线、服务端重启、tab reload/close、浏览器退出。四个 `REQ-F033` 操作使用不可互换的 oracle：离线恢复在线后必须自动重连并复用原成员身份；服务端重启固定使用同一 run 的 Redis room/runtime store，进程恢复后必须以原身份重新加入并取得新鲜房间态（memory store 丢失后的 `room_not_found` 只属于另行标记的负向诊断，不能满足该键）；tab reload 必须由新 content 文档重新绑定标准化共享 URL、hydrate 当前房间态并完成重载后的跨端播放；shared tab close 必须先观察 source-tab binding 清除、房间/共享视频/身份保留且稳定窗口内不自动建 tab，再经真实 popup“打开共享视频”动作重新打开/认领并恢复同步。断网或停服窗口内的暂时性重试反馈可以记录，但恢复完成时必须清除；其余终态错误都使相应操作失败。
 - Ownership/concurrency：晚加入、近同时操作、成员断连、所有者转移、房间切换，以及首次归属重同步或 runtime index reaper 清理通告被事件总线拒收后的独立重试收敛。
 - Admin：真实扩展客户端配合后台治理；五个单项和两个批量治理对话框逐一验证确认/取消，批量结果框验证关闭，房间表格验证选择与清空选择。
 
