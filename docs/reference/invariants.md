@@ -427,11 +427,15 @@ overrun `close_event_store`'s budget (#264). The rules:
   them from the store and pins them to `error`, together, because both rules
   have that one reason.
 - **A dropped append answers its caller successfully.** The caller is the
-  structured logger, which turns a rejection into a `runtime_event_append_failed`
-  line on stdout — so rejecting would answer a Redis stall with one error line
-  per log line, on the path already established to be overloaded. Drops are
-  reported in aggregate instead: every drop on the counter, and a shedding line
-  throttled to one per reason per minute.
+  structured logger, which turns a rejection into a
+  `runtime_event_append_failed` line on stdout. The logger throttles those lines
+  by diagnosis to one per minute, covering fast Redis rejections and every event
+  store implementation. The throttle tracks at most 32 active diagnoses; any
+  extras share one overflow bucket so attacker-controlled error text cannot
+  make the throttle's own memory or output unbounded. Shedding still must not
+  make every caller handle the same dependency failure. Drops are reported in
+  aggregate instead: every drop on the counter, and a shedding line throttled
+  to one per reason per minute (#268).
 - **The cap does not release the chain.** It flips the store into shedding; the
   link itself still waits for the real answer. Letting the chain advance would
   put a second write on a connection that has answered neither, and would land
@@ -487,11 +491,17 @@ event_store_unavailable`), not delayed. The fix for an unbounded queue is
 - **`close` drains, bounded, then drops the socket — `QUIT` is not an escape
   hatch.** Dropping the queue outright would lose the shutdown's own events on
   every clean restart, and waiting unbounded makes the step fail on every hung
-  one. So: wait for the chain inside a budget, and past it stop the links that
-  have not started, because a command issued on a connection that is going away
-  is rejected and the logger turns that back into one
-  `runtime_event_append_failed` per queued event, after shutdown reported it was
-  done. Then `disconnect()`, NOT `quit()`: ioredis puts `QUIT` on the same
+  one. The event store is the logger's sink, so its shutdown step comes after
+  every shared producer; closing it earlier silently loses their teardown
+  events. Appends that still arrive after `close` starts are counted as
+  `closingAppends` in the abandonment report. A shutdown-step timeout answers
+  its caller without cancelling the real producer, so an append that arrives
+  after the event-store step returned emits a cumulative update instead of
+  disappearing past a one-shot final callback. Then: wait for the chain inside
+  a budget, and past it stop the links that have not started, because a command
+  issued on a connection that is going away is rejected and the logger turns
+  that back into a throttled `runtime_event_append_failed` after shutdown.
+  Then `disconnect()`, NOT `quit()`: ioredis puts `QUIT` on the same
   `commandQueue` as everything else and pairs replies front-first, so a graceful
   close inherits the exact wait that was just bounded (#264 review). The graceful
   path is still taken when the chain drained — and is bounded too, because a

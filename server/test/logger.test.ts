@@ -97,6 +97,126 @@ test("structured logger keeps the event store's own backpressure reports out of 
   assert.equal(writtenLines.length, 2);
 });
 
+test("structured logger throttles repeated event-store failures by diagnosis", async () => {
+  const writtenLines: string[] = [];
+  let clock = 1_000;
+  const { store } = createCapturingEventStore();
+  store.append = (input) =>
+    Promise.reject(
+      new Error(
+        input.event === "admin_login_failed"
+          ? "permission denied"
+          : "Redis connection is closed",
+      ),
+    );
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    eventStore: store,
+    logLevel: "error",
+    appendFailureNow: () => clock,
+  });
+
+  logger("room_created", { result: "ok" });
+  logger("room_joined", { result: "ok" });
+  logger("admin_login_failed", { result: "ok" });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // The failed event is deliberately different: keying on it would turn one
+  // Redis outage back into one line per business event. A genuinely different
+  // diagnosis still deserves its own first line.
+  assert.deepEqual(
+    writtenLines.map(
+      (line) => (JSON.parse(line) as { failedEvent: string }).failedEvent,
+    ),
+    ["room_created", "admin_login_failed"],
+  );
+
+  clock += 59_999;
+  logger("room_closed", { result: "ok" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writtenLines.length, 2);
+
+  clock += 1;
+  logger("room_closed", { result: "ok" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writtenLines.length, 3);
+});
+
+test("structured logger bounds high-cardinality append-failure diagnoses", async () => {
+  const writtenLines: string[] = [];
+  let clock = 1_000;
+  const { store } = createCapturingEventStore();
+  store.append = (input) =>
+    Promise.reject(new Error(String(input.data.failureReason)));
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    eventStore: store,
+    logLevel: "error",
+    appendFailureNow: () => clock,
+  });
+
+  for (let index = 0; index < 40; index += 1) {
+    logger("room_created", { failureReason: `failure-${index}` });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // Track 32 diagnoses independently, then let every additional diagnosis
+  // share one overflow bucket. Without that second bound, an implementation
+  // can avoid repeated-error spam while still holding attacker-controlled
+  // error messages without a finite memory or output ceiling.
+  assert.equal(writtenLines.length, 33);
+
+  clock += 60_000;
+  logger("room_created", { failureReason: "failure-40" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writtenLines.length, 34);
+});
+
+test("structured logger keeps the overflow cooldown when a tracked slot expires", async () => {
+  const writtenLines: string[] = [];
+  let clock = 1_000;
+  const { store } = createCapturingEventStore();
+  store.append = (input) =>
+    Promise.reject(new Error(String(input.data.failureReason)));
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    eventStore: store,
+    logLevel: "error",
+    appendFailureNow: () => clock,
+  });
+
+  logger("room_created", { failureReason: "tracked-0" });
+  await new Promise((resolve) => setImmediate(resolve));
+  clock = 30_000;
+  for (let index = 1; index < 32; index += 1) {
+    logger("room_created", { failureReason: `tracked-${index}` });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clock = 31_000;
+  logger("room_created", { failureReason: "overflow" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writtenLines.length, 33);
+
+  // `tracked-0` has expired, but the shared overflow bucket is only 30s old.
+  // Moving this diagnosis into the free slot must not reset that cooldown.
+  clock = 61_000;
+  logger("room_created", { failureReason: "overflow" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writtenLines.length, 33);
+
+  clock = 91_000;
+  logger("room_created", { failureReason: "overflow" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writtenLines.length, 34);
+});
+
 test("structured logger stamps default info level on emitted events", () => {
   const writtenLines: string[] = [];
   const logger = createStructuredLogger({
@@ -343,5 +463,42 @@ test("both shutdown outcomes infer error, under the result each one deserves", (
       result: "timeout",
     }),
     "error",
+  );
+});
+
+test("every append failure moves the counter, not just the ones that get a line", async () => {
+  const writtenLines: string[] = [];
+  const recordedEvents: string[] = [];
+  const clock = 1_000;
+  const { store } = createCapturingEventStore();
+  store.append = () => Promise.reject(new Error("Redis connection is closed"));
+  const logger = createStructuredLogger({
+    writeLine: (line) => {
+      writtenLines.push(line);
+    },
+    eventStore: store,
+    logLevel: "error",
+    appendFailureNow: () => clock,
+    metricsCollector: {
+      recordEvent: (event) => {
+        recordedEvents.push(event);
+      },
+    },
+  });
+
+  for (let index = 0; index < 5; index += 1) {
+    logger("room_created", { result: "ok" });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // One line for five failures — which is the point of the throttle, and also
+  // why the magnitude has to live somewhere else. Without the counter an
+  // operator cannot tell five rejections from five million, and the runbook's
+  // own rule is that "how much" is the metric's question (#268 review).
+  assert.equal(writtenLines.length, 1);
+  assert.equal(
+    recordedEvents.filter((event) => event === "runtime_event_append_failed")
+      .length,
+    5,
   );
 });

@@ -26,6 +26,20 @@ const EVENT_STORE_BACKPRESSURE_EVENTS = new Set([
 /** Excluded for volume rather than for reflexivity. */
 const HIGH_VOLUME_EXCLUDED_EVENTS = new Set(["node_heartbeat_sent"]);
 
+/**
+ * An event-store outage is one failure no matter how many log lines happen
+ * while it lasts. Reporting every rejected append turns the logger into an
+ * error-line amplifier, so repeat diagnoses get one line per minute (#268).
+ */
+const APPEND_FAILURE_REPORT_INTERVAL_MS = 60_000;
+
+/**
+ * Failure messages come from an implementation outside the logger and are not
+ * necessarily a finite vocabulary. Keep the throttle itself bounded too: once
+ * this many diagnoses are live, new ones share one overflow bucket.
+ */
+const MAX_TRACKED_APPEND_FAILURE_REASONS = 32;
+
 function isExcludedFromEventStore(event: string): boolean {
   return (
     HIGH_VOLUME_EXCLUDED_EVENTS.has(event) ||
@@ -83,6 +97,8 @@ export type StructuredLoggerOptions = {
   metricsCollector?: Pick<MetricsCollector, "recordEvent">;
   logLevel?: LogLevel;
   sampling?: Record<string, number>;
+  /** Injectable monotonic clock for append-failure throttle tests. */
+  appendFailureNow?: () => number;
 };
 
 export function createStructuredLogger(
@@ -95,12 +111,81 @@ export function createStructuredLogger(
     metricsCollector,
     logLevel = "info",
     sampling = {},
+    appendFailureNow = () => performance.now(),
   } = options;
 
   const threshold = LEVEL_PRIORITY[logLevel];
   const sampleCounters = new Map<string, number>();
+  const lastAppendFailureReportAtByReason = new Map<string, number>();
+  let lastUntrackedAppendFailureReportAt: number | undefined;
   const emitLine = (line: string) => {
     (writeLine ?? console.log)(line);
+  };
+
+  const reportAppendFailure = (failedEvent: string, error: unknown): void => {
+    // Counted BEFORE the throttle, and every time. The line answers "what is
+    // broken"; only a counter can answer "how much", and throttling the line
+    // without one leaves an operator unable to tell thirty failures from thirty
+    // million — which is the exact pairing #266 established for the shedding
+    // path, and which `admin_audit_log_append_failed` already gets for free by
+    // going through `logEvent` (#268 review).
+    //
+    // Deliberately `recordEvent` and not `logEvent`: the counter is a local
+    // increment, while routing this through the logger would append it to the
+    // very store that just rejected an append.
+    metricsCollector?.recordEvent("runtime_event_append_failed");
+
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const reason =
+      error instanceof Error ? `${error.name}:${errorMessage}` : errorMessage;
+    const at = appendFailureNow();
+
+    for (const [
+      trackedReason,
+      lastReportedAt,
+    ] of lastAppendFailureReportAtByReason) {
+      if (at - lastReportedAt >= APPEND_FAILURE_REPORT_INTERVAL_MS) {
+        lastAppendFailureReportAtByReason.delete(trackedReason);
+      }
+    }
+
+    const lastReportedAt = lastAppendFailureReportAtByReason.get(reason);
+    if (lastReportedAt !== undefined) {
+      return;
+    }
+
+    // Once high-cardinality failures have spilled into the shared bucket, its
+    // cooldown applies to every diagnosis that was not already tracked. An old
+    // tracked slot can expire before the bucket does; promoting an overflow
+    // diagnosis into that newly free slot would otherwise print it twice inside
+    // one minute (#268 review).
+    if (
+      lastUntrackedAppendFailureReportAt !== undefined &&
+      at - lastUntrackedAppendFailureReportAt <
+        APPEND_FAILURE_REPORT_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    if (
+      lastAppendFailureReportAtByReason.size >=
+      MAX_TRACKED_APPEND_FAILURE_REASONS
+    ) {
+      lastUntrackedAppendFailureReportAt = at;
+    } else {
+      lastAppendFailureReportAtByReason.set(reason, at);
+    }
+
+    emitLine(
+      JSON.stringify({
+        event: "runtime_event_append_failed",
+        level: "error" satisfies LogLevel,
+        timestamp: new Date().toISOString(),
+        result: "error",
+        failedEvent,
+        error: errorMessage,
+      }),
+    );
   };
 
   return (event, data, eventOptions) => {
@@ -133,16 +218,7 @@ export function createStructuredLogger(
           eventStore.append({ event, timestamp, data: { level, ...data } }),
         )
         .catch((error: unknown) => {
-          emitLine(
-            JSON.stringify({
-              event: "runtime_event_append_failed",
-              level: "error" satisfies LogLevel,
-              timestamp: new Date().toISOString(),
-              result: "error",
-              failedEvent: event,
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          );
+          reportAppendFailure(event, error);
         });
     }
     runtimeStore?.recordEvent(event, Date.parse(timestamp));

@@ -408,6 +408,7 @@ test("close gives up on a hung write inside its budget, and says so", async () =
   const abandoned: Array<{
     pendingWrites: number;
     queuedAppends: number;
+    closingAppends: number;
     quitOutcome: string;
     budgetMs: number;
   }> = [];
@@ -436,6 +437,7 @@ test("close gives up on a hung write inside its budget, and says so", async () =
     {
       pendingWrites: 1,
       queuedAppends: 1,
+      closingAppends: 0,
       // Never attempted: the drain had already run out, so the socket went
       // down instead of a `QUIT` that would have queued behind the write.
       quitOutcome: "skipped",
@@ -499,6 +501,83 @@ test("close still flushes a healthy queue, and stays quiet doing it", async () =
   // would abandon replies for no reason.
   assert.equal(redis.quitCalls(), 1);
   assert.equal(redis.disconnectCalls(), 0);
+});
+
+test("close reports appends that arrive after shutdown starts", async () => {
+  const redis = createFakeEventRedis();
+  const blockedQuit = createBlockedWrite();
+  const gracefulClient = redis.client as { quit: () => Promise<unknown> };
+  gracefulClient.quit = () => blockedQuit.write();
+  const abandoned: Array<{
+    pendingWrites: number;
+    queuedAppends: number;
+    closingAppends: number;
+    quitOutcome: string;
+    budgetMs: number;
+  }> = [];
+  const store = await createStore(redis.client, {
+    closeSettleTimeoutMs: 500,
+    onAppendsAbandonedAtShutdown: (info) => {
+      abandoned.push(info);
+    },
+  });
+
+  const closing = store.close();
+  await store.append(appendInput(0));
+  await store.append(appendInput(1));
+  blockedQuit.release();
+  await closing;
+
+  // The queue and QUIT are healthy; the report exists solely because those
+  // two records arrived after `closing` became true and were accepted without
+  // being written. Before #268 this loss had no log or scrapeable counter.
+  assert.deepEqual(abandoned, [
+    {
+      pendingWrites: 0,
+      queuedAppends: 0,
+      closingAppends: 2,
+      quitOutcome: "ok",
+      budgetMs: 500,
+    },
+  ]);
+});
+
+test("late appends keep updating the shutdown report, throttled instead of one line each", async () => {
+  let clock = 1_000;
+  const redis = createFakeEventRedis();
+  const abandoned: Array<{ closingAppends: number; quitOutcome: string }> = [];
+  const store = await createStore(redis.client, {
+    closeSettleTimeoutMs: 500,
+    now: () => clock,
+    onAppendsAbandonedAtShutdown: ({ closingAppends, quitOutcome }) => {
+      abandoned.push({ closingAppends, quitOutcome });
+    },
+  });
+
+  await store.close();
+  for (let index = 0; index < 5; index += 1) {
+    await store.append(appendInput(index));
+  }
+
+  // A timed-out shutdown step keeps running: the timeout answered its caller,
+  // it did not cancel the real work, so those producers go on logging after
+  // `close_event_store` returned. One update per late append would be one error
+  // line per log line — the amplifier this whole issue exists to remove,
+  // reappearing under a different event name in the shutdown tail (#268
+  // review). `app.ts` gives session cleanup 30s and the force-exit watchdog
+  // 150s, so that tail is long enough to matter.
+  assert.deepEqual(abandoned, [{ closingAppends: 1, quitOutcome: "ok" }]);
+
+  clock += 60_000;
+  await store.append(appendInput(5));
+
+  // Still throttled, still cumulative: the newest line supersedes the previous
+  // one rather than adding to it, so a shutdown that keeps losing appends says
+  // so more than once without saying it per append.
+  assert.deepEqual(abandoned, [
+    { closingAppends: 1, quitOutcome: "ok" },
+    { closingAppends: 6, quitOutcome: "ok" },
+  ]);
 });
 
 test("a queued write does not reach a connection close already gave up on", async () => {
