@@ -386,10 +386,14 @@ export async function createServerBootstrapContext(
               result: "error",
             });
           },
-          onAppendsResumed: ({ reason, droppedEvents }) => {
+          onAppendsResumed: ({ reason, startedAsReason, droppedEvents }) => {
             logEvent("runtime_event_appends_resumed", {
               instanceId: persistenceConfig.instanceId,
               reason,
+              // Differs from `reason` when the incident changed stage. Carried
+              // here rather than as a second start line, so the pair an
+              // operator matches up stays one-to-one.
+              startedAsReason,
               droppedEvents,
               result: "ok",
             });

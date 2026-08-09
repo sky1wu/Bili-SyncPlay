@@ -416,7 +416,7 @@ WebSocket 客户端。先读**该节点自己的日志**再去信外部视图，
   僵死或 Redis 被阻塞。在此期间记录的每一条日志都会被丢弃。
 - `reason="overflow"`——Redis 在回应，只是比事件产生的速度慢，其后排队的深度达到了
   1000 条上限。存储是落后，不是坏了；与 reaper 的 `skipped` 是同一种读法。
-- `reason="closing"`——关服时 2s 的排空预算耗尽，队列里仍有未写入的事件。在 Redis
+- `reason="closing"`——关服时 1.5s 的排空预算耗尽，队列里仍有未写入的事件。在 Redis
   本来就僵死的节点上出现属于预期。
 
 ```promql
@@ -426,8 +426,13 @@ sum(rate(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instanc
 日志按**一次事故两行**给出，而不是每丢一条打一行——后者等于在已经被证明过载的那条
 路径上输出最大音量：
 
-- `runtime_event_appends_dropped`——开始丢弃，`reason` 同上。
-- `runtime_event_appends_resumed`——丢弃结束，`droppedEvents` 是整次事故的总代价。
+- `runtime_event_appends_dropped`——开始丢弃，`reason` 是它**开始时**的原因。每次事故
+  恰好一条。
+- `runtime_event_appends_resumed`——丢弃结束，`droppedEvents` 是整次事故的总代价。每次
+  事故同样恰好一条，所以两者永远一一配对。`reason` 是结束时的原因，`startedAsReason`
+  是开始时的原因：两者不同说明事故中途换了阶段，`overflow` → `stalled` 意味着原本只是
+  落后的 Redis 已经彻底不应答。**当前处于哪个阶段是指标的职责，不是日志的**——事故进行
+  中 `reason` 标签会变，日志只负责给它划出起止。
 - `runtime_event_appends_abandoned_at_shutdown`——`close_event_store` 在自己的预算内
   返回，但连接上仍有 `pendingWrites` 条命令未应答，于是直接断开 socket，而不是发
   `QUIT`（那会排在它们后面、原样继承同一段等待）。在这个预算存在之前，这种情况表现为

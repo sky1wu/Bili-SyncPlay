@@ -426,7 +426,7 @@ section. What shedding protects is the process, not the page.
 - `reason="overflow"` — Redis is answering, just slower than events arrive, and
   the queue behind it reached its 1000-event depth limit. The store is behind,
   not broken; the same reading as the reaper's `skipped`.
-- `reason="closing"` — shutdown reached its 2s drain budget with writes still
+- `reason="closing"` — shutdown reached its 1.5s drain budget with writes still
   queued. Expected on a node whose Redis was already stalled.
 
 ```promql
@@ -437,9 +437,15 @@ The log lines bracket each incident instead of repeating per dropped event — o
 line per drop would be the loudest possible output on the path already
 established to be overloaded:
 
-- `runtime_event_appends_dropped` — shedding started, with the `reason` above.
+- `runtime_event_appends_dropped` — shedding started, with the `reason` it
+  started for. Exactly one per incident.
 - `runtime_event_appends_resumed` — shedding ended; `droppedEvents` is what the
-  whole incident cost.
+  whole incident cost. Exactly one per incident, so the two always pair up.
+  `reason` is what it ended as and `startedAsReason` what it began as: when they
+  differ the incident changed stage mid-flight, and `overflow` → `stalled` means
+  a Redis that was behind stopped answering altogether. **The live stage is the
+  metric's job, not the log's** — the `reason` label moves while the incident is
+  open, the log lines only bracket it.
 - `runtime_event_appends_abandoned_at_shutdown` — `close_event_store` returned on
   its own budget with `pendingWrites` commands still outstanding, and dropped the
   socket rather than sending `QUIT` (which would have queued behind them and

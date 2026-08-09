@@ -303,18 +303,27 @@ export type RedisEventStoreOptions = {
     "declareEventStoreAppends" | "recordEventStoreAppendDropped"
   >;
   /**
-   * The store started shedding events.
+   * The store started shedding events. Exactly once per incident.
    *
    * Fired on the transition, not per drop: the report is itself a log line, and
    * a report per dropped log line would put the loudest possible output on the
-   * one path already established to be overloaded. The magnitude belongs to
+   * one path already established to be overloaded. It is also NOT fired again
+   * when the diagnosis changes mid-incident — one start, one end, so the two
+   * can be matched up. The live per-stage picture belongs to
    * `bili_syncplay_event_store_appends_dropped_total`, and the total to
    * {@link RedisEventStoreOptions.onAppendsResumed}.
    */
   onAppendsDropped?: (info: { reason: EventStoreSheddingReason }) => void;
-  /** Shedding ended; `droppedEvents` is what the incident cost in total. */
+  /**
+   * Shedding ended. Exactly once per incident, closing the line above.
+   *
+   * `reason` is what it ended as and `startedAsReason` what it began as; they
+   * differ when the incident changed stage, which is the whole arc in one line.
+   * `droppedEvents` is what it cost across every stage.
+   */
   onAppendsResumed?: (info: {
     reason: EventStoreSheddingReason;
+    startedAsReason: EventStoreSheddingReason;
     droppedEvents: number;
   }) => void;
   /**
@@ -382,9 +391,12 @@ export async function createRedisEventStore(
   let queuedAppends = 0;
   /** Whether the write in flight has already lost its race against the cap. */
   let writeIsStalled = false;
-  /** The incident in progress, or null. Cleared by the first append that queues. */
+  /** The incident in progress, or null. Closed by {@link endSheddingIfRecovered}. */
   let shedding: {
+    /** What it is shedding for now. Can change without ending the incident. */
     reason: EventStoreSheddingReason;
+    /** What it was shedding for when the start line went out. */
+    startedAsReason: EventStoreSheddingReason;
     droppedEvents: number;
   } | null = null;
   const lastPrunedMinuteByEvent = new Map<string, number>();
@@ -401,21 +413,22 @@ export async function createRedisEventStore(
 
   function shedAppend(reason: EventStoreSheddingReason): void {
     countDroppedAppend(reason);
-    if (shedding !== null && shedding.reason === reason) {
+    if (shedding !== null) {
+      // The diagnosis can change mid-incident: `overflow` becoming `stalled` is
+      // Redis going from behind to not answering at all, and the two need
+      // different repairs. It does NOT open a second incident and does NOT get
+      // a second start line — two starts against one end is a pair an operator
+      // cannot match up (#266 review). Which stage it is in RIGHT NOW is the
+      // metric's job, per `reason`; all this has to do is make sure the line
+      // that closes the incident names what it ended as.
+      shedding.reason = reason;
       shedding.droppedEvents += 1;
       return;
     }
-    // A new incident, or one whose diagnosis changed under it. `overflow`
-    // becoming `stalled` is Redis going from behind to not answering at all,
-    // and those need different repairs — reporting the whole incident under
-    // whichever stage it happened to start in would call a dead Redis a slow
-    // one (#266 review). The count carries over, because it is still one
-    // incident, told in the stage it is now in.
-    //
     // Recorded BEFORE the callback, which is a log line and could come back
     // here as another append: a second transition report would be the start of
     // a loop rather than a second incident.
-    shedding = { reason, droppedEvents: (shedding?.droppedEvents ?? 0) + 1 };
+    shedding = { reason, startedAsReason: reason, droppedEvents: 1 };
     options.onAppendsDropped?.({ reason });
   }
 
@@ -423,9 +436,9 @@ export async function createRedisEventStore(
     if (shedding === null) {
       return;
     }
-    const { reason, droppedEvents } = shedding;
+    const { reason, startedAsReason, droppedEvents } = shedding;
     shedding = null;
-    options.onAppendsResumed?.({ reason, droppedEvents });
+    options.onAppendsResumed?.({ reason, startedAsReason, droppedEvents });
   }
 
   /**

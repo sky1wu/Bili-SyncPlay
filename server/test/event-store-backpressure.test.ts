@@ -333,43 +333,71 @@ test("shedding ends when the write answers, and reports what the incident cost",
     //
     // The magnitude is the point of the line: the metric counts drops as they
     // happen, this says what the whole incident cost once it is over.
-    assert.deepEqual(resumed, [{ reason: "stalled", droppedEvents: 2 }]);
+    assert.deepEqual(resumed, [
+      { reason: "stalled", startedAsReason: "stalled", droppedEvents: 2 },
+    ]);
   } finally {
     await store.close();
   }
 });
 
-test("an overflow that becomes a stall is re-reported as a stall", async () => {
-  const hung = createBlockedWrite();
+test("an overflow that becomes a stall closes as a stall, still as one pair", async () => {
+  const hung = createBlockedWrite({ blockedCalls: 1 });
   const redis = createFakeEventRedis({ xadd: hung.write });
   const dropped: string[] = [];
+  const resumed: Array<{
+    reason: string;
+    startedAsReason: string;
+    droppedEvents: number;
+  }> = [];
+  const recorded: string[] = [];
+  const appends: Array<Promise<unknown> | unknown> = [];
   const store = await createStore(redis.client, {
     appendTimeoutMs: 40,
     maxPendingAppends: 2,
-    closeSettleTimeoutMs: 20,
+    closeSettleTimeoutMs: 200,
+    metricsCollector: {
+      declareEventStoreAppends: () => undefined,
+      recordEventStoreAppendDropped: (reason) => {
+        recorded.push(reason);
+      },
+    },
     onAppendsDropped: ({ reason }) => {
       dropped.push(reason);
+    },
+    onAppendsResumed: (info) => {
+      resumed.push(info);
     },
   });
 
   try {
     // Redis is behind, not dead: the depth limit trips first, while the write
     // in flight is still inside its cap.
-    void store.append(appendInput(0));
-    void store.append(appendInput(1));
-    void store.append(appendInput(2));
+    for (let index = 0; index < 3; index += 1) {
+      appends.push(store.append(appendInput(index)));
+    }
     assert.deepEqual(dropped, ["overflow"]);
 
-    // ...and then the same write blows its cap. Carrying the first stage's
-    // reason to the end of the incident would report a Redis that stopped
-    // answering as one that is merely slow, and the two need different repairs.
+    // ...and then the same write blows its cap.
     await delay(80);
-    void store.append(appendInput(3));
-    assert.deepEqual(dropped, ["overflow", "stalled"]);
+    appends.push(store.append(appendInput(3)));
 
-    // Still one incident, not two — the count carries across the stages.
-    void store.append(appendInput(4));
-    assert.deepEqual(dropped, ["overflow", "stalled"]);
+    // No second start line. Two starts against one end is a pair an operator
+    // cannot match up (#266 review) — so the stage change goes to the metric,
+    // which is where the runbook sends them for the live picture anyway.
+    assert.deepEqual(dropped, ["overflow"]);
+    assert.deepEqual(recorded, ["overflow", "stalled"]);
+
+    hung.release();
+    await Promise.all(appends);
+
+    // And the line that closes the incident carries the whole arc: what it
+    // ended as, what it began as, and what it cost across both stages.
+    // Reporting it as `overflow` would call a Redis that stopped answering a
+    // slow one, and those need different repairs.
+    assert.deepEqual(resumed, [
+      { reason: "stalled", startedAsReason: "overflow", droppedEvents: 2 },
+    ]);
   } finally {
     hung.release();
     await store.close();
@@ -425,7 +453,9 @@ test("holding the queue at its limit does not log a line per freed slot", async 
     // carrying what it cost: two refused at the door, across both phases.
     stepped.releaseAll();
     await Promise.all(appends);
-    assert.deepEqual(resumed, [{ reason: "overflow", droppedEvents: 2 }]);
+    assert.deepEqual(resumed, [
+      { reason: "overflow", startedAsReason: "overflow", droppedEvents: 2 },
+    ]);
   } finally {
     stepped.releaseAll();
     await store.close();
