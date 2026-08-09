@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Redis } from "ioredis";
-import { createRedisRoomStore, expiryScore } from "../src/redis-room-store.js";
+import {
+  createRedisRoomStore,
+  expiryScore,
+  type RedisRoomStoreClient,
+} from "../src/redis-room-store.js";
 
 const REDIS_URL = process.env.REDIS_URL;
 
@@ -21,6 +25,51 @@ async function connect(): Promise<Redis> {
   await redis.connect();
   return redis;
 }
+
+function createFakeRoomStoreRedis(quit: () => Promise<unknown>): {
+  client: RedisRoomStoreClient;
+  disconnectCalls: () => number;
+} {
+  let disconnectCalls = 0;
+  return {
+    client: {
+      connect: async () => undefined,
+      quit,
+      disconnect: () => {
+        disconnectCalls += 1;
+      },
+      get: async () => null,
+      scan: async () => ["0", []],
+      zscan: async () => ["0", []],
+      zscore: async () => null,
+      eval: async () => null,
+      zrange: async () => [],
+      zrangebyscore: async () => [],
+      zcard: async () => 0,
+      zcount: async () => 0,
+      ping: async () => "PONG",
+    },
+    disconnectCalls: () => disconnectCalls,
+  };
+}
+
+test("redis room store close gives up on a Redis that never answers QUIT, and says so", async () => {
+  const redis = createFakeRoomStoreRedis(() => new Promise(() => undefined));
+  const unfinished: Array<{ quitOutcome: string; budgetMs: number }> = [];
+  const store = await createRedisRoomStore("redis://unused", {
+    redisClient: redis.client,
+    closeQuitTimeoutMs: 20,
+    onCloseUnfinished: (info) => {
+      unfinished.push(info);
+    },
+  });
+
+  const startedAt = Date.now();
+  await store.close();
+  assert.ok(Date.now() - startedAt < 1_000);
+  assert.equal(redis.disconnectCalls(), 1);
+  assert.deepEqual(unfinished, [{ quitOutcome: "timed_out", budgetMs: 20 }]);
+});
 
 function legacyRoomBody(
   code: string,

@@ -15,6 +15,7 @@ import {
 import { createStructuredLogger, DEFAULT_EVENT_SAMPLING } from "../logger.js";
 import { createMirroredRuntimeStore } from "../mirrored-runtime-store.js";
 import { createRedisAdminCommandBus } from "../redis-admin-command-bus.js";
+import type { RedisQuitOutcome } from "../redis-graceful-close.js";
 import { createRedisRoomEventBus } from "../redis-room-event-bus.js";
 import { createRedisRoomStore } from "../redis-room-store.js";
 import {
@@ -271,11 +272,41 @@ export async function createServerBootstrapContext(
   const serviceVersion =
     dependencies.serviceVersion ?? (await resolveServiceVersion());
   const now = dependencies.now ?? Date.now;
+  // The Redis components are constructed before the structured logger because
+  // that logger itself may depend on Redis. Their close callbacks capture this
+  // binding and therefore use the final logger by the time shutdown runs.
+  let logEvent: LogEvent = dependencies.logEvent ?? (() => undefined);
+
+  function logRedisCloseUnfinished<
+    Report extends {
+      quitOutcome: RedisQuitOutcome;
+      budgetMs: number;
+    },
+  >(event: string, report: Report): void {
+    logEvent(event, {
+      instanceId: persistenceConfig.instanceId,
+      ...report,
+      // A rejected `QUIT` is an error; a reply that never arrived spent the
+      // wait budget. Keep that distinction queryable in every close report.
+      //
+      // `ok` reaches this helper only from the runtime store, whose report also
+      // fires on abandoned callers/commands — and those exist precisely because
+      // a drain budget ran out, so `timeout` is the right diagnosis there. The
+      // event store's own mapping differs for a reason: `closingAppends` is not
+      // a budget expiry, so a graceful `QUIT` with appends refused after close
+      // is a fault (#268). Same field, two derivations, because the underlying
+      // question is "what made this close incomplete" and the answers differ.
+      result: report.quitOutcome === "failed" ? "error" : "timeout",
+    });
+  }
+
   const rawRoomStore =
     dependencies.roomStore ??
     (persistenceConfig.provider === "redis"
       ? await createRedisRoomStore(persistenceConfig.redisUrl, {
           namespace: persistenceConfig.redisNamespace,
+          onCloseUnfinished: (report) =>
+            logRedisCloseUnfinished("room_store_close_unfinished", report),
         })
       : createInMemoryRoomStore({ now }));
   const localRuntimeStore = createInMemoryRuntimeStore(now);
@@ -294,8 +325,6 @@ export async function createServerBootstrapContext(
   const runtimeStorePendingOperationLogger =
     options.loggingHooks?.onRuntimeStorePendingOperationError;
 
-  let logEvent: LogEvent = dependencies.logEvent ?? (() => undefined);
-
   const sharedRuntimeStore =
     persistenceConfig.runtimeStoreProvider === "redis"
       ? await createRedisRuntimeStore(persistenceConfig.redisUrl, {
@@ -313,6 +342,8 @@ export async function createServerBootstrapContext(
                 },
               }
             : {}),
+          onCloseUnfinished: (report) =>
+            logRedisCloseUnfinished("runtime_store_close_unfinished", report),
         })
       : localRuntimeStore;
   const runtimeStore =
@@ -329,6 +360,11 @@ export async function createServerBootstrapContext(
           resultChannelPrefix: getRedisAdminCommandResultChannelPrefix(
             persistenceConfig.redisNamespace,
           ),
+          onCloseUnfinished: (report) =>
+            logRedisCloseUnfinished(
+              "admin_command_bus_close_unfinished",
+              report,
+            ),
         })
       : persistenceConfig.adminCommandBusProvider === "none"
         ? createNoopAdminCommandBus()
@@ -358,6 +394,8 @@ export async function createServerBootstrapContext(
               error,
             );
           },
+          onCloseUnfinished: (report) =>
+            logRedisCloseUnfinished("room_event_bus_close_unfinished", report),
         })
       : persistenceConfig.roomEventBusProvider === "none"
         ? createNoopRoomEventBus()
@@ -513,12 +551,11 @@ export function createSharedServerShutdownSteps(args: {
   if (args.runtimeStore) {
     steps.push({
       name: args.runtimeStoreStepName ?? "close_runtime_store",
-      // Must exceed ONE `pendingOperationTimeoutMs` (5s by default), which is
-      // what a wound-down write queue can still be holding: `close` stops the
-      // retries and drops writes that have not started, but a Redis command
-      // already in flight only ends when its own timeout fires. On the default
-      // step budget the two are equal and the step — which started first —
-      // times out and reports a failed shutdown (#242 review).
+      // Default worst case is 14s: 5s for the wound-down queue's one in-flight
+      // attempt to answer its caller, another 5s for that timed-out Redis
+      // command to really settle, then 4s for bounded `QUIT`. The 15s step
+      // leaves a one-second margin while preserving the rule that a timeout
+      // answers the caller but does not cancel the command (#242, #270).
       timeoutMs: DEFAULT_CLOSE_STEP_TIMEOUT_MS * 3,
       run: () =>
         hasClose(args.runtimeStore) ? args.runtimeStore.close() : undefined,

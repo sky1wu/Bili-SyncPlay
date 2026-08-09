@@ -65,6 +65,7 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
   return {
     async connect() {},
     async quit() {},
+    disconnect() {},
     multi() {
       const execPromise = execPromises[multiIndex++] ?? Promise.resolve(null);
       return {
@@ -142,6 +143,109 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
     },
   };
 }
+
+test("redis runtime store close gives up on a Redis that never answers QUIT, and says so", async () => {
+  let disconnectCalls = 0;
+  const unfinished: Array<{
+    pendingOperations: number;
+    pendingCommands: number;
+    pendingOperationBudgetMs: number;
+    quitOutcome: string;
+    budgetMs: number;
+  }> = [];
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: {
+      ...createFakeRedisClient([]),
+      quit: () => new Promise(() => undefined),
+      disconnect: () => {
+        disconnectCalls += 1;
+      },
+    },
+    closeQuitTimeoutMs: 20,
+    onCloseUnfinished: (info) => {
+      unfinished.push(info);
+    },
+  });
+
+  const startedAt = Date.now();
+  await store.close();
+  assert.ok(Date.now() - startedAt < 1_000);
+  assert.equal(disconnectCalls, 1);
+  assert.deepEqual(unfinished, [
+    {
+      pendingOperations: 0,
+      pendingCommands: 0,
+      pendingAttempts: 0,
+      pendingOperationBudgetMs: 5_000,
+      quitOutcome: "timed_out",
+      budgetMs: 20,
+    },
+  ]);
+});
+
+test("redis runtime store bounds its pre-QUIT drain and counts every active Redis command", async () => {
+  const neverAnswers = new Promise<unknown>(() => undefined);
+  let disconnectCalls = 0;
+  const unfinished: Array<{
+    pendingOperations: number;
+    pendingCommands: number;
+    pendingOperationBudgetMs: number;
+    quitOutcome: string;
+    budgetMs: number;
+  }> = [];
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: {
+      ...createFakeRedisClient([neverAnswers]),
+      zadd: () => neverAnswers,
+      zremrangebyscore: () => neverAnswers,
+      quit: () => neverAnswers,
+      disconnect: () => {
+        disconnectCalls += 1;
+      },
+    },
+    pendingOperationTimeoutMs: 20,
+    closeQuitTimeoutMs: 20,
+    onPendingOperationError() {},
+    onCloseUnfinished: (info) => {
+      unfinished.push(info);
+    },
+  });
+
+  store.getOrCreateRoom("ROOMCLOSE");
+  store.addMember(
+    "ROOMCLOSE",
+    "member-close",
+    createSession("session-close"),
+    "token-close",
+  );
+  // This helper deliberately gives a live caller the command's real outcome;
+  // shutdown must bound its own wait without changing that API contract.
+  void store.blockMemberToken("ROOMCLOSE", "token-close", 60_000);
+  // Direct reads/writes can outlive an upstream shutdown step too. They bypass
+  // the pending-operation wrappers, so only client-boundary tracking sees this.
+  void store.isMemberTokenBlocked("ROOMCLOSE", "token-close");
+
+  const startedAt = Date.now();
+  await store.close();
+  assert.ok(Date.now() - startedAt < 1_000);
+  assert.equal(disconnectCalls, 1);
+  // Three numbers because they answer three different questions, and the drain
+  // waits on both of the last two: `pendingCommands` is what is on the wire and
+  // reads zero in the gaps between one attempt's commands, while
+  // `pendingAttempts` counts whole attempts and stays non-zero across exactly
+  // those gaps. Reporting only the first is how a close could say
+  // `pendingCommands: 0` and skip the report entirely (#270 review).
+  assert.deepEqual(unfinished, [
+    {
+      pendingOperations: 1,
+      pendingCommands: 3,
+      pendingAttempts: 1,
+      pendingOperationBudgetMs: 20,
+      quitOutcome: "timed_out",
+      budgetMs: 20,
+    },
+  ]);
+});
 
 test("runtime seat helper rejects when the add-member write is lost", async () => {
   const addMemberFailure = Promise.reject(new Error("add-member write lost"));
@@ -585,6 +689,42 @@ test("redis runtime store rejects new pending operations after reaching the conf
     store.registerSession(createSession("pending-c"));
     await store.flush?.();
   } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store keeps a timed-out add-member command under backpressure until it answers", async () => {
+  const firstOperation = createDeferred<unknown>();
+  const fakeRedis = createFakeRedisClient([firstOperation.promise]);
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: fakeRedis,
+    maxPendingOperations: 1,
+    pendingOperationTimeoutMs: 10,
+    onPendingOperationError() {},
+  });
+  store.getOrCreateRoom("ROOMCAP");
+
+  try {
+    store.addMember(
+      "ROOMCAP",
+      "member-a",
+      createSession("member-a"),
+      "token-a",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.throws(
+      () =>
+        store.addMember(
+          "ROOMCAP",
+          "member-b",
+          createSession("member-b"),
+          "token-b",
+        ),
+      /backpressure/,
+    );
+  } finally {
+    firstOperation.resolve(null);
     await store.close();
   }
 });

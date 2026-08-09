@@ -528,17 +528,47 @@ sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<wind
 **拒绝**并返回 `503 audit_store_unavailable`，而不是发出一条会排在僵死写入后面、永远
 回不来的命令。这里的 503 指向的是 Redis、不是后台进程：先查 Redis，恢复后重试。
 
-关服时 `close_admin_services` 会依次关闭管理会话存储与审计存储，现在两者都是有界的：
+关服时 `close_admin_services` 会一起关闭管理会话存储与审计存储，现在两者都是有界的：
 
 - `admin_audit_appends_abandoned_at_shutdown`——字段与 `quitOutcome` 的词汇表和
   `runtime_event_appends_abandoned_at_shutdown` 完全相同。
 - `admin_session_store_close_unfinished`——会话存储的 `QUIT` 没成，于是断掉了 socket。
-  它在这一步里排在前面，所以在这道边界存在之前，它自己就能把 5s 预算花光，审计存储的
+  在两个关闭改为一起 settle 之前，这道无界等待自己就能把 5s 预算花光，让审计存储的
   关闭根本轮不到执行。
 
 在这两道边界之前，只要 Redis 僵死，`close_admin_services` 必然是一次
 `server_shutdown_step_failed`。和这里其他地方一样，边界约束的是我们等多久、不是命令
 本身：这个客户端同样没有设置 `commandTimeout`。
+
+另外四个 Redis 关服步骤也采用同一条有界关闭规则（#270）：
+
+- `room_store_close_unfinished`——`close_room_store` 没能完成 `QUIT`。
+- `runtime_store_close_unfinished`——`close_runtime_store` 没能完成全部前置工作或
+  `QUIT`。三个计数，因为它们回答三个不同的问题，而其中任意一个单独非零都足以让这行
+  日志发出：
+  - `pendingOperations`——仍在等答复的调用方。
+  - `pendingCommands`——运行时存储 Redis 客户端边界上仍在线的命令。
+  - `pendingAttempts`——命令节拍器手里还没放掉的活：一次排队写入的 attempt、一次被
+    追踪的 `add_member`、一次房间 generation 的 pin。一个 attempt 可以跨好几条命令，
+    所以**它正是"attempt 卡在两条命令之间、`pendingCommands` 读作 0"时仍然非零的那
+    个计数**。一条 `quitOutcome: "ok"` 且前两个计数为 0 的降级日志说的就是这种情况，
+    不是自相矛盾。
+
+  `pendingOperationBudgetMs` 是调用方与命令的 drain 预算。
+
+- `admin_command_bus_close_unfinished` 与 `room_event_bus_close_unfinished`——每个受影响的
+  `role`（`publisher` / `subscriber`）各报一行，保证一个 socket 的失败不会藏掉另一个。
+
+四类上报都带 `quitOutcome`、`budgetMs` 与 `result`；非 `ok` 结果会强制断开 socket。
+它们属于关服基础设施，默认从管理事件列表隐藏。房间存储与两个总线在默认 5s 步骤里给
+`QUIT` 4s。运行时存储的 15s 步骤覆盖：写入队列最后一次尝试与刻意无超时的在线调用方
+5s、越过调用方等待的 Redis 命令再等 5s、`QUIT` 4s，合计 14s。两个总线并发关闭
+socket，并在重抛意外实现错误之前 settle 两端结果。房间事件总线的终态关闭不再追加
+第二条 `UNSUBSCRIBE`，因为半开 socket 可能已卡在 consumer 发出的第一条，而 `QUIT`
+本身就会退出订阅模式。
+
+这些边界仍只约束调用方等多久，并没有给 ioredis 增加 `commandTimeout`；后者是影响整条
+连接的另一项策略，由 #271 单独跟踪。
 
 ## 变更后回归清单
 

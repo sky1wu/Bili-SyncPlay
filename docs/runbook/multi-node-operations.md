@@ -568,14 +568,52 @@ store, and both are now bounded:
 - `admin_audit_appends_abandoned_at_shutdown` — same fields and same
   `quitOutcome` vocabulary as `runtime_event_appends_abandoned_at_shutdown`.
 - `admin_session_store_close_unfinished` — the session store's `QUIT` did not
-  work, so its socket was dropped. It runs first in the step, so before this
-  bound existed it could spend the whole 5s budget on its own and the audit
-  store's close was never even reached.
+  work, so its socket was dropped. Before the two closes were settled together,
+  this unbounded wait could spend the whole 5s budget on its own and prevent the
+  audit store's close from being reached.
 
 Before either bound, `close_admin_services` was a guaranteed
 `server_shutdown_step_failed` whenever Redis was hung. As everywhere else here,
 the bound is on how long we wait, not on the command: this client sets no
 `commandTimeout` either.
+
+The other Redis-backed shutdown steps use the same bounded-close rule (#270):
+
+- `room_store_close_unfinished` — `close_room_store` could not finish `QUIT`.
+- `runtime_store_close_unfinished` — `close_runtime_store` could not finish
+  all pre-close work or `QUIT`. Three counts, because they answer three
+  different questions and any one of them alone can be the reason the line was
+  emitted:
+  - `pendingOperations` — live callers still waiting for an answer.
+  - `pendingCommands` — commands still on the wire, counted at the runtime
+    store's Redis client boundary.
+  - `pendingAttempts` — work the command pacer was still holding: a queued
+    write's attempt, a tracked `add_member`, a room-generation pin. An attempt
+    can span several commands, so **this is the count that stays non-zero while
+    an attempt is between two of them and `pendingCommands` reads zero**. A
+    degraded line with `quitOutcome: "ok"` and the first two counts at zero
+    means exactly that, and it is not a contradiction.
+
+  `pendingOperationBudgetMs` states the caller/command drain budget.
+
+- `admin_command_bus_close_unfinished` and
+  `room_event_bus_close_unfinished` — one line per affected `role`
+  (`publisher` / `subscriber`), so one socket's failure cannot hide the other.
+
+All four carry `quitOutcome`, `budgetMs` and `result`, force-disconnect the
+socket after a non-`ok` outcome, and are hidden from the default admin event
+feed as shutdown plumbing. The room store and both buses use 4s inside their
+default 5s step. The runtime store's 15s step covers 5s for the write queue's
+last attempt and deliberately uncapped live callers, 5s for Redis commands that
+outlived that caller wait, and 4s for `QUIT` (14s total). The two
+buses close their sockets concurrently and settle both results before rethrowing
+an unexpected implementation error. A terminal room-event bus close skips a
+second `UNSUBSCRIBE`, because a half-open socket may already be stuck on the
+consumer's first one and `QUIT` itself exits subscriber mode.
+
+These bounds still govern how long the caller waits; they do not add an
+ioredis `commandTimeout`. That separate, connection-wide policy is tracked in
+#271.
 
 ## Post-Change Regression Checklist
 

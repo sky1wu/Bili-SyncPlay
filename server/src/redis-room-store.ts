@@ -1,5 +1,6 @@
 import { Redis } from "ioredis";
 import type { RoomListQuery } from "./admin/types.js";
+import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 import { getRedisRoomStoreKeys } from "./redis-namespace.js";
 import {
   createPersistedRoom,
@@ -7,6 +8,46 @@ import {
   type RoomUpdateResult,
 } from "./room-store.js";
 import type { PersistedRoom } from "./types.js";
+
+/**
+ * `close_room_store` has the default 5s shutdown budget and, after the room
+ * index reconciler's separate stop step, this store has only `QUIT` left to
+ * await. Four seconds gives the graceful path most of that budget while
+ * retaining one second for shutdown bookkeeping and the degraded report.
+ */
+const CLOSE_QUIT_TIMEOUT_MS = 4_000;
+
+/** Injectable so shutdown tests can model a `QUIT` reply that never arrives. */
+export type RedisRoomStoreClient = {
+  connect: () => Promise<unknown>;
+  quit: () => Promise<unknown>;
+  disconnect: () => void;
+  get: (key: string) => Promise<string | null>;
+  scan: (
+    cursor: string,
+    matchToken: "MATCH",
+    pattern: string,
+    countToken: "COUNT",
+    count: number,
+  ) => Promise<[string, string[]]>;
+  zscan: (
+    key: string,
+    cursor: string,
+    countToken: "COUNT",
+    count: number,
+  ) => Promise<[string, string[]]>;
+  zscore: (key: string, member: string) => Promise<string | null>;
+  eval: (
+    script: string,
+    numKeys: number,
+    ...args: Array<string | number>
+  ) => Promise<unknown>;
+  zrange: (key: string, start: number, stop: number) => Promise<string[]>;
+  zrangebyscore: (key: string, min: string, max: string) => Promise<string[]>;
+  zcard: (key: string) => Promise<number>;
+  zcount: (key: string, min: string, max: string) => Promise<number>;
+  ping: () => Promise<string>;
+};
 
 // Every room is a member of one sorted set scored by its expiry, with "+inf"
 // standing in for a room that does not expire. That single invariant — one
@@ -345,6 +386,13 @@ export async function createRedisRoomStore(
     // cutoff without waiting; every other timestamp in this module stays on
     // Date.now.
     now?: () => number;
+    closeQuitTimeoutMs?: number;
+    /** Report the graceful close that was replaced by a forced disconnect. */
+    onCloseUnfinished?: (info: {
+      quitOutcome: RedisQuitOutcome;
+      budgetMs: number;
+    }) => void;
+    redisClient?: RedisRoomStoreClient;
   } = {},
 ): Promise<
   RoomStore & {
@@ -352,14 +400,18 @@ export async function createRedisRoomStore(
     reconcileRoomIndex: () => Promise<void>;
   }
 > {
-  const redis = new Redis(redisUrl, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
+  const redis =
+    options.redisClient ??
+    (new Redis(redisUrl, {
+      lazyConnect: true,
+      maxRetriesPerRequest: 1,
+    }) as RedisRoomStoreClient);
   const { roomKeyPrefix, roomsByExpiryKey } = getRedisRoomStoreKeys(
     options.namespace,
   );
   const now = options.now ?? Date.now;
+  const closeQuitTimeoutMs =
+    options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
 
   function roomKey(code: string): string {
     return `${roomKeyPrefix}${code}`;
@@ -803,7 +855,13 @@ export async function createRedisRoomStore(
     // its own histogram label instead of on whichever read triggered it.
     reconcileRoomIndex,
     async close() {
-      await redis.quit();
+      const quitOutcome = await quitWithin(redis, closeQuitTimeoutMs);
+      if (quitOutcome !== "ok") {
+        options.onCloseUnfinished?.({
+          quitOutcome,
+          budgetMs: closeQuitTimeoutMs,
+        });
+      }
     },
   };
 }

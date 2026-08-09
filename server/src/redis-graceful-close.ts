@@ -8,12 +8,12 @@
  * never arrives. Every `close()` in this server runs inside a shutdown step
  * with a budget, so an unbounded `await redis.quit()` spends the whole budget
  * and hands the step a `server_shutdown_step_failed` every time Redis is hung
- * (#264, #267).
+ * (#264, #267, #270).
  *
- * Extracted rather than written a third time: the event store, the audit store
- * and the admin session store all close a Redis connection inside the same kind
- * of budget, and four hand-rolled copies of a timeout mechanism is what #242
- * cost six duplicate review findings.
+ * Shared by every Redis-backed facility rather than copied at each call site:
+ * four hand-rolled timeout mechanisms are what #242 cost six duplicate review
+ * findings. The wait mechanism lives here; each facility still owns its budget
+ * and its degraded-shutdown report.
  */
 
 import { settleWithin } from "./retry-pacer.js";
@@ -34,6 +34,17 @@ export type ClosableRedisConnection = {
   disconnect: () => void;
 };
 
+export type NamedRedisConnection<Role extends string> = {
+  role: Role;
+  connection: ClosableRedisConnection;
+};
+
+export type RedisQuitReport<Role extends string> = {
+  role: Role;
+  quitOutcome: RedisQuitOutcome;
+  budgetMs: number;
+};
+
 /**
  * Send `QUIT`, wait no longer than `budgetMs`, and drop the socket if that did
  * not work.
@@ -48,12 +59,21 @@ export async function quitWithin(
   budgetMs: number,
 ): Promise<RedisQuitOutcome> {
   let failed = false;
-  const quitting = connection.quit().then(
-    () => undefined,
-    () => {
-      failed = true;
-    },
-  );
+  // `quit()` itself can throw synchronously on a client that is already gone.
+  // Letting that escape would skip the `disconnect()` below and leak the very
+  // socket this function exists to close.
+  let quitting: Promise<void>;
+  try {
+    quitting = connection.quit().then(
+      () => undefined,
+      () => {
+        failed = true;
+      },
+    );
+  } catch {
+    failed = true;
+    quitting = Promise.resolve();
+  }
   const answered = await settleWithin(quitting, budgetMs);
   const outcome: RedisQuitOutcome = !answered
     ? "timed_out"
@@ -65,7 +85,43 @@ export async function quitWithin(
     // budget; one that came back an error left the socket in a state nobody
     // vouched for. Either way it goes down here rather than outliving the
     // process's own shutdown.
-    connection.disconnect();
+    try {
+      connection.disconnect();
+    } catch {
+      // Swallowed on purpose: the caller reports this outcome, and throwing
+      // here would skip that report on the one connection that most needs it —
+      // the process is exiting either way, so the answer is worth more than the
+      // exception (#270 review).
+    }
   }
   return outcome;
+}
+
+/**
+ * Close independent Redis connections together, without letting one rejected
+ * close hide another connection's outcome.
+ *
+ * Pub/sub facilities own two sockets. `Promise.all` used to reject on the
+ * first close error and discard the other result, so shutdown could neither
+ * report nor react to the whole facility. `allSettled` preserves both results;
+ * after every close and report callback has settled, an unexpected rejection
+ * is rethrown so the shutdown step still records a real implementation error.
+ */
+export async function quitAllWithin<Role extends string>(
+  connections: ReadonlyArray<NamedRedisConnection<Role>>,
+  budgetMs: number,
+  onCloseUnfinished?: (report: RedisQuitReport<Role>) => void,
+): Promise<void> {
+  const closed = await Promise.allSettled(
+    connections.map(async ({ role, connection }) => {
+      const quitOutcome = await quitWithin(connection, budgetMs);
+      if (quitOutcome !== "ok") {
+        onCloseUnfinished?.({ role, quitOutcome, budgetMs });
+      }
+    }),
+  );
+  const failed = closed.find((outcome) => outcome.status === "rejected");
+  if (failed?.status === "rejected") {
+    throw failed.reason;
+  }
 }

@@ -13,7 +13,8 @@ import {
   getPreviousRoomToLeave,
   resolveRoomCodeToLeave,
 } from "./runtime-store-state.js";
-import { createRetryPacer } from "./retry-pacer.js";
+import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
+import { createRetryPacer, settleWithin } from "./retry-pacer.js";
 import {
   createDurableWriteQueue,
   NonRetryableWriteError,
@@ -35,6 +36,7 @@ type RedisMulti = {
 type RedisClient = {
   connect: () => Promise<unknown>;
   quit: () => Promise<unknown>;
+  disconnect: () => void;
   multi: (...args: unknown[]) => RedisMulti;
   hgetall: (key: string) => Promise<Record<string, string>>;
   hget: (key: string, field: string) => Promise<string | null>;
@@ -62,6 +64,77 @@ type RedisClient = {
   del: (...keys: string[]) => Promise<unknown>;
   get: (key: string) => Promise<string | null>;
 };
+
+type TrackRedisCommand = <T>(command: Promise<T>) => Promise<T>;
+
+/** Track the command at the client boundary so no direct call can bypass it. */
+function createTrackedRedisMulti(
+  multi: RedisMulti,
+  track: TrackRedisCommand,
+): RedisMulti {
+  const tracked: RedisMulti = {
+    sadd(...args) {
+      multi.sadd(...args);
+      return tracked;
+    },
+    srem(...args) {
+      multi.srem(...args);
+      return tracked;
+    },
+    del(...keys) {
+      multi.del(...keys);
+      return tracked;
+    },
+    hset(key, ...args) {
+      multi.hset(key, ...args);
+      return tracked;
+    },
+    hdel(key, ...fields) {
+      multi.hdel(key, ...fields);
+      return tracked;
+    },
+    zadd(key, score, member) {
+      multi.zadd(key, score, member);
+      return tracked;
+    },
+    zrem(key, ...members) {
+      multi.zrem(key, ...members);
+      return tracked;
+    },
+    exec() {
+      return track(multi.exec());
+    },
+  };
+  return tracked;
+}
+
+function createTrackedRedisClient(
+  client: RedisClient,
+  track: TrackRedisCommand,
+): RedisClient {
+  return {
+    // Startup and terminal connection operations are not application commands.
+    connect: () => client.connect(),
+    quit: () => client.quit(),
+    disconnect: () => client.disconnect(),
+    multi: (...args) => createTrackedRedisMulti(client.multi(...args), track),
+    hgetall: (...args) => track(client.hgetall(...args)),
+    hget: (...args) => track(client.hget(...args)),
+    smembers: (...args) => track(client.smembers(...args)),
+    scard: (...args) => track(client.scard(...args)),
+    sadd: (...args) => track(client.sadd(...args)),
+    srem: (...args) => track(client.srem(...args)),
+    zadd: (...args) => track(client.zadd(...args)),
+    zremrangebyscore: (...args) => track(client.zremrangebyscore(...args)),
+    zrange: (...args) => track(client.zrange(...args)),
+    zrem: (...args) => track(client.zrem(...args)),
+    zscore: (...args) => track(client.zscore(...args)),
+    set: (...args) => track(client.set(...args)),
+    eval: (...args) => track(client.eval(...args)),
+    del: (...args) => track(client.del(...args)),
+    get: (...args) => track(client.get(...args)),
+  };
+}
 
 /**
  * Exported so the bootstrap's logging hook shares this exact union rather than
@@ -98,6 +171,7 @@ type RuntimeStoreOptions = {
   now?: () => number;
   maxPendingOperations?: number;
   pendingOperationTimeoutMs?: number;
+  closeQuitTimeoutMs?: number;
   /**
    * Retry policy for the queued session writes. Bounded on purpose: a room code
    * that has been recycled must not inherit an ancient write, and the writes are
@@ -113,11 +187,36 @@ type RuntimeStoreOptions = {
     context: PendingOperationLogContext,
     error: unknown,
   ) => void;
+  /** Report callers, commands, or a graceful close abandoned at shutdown. */
+  onCloseUnfinished?: (info: {
+    /** Callers still waiting for an answer. */
+    pendingOperations: number;
+    /** Commands on the wire, counted at the Redis client boundary. */
+    pendingCommands: number;
+    /**
+     * Work the command pacer is still holding: a queued write's attempt, a
+     * tracked `add_member`, a room-generation pin. Not all of them span several
+     * commands — the ones that do are why this exists, because it stays
+     * non-zero in the gaps where `pendingCommands` reads zero.
+     */
+    pendingAttempts: number;
+    pendingOperationBudgetMs: number;
+    quitOutcome: RedisQuitOutcome;
+    budgetMs: number;
+  }) => void;
   metricsCollector?: Pick<
     MetricsCollector,
     "observeRedisRuntimeStoreDuration" | "observeRedisRuntimeStoreFailure"
   >;
 };
+
+/**
+ * The default runtime-store shutdown step is 15s. Winding down the write queue
+ * can spend one 5s attempt cap, waiting for that timed-out command can spend a
+ * second 5s cap, and `QUIT` gets 4s here: 14s total, leaving a one-second
+ * margin for the step to record its result.
+ */
+const CLOSE_QUIT_TIMEOUT_MS = 4_000;
 
 const RUNTIME_STORE_METHOD_NAMES = [
   "registerSession",
@@ -609,11 +708,26 @@ export async function createRedisRuntimeStore(
   redisUrl: string,
   options: RuntimeStoreOptions = {},
 ): Promise<RuntimeStore & { close: () => Promise<void> }> {
-  const redis = (options.redisClient ??
+  const rawRedis = (options.redisClient ??
     new Redis(redisUrl, {
       lazyConnect: true,
       maxRetriesPerRequest: 1,
     })) as RedisClient;
+  const activeRedisCommands = new Set<Promise<void>>();
+  const trackRedisCommand: TrackRedisCommand = <T>(
+    command: Promise<T>,
+  ): Promise<T> => {
+    const answered = command.then(
+      () => undefined,
+      () => undefined,
+    );
+    activeRedisCommands.add(answered);
+    void answered.finally(() => {
+      activeRedisCommands.delete(answered);
+    });
+    return command;
+  };
+  const redis = createTrackedRedisClient(rawRedis, trackRedisCommand);
   const keyPrefix = options.keyPrefix ?? "bsp:runtime:";
   const now = options.now ?? Date.now;
   const memberTokenRetentionMs =
@@ -622,6 +736,8 @@ export async function createRedisRuntimeStore(
     options.maxPendingOperations ?? DEFAULT_MAX_PENDING_OPERATIONS;
   const pendingOperationTimeoutMs =
     options.pendingOperationTimeoutMs ?? DEFAULT_PENDING_OPERATION_TIMEOUT_MS;
+  const closeQuitTimeoutMs =
+    options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const metricsCollector = options.metricsCollector;
   const localRuntimeStore = createInMemoryRuntimeStore(now);
   const pendingOperations = new Set<Promise<unknown>>();
@@ -641,7 +757,9 @@ export async function createRedisRuntimeStore(
    * and its failure was swallowed, so a blip silently cost the write.
    */
   /**
-   * Caps each Redis command and remembers the ones that outlive their cap.
+   * Caps commands whose caller is allowed to receive a timeout. Every command,
+   * including direct reads and `MULTI.exec()`, is tracked separately at the
+   * Redis client boundary above so shutdown and reporting cannot miss one.
    *
    * Only the cap and the tracking are used — the retry SCHEDULE belongs to
    * `sessionWriteQueue`, which drives the retries. Sharing the primitive is
@@ -727,6 +845,10 @@ export async function createRedisRuntimeStore(
       failureRecorded = true;
       metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
     };
+    // This caller may time out, so retain the real command separately for
+    // write-admission backpressure until Redis actually answers. The client
+    // boundary tracker independently covers the all-command close report.
+    const command = commandPacer.trackCall(operation);
     const trackedOperation = new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const error = new Error(
@@ -744,7 +866,7 @@ export async function createRedisRuntimeStore(
         reject(error);
       }, pendingOperationTimeoutMs);
 
-      void operation.then(
+      void command.then(
         (value) => {
           clearTimeout(timeout);
           resolve(value);
@@ -1728,15 +1850,77 @@ export async function createRedisRuntimeStore(
       // dead Redis was never going to accept would record the step as failed
       // and exit the process non-zero (#242).
       sessionWriteQueue.stopRetrying();
-      await Promise.allSettled(Array.from(pendingOperations));
+      // `trackAwaitedOperation` intentionally gives its live caller the real
+      // answer, with no timeout that could lie about whether the write landed.
+      // Shutdown is different: it may abandon those callers, but only inside a
+      // named budget and only after keeping the underlying commands tracked.
+      await settleWithin(
+        Promise.allSettled(Array.from(pendingOperations)),
+        pendingOperationTimeoutMs,
+      );
       // `pendingOperations` holds the CALLERS' answers, and a write that timed
       // out answered long before its command did. Quitting on that alone closes
       // the connection under commands still in flight, which is the same
       // "a timeout is not a cancel" gap `settle` closes for the session chain —
       // so wait for the chain releases too, bounded so a dead Redis cannot
       // stretch the close step (#242 review).
-      await commandPacer.settleTracked(pendingOperationTimeoutMs);
-      await redis.quit();
+      //
+      // TWO predicates, because they answer different questions and each is
+      // blind where the other sees. `activeRedisCommands` is what is on the
+      // wire right now: it catches commands issued DURING the drain, which a
+      // one-shot snapshot misses — but it reads empty whenever an operation is
+      // between two of its commands, and exiting there would send `QUIT` under
+      // the next one. `commandPacer` holds whole attempts (`withAttemptTimeout`
+      // caps `operation()`, not a single command), so it stays non-empty across
+      // exactly that gap — but it snapshots once. Waiting on only the first is
+      // how a close could report `pendingCommands: 0` and skip the report
+      // entirely, which is "bounded but silent", the one outcome this whole
+      // area exists to refuse (#270 review).
+      //
+      // The loop belongs to the wait, so it has to end with it. `settleWithin`
+      // answers the caller at the budget but cannot stop what it was waiting
+      // on: left running, a round that finds commands settled and attempts
+      // still outstanding would come back every `pendingOperationTimeoutMs`,
+      // arming a fresh ref'd timer inside `settleTracked` each time — an
+      // unbounded background loop started by a bounded wait, keeping the
+      // process alive long after `close()` said it was done (#272 review).
+      let stopDraining = false;
+      const draining = (async () => {
+        while (
+          !stopDraining &&
+          (activeRedisCommands.size > 0 || commandPacer.trackedCount() > 0)
+        ) {
+          await Promise.allSettled([
+            ...Array.from(activeRedisCommands),
+            commandPacer.settleTracked(pendingOperationTimeoutMs),
+          ]);
+        }
+      })();
+      if (!(await settleWithin(draining, pendingOperationTimeoutMs))) {
+        stopDraining = true;
+      }
+      // Sample before `quitWithin` may force-disconnect the socket and reject
+      // these promises. This is the count that was still in flight when the
+      // graceful close began, not the (usually zero) cleanup count afterwards.
+      const pendingOperationsAtQuit = pendingOperations.size;
+      const pendingCommandsAtQuit = activeRedisCommands.size;
+      const pendingAttemptsAtQuit = commandPacer.trackedCount();
+      const quitOutcome = await quitWithin(redis, closeQuitTimeoutMs);
+      if (
+        pendingOperationsAtQuit > 0 ||
+        pendingCommandsAtQuit > 0 ||
+        pendingAttemptsAtQuit > 0 ||
+        quitOutcome !== "ok"
+      ) {
+        options.onCloseUnfinished?.({
+          pendingOperations: pendingOperationsAtQuit,
+          pendingCommands: pendingCommandsAtQuit,
+          pendingAttempts: pendingAttemptsAtQuit,
+          pendingOperationBudgetMs: pendingOperationTimeoutMs,
+          quitOutcome,
+          budgetMs: closeQuitTimeoutMs,
+        });
+      }
     },
     async heartbeatNode(status: ClusterNodeStatus) {
       await localRuntimeStore.heartbeatNode(status);
