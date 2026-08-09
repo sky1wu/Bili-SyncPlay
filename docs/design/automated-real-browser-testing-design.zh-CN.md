@@ -223,7 +223,7 @@ flowchart LR
 
 - 使用真实 HTTP/WebSocket handler、消息校验和 room service。
 - `allowedOrigins` 精确来自本次浏览器上下文。
-- admin-ui 场景启用测试专用管理员配置；密码在内存中生成，不写文件。
+- E2E-004 的 M0 spike 和 admin-ui 场景都向 `createSyncServer` 传入 run-scoped 测试管理员配置，session/event/audit store 均使用内存 provider；用户名、密码、密码哈希和 session secret 在测试进程内生成且不写文件。fixture 使用发现后已加入 `allowedOrigins` 的扩展 Origin 调用真实 `POST /api/admin/auth/login`，从成功响应中仅在内存保存 bearer token，再以 `Authorization: Bearer` 调用房间列表和详情；缺少或伪造 token 的同一路径必须返回 401，凭据和 token 不进入日志或 artifact。
 - 监听回环地址和随机端口。
 - 为 `popup.server-url.save-wss` 提供可选的受管 TLS facade：使用本次 run 生成的临时 CA，以及 SAN 只包含 `wssUrl` 实际回环主机名/IP 的叶证书终止 HTTPS/WSS，只允许代理到同一 fixture 的随机回环端口；普通 HTTPS 请求必须转发 `/api/connection-check` 和 `/` 并保留 Origin/CORS 语义，WebSocket upgrade 转发到同一后端。CA 信任限制在隔离浏览器 profile 的生命周期内；不得修改系统信任库、关闭全局证书校验或借用公网 WSS。fixture 暴露 `wssUrl`，并验证浏览器实际依次完成 HTTPS 预检、TLS、WebSocket 和同步协议握手；SAN 不匹配、错误 CA、错误目标或 profile 外连接必须失败。
 - `closeBootstrapSink()` 返回前必须等待 sink 端口可重新绑定，同时保持同步后端和可选 TLS facade 可用；`close()` 在任何阶段均可安全调用，并汇总各资源的关闭失败。
@@ -264,7 +264,7 @@ Page model 只封装稳定交互，不承担业务判定：
 
 - `PopupPage`：服务器地址、房间表单、邀请、成员、共享视频卡片、设置和日志；实例记录它来自 action popup 还是普通扩展页，活动-tab-dependent 操作拒绝在普通扩展页实例上执行。
 - `BilibiliPage`：视频元素、页面身份、可见 toast、页内分享按钮、导航和 fixture 控制面。
-- `AdminPage`：登录、导航、房间详情、治理确认和结果。
+- `AdminPage`：登录；通过真实侧栏菜单分别导航到 overview、rooms、events、audit、config，并核验 path、页头标题、唯一选中项和目标页面内容；处理房间详情、治理确认和结果。
 
 业务断言放在 oracle；例如 `PopupPage.shareCurrentVideo()` 只点击并处理 confirm，是否同步成功由 room/playback oracle 判断。
 
@@ -300,7 +300,7 @@ performance.now() / sample sequence
 
 具体数值由 Phase 0 结合当前 `playback-reconcile.ts` 阈值和 Windows 实测校准，未经基线数据不在本文拍脑袋固定。
 
-跨时钟场景通过 E2E-only WSL launcher 使用现有 `ServerBootstrapDependencies.now` 注入点偏移服务端逻辑墙钟，不修改 Windows 或 WSL 系统时钟，也不改变浏览器本地单调钟。正、负偏移分别在两个完全隔离的子场景中运行：每个子场景都创建新的 server 进程、房间和浏览器 profiles，并从进程启动到退出保持固定的 `+Δ` 或 `-Δ`，其中 `Δ >= max(5_000ms, 4 × playing 动态位置容差)`；不得在已经写入播放版本的同一服务端进程中把时钟从正偏移反向跳到负偏移。`sync:ping` 的原始 out/in 分量必须分别证明实测偏移方向和幅度达到计划值，否则对应子场景无效并失败。正确实现须在两个子场景中各自进入稳定窗口；临时把补偿逻辑恢复为 `serverTime - localNow` 后，同样的两个隔离子场景必须因播放位置无法收敛而失败，而不是因 launcher、服务端版本时间倒退或诊断缺失失败。
+跨时钟场景通过 E2E-only WSL launcher 使用现有 `ServerBootstrapDependencies.now` 注入点控制服务端逻辑墙钟，不修改 Windows 或 WSL 系统时钟，也不改变浏览器本地单调钟。每次正向实现或负向对照都创建全新的 server 进程、房间和浏览器 profiles：先固定注入 `+D`，直到 `sync:ping` 原始样本与 popup 已发布诊断值一致；随后在时长 `T` 内把偏移从 `+D` 线性降到 `0`，其中 `D >= max(5_000ms, 4 × playing 动态位置容差)`、`T >= 2 × CLOCK_SYNC_INTERVAL_MS` 且以毫秒计 `T > D`。因此注入时钟以 `1 - D/T` 的正速率前进，取整后的服务端时间与播放版本也不得倒退，但滤波后的 `clockOffsetMs` 会落后于当前原始钟差。runner 必须从每次 pong 的原始 out/in 分量和 popup 值证明两者之差至少大于 playing 动态位置容差，并在这个滞后窗口让 owner 连续产生新的 playing 快照；未形成该滞后、任一版本时间倒退或诊断缺失都属于夹具失败。正确实现只用本地单调到达锚点，须持续进入稳定窗口；负向对照仅临时在当前代码中恢复 `estimatedServerNow = localNow + clockOffsetMs` 再减 `playback.serverTime` 的 #210 前位置补偿，必须因滞后的估计持续过度外推而越过容差。进程终身固定的 `+D`/`-D` 会让偏移同时进入估计值与快照时间而抵消，不能作为这项负向对照。
 
 #### Stability oracle
 
@@ -433,7 +433,7 @@ npm run test:e2e:browser
 - 使用专用低权限 Windows 用户、独立浏览器安装和独立工作目录。
 - 每次运行创建新 profile；Bilibili 登录态如确有需要，从凭据库复制到临时 profile，用后销毁。
 - WSL 场景由 Windows 编排器调用固定、受控的 WSL 入口启动当前 SHA 的 server 构建；不得使用维护者正在开发的工作树。
-- 跨时钟场景由 E2E-only WSL launcher 导入当前构建的生产 bootstrap，并仅通过 `ServerBootstrapDependencies.now` 注入服务端逻辑墙钟偏移；launcher 为固定正、负偏移分别启动全新的 server 进程、房间和浏览器 profiles，每个进程终身保持至少 `max(5_000ms, 4 × playing 动态位置容差)` 的单一偏移。全程不得修改宿主机或 WSL 系统时钟，也不得在同一 server 进程内反向调整测试时钟；测试结束后该注入随对应进程退出。
+- 跨时钟场景由 E2E-only WSL launcher 导入当前构建的生产 bootstrap，并仅通过 `ServerBootstrapDependencies.now` 控制服务端逻辑墙钟；正向实现和负向对照各自启动全新的 server 进程、房间和浏览器 profiles，先在固定 `+D` 下等待校时稳定，再以 `T >= 2 × CLOCK_SYNC_INTERVAL_MS`、且以毫秒计 `T > D` 的线性漂移把偏移降至 `0`，其中 `D >= max(5_000ms, 4 × playing 动态位置容差)`。全程不得修改宿主机或 WSL 系统时钟；注入后的时间和版本不得倒退，测试结束后注入随对应进程退出。
 
 GitHub 明确说明持久化 self-hosted runner 可能被不可信 workflow 持久化攻陷；公开仓库必须把可信 SHA 和 runner 隔离作为设计前提。参考：[GitHub Actions secure use](https://docs.github.com/en/actions/reference/security/secure-use)。
 
@@ -508,7 +508,7 @@ GitHub 明确说明持久化 self-hosted runner 可能被不可信 workflow 持�
 7. paused/playing 的位置容差和消息风暴上限是多少，才能既符合当前产品策略又能抓住真实回归。
 8. GitHub-hosted runner 上的预算分三次关闭：Phase 0 记录空白扩展、双 profile/握手和媒体代表场景的耗时、CPU、内存及 artifact 样本，证明 5/10 分钟目标没有明显不可行；E2E-207 在真实 P0 命令存在后记录 P0 实测并验证 5 分钟目标；E2E-501/504 在完整命令存在后记录全量套件单轮和 100 轮分布，并在 E2E-506 前验证当前 10 分钟目标。未达标时必须先优化，或基于实测修改需求预算并取得评审同意。不得把后两项当作 E2E-007/M0 的前置条件，也不得用 Phase 0 估算冒充最终实测。
 9. Linux/WSL 本地 managed Redis 应锁定哪些 `redis-server` / `redis-cli` 版本，怎样取得它们并证明随机端口、关闭持久化、健康检查和进程回收在干净环境可重复。
-10. E2E-only WSL launcher 能否通过 `ServerBootstrapDependencies.now` 在两个完全隔离的新 server/房间/profile 运行中分别稳定制造至少 `max(5_000ms, 4 × playing 动态位置容差)` 的固定正、负偏移，并让 `sync:ping` 观测到各自方向和幅度，同时不修改任一系统时钟或让单个 server 的版本时间倒退。
+10. E2E-only WSL launcher 能否通过 `ServerBootstrapDependencies.now` 在隔离的新 server/房间/profile 中先稳定校准固定正偏移，再用至少两个 `sync:ping` 周期、且以毫秒计漂移时长大于漂移总量的线性降偏移制造超过 playing 动态位置容差的“已发布估计落后于当前钟差”，同时让注入时间和所有服务端版本单调不减；同一方案在全新负向对照进程中能否稳定复现，且全程不修改任一系统时钟。
 11. Chromium 隔离 profile 能否在不修改系统信任库、不关闭全局证书校验的前提下，仅信任本次 run 的临时 CA，并让扩展 background 通过受管 `wss://` facade 的 HTTPS `/api/connection-check`、`/` 预检后完成真实 TLS/WebSocket/同步协议握手；错误证书是否稳定失败。
 12. 选定 Playwright/Chromium 版本能否通过浏览器调试协议主动终止已加入真实同步房间、且双方已绑定同一共享视频的目标 MV3 service worker，并由下一次真实 popup/content 生产事件恢复持久化房间会话、重连和跨端消息处理；如何记录 popup port、content 设置 hydration 等实际首事件并证明是它触发新 target，而非错误 target、未终止上下文、alarm、自动重试或测试侧重载扩展。
 
