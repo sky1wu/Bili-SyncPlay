@@ -405,54 +405,49 @@ WebSocket 客户端。先读**该节点自己的日志**再去信外部视图，
 当 Redis 不再回应时它会**丢弃**而不是排队：列表变得不完整、所有基于这条流算出来的
 计数都会偏低，但进程的内存不会涨、关服也仍然能收尾（#264）。
 
-它**并不能**让事件页保持可用。读写共用同一条连接、Redis 按序应答，所以 Redis 僵死
-期间发出的查询会排在在途写入后面并跟着停住——见本节末尾。丢弃保住的是进程，不是
-页面。
+它**并不能**让事件页保持可用。读写共用同一条连接、Redis 按序应答，所以一旦存储发现
+连接已经僵死，后台读取会被直接**拒绝**并返回 `503 event_store_unavailable`，而不是发
+出一条会排在僵死写入后面、永远回不来的命令。这里的 503 指向的是 Redis、不是后台进程：
+先查 Redis，恢复后重试。丢弃保住的是进程，不是页面。
 
 信号是 `bili_syncplay_event_store_appends_dropped_total`，它的 `reason` 标签就是
 诊断结论：
 
 - `reason="stalled"`——在途的那次写入已超过它 5s 的上限。Redis 已经不回应了：连接
-  僵死或 Redis 被阻塞。在此期间记录的每一条日志都会被丢弃。
+  僵死或 Redis 被阻塞。在此期间记录的每一条日志都会被丢弃，后台读取一律拒绝。
 - `reason="overflow"`——Redis 在回应，只是比事件产生的速度慢，其后排队的深度达到了
-  1000 条上限。存储是落后，不是坏了；与 reaper 的 `skipped` 是同一种读法。
+  1000 条上限。存储是落后，不是坏了；与 reaper 的 `skipped` 是同一种读法。读取仍然
+  正常。
 
 ```promql
+# 现在还在丢吗？丢的是哪一种？
 sum(rate(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance, reason)
+
+# 你关心的这段窗口里，一共丢了多少？
+sum(increase(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance)
 ```
 
-日志按**一次事故两行**给出，而不是每丢一条打一行——后者等于在已经被证明过载的那条
-路径上输出最大音量：
+**"还在不在丢"和"丢了多少"看指标，不要看日志。** 日志只给两条事实，不做任何超出
+事实的承诺：
 
-- `runtime_event_appends_dropped`——开始丢弃，`reason` 是它**开始时**的原因。每次事故
-  恰好一条。
-- `runtime_event_appends_resumed`——丢弃结束，`droppedEvents` 是整次事故的总代价。每次
-  事故同样恰好一条，所以两者永远一一配对。`reason` 是结束时的原因，`startedAsReason`
-  是开始时的原因：两者不同说明事故中途换了阶段，`overflow` → `stalled` 意味着原本只是
-  落后的 Redis 已经彻底不应答。**当前处于哪个阶段是指标的职责，不是日志的**——事故进行
-  中 `reason` 标签会变，日志只负责给它划出起止。
+- `runtime_event_appends_dropped`——存储正在丢弃，原因是 `reason`。按原因限流为每分钟
+  最多一条，所以持续一小时的僵死不会只留一条一小时前的日志，繁忙节点也不会每丢一条打
+  一行。刻意**没有**配对的"已恢复"行：起止配对是一个日志流无法保证的不变量，#266 为此
+  花了四轮复审去找配对断掉的各种状态。
 - `runtime_event_appends_abandoned_at_shutdown`——`close_event_store` 走到最后仍有事情
-  没做完。可能是还有 `pendingWrites` 次 append 的命令没有全部应答（此时它直接断开 socket，
-  而不是发 `QUIT`——那会排在它们后面、原样继承同一段等待，记为 `quitOutcome="skipped"`）；
-  也可能是优雅关闭本身没成（`quitOutcome="timed_out"` 是半开的 socket、没有任何写入可以
-  归咎，`"failed"` 是 `QUIT` 回了错误，两者都会断开 socket）；也可能是还有一次事故没有
-  闭合，`droppedEvents` 是它到此为止的代价。`pendingWrites` 数的是 append 次数、不是
-  Redis 命令条数——一次 append 会发三到四条命令，而一次 append 就是一条事件。这是 `..._dropped` 的**另一种结束方式**：一次事故
-  要么以 `..._resumed` 结束（存储恢复了），要么以这条结束（进程先走了），不会两者都没有。
-  在这个预算存在之前，整件事表现为 `close_event_store` 的 `server_shutdown_step_failed`，
-  且只要 Redis 僵死就必然发生。
+  没做完：`pendingWrites` 次 append 的命令没有全部应答（数的是 append 次数、不是 Redis
+  命令条数——一次 append 会发三到四条），以及/或者优雅关闭没成。`quitOutcome` 说明是哪
+  一种：`skipped`（排空已超时，于是直接断 socket，而不是发一条会排在僵死写入后面的
+  `QUIT`）、`timed_out`（半开的 socket，且没有任何写入可以归咎）、`failed`（`QUIT` 回
+  了错误）。在这个预算存在之前，这些情况一律表现为 `close_event_store` 的
+  `server_shutdown_step_failed`，且只要 Redis 僵死就必然发生。
 
-关服期间的丢弃刻意不进指标：`close_metrics_http_server` 排在 `close_event_store` 之前，
-此时再动计数器也不会被抓取。这部分损失由上面这条日志上报。
-
-这三条日志都固定为 error 级、不受 `LOG_LEVEL` 影响，所以一次事故的起点与终点总是成对
-出现。
+这两条日志都固定为 error 级、不受 `LOG_LEVEL` 影响——它们被刻意排除出 event store，
+stdout 是它们仅有的输出路径。
 
 与 reaper 和心跳一样，这个上限只约束存储等多久，并不约束命令本身：这个客户端同样没有
-设置 `commandTimeout`。而且它是一条连接、应答按顺序配对，所以 Redis 真正不再应答时，
-后台读取仍会排在在途写入后面并跟着停住——事件页不可用的原因，与这个 Redis 上其他一切
-不可用的原因是同一个。这次消除的是"读取还要等完整个**写入队列**"这一段：Redis 变慢时
-那意味着数千次甚至还没发出的往返。
+设置 `commandTimeout`。在存储发现僵死**之前**发出的读取仍然暴露；Redis 僵死但我们没有
+任何写入在途、因而无从发现时，也一样。
 
 它**不**影响告警。`bili_syncplay_*` 指标是进程内计数器，经 `/metrics` 暴露；
 error 级日志无条件写 stdout。两条路都不经过 event store。会丢数据的只有后台事件

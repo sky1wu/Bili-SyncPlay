@@ -81,11 +81,6 @@ test("structured logger keeps the event store's own backpressure reports out of 
     reason: "stalled",
     result: "error",
   });
-  logger("runtime_event_appends_resumed", {
-    reason: "stalled",
-    droppedEvents: 12,
-    result: "ok",
-  });
   logger("runtime_event_appends_abandoned_at_shutdown", {
     pendingWrites: 1,
     result: "timeout",
@@ -93,14 +88,13 @@ test("structured logger keeps the event store's own backpressure reports out of 
   await new Promise((resolve) => setImmediate(resolve));
 
   // These lines are the event store reporting on its own write queue, so
-  // routing them through that queue is reflexive: the resumed line takes the
-  // slot that just freed, which puts the store one event away from shedding
-  // again and produces a resumed/dropped pair per completed write under a
-  // steady overload (#266 review).
+  // routing them through that queue is reflexive — and the shedding line could
+  // never land anyway, since it is emitted precisely when the store is
+  // shedding (#266 review).
   assert.deepEqual(appendedEvents, []);
   // Still on stdout, where an operator and the log pipeline can see them —
   // excluded from the store is not the same as silenced.
-  assert.equal(writtenLines.length, 3);
+  assert.equal(writtenLines.length, 2);
 });
 
 test("structured logger stamps default info level on emitted events", () => {
@@ -286,7 +280,7 @@ test("sampling counter resets per event name and does not leak across names", ()
   assert.deepEqual(tags, ["a", "b", "e"]);
 });
 
-test("an incident's start and end lines survive the same log level", async () => {
+test("the shedding line survives a raised log level", async () => {
   const writtenLines: string[] = [];
   const logger = createStructuredLogger({
     writeLine: (line) => {
@@ -295,37 +289,33 @@ test("an incident's start and end lines survive the same log level", async () =>
     logLevel: "warn",
   });
 
-  // `result: "ok"` would infer `info`, which this threshold drops — and since
-  // these events are excluded from the event store on purpose, the closing half
-  // of the pair would then have no output path left at all while the opening
-  // half stayed visible (#266 review).
+  // With the store excluded on purpose, stdout is the only path these have,
+  // and this threshold drops anything inferred as `info`. A degradation signal
+  // that a supported configuration silently deletes is not a signal.
   // No explicit level: these go through the same inference every caller uses,
   // which is where the rule has to live if bootstrap is not to be the only
-  // thing keeping the pair together.
+  // thing carrying it.
   logger("runtime_event_appends_dropped", {
     reason: "stalled",
     result: "error",
   });
-  logger("runtime_event_appends_resumed", {
-    reason: "stalled",
-    droppedEvents: 12,
-    result: "ok",
+  logger("runtime_event_appends_abandoned_at_shutdown", {
+    pendingWrites: 1,
+    result: "timeout",
   });
 
-  // A pair where only the start survives the threshold is worse than no pair:
-  // it reads as an incident that never ended.
   assert.equal(writtenLines.length, 2);
-  assert.match(writtenLines[1] ?? "", /runtime_event_appends_resumed/);
+  assert.match(
+    writtenLines[1] ?? "",
+    /runtime_event_appends_abandoned_at_shutdown/,
+  );
 });
 
-test("an incident bracket is error-level by inference, not by its caller", () => {
-  // The rule lives with the event-store exclusion because they share a reason.
-  // Left to `result`, the closing line infers `info` and a raised LOG_LEVEL
-  // drops it while the opening line survives (#266 review).
-  assert.equal(
-    inferLogLevel("runtime_event_appends_resumed", { result: "ok" }),
-    "error",
-  );
+test("backpressure lines infer error level, whatever satisfies it", () => {
+  // Asserted as the requirement, not as the mechanism: excluded from the event
+  // store on purpose, stdout is all these have, and `LOG_LEVEL=warn` deletes
+  // anything inferred as `info` (#266 review). Today their `result` already
+  // means error; if a future line's does not, this is what says so.
   assert.equal(
     inferLogLevel("runtime_event_appends_dropped", { result: "error" }),
     "error",

@@ -4,28 +4,23 @@ import type { MetricsCollector } from "./admin/metrics.js";
 import type { RuntimeStore } from "./runtime-store.js";
 
 /**
- * The event store reporting on its own write queue. Two rules, one list,
- * because they have one reason (#266 review).
+ * The event store reporting on its own write queue, which must never go INTO
+ * the event store: routing a report through the queue it describes is
+ * reflexive — it would compete for the capacity it is reporting about — and the
+ * shedding line could never land anyway, since it is emitted precisely when the
+ * store is shedding (#266 review).
  *
- * **Never into the event store.** Routing them through the queue they describe
- * is reflexive: the report competes for the capacity it is reporting about — a
- * resumed line takes the slot that just freed, which puts the store one event
- * away from shedding again and yields a resumed/dropped pair per completed
- * write at a steady overload. The dropped line could never land anyway; it is
- * emitted precisely when the store is shedding.
- *
- * **Always `error`.** Not a severity claim about a recovery, a routing one:
- * these lines bracket an incident, and the pair has to survive the same
- * `LOG_LEVEL`. `result: "ok"` on the closing line infers `info`, which
- * `LOG_LEVEL=warn` drops from stdout — and with the store excluded above, that
- * left it no output path at all while the opening line stayed visible. A pair
- * where only the start survives reads as an incident that never ended, which is
- * the exact failure this whole area exists to prevent.
+ * With the store excluded, stdout is the only path these have, so both must
+ * infer `error`: `LOG_LEVEL=warn` deletes anything inferred as `info`, and a
+ * degradation signal a supported configuration silently deletes is not a
+ * signal. Both carry a `result` that already means `error`
+ * (`"error"`/`"timeout"`), so no special case is needed here — but the
+ * requirement is real, and `logger.test.ts` asserts it rather than the
+ * mechanism that happens to satisfy it.
  */
 const EVENT_STORE_BACKPRESSURE_EVENTS = new Set([
   "runtime_event_appends_abandoned_at_shutdown",
   "runtime_event_appends_dropped",
-  "runtime_event_appends_resumed",
 ]);
 
 /** Excluded for volume rather than for reflexivity. */
@@ -60,11 +55,6 @@ export function inferLogLevel(
   event: string,
   data: Record<string, unknown>,
 ): LogLevel {
-  // Before the result map, which would call the closing line `info` and let a
-  // raised threshold drop it. See EVENT_STORE_BACKPRESSURE_EVENTS.
-  if (EVENT_STORE_BACKPRESSURE_EVENTS.has(event)) {
-    return "error";
-  }
   const result = data.result;
   if (typeof result === "string") {
     const mapped = LEVEL_BY_RESULT[result];

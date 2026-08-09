@@ -379,10 +379,10 @@ export async function createServerBootstrapContext(
           // the same Redis, so routing these through an opt-in would leave the
           // process most likely to be watching the event list as the one that
           // never says the list went incomplete.
-          // No explicit level on any of these: `logger.ts` pins the whole
-          // bracket to `error` next to the rule that keeps it out of the event
-          // store, because both rules exist for the same reason and a pair
-          // split across two files drifts apart (#266 review).
+          // No explicit level: `logger.ts` pins these to `error` next to the
+          // rule that keeps them out of the event store, because both rules
+          // exist for the same reason and a policy split across two files
+          // drifts apart (#266 review).
           onAppendsDropped: ({ reason }) => {
             logEvent("runtime_event_appends_dropped", {
               instanceId: persistenceConfig.instanceId,
@@ -390,22 +390,9 @@ export async function createServerBootstrapContext(
               result: "error",
             });
           },
-          onAppendsResumed: ({ reason, startedAsReason, droppedEvents }) => {
-            logEvent("runtime_event_appends_resumed", {
-              instanceId: persistenceConfig.instanceId,
-              reason,
-              // Differs from `reason` when the incident changed stage. Carried
-              // here rather than as a second start line, so the pair an
-              // operator matches up stays one-to-one.
-              startedAsReason,
-              droppedEvents,
-              result: "ok",
-            });
-          },
           onAppendsAbandonedAtShutdown: ({
             pendingWrites,
             queuedAppends,
-            droppedEvents,
             quitOutcome,
             budgetMs,
           }) => {
@@ -413,8 +400,6 @@ export async function createServerBootstrapContext(
               instanceId: persistenceConfig.instanceId,
               pendingWrites,
               queuedAppends,
-              // The other way an incident ends: shutdown got there first.
-              droppedEvents,
               quitOutcome,
               budgetMs,
               result: "timeout",

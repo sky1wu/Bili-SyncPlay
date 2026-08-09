@@ -400,9 +400,32 @@ overrun `close_event_store`'s budget (#264). The rules:
   ever fires and the queue grows forever. Both are needed.
 - **Shedding is the right trade here, and is not elsewhere.** The event stream is
   observability data with a `MAXLEN` of its own; losing entries costs an
-  incomplete list, which the drop counter and the bracketing log lines then say
-  out loud. That is the opposite of `pending-resync-queue`, where a dropped
-  record is gone for good — see [one-shot broadcasts](#one-shot-broadcasts-need-a-retry-trail-repeated-ones-do-not).
+  incomplete list, which the drop counter then says out loud. That is the
+  opposite of `pending-resync-queue`, where a dropped record is gone for good —
+  see [one-shot broadcasts](#one-shot-broadcasts-need-a-retry-trail-repeated-ones-do-not).
+- **Report the failure as facts, not as an incident.** The first version of this
+  logged a start and a matching end, with a magnitude, a stage that could
+  escalate, and two possible terminators. #266 then spent four review rounds
+  finding states where the pair broke: a node whose traffic went quiet, a
+  shutdown that arrived first, a write that answered with an error, a stage
+  change that emitted a second start, an end that a raised `LOG_LEVEL` filtered
+  away. That was not bad luck. A start/end pair is a span, a span has an
+  invariant, and nothing in a log stream can enforce one — least of all in the
+  component whose dependency is the thing breaking, so every failure mode of
+  that dependency is another way to break it. `maintenance-pass` gets away with
+  the same shape only because a timer guarantees each tick is discrete and
+  completes; **a pattern's guarantee comes from its precondition, not from its
+  shape**, and the append path is a caller-driven stream that inherits neither.
+  What replaced it: one throttled line per reason saying what is happening, and
+  a counter — which answered "still happening?" and "how much?" from the first
+  version onward, statelessly, and was never once flagged.
+- **The reporting must not depend on the thing it reports on.** These lines go
+  through `logEvent`, which goes through `eventStore.append` — so the report
+  competed for the capacity it was reporting about, and produced a reflexive
+  loop, a level-routing problem, and per-completed-write churn at the capacity
+  edge. Four findings from one bad dependency direction. `logger.ts` excludes
+  them from the store and pins them to `error`, together, because both rules
+  have that one reason.
 - **A dropped append answers its caller successfully.** The caller is the
   structured logger, which turns a rejection into a `runtime_event_append_failed`
   line on stdout — so rejecting would answer a Redis stall with one error line
@@ -414,12 +437,18 @@ overrun `close_event_store`'s budget (#264). The rules:
   link itself still waits for the real answer. Letting the chain advance would
   put a second write on a connection that has answered neither, and would land
   them out of order if Redis recovered — the ordering the chain exists for.
-- **A read must not join the write queue it is trying to read about.** The chain
-  is serial, so `await pendingAppend` made a read wait for every queued write to
-  be ISSUED and answered one after another — round trips that had not started
-  yet. Bounding it leaves the read queued behind only the one write in flight.
-  It does not, and cannot, get the read past that write: one connection, replies
-  matched in order (below).
+- **A read must not join the write queue it is trying to read about, and past a
+  point must not be issued at all.** The chain is serial, so `await
+pendingAppend` made a read wait for every queued write to be ISSUED and
+  answered one after another — round trips that had not started yet. Bounding
+  that wait leaves the read queued behind only the write in flight. But once
+  that write is past its own cap, the read will not come back either, and a
+  longer wait is the wrong lever entirely: the admin console polls events and
+  the overview every 15s, so each poll leaves another read and its closure in
+  ioredis's queue for as long as the stall lasts — timer-driven growth of
+  exactly the kind this section exists to stop (#266 review). So the read is
+  refused (`503 event_store_unavailable`), not delayed. The fix for an unbounded
+  queue is never a bound on how long you wait for it.
 - **`close` drains, bounded, then drops the socket — `QUIT` is not an escape
   hatch.** Dropping the queue outright would lose the shutdown's own events on
   every clean restart, and waiting unbounded makes the step fail on every hung
@@ -434,19 +463,25 @@ overrun `close_event_store`'s budget (#264). The rules:
   half-open socket swallows `QUIT`'s reply with no write left to blame, and
   that bound owes the same line as every other one here (#266 review): it just
   spent the whole budget, and a `close` that returns cleanly is the only thing
-  standing between that and a shutdown recorded as successful. Bounding
-  without reporting is the same trade in reverse as in
+  standing between that and a shutdown recorded as successful. `settleWithin`
+  answers "did it settle", which is the right question for the drain (a rejected
+  write is still an answer) and the wrong one for `QUIT` (a rejection settles
+  just fine while leaving the socket in a state nobody checked) — hence three
+  outcomes there, not two. Bounding without reporting is the same trade in
+  reverse as in
   [background passes](#a-background-pass-that-cannot-time-out-cannot-be-observed),
   hence `runtime_event_appends_abandoned_at_shutdown`.
 
 One connection, replies in order. That is what makes `disconnect` the only
-bounded close, and it is also the limit of the read-side bound: an admin read
-issued while Redis has genuinely stopped answering still queues behind the write
-in flight and stops with it. Fixing THAT needs either a separate read connection
-or a `commandTimeout` — the same deferred decision as in #261 and #263, and all
-three should be weighed together. A test fixture for this store is only worth
-trusting if it models the ordering; one that lets each call settle on its own
-will happily prove that reads and shutdown sail past a hung write.
+bounded close, and it is what the read refusal is derived from. It is also the
+limit of that refusal: the store can only refuse once one of ITS OWN commands
+has outlived a cap, so a read issued before that, or while Redis is hung with no
+write of ours in flight, is still exposed. Closing that needs either a separate
+read connection or a `commandTimeout` — the same deferred decision as in #261
+and #263, and all three should be weighed together. A test fixture for this
+store is only worth trusting if it models the ordering; one that lets each call
+settle on its own will happily prove that reads and shutdown sail past a hung
+write.
 
 ## Test fixtures must not cast past the checker
 

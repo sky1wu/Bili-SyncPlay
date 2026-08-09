@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AdminActionError } from "./action-service.js";
+import { EventStoreUnavailableError } from "./redis-event-store.js";
 import {
   requireAdminWriteOrigin,
   setAdminCorsResponseHeaders,
@@ -157,6 +158,15 @@ export function createAdminRouter(options: AdminRouterOptions) {
       } catch (error) {
         if (error instanceof JsonBodyParseError) {
           sendError(response, 400, "invalid_json", error.message);
+          return true;
+        }
+        if (error instanceof EventStoreUnavailableError) {
+          // 503, not 500: the store refused to issue the read because its Redis
+          // connection is not answering, and a retry once Redis recovers is
+          // exactly the right thing for the caller to do. Refusing is the
+          // point — issuing it would queue a command that never returns behind
+          // the one already stuck (#266 review).
+          sendError(response, 503, "event_store_unavailable", error.message);
           return true;
         }
         if (error instanceof AdminActionError) {

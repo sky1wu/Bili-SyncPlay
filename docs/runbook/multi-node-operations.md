@@ -413,68 +413,58 @@ stream reads low, but the process keeps its memory and shutdown still finishes
 (#264).
 
 It does **not** keep the events page available. Reads share the one connection
-with the writes and Redis answers in order, so a query issued while Redis is
-hung queues behind the write in flight and stops with it — see the end of this
-section. What shedding protects is the process, not the page.
+with the writes and Redis answers in order, so once the store knows the
+connection is stalled it **refuses** admin reads with `503
+event_store_unavailable` rather than issuing a command that would queue behind
+the stuck write and never return. A 503 here means Redis, not the admin
+process — check Redis first, then retry. What shedding protects is the process,
+not the page.
 
 `bili_syncplay_event_store_appends_dropped_total` is the signal, and its
 `reason` label is the diagnosis:
 
 - `reason="stalled"` — the write in flight is past its 5s cap. Redis has stopped
   answering: a stalled connection or a blocked server. Everything logged for as
-  long as it lasts is dropped.
+  long as it lasts is dropped, and admin reads are refused.
 - `reason="overflow"` — Redis is answering, just slower than events arrive, and
   the queue behind it reached its 1000-event depth limit. The store is behind,
-  not broken; the same reading as the reaper's `skipped`.
+  not broken; the same reading as the reaper's `skipped`. Reads still work.
 
 ```promql
+# Is it shedding right now, and for which reason?
 sum(rate(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance, reason)
+
+# What did an incident cost, over the window you are looking at?
+sum(increase(bili_syncplay_event_store_appends_dropped_total[<window>])) by (instance)
 ```
 
-The log lines bracket each incident instead of repeating per dropped event — one
-line per drop would be the loudest possible output on the path already
-established to be overloaded:
+**Read the metric, not the logs, for "is it still happening" and "how much".**
+The logs carry two facts and make no claim beyond them:
 
-- `runtime_event_appends_dropped` — shedding started, with the `reason` it
-  started for. Exactly one per incident.
-- `runtime_event_appends_resumed` — shedding ended; `droppedEvents` is what the
-  whole incident cost. Exactly one per incident, so the two always pair up.
-  `reason` is what it ended as and `startedAsReason` what it began as: when they
-  differ the incident changed stage mid-flight, and `overflow` → `stalled` means
-  a Redis that was behind stopped answering altogether. **The live stage is the
-  metric's job, not the log's** — the `reason` label moves while the incident is
-  open, the log lines only bracket it.
+- `runtime_event_appends_dropped` — the store is shedding, for this `reason`.
+  Throttled to one line per reason per minute, so a stall that lasts an hour is
+  not one line an hour old and a busy node is not one line per dropped event.
+  There is deliberately no matching "resumed" line: a start/end pair is an
+  invariant nothing in a log stream can enforce, and #266 spent four review
+  rounds finding states that broke it.
 - `runtime_event_appends_abandoned_at_shutdown` — shutdown reached the end of
-  `close_event_store` with something unfinished. `pendingWrites` commands were
-  still unanswered (in which case it dropped the socket rather than sending
-  `QUIT`, which would have queued behind them and inherited the same wait —
-  `quitOutcome="skipped"`), and/or the graceful close did not work
-  (`quitOutcome="timed_out"` is a half-open socket with no write left to blame,
-  `"failed"` is a `QUIT` that came back an error; both drop the socket), and/or
-  an incident was still open, with `droppedEvents` being what it had cost.
-  `pendingWrites` counts appends, not Redis commands — one append issues three
-  or four of them, and one append is one event. This
-  is the **other ending** for a `..._dropped` line: an incident closes either
-  with `..._resumed` (the store recovered) or with this (the process left
-  first), never with neither. Before this budget existed the whole thing
+  `close_event_store` with something unfinished: `pendingWrites` appends whose
+  commands had not all answered (appends, not Redis commands — one append issues
+  three or four), and/or a graceful close that did not work. `quitOutcome` says
+  which: `skipped` (the drain had already run out, so the socket was dropped
+  rather than sending a `QUIT` that would queue behind the stuck write),
+  `timed_out` (a half-open socket with no write left to blame), `failed` (a
+  `QUIT` that came back an error). Before this budget existed, all of it
   appeared as a `server_shutdown_step_failed` for `close_event_store`, every
   single time Redis was hung.
 
-Shutdown drops are not on the metric on purpose: `close_metrics_http_server`
-runs before `close_event_store`, so a counter moved there is never scraped. The
-line above is where that loss is reported.
-
-All three lines are `error` level regardless of `LOG_LEVEL`, so an incident's
-start and end always appear together.
+Both lines are `error` level regardless of `LOG_LEVEL` — they are excluded from
+the event store on purpose, so stdout is the only path they have.
 
 As with the reaper and the heartbeat, the cap bounds how long the store waits,
-not the command: this client sets no `commandTimeout` either. Since it is one
-connection with replies matched in order, an admin read issued while Redis has
-genuinely stopped answering still queues behind the write in flight and stops
-with it — the events page is unavailable for the same reason everything else on
-that Redis is. What the bound removed is the read waiting on the whole **write
-queue** ahead of it, which under a slow Redis meant thousands of round trips
-that had not even been issued yet.
+not the command: this client sets no `commandTimeout` either. A read issued
+before the store noticed the stall is still exposed, and so is one issued while
+Redis is hung with no write of ours in flight to notice it by.
 
 What this does **not** affect: alerting. `bili_syncplay_*` metrics are in-process
 counters served from `/metrics`, and error-level logs go to stdout

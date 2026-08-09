@@ -71,8 +71,42 @@ const READ_APPEND_SETTLE_TIMEOUT_MS = 1_000;
  */
 const CLOSE_APPEND_SETTLE_TIMEOUT_MS = 1_500;
 
-/** Reported once per incident, unlike the metric, which counts every drop. */
+/**
+ * How often a shedding line may repeat, per reason.
+ *
+ * The log carries FACTS, not an incident. An earlier version of this reported a
+ * start and a matching end, and #266 spent four review rounds finding states
+ * where the pair broke: a node whose traffic went quiet, a shutdown that
+ * arrived first, a write that answered with an error, a stage change that
+ * produced a second start, an end that a raised `LOG_LEVEL` filtered away. That
+ * was the wrong shape — a paired span has an invariant, and nothing in a log
+ * stream can enforce one, least of all in the component whose dependency is
+ * broken. `maintenance-pass` gets away with it because a timer guarantees each
+ * tick is discrete and completes; the append path is a caller-driven stream and
+ * inherits no such guarantee. So: one throttled line saying what is happening,
+ * and `bili_syncplay_event_store_appends_dropped_total` for "still happening?"
+ * and "how much?", which it already answered without any state at all.
+ */
+const SHEDDING_REPORT_INTERVAL_MS = 60_000;
+
 export type EventStoreSheddingReason = EventStoreAppendDropReason;
+
+/**
+ * A read refused because the connection is not answering.
+ *
+ * Refused, not attempted: a read issued now joins ioredis's command queue
+ * behind a write that has already outlived its cap, never answers, and holds
+ * its closure there for good. The admin console polls events and the overview
+ * every 15s, so that is timer-driven growth of exactly the kind this store was
+ * fixed to stop having (#266 review) — the fix cannot be a longer wait, it has
+ * to be not sending the command.
+ */
+export class EventStoreUnavailableError extends Error {
+  constructor() {
+    super("Event store is not answering; its Redis connection is stalled.");
+    this.name = "EventStoreUnavailableError";
+  }
+}
 
 /**
  * How the graceful close went.
@@ -310,30 +344,22 @@ export type RedisEventStoreOptions = {
     MetricsCollector,
     "declareEventStoreAppends" | "recordEventStoreAppendDropped"
   >;
+  /** Injectable so the throttle can be tested without waiting out a minute. */
+  now?: () => number;
   /**
-   * The store started shedding events. Exactly once per incident.
+   * The store is shedding events, for this reason.
    *
-   * Fired on the transition, not per drop: the report is itself a log line, and
-   * a report per dropped log line would put the loudest possible output on the
-   * one path already established to be overloaded. It is also NOT fired again
-   * when the diagnosis changes mid-incident — one start, one end, so the two
-   * can be matched up. The live per-stage picture belongs to
-   * `bili_syncplay_event_store_appends_dropped_total`, and the total to
-   * {@link RedisEventStoreOptions.onAppendsResumed}.
+   * Throttled per reason, not paired with anything: at most one line per
+   * {@link SHEDDING_REPORT_INTERVAL_MS}, so a stage change gets its own line
+   * without any notion of an incident that has to be opened and closed. A line
+   * per drop is out of the question — the report is itself a log line, on the
+   * one path already established to be overloaded.
+   *
+   * Deliberately no "resumed" counterpart. Whether it is still happening and
+   * how much it cost are `bili_syncplay_event_store_appends_dropped_total`'s
+   * questions, and it answers them with no state to get wrong.
    */
   onAppendsDropped?: (info: { reason: EventStoreSheddingReason }) => void;
-  /**
-   * Shedding ended. Exactly once per incident, closing the line above.
-   *
-   * `reason` is what it ended as and `startedAsReason` what it began as; they
-   * differ when the incident changed stage, which is the whole arc in one line.
-   * `droppedEvents` is what it cost across every stage.
-   */
-  onAppendsResumed?: (info: {
-    reason: EventStoreSheddingReason;
-    startedAsReason: EventStoreSheddingReason;
-    droppedEvents: number;
-  }) => void;
   /**
    * `close` finished with something unfinished. The one degraded-shutdown
    * signal, and the only thing standing between a bounded close and a silent
@@ -353,8 +379,6 @@ export type RedisEventStoreOptions = {
      */
     pendingWrites: number;
     queuedAppends: number;
-    /** What an incident still open at shutdown had cost. 0 when none was open. */
-    droppedEvents: number;
     quitOutcome: EventStoreQuitOutcome;
     budgetMs: number;
   }) => void;
@@ -386,8 +410,7 @@ export async function createRedisEventStore(
   const appendTimeoutMs = options.appendTimeoutMs ?? APPEND_TIMEOUT_MS;
   const maxPendingAppends =
     options.maxPendingAppends ?? Math.min(maxLen, MAX_PENDING_APPENDS);
-  /** The low watermark. See {@link endSheddingIfRecovered} for why it is not the limit. */
-  const resumeAtQueuedAppends = Math.floor(maxPendingAppends / 2);
+  const now = options.now ?? Date.now;
   const readSettleTimeoutMs =
     options.readSettleTimeoutMs ?? READ_APPEND_SETTLE_TIMEOUT_MS;
   const closeSettleTimeoutMs =
@@ -411,14 +434,11 @@ export async function createRedisEventStore(
   let queuedAppends = 0;
   /** Whether the write in flight has already lost its race against the cap. */
   let writeIsStalled = false;
-  /** The incident in progress, or null. Closed by {@link endSheddingIfRecovered}. */
-  let shedding: {
-    /** What it is shedding for now. Can change without ending the incident. */
-    reason: EventStoreSheddingReason;
-    /** What it was shedding for when the start line went out. */
-    startedAsReason: EventStoreSheddingReason;
-    droppedEvents: number;
-  } | null = null;
+  /** Throttle only. Two entries at most, and nothing depends on them being right. */
+  const lastSheddingReportAtByReason = new Map<
+    EventStoreSheddingReason,
+    number
+  >();
   const lastPrunedMinuteByEvent = new Map<string, number>();
 
   await redis.connect();
@@ -429,72 +449,29 @@ export async function createRedisEventStore(
 
   function shedAppend(reason: EventStoreSheddingReason): void {
     metricsCollector?.recordEventStoreAppendDropped(reason);
-    if (shedding !== null) {
-      // The diagnosis can change mid-incident: `overflow` becoming `stalled` is
-      // Redis going from behind to not answering at all, and the two need
-      // different repairs. It does NOT open a second incident and does NOT get
-      // a second start line — two starts against one end is a pair an operator
-      // cannot match up (#266 review). Which stage it is in RIGHT NOW is the
-      // metric's job, per `reason`; all this has to do is make sure the line
-      // that closes the incident names what it ended as.
-      shedding.reason = reason;
-      shedding.droppedEvents += 1;
+    const at = now();
+    const lastReportedAt = lastSheddingReportAtByReason.get(reason);
+    if (
+      lastReportedAt !== undefined &&
+      at - lastReportedAt < SHEDDING_REPORT_INTERVAL_MS
+    ) {
       return;
     }
-    // Recorded BEFORE the callback, which is a log line and could come back
-    // here as another append: a second transition report would be the start of
-    // a loop rather than a second incident.
-    shedding = { reason, startedAsReason: reason, droppedEvents: 1 };
+    // Stamped BEFORE the callback, which is a log line that comes back here as
+    // another append: without this the report would re-enter and report itself.
+    lastSheddingReportAtByReason.set(reason, at);
     options.onAppendsDropped?.({ reason });
-  }
-
-  function resumeAppends(): void {
-    if (shedding === null) {
-      return;
-    }
-    const { reason, startedAsReason, droppedEvents } = shedding;
-    shedding = null;
-    options.onAppendsResumed?.({ reason, startedAsReason, droppedEvents });
-  }
-
-  /**
-   * End the incident once the store is comfortably accepting again.
-   *
-   * Driven by a write LANDING rather than by the next `append`, because that
-   * append may never come: a node whose traffic went quiet during the stall
-   * would log a start with no end, and an operator reading that has no way to
-   * tell an incident that ended from one still running (#266 review).
-   *
-   * Landing, not merely settling. A write that finally answers with a rejection
-   * — ioredis rejecting after a disconnect and its retries — leaves the store
-   * able to accept appends but not able to store them, and calling that a
-   * recovery puts a cheerful line immediately before a run of
-   * `runtime_event_append_failed`. Only a write that succeeded shows the store
-   * works again.
-   *
-   * Well below the depth limit, not at it. Resuming the moment one slot frees
-   * leaves the store one event away from shedding again, which under a steady
-   * overload is a resumed/dropped pair per completed write — the per-line noise
-   * this whole design exists to avoid, moved to the other edge.
-   */
-  function endSheddingIfRecovered(): void {
-    if (writeIsStalled || queuedAppends > resumeAtQueuedAppends) {
-      return;
-    }
-    resumeAppends();
   }
 
   /**
    * The one degraded-shutdown report, at the end of `close`.
    *
-   * Three things can be unfinished, and any one of them on its own is worth a
-   * line:
+   * A single fact about a single moment, which is why it survived the
+   * simplification that removed the shedding pair: nothing has to be matched up
+   * with it later, so there is no invariant to break. Two things can be
+   * unfinished, and either on its own is worth a line:
    *
-   * - commands still on the connection that is about to go;
-   * - an incident whose start line would otherwise never be closed —
-   *   `resumeAppends` cannot close it, because the store did not recover, the
-   *   process is leaving, so every `runtime_event_appends_dropped` gets exactly
-   *   one of these two endings (#266 review);
+   * - appends whose commands had not all answered when the socket went;
    * - a graceful close that did not work: `QUIT` never came back (a half-open
    *   socket with no write left to blame, having just spent the whole budget)
    *   or came back an error. Bounded and silent is the trade this whole area
@@ -506,17 +483,14 @@ export async function createRedisEventStore(
     pendingWrites: number;
     quitOutcome: EventStoreQuitOutcome;
   }): void {
-    const incident = shedding;
-    shedding = null;
     const quitWorked =
       outcome.quitOutcome === "ok" || outcome.quitOutcome === "skipped";
-    if (outcome.pendingWrites === 0 && quitWorked && incident === null) {
+    if (outcome.pendingWrites === 0 && quitWorked) {
       return;
     }
     options.onAppendsAbandonedAtShutdown?.({
       pendingWrites: outcome.pendingWrites,
       queuedAppends,
-      droppedEvents: incident?.droppedEvents ?? 0,
       quitOutcome: outcome.quitOutcome,
       budgetMs: closeSettleTimeoutMs,
     });
@@ -676,6 +650,14 @@ export async function createRedisEventStore(
    * them, and under a stall it would not have seen them by waiting anyway.
    */
   async function settleQueuedAppendsForRead(): Promise<void> {
+    // Refused, not delayed. Waiting longer was the wrong lever: the read that
+    // follows goes out on the same connection, behind the write that is not
+    // answering, and never comes back — while the admin console polls events
+    // and the overview every 15s, so ioredis's queue grows a read and a closure
+    // per poll for as long as the stall lasts (#266 review).
+    if (writeIsStalled) {
+      throw new EventStoreUnavailableError();
+    }
     await settleWithin(pendingAppend, readSettleTimeoutMs);
   }
 
@@ -856,26 +838,13 @@ export async function createRedisEventStore(
 
       queuedAppends += 1;
       const appendPromise = pendingAppend.then(async () => {
-        let landed = false;
         try {
           if (abandonQueuedAppends) {
             return runtimeEvent;
           }
-          const written = await writeEvent(
-            input,
-            timestamp,
-            details,
-            runtimeEvent,
-          );
-          landed = true;
-          return written;
+          return await writeEvent(input, timestamp, details, runtimeEvent);
         } finally {
           queuedAppends -= 1;
-          // Only a write that landed. A rejection settles the queue just as
-          // well but proves nothing about the store working again.
-          if (landed) {
-            endSheddingIfRecovered();
-          }
         }
       });
 

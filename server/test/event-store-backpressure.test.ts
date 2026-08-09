@@ -127,36 +127,6 @@ function createBlockedWrite(options: { blockedCalls?: number } = {}): {
   };
 }
 
-/** A write that answers one call at a time, so a test can hold the queue at its limit. */
-function createSteppedWrite(): {
-  write: () => Promise<string>;
-  step: () => void;
-  releaseAll: () => void;
-} {
-  const waiting: Array<() => void> = [];
-  let released = false;
-  let calls = 0;
-  return {
-    write: async () => {
-      calls += 1;
-      const id = calls;
-      if (!released) {
-        await new Promise<void>((resolve) => waiting.push(resolve));
-      }
-      return `${id}-0`;
-    },
-    step: () => {
-      waiting.shift()?.();
-    },
-    releaseAll: () => {
-      released = true;
-      while (waiting.length > 0) {
-        waiting.shift()?.();
-      }
-    },
-  };
-}
-
 /**
  * Local rather than the production `settleWithin`, so a defect in that helper
  * cannot make these tests agree with the code they are checking.
@@ -302,170 +272,54 @@ test("the chain does not run a second write on top of an unanswered one", async 
   }
 });
 
-test("shedding ends when the write answers, and reports what the incident cost", async () => {
-  const hung = createBlockedWrite({ blockedCalls: 1 });
+test("a read is refused, not queued, while the connection is not answering", async () => {
+  const hung = createBlockedWrite();
   const redis = createFakeEventRedis({ xadd: hung.write });
-  const resumed: Array<{ reason: string; droppedEvents: number }> = [];
   const store = await createStore(redis.client, {
     appendTimeoutMs: 20,
-    maxPendingAppends: 10,
-    onAppendsResumed: (info) => {
-      resumed.push(info);
-    },
+    readSettleTimeoutMs: 20,
+    closeSettleTimeoutMs: 20,
   });
 
   try {
-    const stalling = store.append(appendInput(0));
+    void store.append(appendInput(0));
+    // Past the cap: the write is not coming back, so nothing sent now will
+    // come back either.
     await delay(60);
-    await store.append(appendInput(1));
-    await store.append(appendInput(2));
-    // Still shedding, so nothing is reported yet — a resume line is what says
-    // the list is complete again, and it must not arrive before it is.
-    assert.deepEqual(resumed, []);
 
-    hung.release();
-    await stalling;
+    const issuedBefore = redis.issued().length;
+    await assert.rejects(
+      Promise.resolve(store.query({ page: 1, pageSize: 10 })),
+      /not answering/,
+    );
+    await assert.rejects(
+      Promise.resolve(store.totalCountsByEvent(["room_created"])),
+      /not answering/,
+    );
+    await assert.rejects(
+      Promise.resolve(store.countsByEventInWindow(["room_created"], 0, 1)),
+      /not answering/,
+    );
 
-    // Reported off the write settling, with NO further append. A low-traffic
-    // node whose logs went quiet during the stall would otherwise be left with
-    // a dropped line and no end to it, and nothing in the log would separate
-    // "recovered" from "still down" (#266 review).
-    //
-    // The magnitude is the point of the line: the metric counts drops as they
-    // happen, this says what the whole incident cost once it is over.
-    assert.deepEqual(resumed, [
-      { reason: "stalled", startedAsReason: "stalled", droppedEvents: 2 },
-    ]);
-  } finally {
-    await store.close();
-  }
-});
-
-test("an overflow that becomes a stall closes as a stall, still as one pair", async () => {
-  const hung = createBlockedWrite({ blockedCalls: 1 });
-  const redis = createFakeEventRedis({ xadd: hung.write });
-  const dropped: string[] = [];
-  const resumed: Array<{
-    reason: string;
-    startedAsReason: string;
-    droppedEvents: number;
-  }> = [];
-  const recorded: string[] = [];
-  const appends: Array<Promise<unknown> | unknown> = [];
-  const store = await createStore(redis.client, {
-    appendTimeoutMs: 40,
-    maxPendingAppends: 2,
-    closeSettleTimeoutMs: 200,
-    metricsCollector: {
-      declareEventStoreAppends: () => undefined,
-      recordEventStoreAppendDropped: (reason) => {
-        recorded.push(reason);
-      },
-    },
-    onAppendsDropped: ({ reason }) => {
-      dropped.push(reason);
-    },
-    onAppendsResumed: (info) => {
-      resumed.push(info);
-    },
-  });
-
-  try {
-    // Redis is behind, not dead: the depth limit trips first, while the write
-    // in flight is still inside its cap.
-    for (let index = 0; index < 3; index += 1) {
-      appends.push(store.append(appendInput(index)));
-    }
-    assert.deepEqual(dropped, ["overflow"]);
-
-    // ...and then the same write blows its cap.
-    await delay(80);
-    appends.push(store.append(appendInput(3)));
-
-    // No second start line. Two starts against one end is a pair an operator
-    // cannot match up (#266 review) — so the stage change goes to the metric,
-    // which is where the runbook sends them for the live picture anyway.
-    assert.deepEqual(dropped, ["overflow"]);
-    assert.deepEqual(recorded, ["overflow", "stalled"]);
-
-    hung.release();
-    await Promise.all(appends);
-
-    // And the line that closes the incident carries the whole arc: what it
-    // ended as, what it began as, and what it cost across both stages.
-    // Reporting it as `overflow` would call a Redis that stopped answering a
-    // slow one, and those need different repairs.
-    assert.deepEqual(resumed, [
-      { reason: "stalled", startedAsReason: "overflow", droppedEvents: 2 },
-    ]);
+    // The point is the command that was NOT sent. Waiting longer was the wrong
+    // lever: the read goes out on the same connection, behind a write that has
+    // already outlived its cap, and never comes back — while the admin console
+    // polls events and the overview every 15s, so each poll would leave another
+    // read and its closure in ioredis's queue for as long as the stall lasts
+    // (#266 review).
+    assert.equal(redis.issued().length, issuedBefore);
   } finally {
     hung.release();
     await store.close();
   }
 });
 
-test("holding the queue at its limit does not log a line per freed slot", async () => {
-  const stepped = createSteppedWrite();
-  const redis = createFakeEventRedis({ xadd: stepped.write });
-  const dropped: string[] = [];
-  const resumed: Array<{ reason: string; droppedEvents: number }> = [];
-  const store = await createStore(redis.client, {
-    appendTimeoutMs: 60_000,
-    maxPendingAppends: 4,
-    closeSettleTimeoutMs: 200,
-    onAppendsDropped: ({ reason }) => {
-      dropped.push(reason);
-    },
-    onAppendsResumed: (info) => {
-      resumed.push(info);
-    },
-  });
-  const appends: Array<Promise<unknown> | unknown> = [];
-
-  try {
-    // Four queued, the fifth refused.
-    for (let index = 0; index < 5; index += 1) {
-      appends.push(store.append(appendInput(index)));
-    }
-    assert.deepEqual(dropped, ["overflow"]);
-
-    // Now hold the edge: free exactly one slot, refill it, overload again.
-    // This is what a Redis that is steadily a little too slow looks like.
-    //
-    // The first wait is load-bearing: `append` is synchronous up to the `.then`
-    // that chains it, so the first write has not reached the client yet and
-    // there would be nothing to step.
-    await delay(20);
-    stepped.step();
-    await delay(20);
-    appends.push(store.append(appendInput(5)));
-    appends.push(store.append(appendInput(6)));
-
-    // Still one incident and one line. Resuming the moment a single slot frees
-    // leaves the store one event away from shedding again, so a sustained
-    // overload would log a resumed/dropped pair per completed write — the
-    // per-line noise this whole design exists to avoid, moved to the other
-    // edge (#266 review).
-    assert.deepEqual(resumed, []);
-    assert.deepEqual(dropped, ["overflow"]);
-
-    // And when it really does recover, the incident is closed exactly once,
-    // carrying what it cost: two refused at the door, across both phases.
-    stepped.releaseAll();
-    await Promise.all(appends);
-    assert.deepEqual(resumed, [
-      { reason: "overflow", startedAsReason: "overflow", droppedEvents: 2 },
-    ]);
-  } finally {
-    stepped.releaseAll();
-    await store.close();
-  }
-});
-
-test("a read is issued behind the write in flight, not behind the whole queue", async () => {
+test("a read still waits, briefly, for a queue that is merely slow", async () => {
   const slow = createBlockedWrite();
   const redis = createFakeEventRedis({ xadd: slow.write });
   const store = await createStore(redis.client, {
+    // The cap has NOT fired: Redis is answering, just behind. Refusing here
+    // would take the admin console down on a Redis that is merely slow.
     appendTimeoutMs: 60_000,
     readSettleTimeoutMs: 20,
     closeSettleTimeoutMs: 200,
@@ -478,15 +332,9 @@ test("a read is issued behind the write in flight, not behind the whole queue", 
     const query = store.query({ page: 1, pageSize: 10 });
     await delay(60);
 
-    // What the bound actually buys, stated as the order commands reach the
-    // connection. Four of those five writes have not been ISSUED yet — the
-    // chain is serial — so `await pendingAppend` made the read wait for four
-    // round trips that had not even started. Now it waits for one.
-    //
-    // What it does not buy: skipping the write in flight. `XREVRANGE` still
-    // goes out behind that `XADD` on the one connection, and against a Redis
-    // that has genuinely stopped answering the read stops too. That is the
-    // `commandTimeout` decision deferred by #261 and #263, not this one.
+    // Four of those five writes have not been ISSUED yet — the chain is serial
+    // — so `await pendingAppend` made the read wait for four round trips that
+    // had not even started. Now it waits for one.
     assert.deepEqual(redis.issued().slice(-2), ["xadd", "xrevrange"]);
 
     slow.release();
@@ -506,7 +354,6 @@ test("close gives up on a hung write inside its budget, and says so", async () =
   const abandoned: Array<{
     pendingWrites: number;
     queuedAppends: number;
-    droppedEvents: number;
     quitOutcome: string;
     budgetMs: number;
   }> = [];
@@ -535,7 +382,6 @@ test("close gives up on a hung write inside its budget, and says so", async () =
     {
       pendingWrites: 1,
       queuedAppends: 1,
-      droppedEvents: 0,
       // Never attempted: the drain had already run out, so the socket went
       // down instead of a `QUIT` that would have queued behind the write.
       quitOutcome: "skipped",
@@ -549,17 +395,12 @@ test("close falls back to the socket when QUIT itself is not answered, and says 
   const redis = createFakeEventRedis();
   const abandoned: Array<{
     pendingWrites: number;
-    droppedEvents: number;
     quitOutcome: string;
   }> = [];
   const store = await createStore(redis.client, {
     closeSettleTimeoutMs: 20,
-    onAppendsAbandonedAtShutdown: ({
-      pendingWrites,
-      droppedEvents,
-      quitOutcome,
-    }) => {
-      abandoned.push({ pendingWrites, droppedEvents, quitOutcome });
+    onAppendsAbandonedAtShutdown: ({ pendingWrites, quitOutcome }) => {
+      abandoned.push({ pendingWrites, quitOutcome });
     },
   });
 
@@ -576,9 +417,7 @@ test("close falls back to the socket when QUIT itself is not answered, and says 
   // else was outstanding, so without this line a Redis failure that consumed
   // the entire close budget would be recorded as a clean shutdown (#266
   // review).
-  assert.deepEqual(abandoned, [
-    { pendingWrites: 0, droppedEvents: 0, quitOutcome: "timed_out" },
-  ]);
+  assert.deepEqual(abandoned, [{ pendingWrites: 0, quitOutcome: "timed_out" }]);
   stalledQuit.release();
 });
 
@@ -669,181 +508,16 @@ test("drops reach the metric, in the reason that names the diagnosis", async () 
   }
 });
 
-test("a write that answers with an error is not reported as a recovery", async () => {
-  let failNextWrite = true;
-  const redis = createFakeEventRedis({
-    xadd: async () => {
-      if (failNextWrite) {
-        failNextWrite = false;
-        throw new Error("Connection is closed.");
-      }
-      return "1-0";
-    },
-  });
-  const dropped: string[] = [];
-  const resumed: unknown[] = [];
-  const store = await createStore(redis.client, {
-    appendTimeoutMs: 60_000,
-    maxPendingAppends: 1,
-    closeSettleTimeoutMs: 200,
-    onAppendsDropped: ({ reason }) => {
-      dropped.push(reason);
-    },
-    onAppendsResumed: (info) => {
-      resumed.push(info);
-    },
-  });
-
-  try {
-    const failing = store.append(appendInput(0));
-    store.append(appendInput(1));
-    assert.deepEqual(dropped, ["overflow"]);
-
-    await assert.rejects(Promise.resolve(failing), /Connection is closed/);
-    // The queue drained, so the store can accept again — but it cannot store
-    // anything, and calling that a recovery puts a cheerful line immediately
-    // before a run of `runtime_event_append_failed` (#266 review).
-    assert.deepEqual(resumed, []);
-
-    // The incident closes on a write that actually lands.
-    await store.append(appendInput(2));
-    assert.deepEqual(resumed, [
-      { reason: "overflow", startedAsReason: "overflow", droppedEvents: 1 },
-    ]);
-  } finally {
-    await store.close();
-  }
-});
-
-test("an incident that recovers during shutdown is still closed", async () => {
-  const hung = createBlockedWrite({ blockedCalls: 1 });
-  const redis = createFakeEventRedis({ xadd: hung.write });
-  const dropped: string[] = [];
-  const resumed: unknown[] = [];
-  const store = await createStore(redis.client, {
-    appendTimeoutMs: 20,
-    maxPendingAppends: 4,
-    closeSettleTimeoutMs: 200,
-    onAppendsDropped: ({ reason }) => {
-      dropped.push(reason);
-    },
-    onAppendsResumed: (info) => {
-      resumed.push(info);
-    },
-  });
-
-  const stalling = store.append(appendInput(0));
-  await delay(50);
-  store.append(appendInput(1));
-  assert.deepEqual(dropped, ["stalled"]);
-
-  // The write lands inside the drain budget, so shutdown takes the graceful
-  // `QUIT` path and the pending-writes report never fires. A recovery check
-  // that stood down as soon as `closing` was set would leave the dropped line
-  // with no ending at all (#266 review).
-  hung.release();
-  await store.close();
-  await stalling;
-
-  assert.deepEqual(resumed, [
-    { reason: "stalled", startedAsReason: "stalled", droppedEvents: 1 },
-  ]);
-  assert.equal(redis.quitCalls(), 1);
-});
-
-test("an incident still open when shutdown gives up is closed by the shutdown line", async () => {
-  const hung = createBlockedWrite();
-  const redis = createFakeEventRedis({ xadd: hung.write });
-  const resumed: unknown[] = [];
-  const abandoned: Array<{
-    pendingWrites: number;
-    queuedAppends: number;
-    droppedEvents: number;
-    quitOutcome: string;
-    budgetMs: number;
-  }> = [];
-  const store = await createStore(redis.client, {
-    appendTimeoutMs: 20,
-    maxPendingAppends: 4,
-    closeSettleTimeoutMs: 20,
-    onAppendsResumed: (info) => {
-      resumed.push(info);
-    },
-    onAppendsAbandonedAtShutdown: (info) => {
-      abandoned.push(info);
-    },
-  });
-
-  void store.append(appendInput(0));
-  await delay(50);
-  void store.append(appendInput(1));
-  void store.append(appendInput(2));
-
-  await store.close();
-
-  // Not a resume — the store never recovered, the process is leaving. But the
-  // dropped line still gets exactly one ending, and this is the other one:
-  // what the incident had cost by the time shutdown stopped waiting.
-  assert.deepEqual(resumed, []);
-  assert.equal(abandoned.length, 1);
-  assert.equal(abandoned[0]?.droppedEvents, 2);
-  assert.equal(abandoned[0]?.pendingWrites, 1);
-  assert.equal(redis.disconnectCalls(), 1);
-  hung.release();
-});
-
-test("an incident open with nothing left in flight is still closed at shutdown", async () => {
-  const redis = createFakeEventRedis({
-    xadd: async () => {
-      throw new Error("Connection is closed.");
-    },
-  });
-  const resumed: unknown[] = [];
-  const abandoned: Array<{
-    pendingWrites: number;
-    droppedEvents: number;
-  }> = [];
-  const store = await createStore(redis.client, {
-    appendTimeoutMs: 60_000,
-    maxPendingAppends: 1,
-    closeSettleTimeoutMs: 200,
-    onAppendsResumed: (info) => {
-      resumed.push(info);
-    },
-    onAppendsAbandonedAtShutdown: ({ pendingWrites, droppedEvents }) => {
-      abandoned.push({ pendingWrites, droppedEvents });
-    },
-  });
-
-  const failing = store.append(appendInput(0));
-  store.append(appendInput(1));
-  await assert.rejects(Promise.resolve(failing), /Connection is closed/);
-
-  // Nothing is in flight — the write answered, with an error — so the chain
-  // drains and shutdown takes the graceful path. But the incident is still
-  // open: a rejection is not a recovery, so nothing closed it. Reporting only
-  // on outstanding commands would leave this dropped line with no ending.
-  await store.close();
-
-  assert.deepEqual(resumed, []);
-  assert.deepEqual(abandoned, [{ pendingWrites: 0, droppedEvents: 1 }]);
-});
-
 test("a QUIT that answers with an error drops the socket and reports it", async () => {
   const redis = createFakeEventRedis();
   const abandoned: Array<{
     pendingWrites: number;
-    droppedEvents: number;
     quitOutcome: string;
   }> = [];
   const store = await createStore(redis.client, {
     closeSettleTimeoutMs: 200,
-    onAppendsAbandonedAtShutdown: ({
-      pendingWrites,
-      droppedEvents,
-      quitOutcome,
-    }) => {
-      abandoned.push({ pendingWrites, droppedEvents, quitOutcome });
+    onAppendsAbandonedAtShutdown: ({ pendingWrites, quitOutcome }) => {
+      abandoned.push({ pendingWrites, quitOutcome });
     },
   });
 
@@ -856,8 +530,51 @@ test("a QUIT that answers with an error drops the socket and reports it", async 
   // "did it settle" answer calls this a graceful close and records a clean
   // shutdown — with the connection left in a state nobody checked (#266
   // review).
-  assert.deepEqual(abandoned, [
-    { pendingWrites: 0, droppedEvents: 0, quitOutcome: "failed" },
-  ]);
+  assert.deepEqual(abandoned, [{ pendingWrites: 0, quitOutcome: "failed" }]);
   assert.equal(redis.disconnectCalls(), 1);
+});
+
+test("the shedding line is throttled per reason, and never paired", async () => {
+  let clock = 1_000;
+  const hung = createBlockedWrite();
+  const redis = createFakeEventRedis({ xadd: hung.write });
+  const dropped: string[] = [];
+  const store = await createStore(redis.client, {
+    appendTimeoutMs: 20,
+    maxPendingAppends: 2,
+    closeSettleTimeoutMs: 20,
+    now: () => clock,
+    onAppendsDropped: ({ reason }) => {
+      dropped.push(reason);
+    },
+  });
+
+  try {
+    // Redis is behind but inside its cap: the depth limit trips first.
+    void store.append(appendInput(0));
+    void store.append(appendInput(1));
+    void store.append(appendInput(2));
+    void store.append(appendInput(3));
+    assert.deepEqual(dropped, ["overflow"]);
+
+    // ...then the same write blows its cap. A different reason means a
+    // different diagnosis — Redis went from behind to not answering — so it
+    // gets its own line without any notion of an incident to re-open.
+    await delay(60);
+    void store.append(appendInput(4));
+    void store.append(appendInput(5));
+    assert.deepEqual(dropped, ["overflow", "stalled"]);
+
+    // Still shedding a minute later: one more line, because a stall that lasts
+    // an hour should not be one line an hour old. No pairing, no terminator —
+    // whether it is STILL happening is the metric's question, and it answers
+    // it without any state that can be wrong (#266 review).
+    clock += 60_000;
+    void store.append(appendInput(6));
+    void store.append(appendInput(7));
+    assert.deepEqual(dropped, ["overflow", "stalled", "stalled"]);
+  } finally {
+    hung.release();
+    await store.close();
+  }
 });
