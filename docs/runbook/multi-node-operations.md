@@ -645,7 +645,9 @@ There are two layers and they are not interchangeable:
   patience. `REDIS_COMMAND_TIMEOUT_MS` is 5s. It never decides what happens
   next; it only makes sure something does.
 
-A connection needs at least one. Four had neither until #271:
+A connection needs at least one. Four had neither until #271 — and a fifth,
+the runtime store, had one over its write queue's attempts and nothing over
+`trackAwaitedOperation`, which is the half a WebSocket join blocks on:
 
 | Connection                                 | Command bound                               |
 | ------------------------------------------ | ------------------------------------------- |
@@ -653,12 +655,19 @@ A connection needs at least one. Four had neither until #271:
 | admin session store                        | `commandTimeout`                            |
 | room event bus (publisher + subscriber)    | `commandTimeout`                            |
 | admin command bus (publisher + subscriber) | `commandTimeout`                            |
-| runtime store                              | caller-side: `pendingOperationTimeoutMs`    |
+| runtime store                              | `commandTimeout`                            |
 | admin event store                          | caller-side: the append chain's four bounds |
 | admin audit store                          | caller-side: the append chain's four bounds |
 
 Every client is built by `createBoundedRedisClient`, which takes a **required**
-declaration of which of the two it has; `server/test/redis-client-bounds.test.ts`
+declaration of which of the two it has — and a caller-side one has to NAME the
+deadline, because "this one is bounded" was believed about the runtime store for
+as long as nobody had to write down by what. `connectWithin` bounds the handshake
+of the two exempt connections, which no per-command deadline reaches:
+`connectTimeout` covers the TCP connect and not the `INFO` after it, so without
+either, bootstrap could wait forever on a host that accepts the socket and
+answers nothing.
+`server/test/redis-client-bounds.test.ts`
 enforces that no connection is built anywhere else. That is the part of #271
 that is not a threshold: the option's absence was invisible in a diff five times
 running.

@@ -709,20 +709,30 @@ export async function createRedisRuntimeStore(
   options: RuntimeStoreOptions = {},
 ): Promise<RuntimeStore & { close: () => Promise<void> }> {
   const rawRedis = (options.redisClient ??
-    // Exempted in #271, and the only one of the three exemptions that is purely
-    // "a deadline already answers everybody". Every command here goes through
-    // `commandPacer.capAttempt` at `pendingOperationTimeoutMs`, so no caller
-    // waits without a bound; a backstop of the same magnitude behind it would
-    // only decide which of two timeouts wins the race.
+    // `capAttempt` at `pendingOperationTimeoutMs` covers the durable write
+    // queue's attempts and NOTHING ELSE. `trackAwaitedOperation` — the member
+    // token lookup a join blocks on, the room generation a create pins, the
+    // block and revoke a kick issues — is deliberately outside it (#237), so
+    // those commands had no bound at all. That is the symptom #271 predicted
+    // for this family: a room read hanging a WebSocket join, with the caller
+    // waiting forever rather than being told anything.
     //
-    // What it WOULD add is settling the commands the cap gave up on, so
-    // `activeRedisCommands` and the pacer's tracked set empty out on their own.
-    // Left for its own change: those four overlapping tracking sets are what
-    // made two of #272's fixes untestable, and retiring any of them is a
-    // refactor with its own review, not a side effect of setting an option.
+    // #237's trade was "an answer that can be wrong is worse than a slow one",
+    // and it was made against a caller-side cap that fires on a Redis which is
+    // merely slow. A backstop is not that: it sits far above ordinary latency
+    // and only fires once the connection has stopped answering, and by then the
+    // caller has either given up on its own (the admin command bus's reply
+    // timer) or is hanging with no answer at all. Neither preserved the answer;
+    // one of them at least says so.
+    //
+    // Against the write queue the two bounds race, and the race has no
+    // consequence: both mean "this attempt failed", every queued write is
+    // idempotent, and the queue retries either way. What the backstop adds
+    // there is that the command finally SETTLES, so `heldCommandCapacity`, the
+    // pacer's tracked set and `activeRedisCommands` empty out instead of being
+    // held by a command nobody will ever hear from.
     createBoundedRedisClient(redisUrl, {
-      bound: "caller",
-      boundedBy: "commandPacer.capAttempt at pendingOperationTimeoutMs",
+      bound: "command_timeout",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(

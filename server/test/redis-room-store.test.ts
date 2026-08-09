@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Redis } from "ioredis";
+import { Redis, ReplyError } from "ioredis";
 import {
   createRedisRoomStore,
   expiryScore,
@@ -26,7 +26,10 @@ async function connect(): Promise<Redis> {
   return redis;
 }
 
-function createFakeRoomStoreRedis(quit: () => Promise<unknown>): {
+function createFakeRoomStoreRedis(
+  quit: () => Promise<unknown>,
+  commands: Partial<Pick<RedisRoomStoreClient, "get" | "zrange">> = {},
+): {
   client: RedisRoomStoreClient;
   disconnectCalls: () => number;
 } {
@@ -38,12 +41,12 @@ function createFakeRoomStoreRedis(quit: () => Promise<unknown>): {
       disconnect: () => {
         disconnectCalls += 1;
       },
-      get: async () => null,
+      get: commands.get ?? (async () => null),
       scan: async () => ["0", []],
       zscan: async () => ["0", []],
       zscore: async () => null,
       eval: async () => null,
-      zrange: async () => [],
+      zrange: commands.zrange ?? (async () => []),
       zrangebyscore: async () => [],
       zcard: async () => 0,
       zcount: async () => 0,
@@ -1347,6 +1350,87 @@ test("redis room store reports which delete removed the room and still drops the
   } finally {
     await redis.del(roomsKey);
     await redis.quit();
+    await store.close();
+  }
+});
+
+test("a stalled GET is an unknown room body, not an absent one", async () => {
+  // The listing reads every indexed room's body, and `readRoomBody` used to
+  // answer null for ANY failure. That is right for a reply — WRONGTYPE is a
+  // fact about one key, and one bad key must not reject a whole batch — and
+  // wrong for everything else, because a connection that stopped answering
+  // fails every key in the batch at once. Answering "no body" there empties the
+  // admin room list of live rooms and points the orphan prune at their index
+  // members, which is the unknown-as-absent mistake `room-service` refuses to
+  // make on this very store. Reachable since #271 gave this client a
+  // `commandTimeout`; before that the batch hung instead (#271 review).
+  const evals: string[] = [];
+  const redis = createFakeRoomStoreRedis(async () => "OK", {
+    zrange: async () => ["ABC123"],
+    get: async () => {
+      throw new Error("Command timed out");
+    },
+  });
+  redis.client.eval = async (script: string) => {
+    evals.push(script);
+    return 0;
+  };
+  const store = await createRedisRoomStore("redis://unused", {
+    redisClient: redis.client,
+  });
+
+  try {
+    await assert.rejects(
+      store.listRooms({
+        page: 1,
+        pageSize: 10,
+        sortBy: "createdAt",
+        sortOrder: "desc",
+      }),
+    );
+    // And nothing was pruned or quarantined on the strength of an answer the
+    // store never got.
+    assert.deepEqual(evals, []);
+  } finally {
+    await store.close();
+  }
+});
+
+test("a WRONGTYPE reply is still one unreadable key, not a dependency outage", async () => {
+  // The discriminating half. A reply IS evidence about the key, so the batch
+  // survives it and the index repair still runs — which is the behaviour the
+  // fix above must not have taken away.
+  const evals: string[] = [];
+  const redis = createFakeRoomStoreRedis(async () => "OK", {
+    zrange: async () => ["ABC123"],
+    get: async () => {
+      throw new ReplyError(
+        "WRONGTYPE Operation against a key holding the wrong kind of value",
+      );
+    },
+  });
+  redis.client.eval = async (script: string) => {
+    evals.push(script);
+    return 0;
+  };
+  const store = await createRedisRoomStore("redis://unused", {
+    redisClient: redis.client,
+  });
+
+  try {
+    assert.deepEqual(
+      await store.listRooms({
+        page: 1,
+        pageSize: 10,
+        sortBy: "createdAt",
+        sortOrder: "desc",
+      }),
+      [],
+    );
+    // Whether that is the orphan prune, the quarantine, or both is the repair
+    // path's business; what this pins is that the batch reached it at all.
+    assert.ok(evals.length > 0);
+  } finally {
     await store.close();
   }
 });

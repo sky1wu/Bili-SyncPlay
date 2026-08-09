@@ -1,4 +1,7 @@
-import { createBoundedRedisClient } from "../redis-command-timeout.js";
+import {
+  connectWithin,
+  createBoundedRedisClient,
+} from "../redis-command-timeout.js";
 import {
   createAppendChain,
   type AppendChainCloseReport,
@@ -279,7 +282,12 @@ export async function createRedisAuditStore(
     },
   });
 
-  await redis.connect();
+  // The exemption above is about the commands this store issues; the
+  // handshake is not one of them, and without a `commandTimeout` it never
+  // times out on a host that accepts the socket and stops there — bootstrap
+  // awaits this, so the process would never start listening and never say
+  // why (#271 review).
+  await connectWithin(redis);
 
   async function writeRecord(
     input: GlobalAuditAppendInput,

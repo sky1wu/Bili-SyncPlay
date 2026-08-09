@@ -639,9 +639,17 @@ A connection needs at least one, and four of the seven had neither. So:
   `new Redis` out of every other module, because the option's absence is
   invisible in a diff — which is how it stayed invisible five times.
 - **A backstop cannot replace a bound whose output is evidence.** Both
-  append-chain stores are exempt for this reason and not merely because they are
+  append-chain stores are exempt for this reason and NOT merely because they are
   already bounded: `writeIsStalled` is what the read refusal is derived from, and
-  a `commandTimeout` racing the per-write cap would clear it.
+  a `commandTimeout` racing the per-write cap would clear it. "Already bounded"
+  on its own is the claim that failed — the runtime store passed it while being
+  bounded over its write queue's attempts and nothing else, which is why the
+  declaration has to NAME the deadline (#271 review).
+- **An exemption covers commands, not the handshake.** `connect()` runs before
+  the store exists and resolves on `ready`; ioredis's `connectTimeout` bounds
+  the TCP connect and not the `INFO` after it. Without either bound, bootstrap
+  waits forever on a host that accepts the socket and answers nothing, so an
+  exempt connection opens through `connectWithin`.
 - **It bounds the caller's wait, not the connection's queue.** ioredis keeps a
   timed-out command in `commandQueue` so later replies stay aligned. Every depth
   limit here — `maxPendingAppends`, the runtime store's command admission — is

@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { createBoundedRedisClient } from "../redis-command-timeout.js";
+import {
+  connectWithin,
+  createBoundedRedisClient,
+} from "../redis-command-timeout.js";
 import {
   createAppendChain,
   type AppendChainCloseReport,
@@ -504,7 +507,12 @@ export async function createRedisEventStore(
   >();
   const lastPrunedMinuteByEvent = new Map<string, number>();
 
-  await redis.connect();
+  // The exemption above is about the commands this store issues; the
+  // handshake is not one of them, and without a `commandTimeout` it never
+  // times out on a host that accepts the socket and stops there — bootstrap
+  // awaits this, so the process would never start listening and never say
+  // why (#271 review).
+  await connectWithin(redis);
   // After the connection, not before it: a construction that throws leaves no
   // store behind, and a declared series with nothing feeding it is exactly the
   // permanent zero the declaration gate exists to avoid.

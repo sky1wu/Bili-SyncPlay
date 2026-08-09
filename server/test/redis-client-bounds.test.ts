@@ -15,8 +15,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
+  connectWithin,
   createBoundedRedisClient,
   REDIS_COMMAND_TIMEOUT_MS,
+  RedisConnectTimeoutError,
 } from "../src/redis-command-timeout.js";
 
 const sourceRoot = path.resolve(
@@ -97,17 +99,42 @@ test("every source file that builds a connection names its bound", () => {
       [...declarations].sort(([a], [b]) => a.localeCompare(b)),
     ),
     {
-      // Three exemptions, each naming a caller-side deadline that already
-      // answers every caller on that connection.
+      // Two exemptions, and both for the same narrow reason: a backstop would
+      // race `append-chain`'s per-write cap and clear the `writeIsStalled`
+      // evidence its read refusal is derived from. "Already bounded" is NOT
+      // sufficient on its own — the runtime store looked like that and was
+      // bounded over its write queue only (#271 review).
       "admin/redis-audit-store.ts": ["caller"],
       "admin/redis-event-store.ts": ["caller"],
-      "redis-runtime-store.ts": ["caller"],
-      // Four connections' worth: the pub/sub factory builds a publisher and a
-      // subscriber, and both buses call it.
+      // Four connections' worth from the pub/sub factory alone: it builds a
+      // publisher and a subscriber, and both buses call it.
       "redis-admin-session-store.ts": ["command_timeout"],
       "redis-pubsub-client.ts": ["command_timeout"],
       "redis-room-store.ts": ["command_timeout"],
+      "redis-runtime-store.ts": ["command_timeout"],
     },
+  );
+});
+
+test("a caller-bounded module opens its connection through connectWithin", () => {
+  // The exemption covers the commands a store issues; the handshake is not one
+  // of them, and a `caller` module that calls `connect()` directly is pending
+  // forever against a host that accepts the socket and answers nothing. This is
+  // the part of that fix which survives the next module: declaring `caller`
+  // now obliges you to bound the handshake, mechanically (#271 review).
+  const offenders = sourceFiles.filter((file) => {
+    if (file === policyModule) {
+      return false;
+    }
+    const source = readFileSync(file, "utf8");
+    return (
+      source.includes('bound: "caller"') && !source.includes("connectWithin(")
+    );
+  });
+  assert.deepEqual(
+    offenders.map((file) => path.relative(sourceRoot, file)),
+    [],
+    "a caller-bounded connection must open through connectWithin",
   );
 });
 
@@ -137,4 +164,67 @@ test("a command_timeout client carries the backstop and a caller-bounded one doe
     backstopped.disconnect();
     callerBounded.disconnect();
   }
+});
+
+test("a caller-bounded connection still bounds its own handshake", async () => {
+  // The exemption is about the commands a store issues; `connect()` is not one
+  // of them. ioredis's `connectTimeout` bounds the TCP connect and not the
+  // handshake that follows, and `connect()` resolves on `ready` — so against a
+  // host that accepts the socket and answers nothing, an exempt connection used
+  // to stay pending forever, with bootstrap awaiting it. A process that never
+  // starts listening and never says why is the same silence in a new place
+  // (#271 review).
+  let disconnectCalls = 0;
+  const connection = {
+    connect: () => new Promise<void>(() => undefined),
+    quit: async () => "OK",
+    disconnect: () => {
+      disconnectCalls += 1;
+    },
+  };
+
+  const startedAt = Date.now();
+  await assert.rejects(connectWithin(connection, 20), RedisConnectTimeoutError);
+  assert.ok(Date.now() - startedAt < 1_000);
+  // The handshake cannot be cancelled, so the socket goes: leaving it open
+  // keeps a half-connected client retrying behind a process that is already
+  // failing to start.
+  assert.equal(disconnectCalls, 1);
+});
+
+test("a handshake that fails on its own keeps its own error", async () => {
+  // Giving up and failing are different answers, and only the first is this
+  // helper's to report — an operator debugging `WRONGPASS` must not be handed a
+  // timeout instead.
+  const authFailure = new Error("WRONGPASS invalid username-password pair");
+  let disconnectCalls = 0;
+  await assert.rejects(
+    connectWithin(
+      {
+        connect: () => Promise.reject(authFailure),
+        quit: async () => "OK",
+        disconnect: () => {
+          disconnectCalls += 1;
+        },
+      },
+      1_000,
+    ),
+    (error: unknown) => error === authFailure,
+  );
+  assert.equal(disconnectCalls, 0);
+});
+
+test("a handshake that lands inside the budget is left alone", async () => {
+  let disconnectCalls = 0;
+  await connectWithin(
+    {
+      connect: async () => "OK",
+      quit: async () => "OK",
+      disconnect: () => {
+        disconnectCalls += 1;
+      },
+    },
+    1_000,
+  );
+  assert.equal(disconnectCalls, 0);
 });

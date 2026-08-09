@@ -21,8 +21,12 @@
  *   patience. It never decides what happens next; it only makes sure something
  *   does.
  *
- * A connection needs at least one. Four of them had neither, which is what
- * {@link RedisCommandBound} now makes impossible to reintroduce silently.
+ * A connection needs at least one. Four of the seven had neither, and a fifth —
+ * the runtime store — had one over its write queue's attempts and nothing over
+ * `trackAwaitedOperation`, which is the half a join actually blocks on. That
+ * fifth is the reason {@link RedisCommandBound} demands a NAMED deadline rather
+ * than a boolean: "this one is bounded" was believed about that connection for
+ * as long as nobody had to write down by what.
  *
  * ## What `commandTimeout` does NOT do
  *
@@ -56,6 +60,8 @@
  */
 
 import { Redis } from "ioredis";
+import { settleWithin } from "./retry-pacer.js";
+import type { ClosableRedisConnection } from "./redis-graceful-close.js";
 
 /**
  * How long a command may go unanswered before the connection is presumed dead.
@@ -119,4 +125,63 @@ export function createBoundedRedisClient(
       ? { commandTimeout: REDIS_COMMAND_TIMEOUT_MS }
       : {}),
   });
+}
+
+/**
+ * How long a `caller`-bounded connection may take to become ready.
+ *
+ * ioredis's `connectTimeout` bounds the TCP connect, not the handshake that
+ * follows it, and `connect()` resolves on `ready`. Against a host that accepts
+ * the socket and never answers `INFO`, a connection with no `commandTimeout`
+ * therefore stays pending forever — measured, not inferred. A backstopped
+ * connection needs nothing here, because the handshake is a command like any
+ * other and the backstop is armed the moment it is submitted.
+ *
+ * Ten seconds because this is a startup path with no user waiting on it, and
+ * because ioredis's own default for the connect it does bound is the same.
+ */
+export const REDIS_CONNECT_TIMEOUT_MS = 10_000;
+
+export class RedisConnectTimeoutError extends Error {
+  constructor(budgetMs: number) {
+    super(`Redis connection was not ready within ${budgetMs}ms.`);
+    this.name = "RedisConnectTimeoutError";
+  }
+}
+
+/**
+ * Open a `caller`-bounded connection, or fail loudly.
+ *
+ * The exemption from {@link RedisCommandBound} is about the commands a store
+ * issues, and every one of those is bounded by the store. `connect()` is not
+ * one of them: it runs before the store exists, is awaited by bootstrap, and an
+ * unbounded wait there is a process that never starts listening and never says
+ * why — the same silence in a different place.
+ */
+export async function connectWithin(
+  connection: ClosableRedisConnection & { connect: () => Promise<unknown> },
+  budgetMs: number = REDIS_CONNECT_TIMEOUT_MS,
+): Promise<void> {
+  let failed: unknown;
+  const connecting = connection.connect().then(
+    () => undefined,
+    (error: unknown) => {
+      failed = error;
+    },
+  );
+
+  if (!(await settleWithin(connecting, budgetMs))) {
+    // Nothing can cancel the handshake, so the socket goes instead — leaving it
+    // open would keep a half-connected client retrying behind a process that is
+    // already failing to start.
+    try {
+      connection.disconnect();
+    } catch {
+      // The throw below is what the caller acts on.
+    }
+    throw new RedisConnectTimeoutError(budgetMs);
+  }
+  if (failed !== undefined) {
+    throw failed;
+  }
 }

@@ -157,9 +157,12 @@ before changing the code it describes.
   `commandTimeout` is a **liveness backstop** — one question, so one magnitude
   for every connection that takes it, and it decides nothing. A connection needs
   at least one, so `createBoundedRedisClient` takes a required declaration of
-  which, and `redis-client-bounds.test.ts` keeps `new Redis` out of every other
-  module — the option's absence was invisible in a diff five times running. The
-  backstop cannot replace a bound whose output is evidence (`writeIsStalled`),
+  which — and a caller-side one must NAME the deadline, because "already
+  bounded" was believed about the runtime store while only its write queue was.
+  `redis-client-bounds.test.ts` keeps `new Redis` out of every other module and
+  makes exempt connections open through `connectWithin`, since no per-command
+  deadline reaches the handshake. The backstop cannot replace a bound whose
+  output is evidence (`writeIsStalled`),
   it bounds the caller's wait and not ioredis's queue, so no depth limit retires
   because of it, and bounded still owes a report: 503 with a diagnosis, never
   401, and never a cleanup rejection thrown over a real result.

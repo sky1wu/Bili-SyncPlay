@@ -1,3 +1,4 @@
+import { ReplyError } from "ioredis";
 import type { RoomListQuery } from "./admin/types.js";
 import { createBoundedRedisClient } from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
@@ -429,11 +430,22 @@ export async function createRedisRoomStore(
   // through it, the reconcile the reaper waits on: one bad key would stop
   // every other expired room from ever being collected. Null here means the
   // body could not be read, which callers already treat as unusable.
+  //
+  // Which is a statement about ONE KEY, and only a reply can make it. Anything
+  // else is a statement about the CONNECTION, and answering it with "no body"
+  // is the unknown-as-absent mistake this codebase refuses everywhere else: a
+  // Redis that stopped answering would empty every listing of live rooms and
+  // send the orphan prune after their index members. Reachable since #271 gave
+  // this client a `commandTimeout` — before that the batch simply hung, which
+  // is not the better failure (#271 review).
   async function readRoomBody(code: string): Promise<string | null> {
     try {
       return await redis.get(roomKey(code));
-    } catch {
-      return null;
+    } catch (error) {
+      if (error instanceof ReplyError) {
+        return null;
+      }
+      throw error;
     }
   }
 

@@ -591,20 +591,26 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
   所以对所有采用它的连接是**同一个量级**，从 Redis 的时延分布倒推，而不是从任何调用方
   的耐心倒推。`REDIS_COMMAND_TIMEOUT_MS` 为 5s。它从不决定接下来做什么，只保证有人做。
 
-一条连接至少要有其中一层。到 #271 之前，有四条两层都没有：
+一条连接至少要有其中一层。到 #271 之前有四条两层都没有——还有第五条，运行时存储，它
+只在写回队列的 attempt 上有界，而 `trackAwaitedOperation`（WebSocket join 真正阻塞
+的那一半）上什么都没有：
 
-| 连接                                   | 命令一侧的界                            |
-| -------------------------------------- | --------------------------------------- |
-| 房间存储                               | `commandTimeout`                        |
-| 管理会话存储                           | `commandTimeout`                        |
-| 房间事件总线（publisher + subscriber） | `commandTimeout`                        |
-| 管理命令总线（publisher + subscriber） | `commandTimeout`                        |
-| 运行时存储                             | 调用方一侧：`pendingOperationTimeoutMs` |
-| 管理事件存储                           | 调用方一侧：append 链的四道界           |
-| 管理审计存储                           | 调用方一侧：append 链的四道界           |
+| 连接                                   | 命令一侧的界                  |
+| -------------------------------------- | ----------------------------- |
+| 房间存储                               | `commandTimeout`              |
+| 管理会话存储                           | `commandTimeout`              |
+| 房间事件总线（publisher + subscriber） | `commandTimeout`              |
+| 管理命令总线（publisher + subscriber） | `commandTimeout`              |
+| 运行时存储                             | `commandTimeout`              |
+| 管理事件存储                           | 调用方一侧：append 链的四道界 |
+| 管理审计存储                           | 调用方一侧：append 链的四道界 |
 
 所有客户端都由 `createBoundedRedisClient` 构造，它**强制**要求声明采用了两层中的哪
-一层；`server/test/redis-client-bounds.test.ts` 保证没有别处再建连接。这是 #271 里
+一层——而且调用方一侧那一层必须**点名**那道期限，因为"这条已经有界了"这句话在运行时
+存储上被相信了很久，只因为没人必须写下"界在哪里"。两条豁免连接的握手由 `connectWithin`
+兜住，那是任何逐命令期限都够不到的地方：`connectTimeout` 只管 TCP 建连、不管其后的
+`INFO`，两者皆无时，bootstrap 会在一个"接受 socket 但什么都不回"的主机上永远等下去。
+`server/test/redis-client-bounds.test.ts` 保证没有别处再建连接。这是 #271 里
 不属于"定阈值"的那一半：这个选项的缺席在 diff 里连续五次都看不出来。
 
 `commandTimeout` 刻意**不**做的两件事，均在
