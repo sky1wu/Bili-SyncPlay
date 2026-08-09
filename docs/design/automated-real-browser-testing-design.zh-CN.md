@@ -148,6 +148,7 @@ Firefox 确定性 lane 始终使用回环 HTTPS fixture server，因为 Selenium
 - 普通视频、多 P、番剧、festival、两种稍后再看路径使用不同 ID 和标题，防止用例因值相同而误通过。
 - 提供可控制的 metadata 延迟、buffering、视频元素重建、自动连播和快速连续导航。
 - 为 `playback.user.hold-fast-forward` 提供与当前 Bilibili 语义一致的键盘契约：短按 ArrowRight 仍是 5 秒 seek，持续按住并进入重复 keydown 后才把 live rate 临时切到 3×，keyup 恢复长按开始时保存的 rate；场景必须用浏览器键盘 API 驱动这条页面路径，不能由测试直接写媒体属性。
+- 确定性同步媒体包含音轨但从初始 HTML 就带 `muted` 属性，并在任何生产脚本绑定前把实例的 `muted` 属性设为 `true`；页面 contract 暴露只读断言证明两端首个远端 play 前仍静音。browser/page fixture 不得先调用 `play()` 制造用户激活，也不得用 `--autoplay-policy=no-user-gesture-required` 等启动参数绕过全新 profile 的默认策略。另保留一个从相同 contract 单独取消静音的诊断变体，确认默认策略拒绝远端有声 `play()` 时 `NotAllowedError` 及生产诊断可见。
 - 媒体为短小、自有或明确可再分发的测试资源；至少包含足够时长执行 seek、倍速和 ended 场景。
 
 ## 3. 总体架构
@@ -265,7 +266,7 @@ Page model 只封装稳定交互，不承担业务判定：
 
 - `PopupPage`：服务器地址、房间表单、邀请、成员、共享视频卡片、设置和日志；实例记录它来自 action popup 还是普通扩展页，活动-tab-dependent 操作拒绝在普通扩展页实例上执行。
 - `BilibiliPage`：视频元素、页面身份、可见 toast、页内分享按钮、导航、真实键盘长按/释放和 fixture 控制面。
-- `AdminPage`：登录与已有 token 的身份恢复重试；通过真实侧栏菜单分别导航到 overview、rooms、events、audit、config，并核验 path、页头标题、唯一选中项和目标页面内容；处理房间详情、治理确认和结果。
+- `AdminPage`：登录与已有 token 的身份恢复重试；通过真实侧栏菜单分别导航到 overview、rooms、events、audit、config，并核验 path、页头标题、唯一选中项和目标页面内容；处理房间选择、详情、每种单项/批量治理确认框的确认与取消，以及批量结果框关闭。取消和结果关闭 helper 必须点击真实按钮并观测稳定窗口内没有治理请求，不能直接调用 React 回调或移除 DOM。
 
 业务断言放在 oracle；例如 `PopupPage.shareCurrentVideo()` 只点击并处理 confirm，是否同步成功由 room/playback oracle 判断。
 
@@ -364,7 +365,7 @@ CI 无论成功或失败都上传已通过扫描的 `metadata.json` 和摘要；
 4. member popup 保存与 owner 相同的随机服务端地址，再输入邀请串加入。
 5. owner 分享当前视频。
 6. member 自动打开共享视频。
-7. owner 依次 play、seek、修改倍速、pause。
+7. 在没有任何 fixture 直接 `play()` 或伪造用户激活的前提下，先断言 owner/member 媒体均从解析起保持静音，再由 owner 依次 play、seek、修改倍速、pause。
 8. 每步用 playback oracle 等待收敛，并用 stability oracle 排除回声风暴。
 9. member 离房，owner 观察成员消失。
 10. 关闭两个浏览器和服务端，验证无遗留资源。
@@ -374,11 +375,11 @@ CI 无论成功或失败都上传已通过扫描的 `metadata.json` 和摘要；
 ### 5.2 分域场景
 
 - Popup：输入、确认框、剪贴板、pending/错误和设置持久化。
-- Playback：每种媒体事件、软追赶、hard seek、缓冲和 ended。
+- Playback：每种媒体事件、软追赶、hard seek、缓冲和 ended；独立有声变体在默认自动播放策略下验证远端 `play()` rejection 及诊断链路，主同步场景则用初始静音媒体确定性穿过同一生产调用路径。
 - Navigation：五种路由、多 P、festival 快照、自动连播、非共享本地浏览和连续导航竞态。
 - Lifecycle：service worker 终止、离线/在线、服务端重启、tab reload/close、浏览器退出。
 - Ownership/concurrency：晚加入、近同时操作、成员断连、所有者转移、房间切换，以及首次归属重同步或 runtime index reaper 清理通告被事件总线拒收后的独立重试收敛。
-- Admin：真实扩展客户端配合后台治理。
+- Admin：真实扩展客户端配合后台治理；五个单项和两个批量治理对话框逐一验证确认/取消，批量结果框验证关闭，房间表格验证选择与清空选择。
 
 同一行为的细粒度边界继续放在单元测试中；浏览器 E2E 只保留能穿过多个运行时边界、且替身无法证明的代表场景。
 
@@ -418,7 +419,7 @@ Ownership  = none | owner | peer
 - E2E-501 的 GitHub-hosted 单轮实测和 E2E-504 的 100 轮分布必须在 E2E-506 前共同关闭 `REQ-N001` 的当前 10 分钟目标。未达到时先优化；若证据表明目标必须调整，则先在需求规格中提交有依据的新预算并取得评审同意，不能只记录一个更慢的数字后照常提升 required check。
 - 稳定性基线执行拟设为 required 的完整 `browser-e2e` 命令 100 次，逐域记录 P0、P1 和 admin-ui harness failure；只重复 P0 smoke 不能证明完整门禁可用。
 - `docs/design/automated-real-browser-testing-requirements.zh-CN.md` 承载第 5.1 节权威操作/策略映射，不属于可跳过的纯文档：该文件有改动时必须运行完整 `browser-e2e` 和规格—catalog 漂移检查。其他文档/翻译是否跳过由经过表驱动测试的路径分类器决定，未知路径默认运行。
-- M1 先落地追踪基础设施：把需求规格第 5.1 节展开为机器可读 operation catalog；每项包含唯一 `operationKey`、所属 `requirementId`、priority、与权威表一致的独立 `assertionPolicy`、非空 `requiredAssertionKeys`、断言键到类别的固定映射和 `requiredAssertionCategories`。策略表达式必须让每个展开键恰好匹配一次；校验器不能从断言类别反推操作是否跨端。证据类别拆为发起端用户可见、真实接收端结果、服务端结果和稳定窗口；`local-stable` 必须包含发起端可见结果和稳定窗口，`server-observed-visible` 必须包含重启后的发起端可见结果、服务端结果和稳定窗口，`peer-sync` 必须包含真实接收端结果及另外一类，`peer-sync-strict` 必须同时包含发起端、真实接收端和稳定窗口，`server-result` 不得补 `peer-result` 的缺口。断言 helper 的每条运行证据携带 `runId`、`scenarioId`、`attemptId`、本次尝试内唯一的 `evidenceId`、完全展开的 `operationKey`、`assertionKey`、requirement ID、断言类别、结果和时间。门禁分别对权威策略、必需 `(operationKey, assertionKey)` 集合、必要类别集合与本次实际通过证据做精确集合差，并校验证据类别等于 catalog 中该断言键的类别；catalog 内重复键、同一次尝试内重复 `evidenceId`、未知键、花括号/通配键、策略或类别错配、空测试、未执行断言及只声明 ID 的场景都失败。不同场景或尝试可重复核验同一二元组：报告按 `scenarioId` / `attemptId` 保留全部证据，coverage 只对通过二元组求并集；首次失败或 skip 仍由测试运行器独立使 job 失败，不能被后续尝试或另一场景的通过覆盖。
+- M1 先落地追踪基础设施：把需求规格第 5.1 节展开为机器可读 operation catalog；每项包含唯一 `operationKey`、所属 `requirementId`、priority、与权威表一致的独立 `assertionPolicy`、非空 `requiredAssertionKeys`、断言键到类别的固定映射和 `requiredAssertionCategories`。策略表达式必须让每个展开键恰好匹配一次；校验器不能从断言类别反推操作是否跨端。证据类别拆为发起端用户可见、真实接收端结果、服务端结果和稳定窗口；`local-stable` 必须包含发起端可见结果和稳定窗口，`server-observed-visible` 必须包含重启后的发起端可见结果、服务端结果和稳定窗口，`peer-sync` 必须包含真实接收端结果及另外一类，`peer-sync-strict` 必须同时包含发起端、真实接收端和稳定窗口，`server-result` 不得补 `peer-result` 的缺口。共享 helper 在每个 catalog 操作实例开始时分配本次尝试内唯一的 `operationExecutionId`，覆盖真实用户动作、自动加载/刷新、生命周期事件和 runner 驱动的后台终止、浏览器退出、reaper 等非手势操作；每条运行证据携带 `runId`、`scenarioId`、`attemptId`、`operationExecutionId`、本次尝试内唯一的 `evidenceId`、完全展开的 `operationKey`、`assertionKey`、requirement ID、断言类别、结果和时间。门禁以 `(runId, scenarioId, attemptId, operationExecutionId, operationKey)` 为执行组，对组内实际通过证据分别计算必需断言键和必要类别集合差，并校验证据类别等于 catalog 中该断言键的类别；只有至少一个执行组同时满足该操作的全部要求才计覆盖，不能跨执行组、场景或重试求并集。catalog 内重复键、把同一 `operationExecutionId` 分配给两个不同的 catalog 操作实例、同一次尝试内重复 `evidenceId`、未知键、花括号/通配键、策略或类别错配、空测试、未执行断言及只声明 ID 的场景都失败。不同场景或尝试可各自完整核验同一操作：报告保留全部执行组；首次失败或 skip 仍由测试运行器独立使 job 失败，不能被后续完整执行组覆盖。
 
 拟议根命令（实现前不可用）：
 
