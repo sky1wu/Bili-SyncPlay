@@ -26,6 +26,10 @@ function createFakeEventRedis(
      * bounded construction exists for (#271 review).
      */
     exists?: () => Promise<number>;
+    eval?: () => Promise<unknown>;
+    scan?: (cursor: string) => Promise<[string, string[]]>;
+    xrange?: () => Promise<Array<[string, string[]]>>;
+    zremrangebyscore?: () => Promise<unknown>;
   } = {},
 ): {
   client: RedisEventStoreClient;
@@ -74,11 +78,14 @@ function createFakeEventRedis(
     disconnect: () => {
       disconnectCalls += 1;
     },
-    eval: () => command("eval", async () => 0),
+    eval: () => command("eval", options.eval ?? (async () => 0)),
     // 1, so construction skips the counts backfill — this fixture is about the
     // append path, and a startup that reads the stream would only add noise.
     exists: () => command("exists", options.exists ?? (async () => 1)),
-    scan: () => command("scan", async () => ["0", []]),
+    scan: (cursor) =>
+      command("scan", async () =>
+        options.scan ? await options.scan(cursor) : ["0", []],
+      ),
     unlink: () => command("unlink", async () => 0),
     multi: () => multi,
     xadd: () =>
@@ -91,7 +98,10 @@ function createFakeEventRedis(
         return `${nextStreamId}-0`;
       }),
     xtrim: () => command("xtrim", async () => "OK"),
-    xrange: () => command("xrange", async () => []),
+    xrange: () =>
+      command("xrange", async () =>
+        options.xrange ? await options.xrange() : [],
+      ),
     xrevrange: () =>
       command("xrevrange", async () =>
         options.xrevrange ? await options.xrevrange() : [],
@@ -102,7 +112,8 @@ function createFakeEventRedis(
     hincrby: () => command("hincrby", async () => 1),
     zadd: () => command("zadd", async () => 1),
     zcount: () => command("zcount", async () => 0),
-    zremrangebyscore: () => command("zremrangebyscore", async () => 0),
+    zremrangebyscore: () =>
+      command("zremrangebyscore", options.zremrangebyscore ?? (async () => 0)),
   };
 
   return {
@@ -750,11 +761,11 @@ test("a read that slipped past the check still ends in an answer", async () => {
 });
 
 test("construction fails loudly when Redis stops answering after the handshake", async () => {
-  // `connectWithin` closes the handshake and nothing else. The counts migration
-  // and the window-index backfill are ordinary commands issued BEFORE the store
-  // exists, so none of the append chain's deadlines covers them — and bootstrap
-  // awaits the whole construction. Unbounded, this is a process that never
-  // starts listening and never says why (#271 review).
+  // `connectWithin` closes the handshake and nothing else. Each migration
+  // command runs BEFORE the store exists, so none of the append chain's
+  // deadlines covers it — and bootstrap awaits the whole construction.
+  // Unbounded, this is a process that never starts listening and never says why
+  // (#271 review).
   const redis = createFakeEventRedis({
     exists: () => new Promise(() => undefined),
   });
@@ -764,10 +775,7 @@ test("construction fails loudly when Redis stops answering after the handshake",
     createStore(redis.client, { startupTimeoutMs: 20 }),
     (error: unknown) => {
       assert.ok(error instanceof RedisStartupTimeoutError);
-      assert.equal(
-        error.operation,
-        "event store migration and window-index backfill",
-      );
+      assert.equal(error.operation, "event store counts existence check");
       assert.match(error.message, /did not complete within 20ms/);
       return true;
     },
@@ -776,4 +784,103 @@ test("construction fails loudly when Redis stops answering after the handshake",
   // The socket goes with it: a half-connected client retrying behind a process
   // that is already failing to start helps nobody.
   assert.equal(redis.disconnectCalls(), 1);
+});
+
+test("healthy startup progress may outlive one command's budget in total", async () => {
+  // A startup deadline belongs to ONE Redis command. The migration walks the
+  // database with SCAN, so its healthy total duration grows with the number of
+  // pages and must not be raced against that same fixed deadline.
+  let scanCalls = 0;
+  const redis = createFakeEventRedis({
+    exists: async () => {
+      await delay(60);
+      return 1;
+    },
+    scan: async () => {
+      await delay(60);
+      scanCalls += 1;
+      return [scanCalls < 10 ? String(scanCalls) : "0", []];
+    },
+    xrange: async () => {
+      await delay(60);
+      return [];
+    },
+  });
+
+  const store = await createStore(redis.client, { startupTimeoutMs: 500 });
+  try {
+    assert.equal(scanCalls, 10);
+    assert.equal(redis.disconnectCalls(), 0);
+  } finally {
+    await store.close();
+  }
+});
+
+test("the startup deadline does not escape into runtime legacy-count reads", async () => {
+  let evalCalls = 0;
+  const redis = createFakeEventRedis({
+    eval: async () => {
+      evalCalls += 1;
+      if (evalCalls === 1) {
+        return 0;
+      }
+      return await new Promise(() => undefined);
+    },
+  });
+  const store = await createStore(redis.client, {
+    countsKey: "current-counts",
+    legacyCountsKey: "legacy-counts",
+    startupTimeoutMs: 40,
+    readCommandTimeoutMs: 10,
+    closeSettleTimeoutMs: 10,
+  });
+
+  try {
+    await assert.rejects(
+      Promise.resolve(store.totalCountsByEvent(["room_created"])),
+      /not answering/,
+    );
+    // The runtime read owns its bound through `chain.runRead`. A startup timer
+    // attached to the shared migration helper used to fire later and retire the
+    // store's only connection, after its caller had already received a 503.
+    await delay(60);
+    assert.equal(evalCalls, 2);
+    assert.equal(redis.disconnectCalls(), 0);
+  } finally {
+    await store.close();
+  }
+});
+
+test("startup prune deadlines begin when each ordered command is submitted", async () => {
+  const indexedEvents = [
+    "room_created",
+    "room_joined",
+    "rate_limited",
+    "ws_connection_rejected",
+  ];
+  const redis = createFakeEventRedis({
+    xrange: async () =>
+      indexedEvents.map((event, index) => [
+        `${index + 1}-0`,
+        ["event", event, "timestamp", "2026-08-10T00:00:00.000Z"],
+      ]),
+    zremrangebyscore: async () => {
+      await delay(30);
+      return 0;
+    },
+  });
+
+  // Each command is healthy at 30ms, while all four necessarily take more
+  // than 70ms on one ordered connection. Concurrent timers would time out a
+  // later command merely because earlier commands were still ahead of it.
+  const store = await createStore(redis.client, { startupTimeoutMs: 70 });
+  try {
+    assert.equal(
+      redis.issued().filter((name) => name === "zremrangebyscore").length,
+      indexedEvents.length,
+    );
+    assert.equal(redis.disconnectCalls(), 0);
+  } finally {
+    await store.close();
+  }
 });

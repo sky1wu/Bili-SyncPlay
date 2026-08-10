@@ -216,19 +216,27 @@ export class RedisStartupTimeoutError extends Error {
   }
 }
 
-async function settleStartupWithin(
+type StartupOutcome<T> =
+  | { readonly status: "fulfilled"; readonly value: T }
+  | { readonly status: "rejected"; readonly error: unknown };
+
+async function settleStartupWithin<T>(
   connection: ClosableRedisConnection,
-  work: () => Promise<unknown>,
+  work: () => Promise<T>,
   budgetMs: number,
   createTimeoutError: () => Error,
-): Promise<void> {
-  let failed: unknown;
-  const running = work().then(
-    () => undefined,
-    (error: unknown) => {
-      failed = error;
-    },
-  );
+): Promise<T> {
+  let outcome: StartupOutcome<T> | undefined;
+  const running = Promise.resolve()
+    .then(work)
+    .then(
+      (value) => {
+        outcome = { status: "fulfilled", value };
+      },
+      (error: unknown) => {
+        outcome = { status: "rejected", error };
+      },
+    );
 
   if (!(await settleWithin(running, budgetMs))) {
     // Nothing can cancel the startup operation, so the socket goes instead —
@@ -241,9 +249,13 @@ async function settleStartupWithin(
     }
     throw createTimeoutError();
   }
-  if (failed !== undefined) {
-    throw failed;
+  if (!outcome) {
+    throw new Error("Redis startup operation settled without an outcome.");
   }
+  if (outcome.status === "rejected") {
+    throw outcome.error;
+  }
+  return outcome.value;
 }
 
 /**
@@ -268,22 +280,24 @@ export async function connectWithin(
 }
 
 /**
- * Run one step of a store's construction under the same bound.
+ * Run one Redis command during construction under the same liveness bound.
  *
  * `connectWithin` closes the handshake; it does not close everything bootstrap
  * awaits. A store that migrates or backfills at construction issues ORDINARY
  * commands before it exists, so they are covered by none of the caller-side
  * deadlines its exemption names — and a Redis that completes the handshake and
  * then stops answering hangs startup just as completely as one that never
- * shook hands (#271 review).
+ * shook hands (#271 review). Call this per command, not around a whole migration:
+ * healthy work grows with database size, while one unanswered Redis command
+ * does not.
  */
-export async function startWithin(
+export async function startWithin<T>(
   connection: ClosableRedisConnection,
   operation: string,
-  work: () => Promise<unknown>,
+  work: () => Promise<T>,
   budgetMs: number = REDIS_CONNECT_TIMEOUT_MS,
-): Promise<void> {
-  await settleStartupWithin(
+): Promise<T> {
+  return await settleStartupWithin(
     connection,
     work,
     budgetMs,

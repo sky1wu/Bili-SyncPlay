@@ -552,7 +552,10 @@ sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<wind
 - `admin_session_store_command_failed`——会话 `save` / `get` / `delete` 失败，带
   `operation` 与底层错误。HTTP 响应是 503 `admin_session_store_unavailable`，正文
   不含任何 Redis 细节，因为 `authenticate` 跑在任何凭据被接受**之前**。**不是 401**：
-  一次 Redis 抖动不该读作一次登出。每条失败命令一行，由后台 API 自己的限流兜住速率。
+  一次 Redis 抖动不该读作一次登出。每次失败都会增加
+  `bili_syncplay_redis_operation_failures_total{component="admin_session_store"}`；诊断日志则按
+  `operation` 节流为每分钟至多一行。后台 API 没有通用请求限流，这正是日志必须自带节流的
+  原因。
 
 另外四个 Redis 关服步骤也采用同一条有界关闭规则（#270）：
 

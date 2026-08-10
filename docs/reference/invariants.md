@@ -375,15 +375,14 @@ up in every hand-written copy:
 
 The cap belongs to the caller, not to the connection. #271 settled the other
 half — see [Two layers bound a Redis command](#two-layers-bound-a-redis-command) —
-and the split it landed on keeps this rule intact: the room store's client now
-carries a `commandTimeout`, the runtime store's deliberately does not, and
-neither changes what the cap here is for. A backstop several seconds out answers
-whoever is still holding the command; it cannot answer a tick that already gave
-up, and it cannot tell the next tick whether the previous one is still
-outstanding. `heartbeatNode` in particular is a direct `MULTI` — it does not go
-through the write queue, so the queue's own `pendingOperationTimeoutMs` never
-applied to it.
-Adding one there would bound the request path (`get_room` / `update_room`) too,
+and the split it landed on keeps this rule intact: both the room store and the
+runtime store deliberately carry no `commandTimeout`. A backstop several seconds
+out answers whoever is still holding the command; it cannot answer a tick that
+already gave up, and it cannot tell the next tick whether the previous one is
+still outstanding. `heartbeatNode` in particular is a direct `MULTI` — it does
+not go through the write queue, so the queue's own
+`pendingOperationTimeoutMs` never applied to it. Adding a backstop to either
+connection would also settle its request path (`get_room` / `update_room`),
 which is a separate decision with its own retry semantics to weigh — deliberately
 not taken in #261.
 

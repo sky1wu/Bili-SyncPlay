@@ -595,8 +595,11 @@ admin request into a 503:
   failed, with `operation` and the underlying error. The HTTP response is a 503
   `admin_session_store_unavailable` carrying no Redis detail, because
   `authenticate` runs before any credential is accepted. **Not a 401**: a Redis
-  blip must not read as a logout. One line per failed command, bounded by the
-  admin API's own request limit.
+  blip must not read as a logout. Every failure increments
+  `bili_syncplay_redis_operation_failures_total{component="admin_session_store"}`;
+  the diagnostic line is throttled to at most once per `operation` per minute.
+  The admin API has no general request-rate limit, which is why the log needs
+  its own throttle.
 
 The other Redis-backed shutdown steps use the same bounded-close rule (#270):
 

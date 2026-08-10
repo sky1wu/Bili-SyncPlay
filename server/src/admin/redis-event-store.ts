@@ -371,8 +371,9 @@ export type RedisEventStoreOptions = {
   readCommandTimeoutMs?: number;
   closeSettleTimeoutMs?: number;
   /**
-   * How long construction's own commands may take. Injectable only so a test
-   * does not spend the real budget in wall clock; production uses
+   * How long any one construction-time Redis command may take. This is not a
+   * migration-wide budget: a healthy SCAN grows with database size. Injectable
+   * only so a test does not spend the real budget in wall clock; production uses
    * `REDIS_CONNECT_TIMEOUT_MS`.
    */
   startupTimeoutMs?: number;
@@ -445,6 +446,7 @@ export async function createRedisEventStore(
     options.readCommandTimeoutMs ?? READ_COMMAND_TIMEOUT_MS;
   const closeSettleTimeoutMs =
     options.closeSettleTimeoutMs ?? CLOSE_APPEND_SETTLE_TIMEOUT_MS;
+  const startupCommandTimeoutMs = options.startupTimeoutMs;
   const metricsCollector = options.metricsCollector;
   let unfinishedCloseReport: AppendChainCloseReport | undefined;
   let closingAppends = 0;
@@ -541,6 +543,18 @@ export async function createRedisEventStore(
     options.onAppendsDropped?.({ reason });
   }
 
+  async function runStartupCommand<T>(
+    operation: string,
+    command: () => Promise<T>,
+  ): Promise<T> {
+    return await startWithin(
+      redis,
+      `event store ${operation}`,
+      command,
+      startupCommandTimeoutMs,
+    );
+  }
+
   async function mergeLegacyCountsIfNeeded() {
     if (!legacyCountsKey) {
       return;
@@ -554,27 +568,28 @@ export async function createRedisEventStore(
     );
   }
 
-  // Bounded as ONE startup step. These commands run before the store exists,
-  // so none of the append chain's deadlines covers them — and bootstrap awaits
-  // the whole construction, so a Redis that completes the handshake and then
-  // stops answering would hang the process here with the socket already up,
-  // exactly as an unbounded `connect()` would (#271 review).
-  await startWithin(
-    redis,
-    "event store migration and window-index backfill",
-    runStartupMigration,
-    options.startupTimeoutMs,
-  );
+  // Every Redis command below has its own liveness budget. The migration as a
+  // whole deliberately does not: SCAN is proportional to database size, so a
+  // fixed total budget turns healthy progress into a startup failure.
+  await runStartupMigration();
 
-  /** Hoisted, so the bounded call above can read top-down. */
+  /** Hoisted so the top-down migration call above stays readable. */
   async function runStartupMigration(): Promise<void> {
-    await mergeLegacyCountsIfNeeded();
+    await runStartupCommand(
+      "legacy counts migration",
+      mergeLegacyCountsIfNeeded,
+    );
 
     // Backfill cumulative counts from existing stream entries if the hash
     // does not exist yet (first startup after upgrade).
-    const hashExists = await redis.exists(countsKey);
+    const hashExists = await runStartupCommand("counts existence check", () =>
+      redis.exists(countsKey),
+    );
     if (!hashExists) {
-      const allEntries = await redis.xrange(streamKey, "-", "+");
+      const allEntries = await runStartupCommand(
+        "counts backfill stream read",
+        () => redis.xrange(streamKey, "-", "+"),
+      );
       if (allEntries.length > 0) {
         const counts = new Map<string, number>();
         for (const [, fieldValues] of allEntries) {
@@ -590,7 +605,9 @@ export async function createRedisEventStore(
           for (const [name, count] of counts) {
             args.push(name, String(count));
           }
-          await redis.hset(countsKey, ...args);
+          await runStartupCommand("counts backfill write", () =>
+            redis.hset(countsKey, ...args),
+          );
         }
       }
     }
@@ -606,12 +623,16 @@ export async function createRedisEventStore(
       const staleKeys: string[] = [];
       const literalKeyPrefix = `${windowIndexKeyPrefix}:`;
       do {
-        const [nextCursor, keys] = await redis.scan(
-          cursor,
-          "MATCH",
-          `${escapeRedisGlob(windowIndexKeyPrefix)}:*`,
-          "COUNT",
-          100,
+        const [nextCursor, keys] = await runStartupCommand(
+          "stale window-index scan",
+          () =>
+            redis.scan(
+              cursor,
+              "MATCH",
+              `${escapeRedisGlob(windowIndexKeyPrefix)}:*`,
+              "COUNT",
+              100,
+            ),
         );
         cursor = nextCursor;
         for (const key of keys) {
@@ -634,7 +655,9 @@ export async function createRedisEventStore(
         }
       } while (cursor !== "0");
       if (staleKeys.length > 0) {
-        await redis.unlink(...staleKeys);
+        await runStartupCommand("stale window-index unlink", () =>
+          redis.unlink(...staleKeys),
+        );
       }
     }
 
@@ -642,7 +665,10 @@ export async function createRedisEventStore(
     // ZADD by stream id is idempotent, so this cannot overwrite or double-count
     // entries written concurrently by another node during a rolling restart.
     {
-      const allEntries = await redis.xrange(streamKey, "-", "+");
+      const allEntries = await runStartupCommand(
+        "window-index backfill stream read",
+        () => redis.xrange(streamKey, "-", "+"),
+      );
       if (allEntries.length > 0) {
         const touchedEvents = new Map<string, number>();
         const transaction = redis.multi();
@@ -668,12 +694,18 @@ export async function createRedisEventStore(
           );
         }
         if (touchedEvents.size > 0) {
-          await transaction.exec();
-          await Promise.all(
-            Array.from(touchedEvents, ([eventName, timestampMs]) =>
-              pruneEventWindowIndexIfNeeded(eventName, timestampMs),
-            ),
+          await runStartupCommand("window-index backfill write", () =>
+            transaction.exec(),
           );
+          // One Redis connection answers these in order. Start each deadline
+          // only when its command reaches the head; starting every timer at
+          // once would charge later commands for healthy queueing behind the
+          // earlier ones and recreate a migration-wide budget by accident.
+          for (const [eventName, timestampMs] of touchedEvents) {
+            await runStartupCommand("window-index prune", () =>
+              pruneEventWindowIndexIfNeeded(eventName, timestampMs),
+            );
+          }
         }
       }
     }
