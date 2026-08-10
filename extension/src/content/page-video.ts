@@ -39,18 +39,6 @@ export interface PageVideoSource {
    * until the bridge resolves that is the only identity available.
    */
   addressBarIdentityRefuted?: boolean;
-  /**
-   * Titles PROVEN to name the video this page has already left — on
-   * `/bangumi/play/epNNN`, the previous episode's (#274).
-   *
-   * Refuting only the source that carried the proof is not enough: the title
-   * sources below are all page globals lagging the same SPA episode switch, so
-   * the resolver would step from the highlighted list item onto an `h1` holding
-   * the identical string and rebuild the record the refutation existed to
-   * prevent — the new episode's `videoId` wearing the old episode's name. A
-   * refuted title is refuted wherever it turns up.
-   */
-  refutedTitles?: readonly string[];
 }
 
 export interface VideoPlaybackSnapshot {
@@ -97,47 +85,25 @@ export function resolvePageSharedVideo(
   };
 }
 
+/**
+ * First title source that has anything to say. Nothing is filtered here: a
+ * source proven to describe an episode this page has left arrives already
+ * emptied by `markStalePageRecords`, whole — both `document.title` and the
+ * `<episode>` cut out of it, because they are one record and not two candidates
+ * (#274).
+ */
 export function resolveSharedVideoTitle(
   source: Pick<
     PageVideoSource,
-    "documentTitle" | "headingTitle" | "currentPartTitle" | "refutedTitles"
+    "documentTitle" | "headingTitle" | "currentPartTitle"
   >,
 ): string {
-  const refutedKeys = new Set(
-    (source.refutedTitles ?? []).map(titleRecordKey).filter(Boolean),
+  return (
+    source.currentPartTitle ||
+    source.headingTitle ||
+    source.documentTitle.split("_")[0]?.trim() ||
+    source.documentTitle.trim()
   );
-  // `<episode>_番剧_bilibili` and the `<episode>` cut out of it are one record,
-  // not two candidates. Listing them separately lets a refuted title back in
-  // wearing its site suffix — the same stale name, still false (#274).
-  const documentTitle =
-    source.documentTitle.split("_")[0]?.trim() || source.documentTitle.trim();
-  for (const candidate of [
-    source.currentPartTitle,
-    source.headingTitle,
-    documentTitle,
-  ]) {
-    const title = candidate?.trim();
-    if (title && !refutedKeys.has(titleRecordKey(title))) {
-      return title;
-    }
-  }
-  return "";
-}
-
-/**
- * Reduces a title to the form the resolver compares on. Both sides must go
- * through it: the resolver cuts `document.title` at its first `_` to shed the
- * site suffix, and that cut is applied to a title whose own text may contain one
- * — so a refuted `OVA_1` has to refute the `OVA` derived from
- * `OVA_1_番剧_bilibili` too. Comparing a derived candidate against raw refuted
- * strings lets the derivation launder the stale name past the refutation (#274).
- *
- * That the cut also truncates a genuine `OVA_1` down to `OVA` is older than this
- * function and applies to the current episode's title just the same; it is a
- * display-quality question, not an episode-identity one.
- */
-function titleRecordKey(title: string): string {
-  return title.split("_")[0]?.trim() || title.trim();
 }
 
 /**

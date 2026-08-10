@@ -1592,3 +1592,48 @@ test("bangumi ep page refutes a title whose own text contains the suffix separat
     dom.restore();
   }
 });
+
+test("bangumi ep page follows the staleness chain from the list item through a snapshot to h1", async () => {
+  // The list item is stale by its own `epId`; the cached snapshot carries no
+  // `epId` at all and inherits staleness through the shared cid; `h1` inherits
+  // it from the snapshot's title. Cutting the chain at any link — which is what
+  // blanking the list item before matching did — hands the room ep396139 wearing
+  // "44 连影".
+  const dom = installDomStub({
+    href: EP_PAGE_HREF,
+    pathname: "/bangumi/play/ep396139",
+    title: "45 某话_番剧_bilibili",
+    currentPartTitle: "第44话",
+    currentPartEpId: "ep396138",
+    currentPartCid: "1200334",
+    headingTitle: "44 连影",
+    video: {
+      currentTime: 0.27,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => null,
+    getFestivalSnapshot: () => ({
+      videoId: "BVold:1200334",
+      url: "https://www.bilibili.com/video/BVold?cid=1200334",
+      title: "44 连影",
+      updatedAt: Date.now(),
+      cid: "1200334",
+      pathname: "/bangumi/play/ep396139",
+      pageUrl: EP_PAGE_HREF,
+    }),
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "ep396139");
+    assert.equal(payload?.video.title, "45 某话");
+  } finally {
+    dom.restore();
+  }
+});

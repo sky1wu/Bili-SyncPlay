@@ -5,8 +5,8 @@ import {
   resolvePageSharedVideo,
 } from "./page-video";
 import type { ContentRuntimeState } from "./runtime-state";
+import { markStalePageRecords } from "./page-record-staleness";
 import {
-  contradictsAddressBarEpisode,
   isAddressBarOpaqueVideoUrl,
   lacksAddressBarEpisodeConfirmation,
   normalizePageVisitUrl,
@@ -118,56 +118,42 @@ export function createShareController(args: {
     );
   }
 
-  interface CachedPageSnapshotMatch {
-    /** The cached snapshot describes this page's current video and may be used. */
-    usable: boolean;
-    /**
-     * The cached snapshot names an episode other than the one in the address
-     * bar. That is direct proof about the snapshot itself — its title belongs to
-     * that other episode — and it holds whether or not the snapshot also matched
-     * the highlighted list item, which is a separate question (#274).
-     */
-    contradictsAddressBar: boolean;
-    /**
-     * The cached snapshot describes the same record as the highlighted list item
-     * — same episode id, cid, or title — *and* contradicts the address bar. The
-     * list item is then proven to name the previous episode as well, even when it
-     * carries no episode id of its own for {@link getCurrentPartIdentity} to
-     * check (#274). Its title must not be handed to the address bar's identity,
-     * or the room shows the new episode labelled with the old one's name.
-     */
-    refutesCurrentPart: boolean;
+  /** The cid a snapshot names, whether it is stored or folded into `videoId`. */
+  function readSnapshotCid(snapshot: {
+    videoId: string;
+    cid?: string;
+  }): string | null {
+    return (
+      snapshot.cid ??
+      (snapshot.videoId.includes(":")
+        ? (snapshot.videoId.split(":").at(-1) ?? null)
+        : null)
+    );
   }
 
-  function matchCachedPageSnapshot(argsForMatch: {
+  /**
+   * Whether the cached snapshot may stand in as this page's video: it has to
+   * describe what the page is showing, and — on `/bangumi/play/epNNN` — be
+   * confirmed as the episode the address bar names. Whether it is *stale* is a
+   * separate question answered for every page record at once by
+   * `markStalePageRecords` (#274).
+   */
+  function canUseMatchingCachedPageSnapshot(argsForMatch: {
     pathname: string;
     pageUrl: string;
     snapshot: CachedPageSnapshot | null;
     currentPart: CurrentPartIdentity;
-  }): CachedPageSnapshotMatch {
-    const describesCurrentPart =
-      cachedPageSnapshotDescribesCurrentPart(argsForMatch);
-    const snapshotEpisodeId =
-      argsForMatch.snapshot === null
-        ? null
-        : readSnapshotEpisodeId(argsForMatch.snapshot);
-    // The address bar outranks a cached snapshot on `/bangumi/play/epNNN` for
-    // the same reason it outranks a fresh one (#274). Using it takes
-    // confirmation; refuting the list item's title takes proof — see the two
-    // predicates for why those are different bars.
-    const isUnconfirmed = lacksAddressBarEpisodeConfirmation({
-      pathname: argsForMatch.pathname,
-      episodeId: snapshotEpisodeId,
-    });
-    const contradictsAddressBar = contradictsAddressBarEpisode({
-      pathname: argsForMatch.pathname,
-      episodeId: snapshotEpisodeId,
-    });
-    return {
-      usable: describesCurrentPart && !isUnconfirmed,
-      contradictsAddressBar,
-      refutesCurrentPart: describesCurrentPart && contradictsAddressBar,
-    };
+  }): boolean {
+    return (
+      cachedPageSnapshotDescribesCurrentPart(argsForMatch) &&
+      !lacksAddressBarEpisodeConfirmation({
+        pathname: argsForMatch.pathname,
+        episodeId:
+          argsForMatch.snapshot === null
+            ? null
+            : readSnapshotEpisodeId(argsForMatch.snapshot),
+      })
+    );
   }
 
   function cachedPageSnapshotDescribesCurrentPart(argsForMatch: {
@@ -189,11 +175,7 @@ export function createShareController(args: {
       );
     }
     const snapshotEpId = readSnapshotEpisodeId(argsForMatch.snapshot);
-    const snapshotCid =
-      argsForMatch.snapshot.cid ??
-      (argsForMatch.snapshot.videoId.includes(":")
-        ? (argsForMatch.snapshot.videoId.split(":").at(-1) ?? null)
-        : null);
+    const snapshotCid = readSnapshotCid(argsForMatch.snapshot);
     const titleMatches =
       argsForMatch.currentPart.title !== null &&
       argsForMatch.snapshot.title.trim() === argsForMatch.currentPart.title;
@@ -327,47 +309,47 @@ export function createShareController(args: {
     const festivalSnapshot = args.getFestivalSnapshot();
     const pathname = window.location.pathname;
     const pageUrl = window.location.href.split("#")[0];
-    // Two independent ways the highlighted item is proven to name the previous
-    // episode (#274): it contradicts the address bar itself, or a snapshot that
-    // describes the same record does. Either way the whole item goes, not the
-    // field today's caller happens to read.
-    const observedPart = getCurrentPartIdentity();
-    const partContradictsAddressBar = contradictsAddressBarEpisode({
+    const currentPart = getCurrentPartIdentity();
+    const headingTitle =
+      document.querySelector("h1")?.textContent?.trim() ?? null;
+    const documentTitle = document.title;
+
+    // Everything this page says about the video it is showing, in one list, so
+    // that "which of these has the page already left behind?" is answered once
+    // for all of them instead of once per source (#274). Answering it per source
+    // is what made this defect keep reappearing: each fix cut the link that
+    // carried the proof, and the next source rebuilt the same wrong answer.
+    const staleRecords = markStalePageRecords({
       pathname,
-      episodeId: observedPart.epId,
+      records: [
+        {
+          episodeId: currentPart.epId,
+          cid: currentPart.cid,
+          title: currentPart.title,
+        },
+        festivalSnapshot && {
+          episodeId: readSnapshotEpisodeId(festivalSnapshot),
+          cid: readSnapshotCid(festivalSnapshot),
+          title: festivalSnapshot.title,
+        },
+        { title: headingTitle },
+        { title: documentTitle },
+      ],
     });
-    const currentPart: CurrentPartIdentity = partContradictsAddressBar
-      ? { title: null, epId: null, cid: null }
-      : observedPart;
-    const cachedSnapshotMatch = matchCachedPageSnapshot({
-      pathname,
-      pageUrl,
-      snapshot: festivalSnapshot,
-      currentPart,
-    });
-    const currentPartRefuted =
-      partContradictsAddressBar || cachedSnapshotMatch.refutesCurrentPart;
-    const resolvedCurrentPart: CurrentPartIdentity = currentPartRefuted
-      ? { title: null, epId: null, cid: null }
-      : currentPart;
-    // Dropping the item's title accomplishes nothing while `h1` and
-    // `document.title` still carry the same string — the title resolver would
-    // step straight onto the next lagging page global and rebuild the hybrid
-    // record. A title proven to belong to the previous episode is refuted
-    // wherever it appears, so hand the resolver the strings themselves.
-    const refutedTitles = [
-      currentPartRefuted ? observedPart.title : null,
-      // Judged on the snapshot's own contradiction, not on whether it happened to
-      // refute the list item. When the item already refuted itself the match runs
-      // against a blanked record and can describe nothing — yet a snapshot naming
-      // ep396138 has still proven its own title belongs to ep396138. A snapshot
-      // that merely fails to describe this page proves nothing and is left alone.
-      cachedSnapshotMatch.contradictsAddressBar
-        ? (festivalSnapshot?.title ?? null)
-        : null,
-    ].filter((title): title is string => Boolean(title));
+    const [currentPartIsStale, , headingIsStale, documentIsStale] =
+      staleRecords;
+
+    // Matching runs against the item as observed, never against a blanked one:
+    // emptying it first destroys the shared cid or title that links it to the
+    // snapshot, which is the very evidence the pass above runs on.
     const matchingFestivalSnapshot =
-      festivalSnapshot && cachedSnapshotMatch.usable
+      festivalSnapshot &&
+      canUseMatchingCachedPageSnapshot({
+        pathname,
+        pageUrl,
+        snapshot: festivalSnapshot,
+        currentPart,
+      })
         ? {
             videoId: festivalSnapshot.videoId,
             url: festivalSnapshot.url,
@@ -380,10 +362,11 @@ export function createShareController(args: {
     return resolvePageSharedVideo({
       pageUrl,
       pathname,
-      documentTitle: document.title,
-      headingTitle: document.querySelector("h1")?.textContent?.trim() ?? null,
-      currentPartTitle: resolvedCurrentPart.title,
-      refutedTitles,
+      // A stale source is emptied whole rather than filtered downstream, so
+      // `document.title` and the `<episode>` cut out of it go together.
+      documentTitle: documentIsStale ? "" : documentTitle,
+      headingTitle: headingIsStale ? null : headingTitle,
+      currentPartTitle: currentPartIsStale ? null : currentPart.title,
       pageSnapshot: matchingFestivalSnapshot,
       festivalSnapshot: matchingFestivalSnapshot,
       addressBarIdentityRefuted: hasRefutedAddressBarIdentity(pageUrl),

@@ -108,18 +108,20 @@ before changing the code it describes.
   `/festival/` and `/bangumi/play/ssNNN` name no episode, so the page snapshot
   outranks the address bar there — but `/bangumi/play/epNNN` names the episode
   itself, and an in-page switch moves the address bar _before_ the page globals,
-  so there every in-page source is the one that can be stale.
-  A snapshot that is not the address bar's episode means "not resolved yet"
-  (which is what makes the retry in `resolveCurrentSharePayload` real), and an
-  `ep` route is never recorded as refuted. **Using an identity takes
-  confirmation, discarding a record takes proof** — hence two predicates,
-  `lacksAddressBarEpisodeConfirmation` (a `bvid:cid` snapshot names no episode,
-  and rejecting it is free because the address bar answers completely) and
-  `contradictsAddressBarEpisode` (only a different episode is proof enough to
-  drop a title). The contradiction is transitive through whatever matched — a
-  list item carrying only a `cid` cannot refute itself, but a snapshot matching
-  it does — and it discards the whole record, not the field today's caller reads. A regression on one polarity proves nothing about the
-  other — every bangumi test used a `ss` page, which is why this shipped.
+  so there every in-page source is the one that can be stale. Using an identity
+  takes confirmation (`lacksAddressBarEpisodeConfirmation`; a `bvid:cid` snapshot
+  names no episode, and rejecting it is free because the address bar answers
+  completely); an unconfirmed snapshot means "not resolved yet", which is what
+  makes the retry in `resolveCurrentSharePayload` real. Staleness is a separate
+  question answered for **all** page sources at once by `markStalePageRecords` —
+  seeded on a contradiction, propagated through records sharing an episode id,
+  cid, or title key, with confirmed records immune — and a stale source is
+  emptied whole rather than filtered downstream. Answering it per source is what
+  brought this defect back six review rounds running: each fix cut the link
+  carrying the proof and the next source rebuilt the same wrong answer. **Chase
+  the whole equivalence class in one pass.** A regression on one polarity proves
+  nothing about the other — every bangumi test used a `ss` page, which is why
+  this shipped.
 - **Share ownership** (#235, #242): `sharedVideo.sharedByMemberId` is a durable
   reference to a volatile identity, resolved at build time by
   `roomStateFromSessions` and never rewritten into the room. A full `room:state`

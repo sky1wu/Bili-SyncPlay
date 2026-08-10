@@ -129,8 +129,9 @@ episode's start — until the sharer reloaded the page.
   list's highlighted item catch up. Every in-page identity source is therefore
   the one that can be stale here, and the address bar is the one that cannot.
 
-So on an `ep` route the rules invert, and `contradictsAddressBarEpisode` is the
-single predicate that states it (`video-identity.ts`):
+So on an `ep` route the rules invert. Two predicates in `video-identity.ts`
+state the comparison, and `page-record-staleness.ts` applies it to every source
+the page offers at once:
 
 - **A snapshot naming another episode is "not resolved yet", not "resolved".**
   Answering `null` is what makes the eight-attempt retry in
@@ -144,27 +145,34 @@ single predicate that states it (`video-identity.ts`):
   festival-only for exactly this reason. Refuting it would nail the wrong answer
   in place for the rest of the page's life — which is precisely the reported
   symptom of only a reload fixing it.
-- **Refute the whole stale record, not the field being compared.** The
-  highlighted list item lags the switch just like the page globals do, so when
-  its episode id contradicts the address bar its title and cid are stale too —
-  the title would go out labelling the new episode, and the cid would match a
-  cached snapshot of the previous one.
-- **A contradiction is transitive through whatever matched.** The list item often
-  carries no episode id at all (plenty of episode lists expose only
-  `data-cid`), so it cannot refute itself. But a snapshot that matches it — by
-  episode id, cid, or title — and contradicts the address bar has proven the
-  item stale by proxy. Refusing only the snapshot there leaves a hybrid record:
-  the address bar's `ep396139` wearing the previous episode's title. Whatever the
-  contradiction reaches, discard; and discard the record, not the field today's
-  caller happens to read.
-- **A refuted title is refuted wherever it appears.** Dropping the highlighted
-  item's title accomplishes nothing while `h1` and `document.title` still carry
-  the same string — they are page globals lagging the same switch, so the
-  resolver steps from one onto the next and rebuilds the hybrid record. The
-  proven-stale strings go to `resolveSharedVideoTitle` as `refutedTitles`, which
-  skips every candidate equal to one. And when that exhausts the list, the label
-  becomes the episode id: blank would be worse than plain, but the previous
-  episode's name is worse than either, because it is the only one that is false.
+- **Which sources are stale is one question, answered once for all of them.**
+  `markStalePageRecords` takes every record the page offers — the highlighted
+  list item, the cached snapshot, the `h1`, the document title — seeds staleness
+  on any that names an episode other than the address bar's, and propagates it
+  through records that describe the same thing (a shared episode id, cid, or
+  title key). Direct confirmation wins over propagation: a record naming exactly
+  the address bar's episode is never marked, whatever it links to.
+
+  The single-source version of this rule is what made #274 come back six review
+  rounds running. Each round refuted the one source that had been flagged, and
+  each refutation cut the link that carried the proof, so the next source
+  rebuilt the same wrong answer: the list item was blanked _before_ it could
+  match the snapshot, so a snapshot with no episode id of its own never inherited
+  staleness through their shared cid; `h1` then repeated the snapshot's title;
+  `document.title` repeated it wearing `_番剧_bilibili`. One record with a
+  contradiction, three sources rebuilding it. **Chase the whole equivalence class
+  in one pass, or the class reassembles itself one source per review round.**
+
+- **Discard a stale source whole, and never filter its output downstream.** A
+  source that is marked arrives at `resolveSharedVideoTitle` already empty, which
+  is why that resolver is plain "first non-empty" again. Filtering strings
+  afterwards is what let `document.title` return `44 连影_番剧_bilibili` after
+  `44 连影` had been rejected — the derivation launders the stale name past a
+  string comparison. Titles link on `titleRecordKey`, the same reduction the
+  resolver applies, so both sides of every comparison have been through it.
+- **When every title is stale the label becomes the episode id.** Blank would be
+  worse than plain, but the previous episode's name is worse than either, because
+  it is the only one that is false.
 - **Using an identity takes confirmation; discarding a record takes proof.**
   These are two different bars and the codebase carries two predicates for them,
   `lacksAddressBarEpisodeConfirmation` and `contradictsAddressBarEpisode`. On an
@@ -173,11 +181,9 @@ single predicate that states it (`video-identity.ts`):
   whenever the page globals expose no `epId`), and in the switch window those are
   the previous episode's `bvid`/`cid`, indistinguishable from the current one's
   by inspection. Rejecting an unconfirmed identity costs nothing, because the
-  address bar already answers completely. A _title_ is the other way round: the
-  address bar says nothing about titles, so dropping one on suspicion trades a
-  possibly-correct label for a possibly-worse one, and only a snapshot naming a
-  different episode is proof enough. Both predicates stay inert on routes that
-  name no episode.
+  address bar already answers completely. Staleness is the other way round: it
+  propagates on proof, since a link is evidence about a record and not a licence
+  to guess. Both predicates stay inert on routes that name no episode.
 
 The coverage gap that let this ship is worth copying as a warning: every bangumi
 case in `share-controller.test.ts` used a `ss` season page, where snapshot-first
