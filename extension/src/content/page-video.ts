@@ -106,13 +106,16 @@ export function resolveSharedVideoTitle(
   const refutedTitles = new Set(
     (source.refutedTitles ?? []).map((title) => title.trim()).filter(Boolean),
   );
-  const candidates = [
+  // `<episode>_番剧_bilibili` and the `<episode>` cut out of it are one record,
+  // not two candidates. Listing them separately lets a refuted title back in
+  // wearing its site suffix — the same stale name, still false (#274).
+  const documentTitle =
+    source.documentTitle.split("_")[0]?.trim() || source.documentTitle.trim();
+  for (const candidate of [
     source.currentPartTitle,
     source.headingTitle,
-    source.documentTitle.split("_")[0],
-    source.documentTitle,
-  ];
-  for (const candidate of candidates) {
+    documentTitle,
+  ]) {
     const title = candidate?.trim();
     if (title && !refutedTitles.has(title)) {
       return title;

@@ -122,6 +122,13 @@ export function createShareController(args: {
     /** The cached snapshot describes this page's current video and may be used. */
     usable: boolean;
     /**
+     * The cached snapshot names an episode other than the one in the address
+     * bar. That is direct proof about the snapshot itself — its title belongs to
+     * that other episode — and it holds whether or not the snapshot also matched
+     * the highlighted list item, which is a separate question (#274).
+     */
+    contradictsAddressBar: boolean;
+    /**
      * The cached snapshot describes the same record as the highlighted list item
      * — same episode id, cid, or title — *and* contradicts the address bar. The
      * list item is then proven to name the previous episode as well, even when it
@@ -152,14 +159,14 @@ export function createShareController(args: {
       pathname: argsForMatch.pathname,
       episodeId: snapshotEpisodeId,
     });
+    const contradictsAddressBar = contradictsAddressBarEpisode({
+      pathname: argsForMatch.pathname,
+      episodeId: snapshotEpisodeId,
+    });
     return {
       usable: describesCurrentPart && !isUnconfirmed,
-      refutesCurrentPart:
-        describesCurrentPart &&
-        contradictsAddressBarEpisode({
-          pathname: argsForMatch.pathname,
-          episodeId: snapshotEpisodeId,
-        }),
+      contradictsAddressBar,
+      refutesCurrentPart: describesCurrentPart && contradictsAddressBar,
     };
   }
 
@@ -350,9 +357,12 @@ export function createShareController(args: {
     // wherever it appears, so hand the resolver the strings themselves.
     const refutedTitles = [
       currentPartRefuted ? observedPart.title : null,
-      // Only the snapshot that did the refuting is itself proven stale; one that
-      // merely failed to describe this page says nothing about its own title.
-      cachedSnapshotMatch.refutesCurrentPart
+      // Judged on the snapshot's own contradiction, not on whether it happened to
+      // refute the list item. When the item already refuted itself the match runs
+      // against a blanked record and can describe nothing — yet a snapshot naming
+      // ep396138 has still proven its own title belongs to ep396138. A snapshot
+      // that merely fails to describe this page proves nothing and is left alone.
+      cachedSnapshotMatch.contradictsAddressBar
         ? (festivalSnapshot?.title ?? null)
         : null,
     ].filter((title): title is string => Boolean(title));

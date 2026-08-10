@@ -1485,3 +1485,77 @@ test("an agreeing list item keeps its title even when h1 repeats it", async () =
     dom.restore();
   }
 });
+
+test("bangumi ep page does not let a refuted title back in wearing its site suffix", async () => {
+  // `document.title` lags too, and its `_番剧_bilibili` decoration is not a
+  // different title — it is the same stale name with the site's suffix on it.
+  const dom = installDomStub({
+    href: EP_PAGE_HREF,
+    pathname: "/bangumi/play/ep396139",
+    title: "44 连影_番剧_bilibili",
+    currentPartTitle: "44 连影",
+    currentPartEpId: "ep396138",
+    video: {
+      currentTime: 0.27,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => null,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "ep396139");
+    assert.equal(payload?.video.title, "ep396139");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("bangumi ep page refutes a contradicting snapshot's title even when the list item refuted itself first", async () => {
+  // The list item carries the old `epId`, so it is blanked before the cached
+  // snapshot is matched — the snapshot can then describe nothing, and tying its
+  // title's fate to "did it refute the list item" leaves that title live. Its own
+  // `ep396138` is proof enough, and `h1` repeats it.
+  const dom = installDomStub({
+    href: EP_PAGE_HREF,
+    pathname: "/bangumi/play/ep396139",
+    title: "45 某话_番剧_bilibili",
+    currentPartTitle: "第44话",
+    currentPartEpId: "ep396138",
+    headingTitle: "44 连影",
+    video: {
+      currentTime: 0.27,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => null,
+    getFestivalSnapshot: () => ({
+      videoId: "ep396138",
+      url: "https://www.bilibili.com/bangumi/play/ep396138",
+      title: "44 连影",
+      updatedAt: Date.now(),
+      epId: "ep396138",
+      pathname: "/bangumi/play/ep396139",
+      pageUrl: EP_PAGE_HREF,
+    }),
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "ep396139");
+    assert.equal(payload?.video.title, "45 某话");
+  } finally {
+    dom.restore();
+  }
+});
