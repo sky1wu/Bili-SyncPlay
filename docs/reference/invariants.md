@@ -457,12 +457,16 @@ up in every hand-written copy:
   the rule: it is what makes the tick after a timeout a `stalled` rather than an
   `overlapped`.
 
-The cap belongs to the caller, not to the connection: neither the room store's
-nor the runtime store's client has a `commandTimeout`, so the command itself
-stays out on the socket. `heartbeatNode` in particular is a direct `MULTI` —
-it does not go through the write queue, so the queue's own
-`pendingOperationTimeoutMs` never applied to it.
-Adding one there would bound the request path (`get_room` / `update_room`) too,
+The cap belongs to the caller, not to the connection. #271 settled the other
+half — see [Two layers bound a Redis command](#two-layers-bound-a-redis-command) —
+and the split it landed on keeps this rule intact: both the room store and the
+runtime store deliberately carry no `commandTimeout`. A backstop several seconds
+out answers whoever is still holding the command; it cannot answer a tick that
+already gave up, and it cannot tell the next tick whether the previous one is
+still outstanding. `heartbeatNode` in particular is a direct `MULTI` — it does
+not go through the write queue, so the queue's own
+`pendingOperationTimeoutMs` never applied to it. Adding a backstop to either
+connection would also settle its request path (`get_room` / `update_room`),
 which is a separate decision with its own retry semantics to weigh — deliberately
 not taken in #261.
 
@@ -607,9 +611,15 @@ limit of that refusal: the store can only refuse on evidence from one of ITS OWN
 commands, so the FIRST request into a stall — whichever it is — is not refused.
 It is bounded and answered as unavailable, and it becomes the evidence that
 refuses the next one. That is the best a caller-side bound can do; closing it
-entirely needs either a separate read connection or a `commandTimeout`. Closing that needs either a separate
-read connection or a `commandTimeout` — the same deferred decision as in #261
-and #263, and all three should be weighed together. A test fixture for this
+entirely needs a separate read connection.
+
+A `commandTimeout` is NOT the other way out, and #271 is where that was settled
+for both append-chain stores. It would race the per-write cap, reject the
+command from underneath it and clear `writeIsStalled` — the very evidence the
+refusal is derived from — turning a chain that freezes and sheds cheaply into
+one that grinds a command per timeout while letting every poll back onto a dead
+connection. A backstop is a liveness bound; it cannot substitute for a bound
+whose output is evidence. A test fixture for this
 store is only worth trusting if it models the ordering; one that lets each call
 settle on its own will happily prove that reads and shutdown sail past a hung
 write.
@@ -684,7 +694,142 @@ The other four Redis facilities follow the same rule (#270):
   ordinary unsubscribe may already be the command a half-open socket stopped
   answering; `QUIT` also exits subscriber mode, and going straight to its bound
   is what keeps the forced-disconnect fallback reachable. Per-command bounds
-  outside shutdown remain the separate connection-wide policy in #271.
+  outside shutdown are the connection-wide policy below.
+
+## Two layers bound a Redis command
+
+#261, #263, #264, #267 and #270 were one defect — a Redis that accepts commands
+and stops answering leaves some caller waiting with no bound — found by five
+different symptoms. Each was closed when its symptom stopped, so the same
+deferred question came back five times. #271 answered it, and the answer is a
+distinction rather than a number.
+
+- **A deadline** is per-behaviour, derived from what its caller can promise, and
+  **decides what happens next**: shed, refuse, retry, abort. `append-chain`'s
+  per-write cap, its read bound, `pendingOperationTimeoutMs`, the admin command
+  bus's reply timer. Different numbers because different questions.
+- **`commandTimeout` is a liveness backstop.** One question — has this
+  connection stopped answering? — so one magnitude for every connection that
+  takes it (`REDIS_COMMAND_TIMEOUT_MS`, 5s), derived from Redis's latency
+  distribution rather than from any caller's patience. It never decides what
+  happens next; it only guarantees something does.
+
+A connection needs at least one, and four of the seven had neither. But the two
+do NOT compose, and that is the part that decides which connection gets which:
+
+- **A backstop cannot replace a bound whose output is evidence.** Nearly every
+  deadline here is built on one mechanism — the cap does not cancel the call, so
+  the call stays tracked, and **its continued silence is what stops the next
+  attempt**. `ensurePendingCapacity` counting `commandPacer.trackedCount()`
+  (#242), `maintenance-pass` reporting `stalled` (#261, #263),
+  `pending-resync-queue` waiting on `inFlight` (#242), `append-chain` refusing a
+  read on `writeIsStalled` (#266, #269). A backstop settles those calls, so each
+  bound reads the connection as idle and lets the next attempt out: it stops
+  being a bound and becomes a rate of one more command per timeout window. The
+  option would undo all four at once.
+- **So the criterion is not "is it already bounded".** A connection may take the
+  backstop only if NO caller on it derives a bound from a command's failure to
+  answer. Three pass: the admin session store and the admin command bus's two
+  clients. Five do not.
+- **The declaration is required, and it must NAME the deadline.** Every client
+  is built by `createBoundedRedisClient`, whose `RedisCommandBound` is either the
+  backstop or a named caller-side deadline. "This one is bounded" was believed
+  about the runtime store for as long as nobody had to write down by what —
+  while `trackAwaitedOperation` had no bound at all.
+  `redis-client-bounds.test.ts` keeps `new Redis` out of every other module,
+  because the option's absence is invisible in a diff, which is how it stayed
+  invisible five times.
+- **Exempt does not mean fine.** The room store's request path and the runtime
+  store's `trackAwaitedOperation` still have no caller-side bound, so a stalled
+  Redis still hangs a join. The fix is a cap that keeps the call tracked, or a
+  separate connection for the paths that want a backstop — never this option.
+- **An exemption covers commands, not the handshake.** `connect()` runs before
+  the store exists and resolves on `ready`; ioredis's `connectTimeout` bounds
+  the TCP connect and not the `INFO` after it. Without either bound, bootstrap
+  waits forever on a host that accepts the socket and answers nothing, so an
+  exempt connection opens through `connectWithin`.
+- **A completed handshake does not cover the next startup command.** The room
+  event consumer awaits its first `SUBSCRIBE` before the server can listen, so
+  that command runs through `startWithin` on the dedicated subscriber
+  connection. If Redis stops replying in the gap after `ready`, startup fails
+  with a staged error and disconnects that subscriber; it does not add a
+  backstop to the publisher whose silence is retry evidence. The message
+  handler is installed before the command is submitted, because ioredis may
+  dispatch a message following the SUBSCRIBE ACK in the same socket read.
+  SUBSCRIBE and final UNSUBSCRIBE share one serialized reconcile: a handler
+  arriving during the latter waits for its ACK and a new SUBSCRIBE ACK before
+  registration succeeds, rather than inheriting a channel that is about to be
+  removed. Registering the same handler twice is refused instead of orphaning
+  the first listener behind a map replacement.
+- **It bounds the caller's wait, not the connection's queue.** ioredis keeps a
+  timed-out command in `commandQueue` so later replies stay aligned. Every
+  caller-side depth limit here — `maxPendingAppends`, the runtime store's command
+  admission — remains essential and none may be retired on the strength of the
+  option. The three backstopped connections synchronously cap commands before
+  submission; the command bus separately caps active reply subscriptions and
+  their request closures. That cap is a refusal-style safety boundary, not a
+  scheduler. All concurrent room-close calls in one admin service therefore
+  share a waiting fan-out limiter sized to half the reply capacity; single
+  `kickMember` / `disconnectSession` actions bypass it and retain the other half.
+  A per-call batch cannot make that promise because concurrent calls multiply
+  its budget. A timed-out promise can free one admission slot while its command
+  remains queued, but the stalled guard resets after at most its
+  threshold, so the real queue is bounded by admission plus `threshold - 1`.
+  They also disable `autoResendUnfulfilledCommands` and `autoResubscribe`.
+  Ordinary command attempts are pinned to their submission generation: reset
+  refuses new attempts until `ready`, and late failures from the retired socket
+  cannot drop its healthy replacement. Every failed
+  subscription-state change marks that command-bus subscriber generation for
+  reset, because a failed `SUBSCRIBE` may still land and a failed `UNSUBSCRIBE`
+  may leave its unique channel behind. A refused `SUBSCRIBE` happens before
+  submission and does not reset a healthy subscriber; a refused durable restore
+  keeps its barrier and retries through `retry-pacer`. A cleanup `UNSUBSCRIBE`
+  is different: its channel already left desired state, so even an admission
+  refusal retains a reset trail. New commands are refused immediately;
+  the reset happens at once when no result is active, or after the already-active
+  replies finish so cleanup cannot sever another command's reply trail. Failures
+  submitted by an older generation cannot reset its replacement. ioredis then
+  moves `commandQueue` to `prevCommandQueue` and discards it instead of replaying
+  it after reconnect.
+  The admin command bus restores the durable command channels from its handler
+  registry and result channels for requests that are still awaiting an answer;
+  a completed request is removed from desired state before its fallible cleanup,
+  so that channel is not resurrected. A restore in progress gates new publishes,
+  and a failed restore carries its exponential `retry-pacer` backoff across
+  `ready` generations — ioredis resets its own retry counter at every `ready`,
+  so its reconnect policy alone would be a fixed-rate loop. The timeout alone
+  still provides no queue bound. Proved, not assumed, in
+  `redis-client-bounds.test.ts`, `redis-admin-session-store.test.ts`, and
+  `redis-admin-command-bus.test.ts`.
+  The caller-bounded room-event publisher has the complementary shape: its
+  submission admission retains a slot until the real Redis `PUBLISH` settles.
+  A `firePublishRoomEvent` wrapper timing out therefore cannot reopen that slot;
+  ordinary events, one-shot resyncs, reaper announcements and admin publishes
+  all meet the same bus-wide real-command cap. This is covered by
+  `redis-room-event-bus.test.ts`.
+- **A threshold that cannot tell slow from dead is the failure to avoid.** It
+  sits far above ordinary latency, because tripping it on a Redis that is merely
+  behind converts a degraded dependency into a failed one on every connection at
+  once.
+- **Bounded still owes a report.** A connection whose commands now fail owes the
+  caller a diagnosis, not just an error: a stalled session store answers 503
+  `admin_session_store_unavailable` — never 401, which would read as a logout —
+  and logs `admin_session_store_command_failed` with the Redis detail the
+  response withholds from an unauthenticated caller. Requests refused while the
+  guard waits for `ready` go through the same reporting path. An executor result
+  refused by publisher admission never became a Redis operation, so it must not
+  inflate the Redis-failure counter; the terminal result-publish callback instead
+  increments `bili_syncplay_admin_command_result_publish_failures_total`
+  unconditionally, before its diagnostic log is throttled. This says the executor
+  could not complete the publish path, not that delivery was certainly lost: a
+  timed-out Redis `PUBLISH` remains queued and Pub/Sub provides no requester
+  receipt.
+- **Cleanup on the same connection is not the answer.** Where a request brackets
+  its real work with commands on the stalled connection, those rejections must
+  not replace the result: the admin command bus's `finally` `UNSUBSCRIBE` would
+  otherwise throw over the `command_timeout` result the stall exists to produce.
+  It still cannot be forgotten: a failed cleanup marks the subscriber for reset,
+  protects replies already in flight, then restores the durable registry.
 
 ## Test fixtures must not cast past the checker
 

@@ -729,6 +729,52 @@ test("redis runtime store keeps a timed-out add-member command under backpressur
   }
 });
 
+test("a command that SETTLES releases the capacity a stalled one holds", async () => {
+  // The companion to the test above, and the reason this connection may not
+  // carry a `commandTimeout` (#271 review). The admission gate counts commands
+  // that outlived their cap precisely so a join whose read timed out cannot
+  // start another one every timeout window (#242 review) — and a backstop
+  // settles exactly those commands. What the gate would then bound is not
+  // ioredis's queue but a RATE: `maxPendingOperations` new commands per
+  // timeout, for as long as the stall lasts.
+  //
+  // A rejection is what `commandTimeout` produces, so that is what this models.
+  const firstOperation = createDeferred<unknown>();
+  const fakeRedis = createFakeRedisClient([firstOperation.promise]);
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: fakeRedis,
+    maxPendingOperations: 1,
+    pendingOperationTimeoutMs: 10,
+    onPendingOperationError() {},
+  });
+  store.getOrCreateRoom("ROOMCAP2");
+
+  try {
+    store.addMember(
+      "ROOMCAP2",
+      "member-a",
+      createSession("member-a"),
+      "token-a",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // The caller was already answered by the cap; now the COMMAND answers too,
+    // which is the only difference from the test above.
+    firstOperation.reject(new Error("Command timed out"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Admitted. Under a real stall this repeats every timeout window.
+    store.addMember(
+      "ROOMCAP2",
+      "member-b",
+      createSession("member-b"),
+      "token-b",
+    );
+  } finally {
+    await store.close();
+  }
+});
+
 test("redis runtime store retries a timed-out write instead of dropping it", async () => {
   // The first attempt outlives its cap: the timeout has to end THAT ATTEMPT and
   // hand the write back to the retry queue, rather than end the write (#242).

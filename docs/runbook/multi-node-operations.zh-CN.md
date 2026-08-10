@@ -297,6 +297,7 @@ curl -fsS http://10.0.0.11:8788/readyz
 | 活跃房间数异常下降                             | `bili_syncplay_active_rooms`、`bili_syncplay_rooms_non_expired`                | Redis 连通性、房间过期配置、重启记录                   | 恢复 Redis，确认 `ROOM_STORE_PROVIDER` 未被改为内存  |
 | 过期房间不再被回收（reaper 停摆）              | `bili_syncplay_room_reaper_sweeps_total`                                       | 见 [reaper 还在扫吗？](#reaper-还在扫吗)               | 恢复 Redis；确认 `ROOM_CLEANUP_INTERVAL_MS` 未被调大 |
 | Redis 操作失败                                 | `bili_syncplay_redis_operation_failures_total`                                 | Redis 进程、网络、ACL、密码、慢查询                    | 优先恢复 Redis；必要时执行应急降级                   |
+| 已完成的管理命令结果发布路径失败               | `bili_syncplay_admin_command_result_publish_failures_total`                    | 管理命令 publisher 饱和、Redis pub/sub、结果发布日志   | 恢复 Redis；确认关房扇出和命令总线容量健康           |
 | Redis runtime store 延迟升高                   | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                    | Redis CPU、内存、网络 RTT、命令排队                    | 扩容 Redis 或降低入口层流量                          |
 | Redis room event bus publish 延迟或失败        | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`、失败计数 | Redis pub/sub 连通性、网络抖动、Room Node 日志         | 恢复 Redis 与网络；验证跨节点播放同步                |
 | 连接被拒绝增加                                 | `bili_syncplay_ws_connection_rejected_total`、结构化日志 `origin_not_allowed`  | `ALLOWED_ORIGINS`、入口层是否改写 Origin               | 修正 Origin 白名单或反代配置                         |
@@ -304,7 +305,7 @@ curl -fsS http://10.0.0.11:8788/readyz
 | 消息处理耗时升高                               | `bili_syncplay_message_handler_duration_seconds_bucket`                        | Node CPU、Redis 延迟、房间成员数、日志中的错误         | 限流、扩容 Room Node、排查慢 Redis                   |
 | Global Admin 看不到某个节点或节点显示过期      | Global Admin 概览、`node_heartbeat_failed` 日志                                | `NODE_HEARTBEAT_ENABLED`、`INSTANCE_ID`、Redis runtime | 修复心跳配置或 Redis runtime store                   |
 | 后台登录失败或频繁要求重新登录                 | `/api/admin/auth/login` 响应、审计日志                                         | `ADMIN_PASSWORD_HASH`、`ADMIN_SESSION_SECRET` 是否一致 | 同步 admin 认证配置并重启                            |
-| 跨节点房间动作失败，例如踢人或关闭房间返回 502 | 审计日志、`ADMIN_COMMAND_BUS_PROVIDER`、目标节点心跳                           | 管理命令总线、目标 `INSTANCE_ID`、Redis                | 恢复 Redis command bus 或在目标节点本地操作          |
+| 跨节点房间动作失败，例如踢人或关闭房间返回 503 | 审计日志、`ADMIN_COMMAND_BUS_PROVIDER`、目标节点心跳                           | 管理命令总线、目标 `INSTANCE_ID`、Redis                | 恢复 Redis command bus 或在目标节点本地操作          |
 
 ### reaper 还在扫吗？
 
@@ -351,8 +352,11 @@ sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<窗口>])) by (
   回应，于是没有再发一条。它总是跟在一次 timeout 之后；单独看到它，说明僵死还在
   持续。若上一轮还在上限**之内**，那属于上面的 `skipped`，既不记日志也不算失败。
 
-这个上限只约束 reaper 等多久，并不约束命令本身——房间存储的客户端仍然没有设置
-`commandTimeout`，命令会一直挂在连接上，直到 Redis 或 socket 了结它。
+这个上限只约束 reaper 等多久，并不约束命令本身：房间存储的客户端没有设
+`commandTimeout`，命令会一直挂在连接上，直到 Redis 或 socket 了结它。这是刻意的，也
+正是 `stalled` 之所以有意义的原因——#271 在这条连接上评估过连接级兜底并**否决**了它，
+因为让命令结算就等于允许下一次触发压在一条从没回来的扫描之上。见
+[哪些 Redis 连接约束了命令本身](#哪些-redis-连接约束了命令本身)。
 
 速率为 0 是观测，不是结论。每一次触发都会记下结果，包括放弃等待僵死扫描的那一
 次，所以序列彻底不动意味着根本没有任何一次触发产出。先分辨原因再动手：
@@ -396,8 +400,10 @@ WebSocket 客户端。先读**该节点自己的日志**再去信外部视图，
 - `node_heartbeat_abandoned_at_shutdown`——节点关闭时还有一拍没回应，于是不再等。
   在 Redis 本来就僵死的节点上出现属于预期；它本身不额外说明任何问题。
 
-与 reaper 一样，这个上限只约束心跳等多久，并不约束命令本身：runtime store 的客户端
-同样没有设置 `commandTimeout`。
+与 reaper 一样，这个上限只约束心跳等多久，并不约束命令本身——runtime store 的客户端
+是刻意不设 `commandTimeout` 的五个之一，因为它的写入准入门会统计"活过自己上限的命令"，
+而兜底会把这些命令从那个计数里结算掉。命令会一直挂在连接上，直到 Redis 或 socket
+了结它。
 
 ### 后台事件列表少了事件？
 
@@ -477,9 +483,11 @@ sum(rate(bili_syncplay_events_total{event="runtime_event_append_failed"}[<window
 这三条日志都固定为 error 级、不受 `LOG_LEVEL` 影响。两条 backpressure 日志被刻意排除
 出 event store，而 append 失败本来就无法写进去，因此 stdout 是它们仅有的输出路径。
 
-与 reaper 和心跳一样，这个上限只约束存储等多久，并不约束命令本身：这个客户端同样没有
-设置 `commandTimeout`。在存储发现僵死**之前**发出的读取仍然暴露；Redis 僵死但我们没有
-任何写入在途、因而无从发现时，也一样。
+与 reaper 和心跳一样，这个上限只约束存储等多久，并不约束命令本身：这个客户端是刻意
+不设 `commandTimeout` 的五个之一，理由到处都一样——兜底会与每次写的上限抢跑并清掉
+`writeIsStalled`，而那正是读取路径据以拒绝的证据。在存储发现僵死
+**之前**发出的读取仍然暴露；Redis 僵死但我们没有任何写入在途、因而无从发现时，也一样
+——这段残余由读取自己的命令上限答复。
 
 它**不**影响告警。`bili_syncplay_*` 指标是进程内计数器，经 `/metrics` 暴露；
 error 级日志无条件写 stdout。两条路都不经过 event store。会丢数据的只有后台事件
@@ -537,8 +545,17 @@ sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<wind
   关闭根本轮不到执行。
 
 在这两道边界之前，只要 Redis 僵死，`close_admin_services` 必然是一次
-`server_shutdown_step_failed`。和这里其他地方一样，边界约束的是我们等多久、不是命令
-本身：这个客户端同样没有设置 `commandTimeout`。
+`server_shutdown_step_failed`。上面这道边界约束的是我们等多久；自 #271 起这个客户端的
+命令另有 `commandTimeout` 约束——它是仅有的三条可以设兜底的连接之一——正是它把"僵死的
+会话查询无界挂住每一个后台请求"变成了一个 503：
+
+- `admin_session_store_command_failed`——会话 `save` / `get` / `delete` 失败，带
+  `operation` 与底层错误。HTTP 响应是 503 `admin_session_store_unavailable`，正文
+  不含任何 Redis 细节，因为 `authenticate` 跑在任何凭据被接受**之前**。**不是 401**：
+  一次 Redis 抖动不该读作一次登出。每次失败都会增加
+  `bili_syncplay_redis_operation_failures_total{component="admin_session_store"}`；诊断日志则按
+  `operation` 节流为每分钟至多一行。后台 API 没有通用请求限流，这正是日志必须自带节流的
+  原因。
 
 另外四个 Redis 关服步骤也采用同一条有界关闭规则（#270）：
 
@@ -567,8 +584,88 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 第二条 `UNSUBSCRIBE`，因为半开 socket 可能已卡在 consumer 发出的第一条，而 `QUIT`
 本身就会退出订阅模式。
 
-这些边界仍只约束调用方等多久，并没有给 ioredis 增加 `commandTimeout`；后者是影响整条
-连接的另一项策略，由 #271 单独跟踪。
+这些边界约束的是调用方等多久。约束命令本身的那项连接级策略是另一回事，见下。
+
+### 哪些 Redis 连接约束了命令本身
+
+#271 定案，此前同一个缺陷——Redis 接收命令却不再应答——被五个不同症状分别找到
+（#261、#263、#264、#267、#270）。这里有两层，互不替代：
+
+- **deadline（期限）** 是按行为定的，从"这个调用方能承诺什么"倒推，并且**决定接下来
+  做什么**：丢弃、拒绝、还是重试。
+- **`commandTimeout` 是活性兜底。** 它只回答一个问题——这条连接是不是不再应答了——
+  所以对所有采用它的连接是**同一个量级**，从 Redis 的时延分布倒推，而不是从任何调用方
+  的耐心倒推。`REDIS_COMMAND_TIMEOUT_MS` 为 5s。它从不决定接下来做什么，只保证有人做。
+
+一条连接至少要有其中一层。到 #271 之前有四条两层都没有——还有第五条，运行时存储，它
+只在写回队列的 attempt 上有界，而 `trackAwaitedOperation`（WebSocket join 真正阻塞的
+那一半）上什么都没有。
+
+**但这两层并不能叠加，而这才是决定下表的东西。** 本服务里几乎每一道期限都建立在同一套
+机制上（`retry-pacer`，以及架在它之上的准入门与后台轮次）：上限不取消调用，所以调用
+仍被追踪，而**"它到现在还没应答"这件事本身，就是阻止下一次尝试的证据**。兜底会把这些
+调用结算掉，于是每一道这样的界都会把连接读成空闲并放行下一次尝试——它不再是一道界，
+而变成一个速率：僵死持续多久，就每个超时窗口多压一条命令。所以判据不是"这条连接是不是
+已经有界了"：
+
+> 只有当**这条连接上没有任何调用方从"命令没有应答"里推导出一道界**时，它才可以设兜底。
+
+| 连接                                   | 命令一侧的界     | 理由                                                     |
+| -------------------------------------- | ---------------- | -------------------------------------------------------- |
+| 管理会话存储                           | `commandTimeout` | 每个 HTTP 请求一条命令；无重试、无 pacer                 |
+| 管理命令总线（publisher + subscriber） | `commandTimeout` | 应答计时器是 `setTimeout`，不是关于连接的证据            |
+| 房间存储                               | 调用方一侧       | reaper 与 reconciler 的 `maintenance-pass` `stalled`     |
+| 运行时存储                             | 调用方一侧       | `ensurePendingCapacity` 统计活过上限的命令               |
+| 房间事件总线（publisher + subscriber） | 调用方一侧       | `pending-resync-queue` 每个房间最多只放一条 publish 在外 |
+| 管理事件存储                           | 调用方一侧       | `writeIsStalled` 把控读取拒绝                            |
+| 管理审计存储                           | 调用方一侧       | 同一条 append 链                                         |
+
+**豁免不等于"这里没问题"。** 其中两条仍有完全没有调用方界的命令路径——房间存储的请求
+路径（join 上的 `get_room` / `update_room`），以及运行时存储的 `trackAwaitedOperation`
+和它旁边的两条裸读。僵死的 Redis 在那里依然会挂住一次 join。这个缺口是真实的，而且
+**这个选项修不了它**：要修得靠一道"保持调用被追踪"的上限，或者给需要兜底的路径单独一条
+连接。
+
+所有客户端都由 `createBoundedRedisClient` 构造，它**强制**要求声明采用了两层中的哪
+一层——而且调用方一侧那一层必须**点名**那道期限，因为"这条已经有界了"这句话在运行时
+存储上被相信了很久，只因为没人必须写下"界在哪里"。所有豁免连接的握手由 `connectWithin`
+兜住，那是任何逐命令期限都够不到的地方：`connectTimeout` 只管 TCP 建连、不管其后的
+`INFO`，两者皆无时，bootstrap 会在一个"接受 socket 但什么都不回"的主机上永远等下去。
+
+`server/test/redis-client-bounds.test.ts` 把这一切变成检查：`new Redis` 只许出现在一个
+模块里、各处声明被钉住、豁免模块必须走 `connectWithin`。这是 #271 里不属于"定阈值"的
+那一半——这个选项的缺席在 diff 里连续五次都没被看见。
+
+`commandTimeout` 刻意**不**做的两件事，均在
+`server/test/redis-command-timeout.test.ts` 里对着 ioredis 验证过：
+
+- **它不会把命令从连接上取下来。** ioredis 会把超时的命令留在队列里以保持后续回复对
+  齐，所以**它约束的是调用方等多久，不是连接上的队列深度**——本服务里每一道深度限制
+  仍然是唯一约束内存的东西。
+- **它分不清"慢"和"死"。** 阈值被刻意放在普通时延之上很远，就是为了不把"只是落后的
+  Redis"判成"失败的 Redis"。
+
+运维含义：Redis 僵死时，三条设兜底的连接和五条豁免的连接**表现完全不同**，等错了信号
+就等于白烧一次故障处理时间：
+
+- **管理会话存储、管理命令总线**：产出的是**失败的命令**而不是沉默。会看到
+  `admin_session_store_command_failed`、`admin_command_bus_command_failed`、
+  `admin_command_result_publish_failed`，后台请求返回 503
+  `admin_session_store_unavailable`，跨节点动作返回 503 `command_bus_unavailable`，
+  以及
+  `bili_syncplay_redis_operation_failures_total{component="admin_session_store"|"admin_command_bus"}`
+  上涨。`bili_syncplay_admin_command_result_publish_failures_total` 会统计每一条结果/fallback
+  发布路径以失败结束的已完成命令，包括从未成为 Redis 操作的 publisher 准入拒绝。它不是端到端
+  送达丢失计数：超时的 `PUBLISH` 仍可能稍后落地。连续失败达到
+  `REDIS_STALL_DROP_THRESHOLD` 后 socket 会被重置，
+  `admin_command_bus_connection_reset` 会说出来——这次重置也正是清空 ioredis 命令队列的
+  唯一手段，兜底本身做不到。
+- **房间存储、运行时存储、房间事件总线、事件存储、审计存储**：命令仍挂在连接上，所以
+  信号来自**调用方**而不是命令：`room_reaper_sweep_timeout` 之后是
+  `room_reaper_sweep_stalled`、`node_heartbeat_failed`、
+  `redis_runtime_store_operation_failed`、事件存储的丢弃日志、审计与事件页的 503。而
+  没有调用方界的请求路径——join 上的 `get_room` / `update_room`、运行时存储的
+  `trackAwaitedOperation`——**保持沉默**，从外面看就是一次永远完不成的 WebSocket join。
 
 ## 变更后回归清单
 
@@ -578,4 +675,5 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 - Global Admin 可登录，并能查看概览、房间、事件和审计日志。
 - 测试房间上的 `disconnect session`、`kick member`、`close room` 动作符合预期。
 - `bili_syncplay_redis_operation_failures_total` 无持续增长。
+- `bili_syncplay_admin_command_result_publish_failures_total` 无增长。
 - 入口层 upstream 与实际在线节点列表一致。

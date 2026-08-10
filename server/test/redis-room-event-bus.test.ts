@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Redis } from "ioredis";
+import {
+  RedisCommandAdmissionError,
+  RedisStartupTimeoutError,
+} from "../src/redis-command-timeout.js";
 import { createRedisRoomEventBus } from "../src/redis-room-event-bus.js";
 import type { RoomEventBusMessage } from "../src/room-event-bus.js";
 import { createFakeRedisPubSubClient } from "./redis-pubsub-test-helpers.js";
@@ -64,6 +68,216 @@ test("redis room event bus closes and reports both clients when QUIT never answe
       { role: "subscriber", quitOutcome: "timed_out", budgetMs: 20 },
     ],
   );
+});
+
+test("redis room event bus holds publish admission until Redis really answers", async () => {
+  let releaseFirstPublish = (): void => {};
+  const firstPublish = new Promise<void>((resolve) => {
+    releaseFirstPublish = resolve;
+  });
+  let publishCalls = 0;
+  const publisher = createFakeRedisPubSubClient(async () => "OK", {
+    publish: async () => {
+      publishCalls += 1;
+      if (publishCalls === 1) {
+        await firstPublish;
+      }
+      return 1;
+    },
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => "OK");
+  const bus = await createRedisRoomEventBus("redis://unused", {
+    maxPendingPublishCommands: 1,
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+  const event = (roomCode: string): RoomEventBusMessage => ({
+    type: "room_state_updated",
+    roomCode,
+    sourceInstanceId: "instance-a",
+    emittedAt: 1,
+  });
+
+  try {
+    const first = bus.publish(event("ROOM01"));
+    await new Promise((resolve) => setImmediate(resolve));
+    const secondOutcome = await Promise.race([
+      bus.publish(event("ROOM02")).then(
+        () => "settled" as const,
+        (error: unknown) => error,
+      ),
+      new Promise<"pending">((resolve) =>
+        setTimeout(() => resolve("pending"), 50),
+      ),
+    ]);
+
+    assert.ok(secondOutcome instanceof RedisCommandAdmissionError);
+    assert.equal(publishCalls, 1);
+
+    releaseFirstPublish();
+    await first;
+    await bus.publish(event("ROOM03"));
+    assert.equal(publishCalls, 2);
+  } finally {
+    releaseFirstPublish();
+    await bus.close();
+  }
+});
+
+test("redis room event bus bounds the first SUBSCRIBE after connect", async () => {
+  const publisher = createFakeRedisPubSubClient(async () => "OK");
+  const subscriber = createFakeRedisPubSubClient(async () => "OK", {
+    subscribe: () => new Promise(() => undefined),
+  });
+  const bus = await createRedisRoomEventBus("redis://unused", {
+    subscriptionTimeoutMs: 20,
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    const outcome = await Promise.race([
+      bus
+        .subscribe(() => undefined)
+        .then(
+          () => "settled" as const,
+          (error: unknown) => error,
+        ),
+      new Promise<"pending">((resolve) =>
+        setTimeout(() => resolve("pending"), 100),
+      ),
+    ]);
+
+    assert.ok(outcome instanceof RedisStartupTimeoutError);
+    assert.equal(outcome.operation, "room event bus SUBSCRIBE");
+    assert.equal(subscriber.disconnectCalls(), 1);
+    assert.equal(subscriber.messageListenerCount(), 0);
+  } finally {
+    await bus.close();
+  }
+});
+
+test("a room event delivered with the SUBSCRIBE acknowledgement sees its handler", async () => {
+  const publisher = createFakeRedisPubSubClient(async () => "OK");
+  let handled = false;
+  const event: RoomEventBusMessage = {
+    type: "room_state_updated",
+    roomCode: "ROOM01",
+    sourceInstanceId: "instance-a",
+    emittedAt: 1,
+  };
+  const subscriber = createFakeRedisPubSubClient(async () => "OK", {
+    subscribe: async () => {
+      subscriber.emitMessage("bsp:room-events", JSON.stringify(event));
+      return 1;
+    },
+  });
+  const bus = await createRedisRoomEventBus("redis://unused", {
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    await bus.subscribe(() => {
+      handled = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(handled, true);
+  } finally {
+    await bus.close();
+  }
+});
+
+test("a new handler waits for an in-flight final UNSUBSCRIBE and resubscribes", async () => {
+  let releaseFirstUnsubscribe = (): void => {};
+  let markFirstUnsubscribeStarted = (): void => {};
+  const firstUnsubscribeStarted = new Promise<void>((resolve) => {
+    markFirstUnsubscribeStarted = resolve;
+  });
+  const blockedFirstUnsubscribe = new Promise<void>((resolve) => {
+    releaseFirstUnsubscribe = resolve;
+  });
+  let subscribeCalls = 0;
+  let unsubscribeCalls = 0;
+  const publisher = createFakeRedisPubSubClient(async () => "OK");
+  const subscriber = createFakeRedisPubSubClient(async () => "OK", {
+    subscribe: async () => {
+      subscribeCalls += 1;
+      return 1;
+    },
+    unsubscribe: async () => {
+      unsubscribeCalls += 1;
+      if (unsubscribeCalls === 1) {
+        markFirstUnsubscribeStarted();
+        await blockedFirstUnsubscribe;
+      }
+      return 0;
+    },
+  });
+  const bus = await createRedisRoomEventBus("redis://unused", {
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    const removeFirst = await bus.subscribe(() => undefined);
+    const removingFirst = removeFirst();
+    await firstUnsubscribeStarted;
+
+    let secondSettled = false;
+    const secondSubscription = bus
+      .subscribe(() => undefined)
+      .then((remove) => {
+        secondSettled = true;
+        return remove;
+      });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(secondSettled, false);
+
+    releaseFirstUnsubscribe();
+    await removingFirst;
+    const removeSecond = await secondSubscription;
+    assert.equal(subscribeCalls, 2);
+    assert.equal(subscriber.messageListenerCount(), 1);
+    await removeSecond();
+    assert.equal(unsubscribeCalls, 2);
+  } finally {
+    releaseFirstUnsubscribe();
+    await bus.close();
+  }
+});
+
+test("redis room event bus refuses a duplicate handler without leaking a listener", async () => {
+  const publisher = createFakeRedisPubSubClient(async () => "OK");
+  const subscriber = createFakeRedisPubSubClient(async () => "OK");
+  const bus = await createRedisRoomEventBus("redis://unused", {
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+  const handler = () => undefined;
+
+  try {
+    const remove = await bus.subscribe(handler);
+    await assert.rejects(
+      bus.subscribe(handler),
+      /Room event handler is already subscribed/,
+    );
+    assert.equal(subscriber.messageListenerCount(), 1);
+    await remove();
+    assert.equal(subscriber.messageListenerCount(), 0);
+  } finally {
+    await bus.close();
+  }
 });
 
 test("redis room event bus delivers published events across instances", async (t) => {

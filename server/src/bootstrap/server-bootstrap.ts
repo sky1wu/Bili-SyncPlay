@@ -12,6 +12,7 @@ import {
   createNoopAdminCommandBus,
   type AdminCommandBus,
 } from "../admin-command-bus.js";
+import { createAdminCommandBusFailureHandlers } from "../admin-command-bus-diagnostics.js";
 import { createStructuredLogger, DEFAULT_EVENT_SAMPLING } from "../logger.js";
 import { createMirroredRuntimeStore } from "../mirrored-runtime-store.js";
 import { createRedisAdminCommandBus } from "../redis-admin-command-bus.js";
@@ -61,6 +62,7 @@ import type {
 } from "../types.js";
 
 const DEFAULT_CLOSE_STEP_TIMEOUT_MS = 5_000;
+
 const PACKAGE_JSON_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../package.json",
@@ -351,6 +353,15 @@ export async function createServerBootstrapContext(
       ? createMirroredRuntimeStore(localRuntimeStore, sharedRuntimeStore)
       : sharedRuntimeStore;
   metricsCollector.bindRuntimeStore(runtimeStore);
+  const commandBusFailureHandlers = createAdminCommandBusFailureHandlers({
+    metricsCollector,
+    // Components are built before the structured logger because that logger
+    // may itself use Redis. Read the binding at callback time so failures use
+    // the final logger rather than the bootstrap no-op.
+    getLogEvent: () => logEvent,
+    instanceId: persistenceConfig.instanceId,
+    now,
+  });
   const adminCommandBus =
     persistenceConfig.adminCommandBusProvider === "redis"
       ? await createRedisAdminCommandBus(persistenceConfig.redisUrl, {
@@ -360,6 +371,7 @@ export async function createServerBootstrapContext(
           resultChannelPrefix: getRedisAdminCommandResultChannelPrefix(
             persistenceConfig.redisNamespace,
           ),
+          ...commandBusFailureHandlers,
           onCloseUnfinished: (report) =>
             logRedisCloseUnfinished(
               "admin_command_bus_close_unfinished",

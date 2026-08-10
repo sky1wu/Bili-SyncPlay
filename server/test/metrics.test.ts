@@ -51,6 +51,8 @@ test("metrics collector renders event counters, histograms, and redis failure co
   metrics.observeRedisRoomStoreFailure("update_room");
   metrics.observeRedisRoomEventBusPublishDuration(5);
   metrics.observeRedisRoomEventBusPublishFailure();
+  metrics.recordAdminCommandResultPublishFailure("disconnect_session");
+  metrics.recordAdminCommandResultPublishFailure("disconnect_session");
   metrics.recordRoomEventPublishDropped("room_member_changed");
   metrics.recordRoomEventPublishDropped("room_member_changed");
 
@@ -61,6 +63,18 @@ test("metrics collector renders event counters, histograms, and redis failure co
   assert.equal(rendered.includes("bili_syncplay_rooms_non_expired 2"), true);
   assert.equal(
     rendered.includes('bili_syncplay_build_info{version="9.9.9-test"} 1'),
+    true,
+  );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_admin_command_result_publish_failures_total{command_kind="disconnect_session"} 2',
+    ),
+    true,
+  );
+  assert.equal(
+    rendered.includes(
+      'bili_syncplay_admin_command_result_publish_failures_total{command_kind="kick_member"} 0',
+    ),
     true,
   );
   const startTimeMatch = rendered.match(

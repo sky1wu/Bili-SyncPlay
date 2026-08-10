@@ -1,4 +1,7 @@
-import { Redis } from "ioredis";
+import {
+  connectWithin,
+  createBoundedRedisClient,
+} from "../redis-command-timeout.js";
 import {
   createAppendChain,
   type AppendChainCloseReport,
@@ -245,13 +248,15 @@ export async function createRedisAuditStore(
 ): Promise<GlobalAuditStore & { close: () => Promise<void> }> {
   const redis =
     options.redisClient ??
-    (new Redis(redisUrl, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
-      // Deliberately no `commandTimeout`: it would bound the audit page's reads
-      // on this connection too, and that is the same decision deferred by #261,
-      // #263 and #264 for the other Redis clients. The bound this store owns is
-      // on its own queue, which is what made the stall unbounded.
+    // Exempted for exactly the event store's reason (#271): this is the same
+    // `append-chain`, and a client-side backstop would race the per-write cap
+    // and erase the `writeIsStalled` evidence the read path judges on. The
+    // policies differ — an audit record is refused, never shed — but that is a
+    // handler choice, not a connection one.
+    (createBoundedRedisClient(redisUrl, {
+      bound: "caller",
+      boundedBy:
+        "append-chain: APPEND_TIMEOUT_MS per write, READ_COMMAND_TIMEOUT_MS per read, CLOSE_APPEND_SETTLE_TIMEOUT_MS on close",
     }) as RedisAuditStoreClient);
   const streamKey = options.streamKey ?? DEFAULT_AUDIT_STREAM_KEY;
   const maxLen = options.maxLen ?? DEFAULT_AUDIT_STREAM_MAX_LEN;
@@ -277,7 +282,12 @@ export async function createRedisAuditStore(
     },
   });
 
-  await redis.connect();
+  // The exemption above is about the commands this store issues; the
+  // handshake is not one of them, and without a `commandTimeout` it never
+  // times out on a host that accepts the socket and stops there — bootstrap
+  // awaits this, so the process would never start listening and never say
+  // why (#271 review).
+  await connectWithin(redis);
 
   async function writeRecord(
     input: GlobalAuditAppendInput,

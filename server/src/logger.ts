@@ -1,4 +1,5 @@
 import type { LogEvent, LogLevel } from "./types.js";
+import { createDiagnosisThrottle } from "./diagnosis-throttle.js";
 import type { GlobalEventStore } from "./admin/global-event-store.js";
 import type { MetricsCollector } from "./admin/metrics.js";
 import type { RuntimeStore } from "./runtime-store.js";
@@ -116,8 +117,11 @@ export function createStructuredLogger(
 
   const threshold = LEVEL_PRIORITY[logLevel];
   const sampleCounters = new Map<string, number>();
-  const lastAppendFailureReportAtByReason = new Map<string, number>();
-  let lastUntrackedAppendFailureReportAt: number | undefined;
+  const appendFailureThrottle = createDiagnosisThrottle({
+    intervalMs: APPEND_FAILURE_REPORT_INTERVAL_MS,
+    maxTrackedDiagnoses: MAX_TRACKED_APPEND_FAILURE_REASONS,
+    now: appendFailureNow,
+  });
   const emitLine = (line: string) => {
     (writeLine ?? console.log)(line);
   };
@@ -138,42 +142,9 @@ export function createStructuredLogger(
     const errorMessage = error instanceof Error ? error.message : String(error);
     const reason =
       error instanceof Error ? `${error.name}:${errorMessage}` : errorMessage;
-    const at = appendFailureNow();
 
-    for (const [
-      trackedReason,
-      lastReportedAt,
-    ] of lastAppendFailureReportAtByReason) {
-      if (at - lastReportedAt >= APPEND_FAILURE_REPORT_INTERVAL_MS) {
-        lastAppendFailureReportAtByReason.delete(trackedReason);
-      }
-    }
-
-    const lastReportedAt = lastAppendFailureReportAtByReason.get(reason);
-    if (lastReportedAt !== undefined) {
+    if (!appendFailureThrottle.allow(reason)) {
       return;
-    }
-
-    // Once high-cardinality failures have spilled into the shared bucket, its
-    // cooldown applies to every diagnosis that was not already tracked. An old
-    // tracked slot can expire before the bucket does; promoting an overflow
-    // diagnosis into that newly free slot would otherwise print it twice inside
-    // one minute (#268 review).
-    if (
-      lastUntrackedAppendFailureReportAt !== undefined &&
-      at - lastUntrackedAppendFailureReportAt <
-        APPEND_FAILURE_REPORT_INTERVAL_MS
-    ) {
-      return;
-    }
-
-    if (
-      lastAppendFailureReportAtByReason.size >=
-      MAX_TRACKED_APPEND_FAILURE_REASONS
-    ) {
-      lastUntrackedAppendFailureReportAt = at;
-    } else {
-      lastAppendFailureReportAtByReason.set(reason, at);
     }
 
     emitLine(

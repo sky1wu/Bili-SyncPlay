@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ADMIN_COMMAND_FANOUT_CONCURRENCY,
   AdminActionError,
   createAdminActionService,
 } from "../src/admin/action-service.js";
@@ -73,6 +74,7 @@ function createService(options: {
   deleteRuntimeRoom?: (roomCode: string) => void;
   publishRoomDeleted?: (roomCode: string) => Promise<void>;
   auditLogService?: ReturnType<typeof createAuditLogService>;
+  maxFanoutConcurrency?: number;
 }) {
   const auditLogService = options.auditLogService ?? createAuditLogService();
   return createAdminActionService({
@@ -113,6 +115,7 @@ function createService(options: {
     publishRoomDeleted: options.publishRoomDeleted ?? (async () => {}),
     logEvent: () => {},
     now: () => 10_000,
+    maxFanoutConcurrency: options.maxFanoutConcurrency,
   });
 }
 
@@ -197,6 +200,60 @@ test("admin action service maps error command results to 502", async () => {
   );
 });
 
+test("admin action service maps command bus unavailability to 503", async () => {
+  const session = createSession();
+  const service = createService({
+    session,
+    requestAdminCommand: async () => ({
+      requestId: "req-unavailable",
+      targetInstanceId: "node-a",
+      executorInstanceId: "node-a",
+      status: "error",
+      code: "command_bus_unavailable",
+      message: "Admin command bus could not reach Redis.",
+      completedAt: 10_003,
+    }),
+  });
+
+  await assert.rejects(
+    () => service.disconnectSession(ACTOR, session.id, "cleanup"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.code, "command_bus_unavailable");
+      return true;
+    },
+  );
+});
+
+test("concurrent admin commands receive distinct request ids", async () => {
+  const session = createSession();
+  const requestIds: string[] = [];
+  const service = createService({
+    session,
+    requestAdminCommand: async (command) => {
+      requestIds.push(command.requestId);
+      return {
+        requestId: command.requestId,
+        targetInstanceId: command.targetInstanceId,
+        executorInstanceId: "node-a",
+        status: "ok",
+        roomCode: session.roomCode,
+        sessionId: session.id,
+        completedAt: 10_004,
+      };
+    },
+  });
+
+  await Promise.all([
+    service.disconnectSession(ACTOR, session.id, "first"),
+    service.disconnectSession(ACTOR, session.id, "second"),
+  ]);
+
+  assert.equal(requestIds.length, 2);
+  assert.notEqual(requestIds[0], requestIds[1]);
+});
+
 test("admin action service keeps room state when closeRoom cannot disconnect every session", async () => {
   let deletedPersistedRoom = false;
   let deletedRuntimeRoom = false;
@@ -250,6 +307,206 @@ test("admin action service keeps room state when closeRoom cannot disconnect eve
   assert.equal(auditLogs.total, 1);
   assert.equal(auditLogs.items[0]?.result, "rejected");
   assert.equal(auditLogs.items[0]?.reason, "command_failed");
+});
+
+test("admin closeRoom stays within its shared fan-out budget", async () => {
+  const sessions = Array.from(
+    { length: ADMIN_COMMAND_FANOUT_CONCURRENCY * 2 + 1 },
+    (_, index) =>
+      createSession({
+        id: `session-${index}`,
+        memberId: `member-${index}`,
+      }),
+  );
+  let calls = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const service = createService({
+    sessionsByRoom: sessions,
+    requestAdminCommand: async (command) => {
+      calls += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight -= 1;
+      return {
+        requestId: command.requestId,
+        targetInstanceId: command.targetInstanceId,
+        executorInstanceId: command.targetInstanceId,
+        status: "ok",
+        roomCode: null,
+        sessionId:
+          command.kind === "disconnect_session" ? command.sessionId : undefined,
+        completedAt: 10_004,
+      };
+    },
+  });
+
+  const result = await service.closeRoom(ACTOR, "ROOM01", "shutdown");
+
+  assert.equal(result.disconnectedSessionCount, sessions.length);
+  assert.equal(calls, sessions.length);
+  assert.equal(maxInFlight, ADMIN_COMMAND_FANOUT_CONCURRENCY);
+});
+
+test("concurrent closeRoom calls share one fan-out budget without blocking single actions", async () => {
+  const sessions = Array.from({ length: 3 }, (_, index) =>
+    createSession({
+      id: `room-session-${index}`,
+      memberId: `room-member-${index}`,
+    }),
+  );
+  const directSession = createSession({
+    id: "direct-session",
+    memberId: "direct-member",
+  });
+  let releaseFanout = (): void => {};
+  const fanoutBlocked = new Promise<void>((resolve) => {
+    releaseFanout = resolve;
+  });
+  let markFanoutCapacityReached = (): void => {};
+  const fanoutCapacityReached = new Promise<void>((resolve) => {
+    markFanoutCapacityReached = resolve;
+  });
+  let markDirectCommandStarted = (): void => {};
+  const directCommandStarted = new Promise<void>((resolve) => {
+    markDirectCommandStarted = resolve;
+  });
+  let fanoutInFlight = 0;
+  let maxFanoutInFlight = 0;
+  const service = createService({
+    session: directSession,
+    sessionsByRoom: sessions,
+    maxFanoutConcurrency: 2,
+    requestAdminCommand: async (command) => {
+      if (command.requestId.startsWith("close-room:")) {
+        fanoutInFlight += 1;
+        maxFanoutInFlight = Math.max(maxFanoutInFlight, fanoutInFlight);
+        if (fanoutInFlight === 2) {
+          markFanoutCapacityReached();
+        }
+        await fanoutBlocked;
+        fanoutInFlight -= 1;
+      } else {
+        markDirectCommandStarted();
+      }
+      return {
+        requestId: command.requestId,
+        targetInstanceId: command.targetInstanceId,
+        executorInstanceId: command.targetInstanceId,
+        status: "ok",
+        roomCode: null,
+        sessionId:
+          command.kind === "disconnect_session" ? command.sessionId : undefined,
+        completedAt: 10_004,
+      };
+    },
+  });
+  const closeCalls = [
+    service.closeRoom(ACTOR, "ROOM01", "shutdown"),
+    service.closeRoom(ACTOR, "ROOM02", "shutdown"),
+    service.closeRoom(ACTOR, "ROOM03", "shutdown"),
+  ];
+
+  try {
+    await fanoutCapacityReached;
+    const directCall = service.disconnectSession(
+      ACTOR,
+      directSession.id,
+      "cleanup",
+    );
+    await Promise.race([
+      directCommandStarted,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(new Error("Single admin command was blocked by fan-out.")),
+          100,
+        ),
+      ),
+    ]);
+
+    assert.equal(maxFanoutInFlight, 2);
+    await directCall;
+  } finally {
+    releaseFanout();
+    await Promise.allSettled(closeCalls);
+  }
+
+  assert.equal(maxFanoutInFlight, 2);
+  assert.deepEqual(await Promise.all(closeCalls), [
+    { roomCode: "ROOM01", disconnectedSessionCount: sessions.length },
+    { roomCode: "ROOM02", disconnectedSessionCount: sessions.length },
+    { roomCode: "ROOM03", disconnectedSessionCount: sessions.length },
+  ]);
+});
+
+test("admin closeRoom maps command bus unavailability to 503", async () => {
+  const session = createSession();
+  const service = createService({
+    sessionsByRoom: [session],
+    requestAdminCommand: async () => ({
+      requestId: "req-close-unavailable",
+      targetInstanceId: "node-a",
+      executorInstanceId: "node-a",
+      status: "error",
+      code: "command_bus_unavailable",
+      message: "Admin command bus could not reach Redis.",
+      completedAt: 10_004,
+    }),
+  });
+
+  await assert.rejects(
+    () => service.closeRoom(ACTOR, "ROOM01", "shutdown"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.details?.commandFailureCount, 1);
+      return true;
+    },
+  );
+});
+
+test("admin closeRoom keeps the 503 code aligned for mixed command failures", async () => {
+  const firstSession = createSession({ id: "session-1" });
+  const secondSession = createSession({
+    id: "session-2",
+    memberId: "member-2",
+  });
+  const service = createService({
+    sessionsByRoom: [firstSession, secondSession],
+    requestAdminCommand: async (command) =>
+      command.kind === "disconnect_session" && command.sessionId === "session-1"
+        ? {
+            requestId: "req-close-executor-error",
+            targetInstanceId: "node-a",
+            executorInstanceId: "node-a",
+            status: "error",
+            code: "socket_close_failed",
+            message: "Failed to close socket.",
+            completedAt: 10_004,
+          }
+        : {
+            requestId: "req-close-unavailable",
+            targetInstanceId: "node-a",
+            executorInstanceId: "node-a",
+            status: "error",
+            code: "command_bus_unavailable",
+            message: "Admin command bus could not reach Redis.",
+            completedAt: 10_004,
+          },
+  });
+
+  await assert.rejects(
+    () => service.closeRoom(ACTOR, "ROOM01", "shutdown"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.code, "command_bus_unavailable");
+      assert.equal(error.details?.commandFailureCount, 2);
+      return true;
+    },
+  );
 });
 
 test("admin expireRoom tears down the room's runtime state", async () => {

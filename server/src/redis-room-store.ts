@@ -1,5 +1,9 @@
-import { Redis } from "ioredis";
+import { ReplyError } from "ioredis";
 import type { RoomListQuery } from "./admin/types.js";
+import {
+  connectWithin,
+  createBoundedRedisClient,
+} from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 import { getRedisRoomStoreKeys } from "./redis-namespace.js";
 import {
@@ -402,9 +406,24 @@ export async function createRedisRoomStore(
 > {
   const redis =
     options.redisClient ??
-    (new Redis(redisUrl, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
+    // Exempt, and this is the connection where the criterion is easiest to get
+    // wrong: its REQUEST path (twenty-odd command sites on join / leave) has no
+    // caller-side bound at all, which makes a backstop look like the obvious
+    // fix. It is not, because two background passes share this connection and
+    // both derive their bounds from a command's silence — the room reaper's
+    // 30s sweep cap and the room index reconciler's, via `maintenance-pass`,
+    // whose `stalled` outcome exists precisely to stop a pass running on top of
+    // one that never came back (#261, #263). A 5s backstop would win every one
+    // of those races: `stalled` becomes unreachable, and every interval issues
+    // a fresh sweep onto a connection still holding the last one.
+    //
+    // So the request path's gap stays open here and is named rather than
+    // papered over: closing it needs a bound that keeps the call tracked, or a
+    // separate connection for the paths that want a backstop (#271 review).
+    (createBoundedRedisClient(redisUrl, {
+      bound: "caller",
+      boundedBy:
+        "room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the request path",
     }) as RedisRoomStoreClient);
   const { roomKeyPrefix, roomsByExpiryKey } = getRedisRoomStoreKeys(
     options.namespace,
@@ -423,15 +442,33 @@ export async function createRedisRoomStore(
   // through it, the reconcile the reaper waits on: one bad key would stop
   // every other expired room from ever being collected. Null here means the
   // body could not be read, which callers already treat as unusable.
+  //
+  // Which is a statement about ONE KEY, and only a reply can make it. Anything
+  // else is a statement about the CONNECTION, and answering it with "no body"
+  // is the unknown-as-absent mistake this codebase refuses everywhere else: a
+  // Redis that stopped answering would empty every listing of live rooms and
+  // send the orphan prune after their index members. A stall hangs this batch
+  // rather than rejecting it, but a dropped socket or an exhausted
+  // `maxRetriesPerRequest` rejects it — and either way "no reply" is not "no
+  // room" (#271 review).
   async function readRoomBody(code: string): Promise<string | null> {
     try {
       return await redis.get(roomKey(code));
-    } catch {
-      return null;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error instanceof ReplyError &&
+        error.message.startsWith("WRONGTYPE ")
+      ) {
+        return null;
+      }
+      throw error;
     }
   }
 
-  await redis.connect();
+  // The exemption is about commands; the handshake is not one of them and has
+  // no bound of its own without a `commandTimeout` (#271 review).
+  await connectWithin(redis);
 
   // Walks room bodies and points the set at each one. On a database written
   // before this set existed it is the migration; afterwards it is what brings

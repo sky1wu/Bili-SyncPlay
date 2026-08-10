@@ -17,6 +17,21 @@ export type AdminCommand =
       requestedAt: number;
     };
 
+export type AdminCommandKind = AdminCommand["kind"];
+
+/** Runtime list used to pre-seed per-command outcome metrics. */
+export const ADMIN_COMMAND_KINDS = [
+  "disconnect_session",
+  "kick_member",
+] as const satisfies readonly AdminCommandKind[];
+
+type _EnsureAllAdminCommandKindsCovered =
+  Exclude<AdminCommandKind, (typeof ADMIN_COMMAND_KINDS)[number]> extends never
+    ? true
+    : never;
+const _adminCommandKindsAreExhaustive: _EnsureAllAdminCommandKindsCovered = true;
+void _adminCommandKindsAreExhaustive;
+
 export type AdminCommandResult =
   | {
       requestId: string;
@@ -37,6 +52,14 @@ export type AdminCommandResult =
       message: string;
       completedAt: number;
     };
+
+/**
+ * Process-wide cap for requests that own a Redis reply subscription.
+ *
+ * Exported because callers that fan out commands must stay below the same
+ * capacity instead of deterministically refusing the tail of a valid batch.
+ */
+export const DEFAULT_ADMIN_COMMAND_MAX_ACTIVE_REQUESTS = 256;
 
 export type AdminCommandBus = {
   request: (

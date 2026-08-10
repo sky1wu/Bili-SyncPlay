@@ -324,11 +324,14 @@
   已经没人能据此行动的问题。"低于间隔"是这条规则的另一半：正是它让超时之后的那次触发
   是 `stalled` 而不是 `overlapped`。
 
-上限属于调用方，不属于连接：房间存储与 runtime store 的客户端都仍然没有 `commandTimeout`，
-命令本身照样挂在 socket 上。尤其 `heartbeatNode` 是直连的 `MULTI`——它不走写回队列，
-所以队列自己的 `pendingOperationTimeoutMs` 从来就没管到它。
-在那里加超时会连带约束请求路径（`get_room` / `update_room`），那是另一个需要单独权衡重试语义的决定——
-#261 有意没有做。
+上限属于调用方，不属于连接。#271 已经把另一半定了下来——见
+[约束一条 Redis 命令的是两层，不是一层](#约束一条-redis-命令的是两层不是一层)——它落
+下的分工没有动摇这条规则：房间存储与 runtime store 都刻意不带 `commandTimeout`。一道几
+秒之后才生效的兜底，回答的是当时还持有命令的那个人；它无法回答一次已经放弃的触发，也
+无法告诉下一次触发上一次是否还悬着。尤其 `heartbeatNode` 是直连的 `MULTI`——它不走写
+回队列，所以队列自己的 `pendingOperationTimeoutMs` 从来就没管到它。给任一连接加兜底都
+会连带结算它的请求路径（`get_room` / `update_room`），那是另一个需要单独权衡重试语义的
+决定——#261 有意没有做。
 
 ## 无界的写入队列会把"僵死的依赖"变成"还在增长的依赖"
 
@@ -423,9 +426,14 @@
 的推导来源。它同样是那道拒绝的边界：存储只能依据**自己**某条命令给出的证据去拒绝，
 所以进入僵死后的**第一个**请求——无论它是读是写——都不会被拒绝。它会被有界地判为不可用
 并答复调用方，然后它自己成为拒绝下一个请求的证据。这已是调用方一侧的界能做到的极限；
-要彻底补上，需要独立的读连接或 `commandTimeout`。要补上这一段，需要独立的读连接或 `commandTimeout`——与 #261、#263 里被
-推迟的是同一个决定，三处应当一起评估。这个存储的测试夹具只有模拟了这种顺序才值得信：让每次调用各自独立完成
-的夹具，会乐于"证明"读取和关服能绕过一条僵死的写入。
+要彻底补上，需要独立的读连接。
+
+`commandTimeout` **不是**另一条出路，#271 已就两个 append 链存储把这一点定案。它会与
+每次写的上限抢跑，从底下把命令 reject 掉并清掉 `writeIsStalled`——而那正是这道拒绝赖以
+成立的证据——于是一条"冻住并廉价丢弃"的链，变成"每个超时磨一条命令"，同时让每一次轮询
+重新回到一条已死的连接上。兜底是活性界，它无法替代一道**产出证据**的界。这个存储的测试
+夹具只有模拟了这种顺序才值得信：让每次调用各自独立完成的夹具，会乐于"证明"读取和关服
+能绕过一条僵死的写入。
 
 ## "哪条记录可以丢"是记录的属性，不是队列的属性
 
@@ -477,7 +485,100 @@
   却没有这些行，只会把原先 `server_shutdown_step_failed` 的沉默下移一层。
 - 总线的终态关闭不再追加第二条 `UNSUBSCRIBE`。consumer 的普通退订可能正是半开 socket
   已经不回答的命令；`QUIT` 本来也会退出订阅模式，直接进入它的边界才能保证强制断开
-  兜底可达。关服以外的逐命令边界仍属于 #271 的连接级策略。
+  兜底可达。关服以外的逐命令边界属于下面这条连接级策略。
+
+## 约束一条 Redis 命令的是两层，不是一层
+
+#261、#263、#264、#267、#270 是同一个缺陷——Redis 接收命令却不再应答，于是某个调用方
+无界地等下去——被五个不同症状分别找到。每一个都在"症状消失"时收尾，所以同一个被推迟的
+问题回来了五次。#271 给出了答案，而这个答案是一条**区分**，不是一个数字。
+
+- **deadline（期限）** 是按行为定的，从"这个调用方能承诺什么"倒推，并且**决定接下来
+  做什么**：丢弃、拒绝、重试、中止。`append-chain` 每次写的上限、它的读取界、
+  `pendingOperationTimeoutMs`、管理命令总线的应答计时器——数值各不相同，因为问题各不
+  相同。
+- **`commandTimeout` 是活性兜底。** 它只回答一个问题——这条连接是不是不再应答了——
+  所以对所有采用它的连接是同一个量级（`REDIS_COMMAND_TIMEOUT_MS`，5s），从 Redis 的
+  时延分布倒推，而不是从任何调用方的耐心倒推。它从不决定接下来做什么，只保证有人做。
+
+一条连接至少要有其中一层，而七条里有四条两层都没有。但这两层**并不能叠加**，而这才是
+决定"哪条连接取哪一层"的东西：
+
+- **兜底无法替代一道"产出证据"的界。** 本仓几乎每一道期限都建立在同一套机制上——上限不
+  取消调用，所以调用仍被追踪，而**它持续的沉默就是阻止下一次尝试的东西**：
+  `ensurePendingCapacity` 统计 `commandPacer.trackedCount()`（#242）、`maintenance-pass`
+  报 `stalled`（#261、#263）、`pending-resync-queue` 等 `inFlight`（#242）、
+  `append-chain` 依 `writeIsStalled` 拒绝读取（#266、#269）。兜底会把这些调用结算掉，
+  于是每一道界都把连接读成空闲并放行下一次尝试：它不再是界，而变成"每个超时窗口多一条
+  命令"的速率。这个选项会一次性废掉上面四条。
+- **所以判据不是"它是不是已经有界了"。** 只有当这条连接上**没有任何调用方从"命令没有
+  应答"里推导出一道界**时，它才可以设兜底。三条通过：管理会话存储，以及管理命令总线的
+  两个客户端。五条不通过。
+- **声明是强制的，而且必须点名那道期限。** 所有客户端由 `createBoundedRedisClient`
+  构造，它的 `RedisCommandBound` 要么是兜底，要么是一条被点名的调用方一侧期限。"这条
+  已经有界了"这句话在运行时存储上被相信了很久，只因为没人必须写下界在哪——而
+  `trackAwaitedOperation` 上一道界都没有。`redis-client-bounds.test.ts` 保证
+  `new Redis` 不出现在别的模块里，因为这个选项的缺席在 diff 里看不出来，它正是这样连着
+  五次没被看见的。
+- **豁免不等于没问题。** 房间存储的请求路径与运行时存储的 `trackAwaitedOperation` 仍然
+  没有调用方一侧的界，僵死的 Redis 在那里依然挂住一次 join。要修得靠一道"保持调用被追踪"
+  的上限，或者给需要兜底的路径单独一条连接——绝不是这个选项。
+- **豁免管的是命令，不是握手。** `connect()` 跑在 store 存在之前，且以 `ready` 收尾；
+  ioredis 的 `connectTimeout` 只管 TCP 建连、不管其后的 `INFO`。两道界都没有时，
+  bootstrap 会在一个"接受 socket 但什么都不回"的主机上永远等下去，所以豁免连接改用
+  `connectWithin` 打开。
+- **握手完成，并不代表后续启动命令也有界。** 房间事件 consumer 会在服务开始监听前
+  await 第一次 `SUBSCRIBE`，所以这条命令会在独立 subscriber 连接上通过 `startWithin`
+  执行。Redis 若恰好在 `ready` 之后停止应答，启动会以分阶段错误失败并断开 subscriber；
+  publisher 仍不采用会破坏重试证据的兜底。handler 会在提交命令前先注册，因为 ioredis
+  可能在同一次 socket 读取中先处理 SUBSCRIBE ACK、紧接着就分发消息。SUBSCRIBE 与最后一次
+  UNSUBSCRIBE 共用一条串行 reconcile：后者尚未 ACK 时到来的新 handler，会先等它完成、再等
+  新 SUBSCRIBE ACK，不能继承一条马上就要被移除的频道。重复注册同一个 handler 会被拒绝，
+  而不是让 map 替换后遗留第一条 listener。
+- **它约束的是调用方等多久，不是连接上的队列。** ioredis 会把超时的命令留在
+  `commandQueue` 里以保持后续回复对齐。本仓每一道调用方侧的深度限制——
+  `maxPendingAppends`、运行时存储的命令准入——仍然不可缺少，都不得因为有了这个选项而
+  退役。三条采用兜底的连接会在提交前同步限制命令数；管理命令总线还会另外限制活跃的 reply
+  subscription 与相应的请求闭包。该上限是会拒绝请求的安全边界，不是调度器。同一个管理服务
+  内所有并发的关闭房间调用因此共用一条等待型扇出限制器，容量取 reply 上限的一半；单条
+  `kickMember` / `disconnectSession` 不经过它，保留另一半容量。逐调用分批无法兑现该承诺，因为
+  并发调用会把局部预算相乘。一个超时 promise 可能在命令仍留在队列时释放一个准入槽，
+  但 stalled guard 最多经历自身 threshold 次失败就会重置，所以真实队列的上限是准入上限再加
+  `threshold - 1`。这些连接也关闭 `autoResendUnfulfilledCommands` 与 `autoResubscribe`。
+  普通命令 attempt 会绑定提交时的连接代际：reset 到 `ready` 之间拒绝新 attempt，退役 socket
+  的迟到失败不得再次断开已经健康的替代连接。订阅状态的每一次变更失败都会把对应的管理
+  命令总线 subscriber 代际标记为待重置，因为失败的 `SUBSCRIBE` 仍可能落地，失败的
+  `UNSUBSCRIBE` 也可能留下它的唯一 channel。被拒的 `SUBSCRIBE` 尚未提交，所以不得重置健康的
+  subscriber；被拒的持久订阅恢复会保持 barrier，并通过 `retry-pacer` 重试。清理用的
+  `UNSUBSCRIBE` 不同：它的 channel 已经退出期望状态，因此即使准入拒绝也必须保留 reset 轨迹。
+  新命令会立即拒绝；没有活跃结果时马上重置，
+  否则等已经在途的结果结束后再重置，避免一次清理切断另一条命令的回复轨迹。旧代际迟到的
+  失败不得重置替代它的新连接。ioredis 随后把 `commandQueue` 移到 `prevCommandQueue` 后丢弃，
+  而不是在重连后重放。管理命令总线会从 handler 注册表恢复持久 command channel，也会恢复仍在
+  等待答案的请求所对应的 result channel；已经结束的请求会在执行可能失败的清理之前先退出
+  期望状态，所以它的 channel 不会被复活。恢复期间禁止新 publish；恢复失败则把指数
+  `retry-pacer` 退避跨 `ready` 代际保留下来——ioredis 自己的计数会在每次 `ready` 清零，单靠
+  它只会形成固定频率的循环。仅有 timeout 仍然没有队列界。这一条在
+  `redis-client-bounds.test.ts`、`redis-admin-session-store.test.ts` 与
+  `redis-admin-command-bus.test.ts` 里是验证过的，不是假设的。
+  采用调用方界的房间事件 publisher 则是互补形状：它的提交准入会一直占槽，直到真实的
+  Redis `PUBLISH` 结算。`firePublishRoomEvent` 的包装器超时不能重新放开该槽；普通事件、
+  一次性 resync、reaper 通告和管理端发布都会经过同一条总线级真实命令上限。
+  `redis-room-event-bus.test.ts` 固定了这项性质。
+- **分不清"慢"和"死"的阈值是要避免的失败。** 它被放在普通时延之上很远，因为在"只是
+  落后的 Redis"上跳闸，会一次性把每条连接上的降级依赖变成失败依赖。
+- **有界了仍然欠一份上报。** 命令开始失败的连接欠调用方的是一个诊断而不只是一个错误：
+  僵死的会话存储答 503 `admin_session_store_unavailable`——绝不能是 401，那会读作一次
+  登出——并记 `admin_session_store_command_failed`，带上响应对未认证调用方隐去的 Redis
+  细节。guard 等待 `ready` 期间被拒的请求也走同一上报路径。被 publisher 准入拒绝的 executor
+  结果从未成为 Redis 操作，因此不得虚增 Redis failure counter；最终结果发布回调会在诊断日志
+  被节流之前，无条件增加 `bili_syncplay_admin_command_result_publish_failures_total`。它表达的是
+  executor 未能完成发布路径，不是断言送达一定丢失：超时的 Redis `PUBLISH` 仍留在队列中，
+  Pub/Sub 也不提供 requester 收件回执。
+- **同一条连接上的清理不是答案。** 当一个请求用同连接上的命令把真正的工作夹在中间时，
+  这些清理的 reject 不得替换掉结果：否则管理命令总线 `finally` 里的 `UNSUBSCRIBE` 会
+  把僵死本该产出的 `command_timeout` 结果抛掉。但清理也不能就此忘掉：清理失败会标记
+  subscriber 待重置，先保护已经在途的回复，之后再恢复持久注册表。
 
 ## 测试夹具不得把类型检查绕过去
 

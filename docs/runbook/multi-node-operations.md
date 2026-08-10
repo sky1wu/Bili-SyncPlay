@@ -287,6 +287,7 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 | Abnormal drop in active rooms                                     | `bili_syncplay_active_rooms`, `bili_syncplay_rooms_non_expired`                        | Redis connectivity, room expiry settings, restart history                    | Restore Redis; confirm `ROOM_STORE_PROVIDER` was not switched to memory        |
 | Expired rooms stop being reclaimed (reaper stalled)               | `bili_syncplay_room_reaper_sweeps_total`                                               | See [Is the room reaper still sweeping?](#is-the-room-reaper-still-sweeping) | Restore Redis; confirm `ROOM_CLEANUP_INTERVAL_MS` was not raised               |
 | Redis operation failures                                          | `bili_syncplay_redis_operation_failures_total`                                         | Redis process, network, ACLs, password, slow queries                         | Restore Redis first; downgrade to in-memory only if necessary                  |
+| Completed admin command result publish paths fail                 | `bili_syncplay_admin_command_result_publish_failures_total`                            | Admin command bus publisher saturation, Redis pub/sub, result publish logs   | Restore Redis; confirm close-room fan-out and command-bus capacity are healthy |
 | Elevated Redis runtime store latency                              | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                            | Redis CPU, memory, network RTT, command queueing                             | Scale Redis or reduce edge-layer traffic                                       |
 | Redis room event bus publish latency or failures                  | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`, failure counters | Redis pub/sub connectivity, network jitter, room node logs                   | Restore Redis and the network; verify cross-node playback sync                 |
 | Increase in rejected connections                                  | `bili_syncplay_ws_connection_rejected_total`, structured `origin_not_allowed` logs     | `ALLOWED_ORIGINS`, whether the edge rewrites `Origin`                        | Fix the origin allowlist or the reverse-proxy configuration                    |
@@ -294,7 +295,7 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 | Elevated message handling latency                                 | `bili_syncplay_message_handler_duration_seconds_bucket`                                | Node CPU, Redis latency, room member counts, errors in logs                  | Rate-limit, scale room nodes, investigate slow Redis                           |
 | Global admin missing a node, or a node shown as expired           | Global admin overview, `node_heartbeat_failed` logs                                    | `NODE_HEARTBEAT_ENABLED`, `INSTANCE_ID`, Redis runtime store                 | Fix the heartbeat configuration or the Redis runtime store                     |
 | Admin login failures or frequent re-login prompts                 | `/api/admin/auth/login` responses, audit logs                                          | Whether `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET` are consistent        | Align the admin auth settings and restart                                      |
-| Cross-node room actions fail, e.g. kick or close room returns 502 | Audit logs, `ADMIN_COMMAND_BUS_PROVIDER`, target node heartbeat                        | Admin command bus, target `INSTANCE_ID`, Redis                               | Restore the Redis command bus or perform the action locally on the target node |
+| Cross-node room actions fail, e.g. kick or close room returns 503 | Audit logs, `ADMIN_COMMAND_BUS_PROVIDER`, target node heartbeat                        | Admin command bus, target `INSTANCE_ID`, Redis                               | Restore the Redis command bus or perform the action locally on the target node |
 
 ### Is the room reaper still sweeping?
 
@@ -348,9 +349,13 @@ which failure it is, and they need different repairs:
   previous sweep still inside its cap is the `skipped` label above instead, and
   is neither logged nor counted as a failure.
 
-The cap only bounds how long the reaper waits, not the command itself — the room
-store's client still sets no `commandTimeout`, so the command stays out on the
-connection until Redis or the socket ends it.
+The cap only bounds how long the reaper waits, not the command itself: the room
+store's client sets no `commandTimeout`, so the command stays out on the
+connection until Redis or the socket ends it. That is deliberate and it is what
+makes `stalled` mean anything — #271 evaluated a connection-wide backstop here
+and rejected it precisely because settling the command would let the next tick
+sweep on top of one that never came back. See
+[Which Redis connections bound their commands](#which-redis-connections-bound-their-commands).
 
 A rate of 0 is an observation, not a diagnosis. Every tick records an outcome,
 including one that gave up on a hung sweep, so a flat series means no tick
@@ -402,7 +407,10 @@ different questions: "others cannot see it" and "it knows why".
   was already stalled; on its own it explains nothing else.
 
 As with the reaper, the cap only bounds how long the heartbeat waits, not the
-command: the runtime store's client sets no `commandTimeout` either.
+command — and the runtime store's client is one of the five that deliberately
+carry no `commandTimeout`, because its write-admission gate counts commands that
+outlived their cap and a backstop would settle them out of that count. The
+command stays out on the connection until Redis or the socket ends it.
 
 ### Why is the admin event list missing events?
 
@@ -501,9 +509,13 @@ backpressure lines are excluded from the event store on purpose, and append
 failures cannot be written there, so stdout is their only path.
 
 As with the reaper and the heartbeat, the cap bounds how long the store waits,
-not the command: this client sets no `commandTimeout` either. A read issued
+not the command: this client is one of the five that deliberately set no
+`commandTimeout`, and the reason is the same one everywhere — a backstop would
+race the per-write cap and clear `writeIsStalled`, which is the evidence the
+read path refuses on. A read issued
 before the store noticed the stall is still exposed, and so is one issued while
-Redis is hung with no write of ours in flight to notice it by.
+Redis is hung with no write of ours in flight to notice it by; that residual is
+what the read's own command bound answers.
 
 What this does **not** affect: alerting. `bili_syncplay_*` metrics are in-process
 counters served from `/metrics`, and error-level logs go to stdout
@@ -573,9 +585,21 @@ store, and both are now bounded:
   audit store's close from being reached.
 
 Before either bound, `close_admin_services` was a guaranteed
-`server_shutdown_step_failed` whenever Redis was hung. As everywhere else here,
-the bound is on how long we wait, not on the command: this client sets no
-`commandTimeout` either.
+`server_shutdown_step_failed` whenever Redis was hung. The bound above is on how
+long we wait; since #271 this client's commands are separately bounded by a
+`commandTimeout` — it is one of only three connections that may take one — and
+that is what turned a stalled session lookup from an unbounded hang on every
+admin request into a 503:
+
+- `admin_session_store_command_failed` — a session `save` / `get` / `delete`
+  failed, with `operation` and the underlying error. The HTTP response is a 503
+  `admin_session_store_unavailable` carrying no Redis detail, because
+  `authenticate` runs before any credential is accepted. **Not a 401**: a Redis
+  blip must not read as a logout. Every failure increments
+  `bili_syncplay_redis_operation_failures_total{component="admin_session_store"}`;
+  the diagnostic line is throttled to at most once per `operation` per minute.
+  The admin API has no general request-rate limit, which is why the log needs
+  its own throttle.
 
 The other Redis-backed shutdown steps use the same bounded-close rule (#270):
 
@@ -611,9 +635,105 @@ an unexpected implementation error. A terminal room-event bus close skips a
 second `UNSUBSCRIBE`, because a half-open socket may already be stuck on the
 consumer's first one and `QUIT` itself exits subscriber mode.
 
-These bounds still govern how long the caller waits; they do not add an
-ioredis `commandTimeout`. That separate, connection-wide policy is tracked in
-#271.
+These bounds govern how long the caller waits. The connection-wide policy that
+bounds the command itself is separate, and is below.
+
+### Which Redis connections bound their commands
+
+Settled in #271, after the same defect — a Redis that accepts commands and stops
+answering — was found by five different symptoms (#261, #263, #264, #267, #270).
+There are two layers and they are not interchangeable:
+
+- **A deadline** is per-behaviour and derived from what its caller can promise.
+  It also decides what happens next: shed, refuse, retry.
+- **`commandTimeout` is a liveness backstop.** One question — has this
+  connection stopped answering? — so one magnitude for every connection that
+  takes it, derived from Redis's latency distribution rather than any caller's
+  patience. `REDIS_COMMAND_TIMEOUT_MS` is 5s. It never decides what happens
+  next; it only makes sure something does.
+
+A connection needs at least one. Four had neither until #271 — and a fifth, the
+runtime store, had one over its write queue's attempts and nothing over
+`trackAwaitedOperation`, which is the half a WebSocket join blocks on.
+
+**But the two layers do not compose, and that is what decides the table.**
+Nearly every deadline in this server is built on one mechanism (`retry-pacer`,
+plus the admission gate and the maintenance passes over it): the cap does not
+cancel the call, so the call stays tracked, and **the fact that it has still not
+answered is the evidence that stops the next attempt**. A backstop settles those
+calls, so each of those bounds reads the connection as idle and lets the next
+attempt out — it stops being a bound and becomes a rate of one more command per
+timeout window. So the criterion is not "is this connection already bounded":
+
+> A connection may take the backstop only if **no caller on it derives a bound
+> from a command's failure to answer.**
+
+| Connection                                 | Command bound    | Why                                                                     |
+| ------------------------------------------ | ---------------- | ----------------------------------------------------------------------- |
+| admin session store                        | `commandTimeout` | one command per HTTP request; no retry, no pacer                        |
+| admin command bus (publisher + subscriber) | `commandTimeout` | the reply timer is a `setTimeout`, not evidence about the connection    |
+| room store                                 | caller-side      | `maintenance-pass`'s `stalled` for the reaper and the reconciler        |
+| runtime store                              | caller-side      | `ensurePendingCapacity` counts commands that outlived their cap         |
+| room event bus (publisher + subscriber)    | caller-side      | `pending-resync-queue` keeps at most one publish per room out at a time |
+| admin event store                          | caller-side      | `writeIsStalled` gates the read refusal                                 |
+| admin audit store                          | caller-side      | the same append chain                                                   |
+
+**The exemptions are not "already fine".** Two of them still have command paths
+with no caller-side bound at all — the room store's request path (`get_room` /
+`update_room` on join) and the runtime store's `trackAwaitedOperation` plus its
+two plain reads. A stalled Redis still hangs a join there. That gap is real, and
+it is not closeable by this option: the fix is a cap that keeps the call tracked,
+or a separate connection for the paths that want a backstop.
+
+Every client is built by `createBoundedRedisClient`, which takes a **required**
+declaration of which of the two it has — and a caller-side one has to NAME the
+deadline, because "this one is bounded" was believed about the runtime store for
+as long as nobody had to write down by what. `connectWithin` bounds the handshake
+of every exempt connection, which no per-command deadline reaches:
+`connectTimeout` covers the TCP connect and not the `INFO` after it, so without
+either, bootstrap could wait forever on a host that accepts the socket and
+answers nothing.
+
+`server/test/redis-client-bounds.test.ts` enforces all of it: `new Redis` appears
+in one module, the declarations are pinned, and an exempt module must open
+through `connectWithin`. That is the part of #271 that is not a threshold — the
+option's absence was invisible in a diff five times running.
+
+Two things `commandTimeout` deliberately does **not** do, both verified against
+ioredis in `server/test/redis-command-timeout.test.ts`:
+
+- It does not take the command off the connection. ioredis keeps the timed-out
+  command in its queue so later replies stay aligned, so **it bounds the
+  caller's wait, not the connection's queue depth** — every depth limit in this
+  server is still the only thing bounding memory.
+- It does not distinguish slow from dead. It is set far above ordinary latency
+  precisely so a Redis that is merely behind is not converted into a failed one.
+
+Operationally, a stalled Redis looks different on the three backstopped
+connections than on the five exempt ones, and expecting the wrong one wastes an
+incident:
+
+- **Admin session store, admin command bus.** Failed commands, not silence.
+  Expect `admin_session_store_command_failed`,
+  `admin_command_bus_command_failed` and `admin_command_result_publish_failed`,
+  a 503 `admin_session_store_unavailable` on admin requests, a 503
+  `command_bus_unavailable` on cross-node actions, and
+  `bili_syncplay_redis_operation_failures_total{component="admin_session_store"|"admin_command_bus"}`
+  climbing. `bili_syncplay_admin_command_result_publish_failures_total` counts
+  every completed command whose result/fallback publish path ended in failure,
+  including publisher admission refusals that never became Redis operations. It
+  is not an end-to-end delivery-loss counter: a timed-out `PUBLISH` can still land.
+  After `REDIS_STALL_DROP_THRESHOLD` consecutive failures the socket
+  is reset and `admin_command_bus_connection_reset` says so — that reset is
+  also what empties ioredis's command queue, which the backstop cannot.
+- **Room store, runtime store, room event bus, event store, audit store.** The
+  commands stay out on the connection, so the signal is the CALLER's, not the
+  command's: `room_reaper_sweep_timeout` then `room_reaper_sweep_stalled`,
+  `node_heartbeat_failed`, `redis_runtime_store_operation_failed`, the event
+  store's shedding line, a 503 from the audit and event pages. Request paths
+  with no caller-side bound — `get_room` / `update_room` on join, the runtime
+  store's `trackAwaitedOperation` — stay **silent**, and a WebSocket join that
+  never completes is what that looks like from outside.
 
 ## Post-Change Regression Checklist
 
@@ -623,4 +743,5 @@ ioredis `commandTimeout`. That separate, connection-wide policy is tracked in
 - The global admin allows login and shows the overview, rooms, events, and audit logs.
 - `disconnect session`, `kick member`, and `close room` behave as expected on a test room.
 - `bili_syncplay_redis_operation_failures_total` shows no sustained growth.
+- `bili_syncplay_admin_command_result_publish_failures_total` shows no growth.
 - The edge-layer upstream list matches the nodes actually online.
