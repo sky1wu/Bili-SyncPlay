@@ -106,6 +106,90 @@ background path touches room state or playback timing.
   `content/index.ts`: a test that re-types the number passes just as happily
   after someone edits the shipped one.
 
+## Whether the address bar names the video is a per-route property
+
+Two kinds of Bilibili page look alike to the content script and answer this
+question oppositely. Getting the polarity wrong is not a degraded answer, it is a
+confident wrong one, and #274 is what that costs: after an in-page episode
+switch the room's shared video stayed pinned to the previous episode — carrying
+the _new_ episode's position, so every other member was yanked back to the old
+episode's start — until the sharer reloaded the page.
+
+- `/festival/<id>` keeps its route, and any `?bvid=` it was opened with, while
+  the player walks a whole playlist. The address bar there is
+  {@link isAddressBarOpaqueVideoUrl}-opaque: the page-bridge snapshot is the only
+  identity, and once one resolves, the address bar is _proven_ stale and its
+  parse must not be used as a fallback (it would answer "some other, non-shared
+  video" and force-pause the page).
+- `/bangumi/play/ssNNN` names a season, never an episode, so the snapshot
+  outranks it for the same reason.
+- `/bangumi/play/epNNN` names the episode itself. Reaching another episode
+  changes it — through `pushState` for an in-page switch — and **the address bar
+  moves first**, before `__INITIAL_STATE__`, `__playinfo__`, and the episode
+  list's highlighted item catch up. Every in-page identity source is therefore
+  the one that can be stale here, and the address bar is the one that cannot.
+
+So on an `ep` route the rules invert. Two predicates in `video-identity.ts`
+state the comparison, and `page-record-staleness.ts` applies it to every source
+the page offers at once:
+
+- **A snapshot naming another episode is "not resolved yet", not "resolved".**
+  Answering `null` is what makes the eight-attempt retry in
+  `resolveCurrentSharePayload` real — its exit condition is a non-null snapshot,
+  so before the gate the first stale read returned and the other seven never ran,
+  even though the page globals had already caught up by the second read. The
+  worst case then degrades to parsing the address bar rather than to sharing the
+  previous episode.
+- **An `ep` route must never be recorded as an address-bar identity refuted.**
+  `rememberSnapshotResolved` is guarded by `isAddressBarOpaqueVideoUrl`, which is
+  festival-only for exactly this reason. Refuting it would nail the wrong answer
+  in place for the rest of the page's life — which is precisely the reported
+  symptom of only a reload fixing it.
+- **Which sources are stale is one question, answered once for all of them.**
+  `markStalePageRecords` takes every record the page offers — the highlighted
+  list item, the cached snapshot, the `h1`, the document title — seeds staleness
+  on any that names an episode other than the address bar's, and propagates it
+  through records that describe the same thing (a shared episode id, cid, or
+  title key). Direct confirmation wins over propagation: a record naming exactly
+  the address bar's episode is never marked, whatever it links to.
+
+  The single-source version of this rule is what made #274 come back six review
+  rounds running. Each round refuted the one source that had been flagged, and
+  each refutation cut the link that carried the proof, so the next source
+  rebuilt the same wrong answer: the list item was blanked _before_ it could
+  match the snapshot, so a snapshot with no episode id of its own never inherited
+  staleness through their shared cid; `h1` then repeated the snapshot's title;
+  `document.title` repeated it wearing `_番剧_bilibili`. One record with a
+  contradiction, three sources rebuilding it. **Chase the whole equivalence class
+  in one pass, or the class reassembles itself one source per review round.**
+
+- **Discard a stale source whole, and never filter its output downstream.** A
+  source that is marked arrives at `resolveSharedVideoTitle` already empty, which
+  is why that resolver is plain "first non-empty" again. Filtering strings
+  afterwards is what let `document.title` return `44 连影_番剧_bilibili` after
+  `44 连影` had been rejected — the derivation launders the stale name past a
+  string comparison. Titles link on `titleRecordKey`, the same reduction the
+  resolver applies, so both sides of every comparison have been through it.
+- **When every title is stale the label becomes the episode id.** Blank would be
+  worse than plain, but the previous episode's name is worse than either, because
+  it is the only one that is false.
+- **Using an identity takes confirmation; discarding a record takes proof.**
+  These are two different bars and the codebase carries two predicates for them,
+  `lacksAddressBarEpisodeConfirmation` and `contradictsAddressBarEpisode`. On an
+  `ep` route a snapshot must be _confirmed_ to name this episode before it may be
+  used — a `bvid:cid` snapshot names no episode at all (the bridge answers one
+  whenever the page globals expose no `epId`), and in the switch window those are
+  the previous episode's `bvid`/`cid`, indistinguishable from the current one's
+  by inspection. Rejecting an unconfirmed identity costs nothing, because the
+  address bar already answers completely. Staleness is the other way round: it
+  propagates on proof, since a link is evidence about a record and not a licence
+  to guess. Both predicates stay inert on routes that name no episode.
+
+The coverage gap that let this ship is worth copying as a warning: every bangumi
+case in `share-controller.test.ts` used a `ss` season page, where snapshot-first
+is correct, so the rule was applied across the polarity boundary with nothing to
+catch it. A regression for one of these routes proves nothing about the other.
+
 ## Share ownership is derived, and deltas do not carry it
 
 `sharedVideo.sharedByMemberId` is written once, at `video:share`, and is a

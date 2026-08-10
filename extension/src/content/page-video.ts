@@ -78,10 +78,20 @@ export function resolvePageSharedVideo(
   return {
     videoId: fallbackVideoRef.videoId,
     url: fallbackVideoRef.normalizedUrl,
-    title: resolveSharedVideoTitle(source),
+    // When every title on the page is refuted, the identity itself is the only
+    // truthful label left. Blank would be worse than plain: `ep396139` says
+    // nothing false, whereas the previous episode's name does.
+    title: resolveSharedVideoTitle(source) || fallbackVideoRef.videoId,
   };
 }
 
+/**
+ * First title source that has anything to say. Nothing is filtered here: a
+ * source proven to describe an episode this page has left arrives already
+ * emptied by `markStalePageRecords`, whole — both `document.title` and the
+ * `<episode>` cut out of it, because they are one record and not two candidates
+ * (#274).
+ */
 export function resolveSharedVideoTitle(
   source: Pick<
     PageVideoSource,
