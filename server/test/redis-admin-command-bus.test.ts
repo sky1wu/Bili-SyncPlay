@@ -823,6 +823,269 @@ test("a late failure from an old subscriber generation cannot reset the new one"
   }
 });
 
+test("admin command admission bounds active reply subscriptions", async () => {
+  let publishes = 0;
+  let subscriptions = 0;
+  const publisher = createFakeRedisPubSubClient(async () => "OK", {
+    publish: async () => {
+      publishes += 1;
+      return 1;
+    },
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => "OK", {
+    subscribe: async () => {
+      subscriptions += 1;
+      return 1;
+    },
+  });
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    resultChannelPrefix: "result:",
+    maxActiveRequests: 1,
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    const first = bus.request(
+      {
+        kind: "disconnect_session",
+        requestId: "request-1",
+        targetInstanceId: "instance-1",
+        sessionId: "session-1",
+        requestedAt: 1,
+      },
+      1_000,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const refused = await bus.request(
+      {
+        kind: "disconnect_session",
+        requestId: "request-2",
+        targetInstanceId: "instance-1",
+        sessionId: "session-2",
+        requestedAt: 1,
+      },
+      20,
+    );
+
+    assert.equal(refused.status, "error");
+    assert.equal(
+      refused.status === "error" ? refused.code : null,
+      "command_bus_unavailable",
+    );
+    assert.equal(subscriptions, 1);
+    assert.equal(publishes, 1);
+
+    subscriber.emitMessage(
+      "result:request-1",
+      JSON.stringify({
+        requestId: "request-1",
+        targetInstanceId: "instance-1",
+        executorInstanceId: "instance-1",
+        status: "ok",
+        roomCode: null,
+        sessionId: "session-1",
+        completedAt: 2,
+      }),
+    );
+    assert.equal((await first).status, "ok");
+  } finally {
+    await bus.close();
+  }
+});
+
+test("a failed publish cancels its reply listener before releasing admission", async () => {
+  const publisher = createFakeRedisPubSubClient(async () => "OK", {
+    publish: async () => {
+      throw new Error("publisher unavailable");
+    },
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => "OK");
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    resultChannelPrefix: "result:",
+    maxActiveRequests: 1,
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    // The one permanent listener dispatches command channels. A request adds a
+    // second listener only while it is genuinely waiting for a result.
+    assert.equal(subscriber.messageListenerCount(), 1);
+    for (const requestId of ["request-1", "request-2"]) {
+      const result = await bus.request(
+        {
+          kind: "disconnect_session",
+          requestId,
+          targetInstanceId: "instance-1",
+          sessionId: `session-${requestId}`,
+          requestedAt: 1,
+        },
+        1_000,
+      );
+      assert.equal(result.status, "error");
+      assert.equal(subscriber.messageListenerCount(), 1);
+    }
+  } finally {
+    await bus.close();
+  }
+});
+
+test("subscriber admission refusal does not reset a healthy connection", async () => {
+  let releaseUnsubscribe = (): void => {};
+  let markUnsubscribeStarted = (): void => {};
+  const unsubscribeStarted = new Promise<void>((resolve) => {
+    markUnsubscribeStarted = resolve;
+  });
+  const blockedUnsubscribe = new Promise<number>((resolve) => {
+    releaseUnsubscribe = () => resolve(1);
+  });
+  const publisher = createFakeRedisPubSubClient(async () => "OK");
+  const subscriber = createFakeRedisPubSubClient(async () => "OK", {
+    unsubscribe: async () => {
+      markUnsubscribeStarted();
+      return await blockedUnsubscribe;
+    },
+  });
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    resultChannelPrefix: "result:",
+    maxPendingCommandsPerConnection: 1,
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    const first = bus.request(
+      {
+        kind: "disconnect_session",
+        requestId: "request-1",
+        targetInstanceId: "instance-1",
+        sessionId: "session-1",
+        requestedAt: 1,
+      },
+      1_000,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    subscriber.emitMessage(
+      "result:request-1",
+      JSON.stringify({
+        requestId: "request-1",
+        targetInstanceId: "instance-1",
+        executorInstanceId: "instance-1",
+        status: "ok",
+        roomCode: null,
+        sessionId: "session-1",
+        completedAt: 2,
+      }),
+    );
+    await unsubscribeStarted;
+
+    const refused = await bus.request(
+      {
+        kind: "disconnect_session",
+        requestId: "request-2",
+        targetInstanceId: "instance-1",
+        sessionId: "session-2",
+        requestedAt: 1,
+      },
+      1_000,
+    );
+    assert.equal(refused.status, "error");
+    assert.equal(subscriber.disconnectCalls(), 0);
+
+    releaseUnsubscribe();
+    assert.equal((await first).status, "ok");
+  } finally {
+    releaseUnsubscribe();
+    await bus.close();
+  }
+});
+
+test("a refused cleanup UNSUBSCRIBE resets the stale subscription set", async () => {
+  let releaseFirstCleanup = (): void => {};
+  let markFirstCleanupStarted = (): void => {};
+  const firstCleanupStarted = new Promise<void>((resolve) => {
+    markFirstCleanupStarted = resolve;
+  });
+  const blockedFirstCleanup = new Promise<number>((resolve) => {
+    releaseFirstCleanup = () => resolve(1);
+  });
+  const subscriptions = new Set<string>();
+  let cleanupCalls = 0;
+  const publisher = createFakeRedisPubSubClient(async () => "OK");
+  const subscriber = createFakeRedisPubSubClient(async () => "OK", {
+    subscribe: async (...channels: string[]) => {
+      for (const channel of channels) {
+        subscriptions.add(channel);
+      }
+      return channels.length;
+    },
+    unsubscribe: async (...channels: string[]) => {
+      cleanupCalls += 1;
+      if (cleanupCalls === 1) {
+        markFirstCleanupStarted();
+        await blockedFirstCleanup;
+      }
+      for (const channel of channels) {
+        subscriptions.delete(channel);
+      }
+      return channels.length;
+    },
+    disconnect: () => subscriptions.clear(),
+  });
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    resultChannelPrefix: "result:",
+    maxPendingCommandsPerConnection: 1,
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+  const command = (requestId: string) => ({
+    kind: "disconnect_session" as const,
+    requestId,
+    targetInstanceId: "instance-1",
+    sessionId: `session-${requestId}`,
+    requestedAt: 1,
+  });
+  const result = (requestId: string) =>
+    JSON.stringify({
+      requestId,
+      targetInstanceId: "instance-1",
+      executorInstanceId: "instance-1",
+      status: "ok",
+      roomCode: null,
+      sessionId: `session-${requestId}`,
+      completedAt: 2,
+    });
+
+  try {
+    const first = bus.request(command("request-1"), 1_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = bus.request(command("request-2"), 1_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    subscriber.emitMessage("result:request-1", result("request-1"));
+    await firstCleanupStarted;
+
+    subscriber.emitMessage("result:request-2", result("request-2"));
+    assert.equal((await second).status, "ok");
+    assert.equal(subscriber.disconnectCalls(), 1);
+    assert.deepEqual([...subscriptions], []);
+
+    releaseFirstCleanup();
+    assert.equal((await first).status, "ok");
+  } finally {
+    releaseFirstCleanup();
+    await bus.close();
+  }
+});
+
 test("a duplicate in-flight request id is refused without sharing its reply channel", async () => {
   let publishes = 0;
   const publisher = createFakeRedisPubSubClient(async () => "OK", {
@@ -922,6 +1185,102 @@ test("a command delivered with the SUBSCRIBE acknowledgement sees its handler", 
 
     assert.equal(handled, true);
   } finally {
+    await bus.close();
+  }
+});
+
+test("durable restore paces an admission refusal without resetting Redis", async () => {
+  const subscriptions: string[][] = [];
+  const restoreDelays: number[] = [];
+  let releaseUnsubscribe = (): void => {};
+  let markUnsubscribeStarted = (): void => {};
+  let releaseRestoreDelay = (): void => {};
+  const unsubscribeStarted = new Promise<void>((resolve) => {
+    markUnsubscribeStarted = resolve;
+  });
+  const blockedUnsubscribe = new Promise<number>((resolve) => {
+    releaseUnsubscribe = () => resolve(1);
+  });
+  const publisher = createFakeRedisPubSubClient(async () => "OK");
+  const subscriber = createFakeRedisPubSubClient(async () => "OK", {
+    subscribe: async (...channels: string[]) => {
+      subscriptions.push(channels);
+      return channels.length;
+    },
+    unsubscribe: async () => {
+      markUnsubscribeStarted();
+      return await blockedUnsubscribe;
+    },
+  });
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    commandChannelPrefix: "cmd:",
+    resultChannelPrefix: "result:",
+    maxPendingCommandsPerConnection: 1,
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+    subscriptionRestoreSleep: async (delayMs) => {
+      restoreDelays.push(delayMs);
+      await new Promise<void>((resolve) => {
+        releaseRestoreDelay = resolve;
+      });
+    },
+  });
+
+  try {
+    await bus.subscribe("instance-1", async (command) => ({
+      requestId: command.requestId,
+      targetInstanceId: command.targetInstanceId,
+      executorInstanceId: "instance-1",
+      status: "ok",
+      roomCode: null,
+      completedAt: 1,
+    }));
+    const request = bus.request(
+      {
+        kind: "disconnect_session",
+        requestId: "request-1",
+        targetInstanceId: "instance-1",
+        sessionId: "session-1",
+        requestedAt: 1,
+      },
+      1_000,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    subscriber.emitMessage(
+      "result:request-1",
+      JSON.stringify({
+        requestId: "request-1",
+        targetInstanceId: "instance-1",
+        executorInstanceId: "instance-1",
+        status: "ok",
+        roomCode: null,
+        sessionId: "session-1",
+        completedAt: 2,
+      }),
+    );
+    await unsubscribeStarted;
+
+    subscriber.emitReady();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(restoreDelays, [250]);
+    assert.equal(subscriber.disconnectCalls(), 0);
+    assert.deepEqual(subscriptions, [["cmd:instance-1"], ["result:request-1"]]);
+
+    releaseUnsubscribe();
+    assert.equal((await request).status, "ok");
+    releaseRestoreDelay();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(subscriptions, [
+      ["cmd:instance-1"],
+      ["result:request-1"],
+      ["cmd:instance-1"],
+    ]);
+    assert.equal(subscriber.disconnectCalls(), 0);
+  } finally {
+    releaseUnsubscribe();
+    releaseRestoreDelay();
     await bus.close();
   }
 });

@@ -17,9 +17,11 @@ import test from "node:test";
 import {
   connectWithin,
   createBoundedRedisClient,
+  createRedisCommandAdmission,
   createStalledConnectionGuard,
   REDIS_COMMAND_TIMEOUT_MS,
   RedisConnectTimeoutError,
+  RedisCommandAdmissionError,
   RedisStartupTimeoutError,
   startWithin,
 } from "../src/redis-command-timeout.js";
@@ -129,6 +131,28 @@ test("every source file that builds a connection names its bound", () => {
   );
 });
 
+test("every command_timeout owner has submission admission and a reset guard", () => {
+  const backstoppedOwners = sourceFiles.filter((file) => {
+    if (file === policyModule) {
+      return false;
+    }
+    return readFileSync(file, "utf8").includes('bound: "command_timeout"');
+  });
+  const offenders = backstoppedOwners.filter((file) => {
+    const source = readFileSync(file, "utf8");
+    return (
+      !source.includes("createRedisCommandAdmission(") ||
+      !source.includes("createStalledConnectionGuard(")
+    );
+  });
+
+  assert.deepEqual(
+    offenders.map((file) => path.relative(sourceRoot, file)),
+    [],
+    "a command_timeout connection must bound its first timeout window and reset its timed-out tail",
+  );
+});
+
 test("a caller-bounded module opens its connection through connectWithin", () => {
   // The exemption covers the commands a store issues; the handshake is not one
   // of them, and a `caller` module that calls `connect()` directly is pending
@@ -181,6 +205,32 @@ test("a command_timeout client carries the backstop and a caller-bounded one doe
     backstopped.disconnect();
     callerBounded.disconnect();
   }
+});
+
+test("command admission refuses before invoking ioredis past its limit", async () => {
+  let releaseFirst = (): void => {};
+  const firstAnswer = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let calls = 0;
+  const admission = createRedisCommandAdmission(1);
+  const first = admission.run(async () => {
+    calls += 1;
+    await firstAnswer;
+  });
+
+  await assert.rejects(
+    admission.run(async () => {
+      calls += 1;
+    }),
+    RedisCommandAdmissionError,
+  );
+  assert.equal(calls, 1);
+  assert.equal(admission.pendingCount(), 1);
+
+  releaseFirst();
+  await first;
+  assert.equal(admission.pendingCount(), 0);
 });
 
 test("a caller-bounded connection still bounds its own handshake", async () => {
@@ -248,12 +298,9 @@ test("a handshake that lands inside the budget is left alone", async () => {
 
 test("a connection that keeps failing is reset without replaying ioredis's queue", () => {
   // The companion every backstopped connection needs. `commandTimeout` answers
-  // the caller and leaves the command in `commandQueue`, and neither
-  // backstopped connection has an admission or depth limit — so a caller
-  // retrying every five seconds adds one queued command per retry, remotely,
-  // for as long as the stall lasts. Dropping the socket while auto-resend is
-  // disabled is the only thing on this side that retires that queue without
-  // replaying it (#271 review).
+  // the caller and leaves the command in `commandQueue`. Admission bounds the
+  // first timeout window; dropping the socket while auto-resend is disabled
+  // retires the timed-out tail instead of carrying it across reconnects.
   const disconnects: Array<boolean | undefined> = [];
   const dropped: Array<{ consecutiveFailures: number }> = [];
   const guard = createStalledConnectionGuard(
@@ -265,9 +312,9 @@ test("a connection that keeps failing is reset without replaying ioredis's queue
     { threshold: 3, onDropped: (info) => dropped.push(info) },
   );
 
-  assert.equal(guard.recordFailure(), false);
-  assert.equal(guard.recordFailure(), false);
-  assert.equal(guard.recordFailure(), true);
+  assert.equal(guard.beginAttempt()?.recordFailure(), false);
+  assert.equal(guard.beginAttempt()?.recordFailure(), false);
+  assert.equal(guard.beginAttempt()?.recordFailure(), true);
   // `disconnect(true)`, never a bare `disconnect()`: the latter sets
   // `manuallyClosing` and retires the connection for good, which would turn a
   // reset into an outage.
@@ -289,11 +336,11 @@ test("one success is enough to say the connection is alive", () => {
     { threshold: 3 },
   );
 
-  guard.recordFailure();
-  guard.recordFailure();
-  guard.recordSuccess();
-  guard.recordFailure();
-  guard.recordFailure();
+  guard.beginAttempt()?.recordFailure();
+  guard.beginAttempt()?.recordFailure();
+  guard.beginAttempt()?.recordSuccess();
+  guard.beginAttempt()?.recordFailure();
+  guard.beginAttempt()?.recordFailure();
   assert.equal(disconnectCalls, 0);
 });
 
@@ -311,10 +358,49 @@ test("the guard does not trip again on the wreckage of its own reset", () => {
     { threshold: 2 },
   );
 
-  guard.recordFailure();
-  assert.equal(guard.recordFailure(), true);
-  assert.equal(guard.recordFailure(), false);
+  const attempts = [
+    guard.beginAttempt(),
+    guard.beginAttempt(),
+    guard.beginAttempt(),
+  ];
+  attempts[0]?.recordFailure();
+  assert.equal(attempts[1]?.recordFailure(), true);
+  assert.equal(attempts[2]?.recordFailure(), false);
   assert.equal(disconnectCalls, 1);
+});
+
+test("late failures from a reset generation cannot drop its ready replacement", () => {
+  let readyListener = (): void => {};
+  let disconnectCalls = 0;
+  const guard = createStalledConnectionGuard(
+    {
+      disconnect: () => {
+        disconnectCalls += 1;
+      },
+      on: (_event, listener) => {
+        readyListener = listener;
+      },
+      off: () => undefined,
+    },
+    { threshold: 2 },
+  );
+  const oldAttempts = [
+    guard.beginAttempt(),
+    guard.beginAttempt(),
+    guard.beginAttempt(),
+    guard.beginAttempt(),
+  ];
+
+  oldAttempts[0]?.recordFailure();
+  assert.equal(oldAttempts[1]?.recordFailure(), true);
+  assert.equal(disconnectCalls, 1);
+  assert.equal(guard.beginAttempt(), null);
+
+  readyListener();
+  oldAttempts[2]?.recordFailure();
+  oldAttempts[3]?.recordFailure();
+  assert.equal(disconnectCalls, 1);
+  assert.ok(guard.beginAttempt());
 });
 
 test("a startup step that never answers fails the process instead of hanging it", () => {

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import type {
-  AdminCommandBus,
-  AdminCommandResult,
+import {
+  DEFAULT_ADMIN_COMMAND_MAX_ACTIVE_REQUESTS,
+  type AdminCommandBus,
+  type AdminCommandResult,
 } from "../admin-command-bus.js";
 import type { GlobalAuditStore } from "./global-audit-store.js";
 import type { AdminSession } from "./types.js";
@@ -15,6 +16,26 @@ import {
 import type { LogEvent, PersistedRoom } from "../types.js";
 import type { RoomStore, RoomUpdateResult } from "../room-store.js";
 import type { RuntimeStore } from "../runtime-store.js";
+
+/** Leave half the bus's reply capacity for concurrent single-admin actions. */
+export const ADMIN_COMMAND_FANOUT_CONCURRENCY = Math.max(
+  1,
+  Math.floor(DEFAULT_ADMIN_COMMAND_MAX_ACTIVE_REQUESTS / 2),
+);
+
+async function mapInBatches<T, Result>(
+  values: readonly T[],
+  batchSize: number,
+  map: (value: T) => Promise<Result>,
+): Promise<Result[]> {
+  const results: Result[] = [];
+  for (let start = 0; start < values.length; start += batchSize) {
+    results.push(
+      ...(await Promise.all(values.slice(start, start + batchSize).map(map))),
+    );
+  }
+  return results;
+}
 
 export class AdminActionError extends Error {
   constructor(
@@ -163,8 +184,10 @@ export function createAdminActionService(options: {
     async closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
       await getRoomOrThrow(roomCode);
       const sessions = await options.listClusterSessionsByRoom(roomCode);
-      const disconnectResults = await Promise.all(
-        sessions.map(async (session) => {
+      const disconnectResults = await mapInBatches(
+        sessions,
+        ADMIN_COMMAND_FANOUT_CONCURRENCY,
+        async (session) => {
           const targetInstanceId = session.instanceId ?? options.instanceId;
           const result = await options.requestAdminCommand({
             kind: "disconnect_session",
@@ -175,7 +198,7 @@ export function createAdminActionService(options: {
             requestedAt: now(),
           });
           return { session, targetInstanceId, result };
-        }),
+        },
       );
       const failedCommands = disconnectResults.filter(
         (

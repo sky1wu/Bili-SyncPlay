@@ -669,12 +669,24 @@ do NOT compose, and that is the part that decides which connection gets which:
   timed-out command in `commandQueue` so later replies stay aligned. Every
   caller-side depth limit here — `maxPendingAppends`, the runtime store's command
   admission — remains essential and none may be retired on the strength of the
-  option. The three backstopped connections have the other half explicitly:
-  `autoResendUnfulfilledCommands` and `autoResubscribe` are disabled. Ordinary
-  commands reset their connection after consecutive failures. Every failed
+  option. The three backstopped connections synchronously cap commands before
+  submission; the command bus separately caps active reply subscriptions and
+  their request closures. Room-close fan-out runs in batches below that cap, so
+  a supported large room is paced rather than deterministically refused. A
+  timed-out promise can free one admission slot while its command remains
+  queued, but the stalled guard resets after at most its
+  threshold, so the real queue is bounded by admission plus `threshold - 1`.
+  They also disable `autoResendUnfulfilledCommands` and `autoResubscribe`.
+  Ordinary command attempts are pinned to their submission generation: reset
+  refuses new attempts until `ready`, and late failures from the retired socket
+  cannot drop its healthy replacement. Every failed
   subscription-state change marks that command-bus subscriber generation for
   reset, because a failed `SUBSCRIBE` may still land and a failed `UNSUBSCRIBE`
-  may leave its unique channel behind. New commands are refused immediately;
+  may leave its unique channel behind. A refused `SUBSCRIBE` happens before
+  submission and does not reset a healthy subscriber; a refused durable restore
+  keeps its barrier and retries through `retry-pacer`. A cleanup `UNSUBSCRIBE`
+  is different: its channel already left desired state, so even an admission
+  refusal retains a reset trail. New commands are refused immediately;
   the reset happens at once when no result is active, or after the already-active
   replies finish so cleanup cannot sever another command's reply trail. Failures
   submitted by an older generation cannot reset its replacement. ioredis then
@@ -688,7 +700,8 @@ do NOT compose, and that is the part that decides which connection gets which:
   `ready` generations — ioredis resets its own retry counter at every `ready`,
   so its reconnect policy alone would be a fixed-rate loop. The timeout alone
   still provides no queue bound. Proved, not assumed, in
-  `redis-client-bounds.test.ts` and `redis-admin-command-bus.test.ts`.
+  `redis-client-bounds.test.ts`, `redis-admin-session-store.test.ts`, and
+  `redis-admin-command-bus.test.ts`.
 - **A threshold that cannot tell slow from dead is the failure to avoid.** It
   sits far above ordinary latency, because tripping it on a Redis that is merely
   behind converts a degraded dependency into a failed one on every connection at
@@ -697,7 +710,8 @@ do NOT compose, and that is the part that decides which connection gets which:
   caller a diagnosis, not just an error: a stalled session store answers 503
   `admin_session_store_unavailable` — never 401, which would read as a logout —
   and logs `admin_session_store_command_failed` with the Redis detail the
-  response withholds from an unauthenticated caller.
+  response withholds from an unauthenticated caller. Requests refused while the
+  guard waits for `ready` go through the same reporting path.
 - **Cleanup on the same connection is not the answer.** Where a request brackets
   its real work with commands on the stalled connection, those rejections must
   not replace the result: the admin command bus's `finally` `UNSUBSCRIBE` would

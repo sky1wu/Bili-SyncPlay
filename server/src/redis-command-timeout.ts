@@ -78,8 +78,9 @@
  * limit in this server — `append-chain`'s `maxPendingAppends`, the runtime
  * store's command admission — remains essential and none may be retired on the
  * strength of this option. The three backstopped connections instead pair it
- * with a stalled-connection reset that disables replay of ioredis's saved
- * `prevCommandQueue`; the timeout alone still supplies no queue bound.
+ * with synchronous submission admission and a stalled-connection reset that
+ * disables replay of ioredis's saved `prevCommandQueue`; the timeout alone
+ * still supplies no queue bound.
  *
  * ## Two consequences of arming the timer at submission
  *
@@ -298,6 +299,43 @@ export async function startWithin(
  * in one backstop window per failure.
  */
 export const REDIS_STALL_DROP_THRESHOLD = 3;
+export const DEFAULT_REDIS_COMMAND_ADMISSION_LIMIT = 256;
+
+export class RedisCommandAdmissionError extends Error {
+  constructor(readonly maxPendingCommands: number) {
+    super(`Redis command admission reached ${maxPendingCommands}.`);
+    this.name = "RedisCommandAdmissionError";
+  }
+}
+
+/**
+ * Synchronously refuse a command before it reaches ioredis when this process
+ * already has the configured number awaiting their caller-visible answer.
+ *
+ * `commandTimeout` can settle one of these promises while its command remains
+ * in ioredis's queue. The stalled guard resets after at most `threshold` such
+ * failures, so the real queue is bounded by this admission limit plus at most
+ * `threshold - 1` timed-out entries from the same generation.
+ */
+export function createRedisCommandAdmission(
+  maxPendingCommands: number = DEFAULT_REDIS_COMMAND_ADMISSION_LIMIT,
+) {
+  let pendingCommands = 0;
+  return {
+    async run<T>(call: () => Promise<T>): Promise<T> {
+      if (pendingCommands >= maxPendingCommands) {
+        throw new RedisCommandAdmissionError(maxPendingCommands);
+      }
+      pendingCommands += 1;
+      try {
+        return await call();
+      } finally {
+        pendingCommands -= 1;
+      }
+    },
+    pendingCount: () => pendingCommands,
+  };
+}
 
 /** A connection that can be reset without being retired. */
 export type ResettableRedisConnection = {
@@ -309,24 +347,36 @@ export type ResettableRedisConnection = {
    * outage.
    */
   disconnect: (reconnect?: boolean) => void;
+  /** Optional on test doubles; ioredis supplies both lifecycle methods. */
+  on?: (event: "ready", listener: () => void) => unknown;
+  off?: (event: "ready", listener: () => void) => unknown;
+};
+
+export type StalledConnectionAttempt = {
+  /** This submitted command answered. Ignored after its connection generation. */
+  recordSuccess: () => void;
+  /** This submitted command failed. Ignored after its connection generation. */
+  recordFailure: () => boolean;
 };
 
 export type StalledConnectionGuard = {
-  /** A command answered. */
-  recordSuccess: () => void;
-  /** A command failed. Returns true when this failure dropped the socket. */
-  recordFailure: () => boolean;
+  /**
+   * Capture the generation at command submission. Returns null while a reset
+   * is waiting for `ready`, so callers do not refill ioredis's offline queue.
+   */
+  beginAttempt: () => StalledConnectionAttempt | null;
+  /** Remove the lifecycle listener before the owning connection closes. */
+  close: () => void;
 };
 
 /**
  * The companion every backstopped connection needs.
  *
  * `commandTimeout` answers the CALLER and leaves the command in ioredis's
- * `commandQueue`, where nothing this side of the socket can remove it. On a
- * connection with no admission or depth limit — and neither of the two that
- * take the backstop has one — that turns a half-open Redis into unbounded
- * growth at the request rate: every caller is answered in five seconds, retries
- * immediately, and leaves one more command behind (#271 review).
+ * `commandQueue`, where nothing this side of the socket can remove it. Every
+ * backstopped owner therefore has synchronous command admission: without it, a
+ * half-open Redis could accept an unbounded first timeout window before this
+ * guard observed one failure (#271 review).
  *
  * A depth limit cannot be built on top of the backstop either, because after it
  * fires a settled command and a queued one look the same from here. What DOES
@@ -338,7 +388,8 @@ export type StalledConnectionGuard = {
  *
  * Consecutive, not cumulative: the count is what distinguishes a connection
  * that has stopped answering from one that is merely returning errors, and a
- * single success is enough to say it is alive.
+ * single success is enough to say it is alive. Each attempt is pinned to the
+ * socket generation at submission; old timers cannot reset a ready replacement.
  */
 export function createStalledConnectionGuard(
   connection: ResettableRedisConnection,
@@ -350,28 +401,70 @@ export function createStalledConnectionGuard(
 ): StalledConnectionGuard {
   const threshold = options.threshold ?? REDIS_STALL_DROP_THRESHOLD;
   let consecutiveFailures = 0;
+  let generation = 0;
+  let resetting = false;
+
+  const onReady = () => {
+    // `ready` identifies a new socket generation, including natural reconnects
+    // not initiated by this guard. Old command timers can still reject after
+    // this event and must not count against the replacement connection.
+    generation += 1;
+    consecutiveFailures = 0;
+    resetting = false;
+  };
+  connection.on?.("ready", onReady);
 
   return {
-    recordSuccess() {
-      consecutiveFailures = 0;
+    beginAttempt() {
+      if (resetting) {
+        return null;
+      }
+      const submittedGeneration = generation;
+      let settled = false;
+      return {
+        recordSuccess() {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (submittedGeneration === generation && !resetting) {
+            consecutiveFailures = 0;
+          }
+        },
+        recordFailure() {
+          if (settled) {
+            return false;
+          }
+          settled = true;
+          if (submittedGeneration !== generation || resetting) {
+            return false;
+          }
+          consecutiveFailures += 1;
+          if (consecutiveFailures < threshold) {
+            return false;
+          }
+          const dropped = consecutiveFailures;
+          const previousGeneration = generation;
+          consecutiveFailures = 0;
+          resetting = true;
+          generation += 1;
+          try {
+            connection.disconnect(true);
+          } catch {
+            // The socket was not dropped, so keep this generation usable and
+            // retain the evidence needed for the next failure to retry reset.
+            generation = previousGeneration;
+            consecutiveFailures = dropped;
+            resetting = false;
+            return false;
+          }
+          options.onDropped?.({ consecutiveFailures: dropped });
+          return true;
+        },
+      };
     },
-    recordFailure() {
-      consecutiveFailures += 1;
-      if (consecutiveFailures < threshold) {
-        return false;
-      }
-      const dropped = consecutiveFailures;
-      // Reset first: commands whose timers are landing alongside this one still
-      // come back through here. Without this the guard could trip again on the
-      // same stalled batch while the socket is being replaced.
-      consecutiveFailures = 0;
-      try {
-        connection.disconnect(true);
-      } catch {
-        // The report below is what the operator acts on.
-      }
-      options.onDropped?.({ consecutiveFailures: dropped });
-      return true;
+    close() {
+      connection.off?.("ready", onReady);
     },
   };
 }

@@ -38,6 +38,14 @@ export type AdminCommandResult =
       completedAt: number;
     };
 
+/**
+ * Process-wide cap for requests that own a Redis reply subscription.
+ *
+ * Exported because callers that fan out commands must stay below the same
+ * capacity instead of deterministically refusing the tail of a valid batch.
+ */
+export const DEFAULT_ADMIN_COMMAND_MAX_ACTIVE_REQUESTS = 256;
+
 export type AdminCommandBus = {
   request: (
     command: AdminCommand,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ADMIN_COMMAND_FANOUT_CONCURRENCY,
   AdminActionError,
   createAdminActionService,
 } from "../src/admin/action-service.js";
@@ -304,6 +305,46 @@ test("admin action service keeps room state when closeRoom cannot disconnect eve
   assert.equal(auditLogs.total, 1);
   assert.equal(auditLogs.items[0]?.result, "rejected");
   assert.equal(auditLogs.items[0]?.reason, "command_failed");
+});
+
+test("admin closeRoom batches rooms larger than the command bus capacity", async () => {
+  const sessions = Array.from(
+    { length: ADMIN_COMMAND_FANOUT_CONCURRENCY * 2 + 1 },
+    (_, index) =>
+      createSession({
+        id: `session-${index}`,
+        memberId: `member-${index}`,
+      }),
+  );
+  let calls = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const service = createService({
+    sessionsByRoom: sessions,
+    requestAdminCommand: async (command) => {
+      calls += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight -= 1;
+      return {
+        requestId: command.requestId,
+        targetInstanceId: command.targetInstanceId,
+        executorInstanceId: command.targetInstanceId,
+        status: "ok",
+        roomCode: null,
+        sessionId:
+          command.kind === "disconnect_session" ? command.sessionId : undefined,
+        completedAt: 10_004,
+      };
+    },
+  });
+
+  const result = await service.closeRoom(ACTOR, "ROOM01", "shutdown");
+
+  assert.equal(result.disconnectedSessionCount, sessions.length);
+  assert.equal(calls, sessions.length);
+  assert.equal(maxInFlight, ADMIN_COMMAND_FANOUT_CONCURRENCY);
 });
 
 test("admin closeRoom maps command bus unavailability to 503", async () => {

@@ -23,6 +23,7 @@ export function createFakeRedisPubSubClient(
 ): {
   client: RedisPubSubClient;
   disconnectCalls: () => number;
+  messageListenerCount: () => number;
   /** Deliver a message to every registered listener, as ioredis would. */
   emitMessage: (channel: string, payload: string) => void;
   /** Announce a reconnect reaching ready. */
@@ -60,6 +61,7 @@ export function createFakeRedisPubSubClient(
       },
     },
     disconnectCalls: () => disconnectCalls,
+    messageListenerCount: () => messageListeners.size,
     emitMessage: (channel, payload) => {
       for (const listener of [...messageListeners]) {
         listener(channel, payload);

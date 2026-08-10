@@ -3,7 +3,10 @@ import type { AdminRole, AdminSession } from "./admin/types.js";
 import type { AdminSessionStore } from "./admin-session-store.js";
 import {
   createBoundedRedisClient,
+  createRedisCommandAdmission,
   createStalledConnectionGuard,
+  DEFAULT_REDIS_COMMAND_ADMISSION_LIMIT,
+  RedisCommandAdmissionError,
 } from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 
@@ -44,6 +47,8 @@ export type RedisAdminSessionStoreClient = {
    * reset rather than a retirement; the shutdown path calls it with no argument.
    */
   disconnect: (reconnect?: boolean) => void;
+  on?: (event: "ready", listener: () => void) => unknown;
+  off?: (event: "ready", listener: () => void) => unknown;
   del: (key: string) => Promise<unknown>;
   hgetall: (key: string) => Promise<Record<string, string>>;
   multi: () => RedisAdminSessionStoreMulti;
@@ -127,7 +132,8 @@ export async function createRedisAdminSessionStore(
       budgetMs: number;
     }) => void;
     /**
-     * A command failed, with the detail the HTTP response deliberately omits.
+     * A command failed or admission refused it, with the detail the HTTP
+     * response deliberately omits.
      *
      * The whole point of giving this connection a `commandTimeout` was to stop
      * a stalled Redis hanging every admin request; answering it with a bare 503
@@ -139,6 +145,8 @@ export async function createRedisAdminSessionStore(
     }) => void;
     /** Injectable so a test does not have to spend three real failures. */
     stallDropThreshold?: number;
+    /** Hard cap before another Redis command may be submitted. */
+    maxPendingCommands?: number;
     /**
      * The socket was dropped after repeated failures, and ioredis is
      * reconnecting. One line per reset, which is at most one per
@@ -163,13 +171,14 @@ export async function createRedisAdminSessionStore(
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const keyPrefix = options.keyPrefix ?? DEFAULT_ADMIN_SESSION_KEY_PREFIX;
   const now = options.now ?? Date.now;
+  const maxPendingCommands =
+    options.maxPendingCommands ?? DEFAULT_REDIS_COMMAND_ADMISSION_LIMIT;
+  const admission = createRedisCommandAdmission(maxPendingCommands);
   /**
-   * The backstop answers the caller and leaves the command in ioredis's queue,
-   * and this store has no admission or depth limit — so an unauthenticated
-   * caller retrying every five seconds would add one queued command per retry
-   * for as long as the stall lasts. The centralized client policy disables
-   * replay, so dropping the socket is what retires that queue instead of
-   * resending it after reconnect (#271 review).
+   * Admission bounds the first timeout window. A timed-out promise releases its
+   * slot while the command can still remain in ioredis, but after at most the
+   * guard threshold that generation is reset without replay. Together the real
+   * queue is bounded by admission plus `threshold - 1` (#271 review).
    */
   const guard = createStalledConnectionGuard(redis, {
     threshold: options.stallDropThreshold,
@@ -187,12 +196,22 @@ export async function createRedisAdminSessionStore(
     operation: AdminSessionStoreOperation,
     call: () => Promise<T>,
   ): Promise<T> {
+    const attempt = guard.beginAttempt();
+    if (!attempt) {
+      options.onCommandFailed?.({
+        operation,
+        error: new Error("Redis connection is reconnecting."),
+      });
+      throw new AdminSessionStoreUnavailableError(operation);
+    }
     try {
-      const result = await call();
-      guard.recordSuccess();
+      const result = await admission.run(call);
+      attempt.recordSuccess();
       return result;
     } catch (error) {
-      guard.recordFailure();
+      if (!(error instanceof RedisCommandAdmissionError)) {
+        attempt.recordFailure();
+      }
       options.onCommandFailed?.({ operation, error });
       throw new AdminSessionStoreUnavailableError(operation);
     }
@@ -257,11 +276,11 @@ export async function createRedisAdminSessionStore(
         // key keeps its own TTL, so the residue is bounded, but a connection
         // that cannot delete is still worth a line.
         try {
-          await redis.del(sessionKey(keyPrefix, tokenId));
-          guard.recordSuccess();
-        } catch (error) {
-          guard.recordFailure();
-          options.onCommandFailed?.({ operation: "delete", error });
+          await guarded("delete", () =>
+            redis.del(sessionKey(keyPrefix, tokenId)),
+          );
+        } catch {
+          // The expired-session answer was determined before this cleanup.
         }
         return null;
       }
@@ -280,6 +299,7 @@ export async function createRedisAdminSessionStore(
       await guarded("delete", () => redis.del(sessionKey(keyPrefix, tokenId)));
     },
     async close() {
+      guard.close();
       // `QUIT` is an ordinary command on this connection, so an unbounded wait
       // for its reply is an unbounded shutdown step. `quitWithin` drops the
       // socket when the reply does not come (#267).
