@@ -1166,6 +1166,10 @@ test("bangumi ep page does not reuse a cached snapshot naming another episode", 
       "https://www.bilibili.com/bangumi/play/ep396139",
     );
     assert.equal(payload?.video.videoId, "ep396139");
+    // Refusing the snapshot is only half of it. The snapshot matched the list
+    // item by cid and title, which is what proves the item names ep396138 too —
+    // keeping its title would ship ep396139 labelled "44 连影".
+    assert.equal(payload?.video.title, "45 某话");
   } finally {
     dom.restore();
   }

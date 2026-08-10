@@ -112,8 +112,10 @@ before changing the code it describes.
   `contradictsAddressBarEpisode` is the single predicate; a snapshot naming
   another episode means "not resolved yet" (which is what makes the retry in
   `resolveCurrentSharePayload` real), an `ep` route is never recorded as refuted,
-  the whole stale record is dropped rather than the compared field, and both
-  sides must be known. A regression on one polarity proves nothing about the
+  and both sides must be known. The contradiction is transitive through whatever
+  matched — a list item carrying only a `cid` cannot refute itself, but a
+  snapshot matching it does — and it discards the whole record, not the field
+  today's caller reads. A regression on one polarity proves nothing about the
   other — every bangumi test used a `ss` page, which is why this shipped.
 - **Share ownership** (#235, #242): `sharedVideo.sharedByMemberId` is a durable
   reference to a volatile identity, resolved at build time by

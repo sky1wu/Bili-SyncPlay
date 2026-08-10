@@ -117,24 +117,50 @@ export function createShareController(args: {
     );
   }
 
-  function canUseMatchingCachedPageSnapshot(argsForMatch: {
+  interface CachedPageSnapshotMatch {
+    /** The cached snapshot describes this page's current video and may be used. */
+    usable: boolean;
+    /**
+     * The cached snapshot describes the same record as the highlighted list item
+     * — same episode id, cid, or title — *and* contradicts the address bar. The
+     * list item is then proven to name the previous episode as well, even when it
+     * carries no episode id of its own for {@link getCurrentPartIdentity} to
+     * check (#274). Its title must not be handed to the address bar's identity,
+     * or the room shows the new episode labelled with the old one's name.
+     */
+    refutesCurrentPart: boolean;
+  }
+
+  function matchCachedPageSnapshot(argsForMatch: {
+    pathname: string;
+    pageUrl: string;
+    snapshot: CachedPageSnapshot | null;
+    currentPart: CurrentPartIdentity;
+  }): CachedPageSnapshotMatch {
+    const describesCurrentPart =
+      cachedPageSnapshotDescribesCurrentPart(argsForMatch);
+    // The address bar outranks a cached snapshot on `/bangumi/play/epNNN` for
+    // the same reason it outranks a fresh one (#274): a snapshot naming another
+    // episode was read from page globals that had not caught up with the switch.
+    const contradictsAddressBar =
+      argsForMatch.snapshot !== null &&
+      contradictsAddressBarEpisode({
+        pathname: argsForMatch.pathname,
+        episodeId: readSnapshotEpisodeId(argsForMatch.snapshot),
+      });
+    return {
+      usable: describesCurrentPart && !contradictsAddressBar,
+      refutesCurrentPart: describesCurrentPart && contradictsAddressBar,
+    };
+  }
+
+  function cachedPageSnapshotDescribesCurrentPart(argsForMatch: {
     pathname: string;
     pageUrl: string;
     snapshot: CachedPageSnapshot | null;
     currentPart: CurrentPartIdentity;
   }): boolean {
     if (!argsForMatch.snapshot) {
-      return false;
-    }
-    // The address bar outranks a cached snapshot on `/bangumi/play/epNNN` for
-    // the same reason it outranks a fresh one (#274): a snapshot naming another
-    // episode was read from page globals that had not caught up with the switch.
-    if (
-      contradictsAddressBarEpisode({
-        pathname: argsForMatch.pathname,
-        episodeId: readSnapshotEpisodeId(argsForMatch.snapshot),
-      })
-    ) {
       return false;
     }
     if (canUseCachedPageSnapshot(argsForMatch.pathname)) {
@@ -296,14 +322,20 @@ export function createShareController(args: {
     const pathname = window.location.pathname;
     const pageUrl = window.location.href.split("#")[0];
     const currentPart = getCurrentPartIdentity();
+    const cachedSnapshotMatch = matchCachedPageSnapshot({
+      pathname,
+      pageUrl,
+      snapshot: festivalSnapshot,
+      currentPart,
+    });
+    // Refute the record, not the field that happens to be read today — the same
+    // rule `getCurrentPartIdentity` applies when the item refutes itself (#274).
+    const resolvedCurrentPart: CurrentPartIdentity =
+      cachedSnapshotMatch.refutesCurrentPart
+        ? { title: null, epId: null, cid: null }
+        : currentPart;
     const matchingFestivalSnapshot =
-      festivalSnapshot &&
-      canUseMatchingCachedPageSnapshot({
-        pathname,
-        pageUrl,
-        snapshot: festivalSnapshot,
-        currentPart,
-      })
+      festivalSnapshot && cachedSnapshotMatch.usable
         ? {
             videoId: festivalSnapshot.videoId,
             url: festivalSnapshot.url,
@@ -318,7 +350,7 @@ export function createShareController(args: {
       pathname,
       documentTitle: document.title,
       headingTitle: document.querySelector("h1")?.textContent?.trim() ?? null,
-      currentPartTitle: currentPart.title,
+      currentPartTitle: resolvedCurrentPart.title,
       pageSnapshot: matchingFestivalSnapshot,
       festivalSnapshot: matchingFestivalSnapshot,
       addressBarIdentityRefuted: hasRefutedAddressBarIdentity(pageUrl),

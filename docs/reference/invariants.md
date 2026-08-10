@@ -149,6 +149,14 @@ single predicate that states it (`video-identity.ts`):
   its episode id contradicts the address bar its title and cid are stale too —
   the title would go out labelling the new episode, and the cid would match a
   cached snapshot of the previous one.
+- **A contradiction is transitive through whatever matched.** The list item often
+  carries no episode id at all (plenty of episode lists expose only
+  `data-cid`), so it cannot refute itself. But a snapshot that matches it — by
+  episode id, cid, or title — and contradicts the address bar has proven the
+  item stale by proxy. Refusing only the snapshot there leaves a hybrid record:
+  the address bar's `ep396139` wearing the previous episode's title. Whatever the
+  contradiction reaches, discard; and discard the record, not the field today's
+  caller happens to read.
 - **Both sides must be known.** A `bvid:cid` snapshot names no episode and a
   season route names none either; refuting on an unknown is a guess, not a
   contradiction.
