@@ -739,10 +739,48 @@ do NOT compose, and that is the part that decides which connection gets which:
   `redis-client-bounds.test.ts` keeps `new Redis` out of every other module,
   because the option's absence is invisible in a diff, which is how it stayed
   invisible five times.
-- **Exempt does not mean fine.** The room store's request path and the runtime
-  store's `trackAwaitedOperation` still have no caller-side bound, so a stalled
-  Redis still hangs a join. The fix is a cap that keeps the call tracked, or a
-  separate connection for the paths that want a backstop — never this option.
+- **Exempt does not mean fine, and the fix is a cap that keeps the call
+  tracked.** The room store's request path and the runtime store's had no
+  caller-side bound at all, so a stalled Redis hung a WebSocket join with
+  nothing counting down anywhere. #277 closed that with `boundCommand` on both
+  stores: `capAttempt` answers the caller and leaves the command tracked, so
+  `ensurePendingCapacity` and `maintenance-pass` keep reading exactly the
+  evidence a connection-wide option would have destroyed. Nothing in the bound
+  declarations moved, which is the point — the two layers are still separate.
+- **Which bound applies is a property of the CALL, not of the method.** Both
+  kinds of caller share these connections and reach the same helpers:
+  `loadSession` runs on the join path and inside the runtime index reaper,
+  `readRoomBody` inside an admin listing and inside the index reconcile. So the
+  bound is passed in (`CommandBound`), and the pass-driven callers pass
+  `boundedByOuterCaller` — a claim, written down, that something further out
+  stops waiting. Capping those would make `stalled` unreachable and let the next
+  tick run a second pass on top of the first, which is #261 and #263 arrived at
+  by another route. `redis-store-command-bounds.test.ts` asserts both polarities,
+  and hangs the k-th command of every request-path method in turn, because a
+  method that bounds its first command and not its third passes any single probe.
+- **A bound belongs to each command, never to the operation.** `getRoom` loads
+  one session per member and `purgeSessionsByInstance` one per session left
+  behind, so a per-method budget fails a healthy Redis for having data — the
+  same mistake as giving a startup migration one total budget (#271 review).
+- **A request that merely joins a background pass needs its wait bounded, not
+  the pass — and bounded on SILENCE, not on duration.** A room listing waits for
+  the first index reconcile, whose commands are deliberately uncapped;
+  `awaitBootstrapReconcile` bounds the WAIT instead, so the pass keeps running
+  and its next caller can still join it. A total budget there would fail every
+  admin listing for the length of a HEALTHY migration on a large database, which
+  is the same defect as a whole-migration startup budget — so the wait gives up
+  only after a full window in which no reconcile command answered at all, which
+  is why every pass command declares `boundedByOuterCaller` rather than calling
+  the client directly. The absorbed rejection is not optional either: the pass
+  outlives the wait, and an unhandled rejection ends the process on Node 22.
+- **Still open, deliberately: the durable writes.** The runtime store's five
+  `trackAwaitedOperation` writes and the room store's four room-body writes stay
+  uncapped, because #237 settled that an answer which can be wrong is worse than
+  a slow one and their effects do not expire on their own. That is the whole of
+  the difference from `acquireRoomLock` and `tryClaimMessageSlot`, which ARE
+  capped: a `SET NX PX` that lands after its caller gave up releases itself at
+  its TTL, so "may have landed" costs one lock interval rather than a permanent
+  wrong answer.
 - **An exemption covers commands, not the handshake.** `connect()` runs before
   the store exists and resolves on `ready`; ioredis's `connectTimeout` bounds
   the TCP connect and not the `INFO` after it. Without either bound, bootstrap

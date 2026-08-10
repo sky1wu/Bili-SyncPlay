@@ -596,12 +596,42 @@ redis.call("SADD", KEYS[5], ARGV[3])
 return 1
 `;
 
+/**
+ * Issues one Redis command under whatever bounds its caller.
+ *
+ * A parameter rather than a rule about the method, because on this connection
+ * the same helper is reached from both kinds of caller: `loadSession` runs on
+ * the join path, where nothing else answers the caller, and inside a queued
+ * write and the runtime index reaper, where something already does. The bound
+ * belongs to the call, not to the function it happens to be in (#277).
+ */
+type CommandBound = <T>(
+  operationName: string,
+  issue: () => Promise<T>,
+) => Promise<T>;
+
+/**
+ * For a command whose caller already derives a bound from its silence.
+ *
+ * Every use is a claim that some OUTER caller stops waiting — a maintenance
+ * pass's per-tick cap, or `withAttemptTimeout` on a queued write — and that
+ * capping here would settle the call that outer bound is reading. Passing this
+ * is how that claim is written down; see the exemption note on the client.
+ */
+const boundedByOuterCaller: CommandBound = (_operationName, issue) => issue();
+
 async function loadSession(
   redis: RedisClient,
   prefix: string,
   sessionId: string,
+  // Required, not defaulted: a default is an exemption taken by omission, which
+  // is exactly how four connections looked bounded while having no bound at all
+  // (#271). Passing `boundedByOuterCaller` is a claim somebody can check.
+  bound: CommandBound,
 ): Promise<Session | null> {
-  const fields = await redis.hgetall(sessionKey(prefix, sessionId));
+  const fields = await bound("load_session", () =>
+    redis.hgetall(sessionKey(prefix, sessionId)),
+  );
   if (Object.keys(fields).length === 0) {
     return null;
   }
@@ -692,15 +722,19 @@ async function cleanupEmptyRoomIndex(
   prefix: string,
   roomCode: string,
   onError: (error: unknown) => void,
+  /** Required for the same reason as {@link loadSession}'s. */
+  bound: CommandBound,
 ): Promise<void> {
   try {
-    await redis.eval(
-      CLEANUP_EMPTY_ROOM_LUA,
-      3,
-      roomSessionsKey(prefix, roomCode),
-      `${prefix}rooms`,
-      roomMembersKey(prefix, roomCode),
-      roomCode,
+    await bound("cleanup_empty_room_index", () =>
+      redis.eval(
+        CLEANUP_EMPTY_ROOM_LUA,
+        3,
+        roomSessionsKey(prefix, roomCode),
+        `${prefix}rooms`,
+        roomMembersKey(prefix, roomCode),
+        roomCode,
+      ),
     );
   } catch (error) {
     onError(error);
@@ -735,19 +769,24 @@ export async function createRedisRuntimeStore(
     //   command is still queued, so the next tick would run on top of it (#261,
     //   #263).
     //
-    // What this does NOT resolve: `trackAwaitedOperation` and the two plain
-    // reads next to it (`isMemberTokenBlocked`, `getRoomGeneration`) have no
-    // caller-side bound at all, so a stalled Redis still hangs a join. The fix
-    // for those is a cap that keeps the call TRACKED — `trackOperation`'s shape,
-    // a few lines below — and for the five writes it also re-opens #237's trade
-    // that an answer which can be wrong is worse than a slow one. That is a
-    // derivation with its own review, not a connection option: no
-    // connection-wide setting can bound those commands without also settling
-    // the ones above.
+    // The request path is bounded HERE rather than on the connection, by
+    // `boundCommand`: it caps the caller through `commandPacer.capAttempt`, so
+    // the command stays tracked and both bounds above keep reading its silence
+    // (#277). That is the shape no connection-wide option can have — which is
+    // also why the bound has to be chosen per CALL, not per method:
+    // `loadSession` is reached from the join path AND from the reaper.
+    //
+    // What this does NOT resolve: the five durable writes through
+    // `trackAwaitedOperation` (`blockMemberToken`, `evictMemberToken`,
+    // `revokeMemberToken`, `markRoomGeneration`, `deleteRoom`). Capping those
+    // re-opens #237's trade that an answer which can be wrong is worse than a
+    // slow one, and their side effects do not expire on their own the way a
+    // lock or a dedup slot does — so they are a derivation with its own
+    // review, not a line moved in this one.
     createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation",
+        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's five durable writes",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
@@ -871,6 +910,50 @@ export async function createRedisRuntimeStore(
     throw error;
   }
 
+  /**
+   * The caller-side bound for a command nobody else is waiting behind.
+   *
+   * `commandTimeout` is inadmissible on this connection because it SETTLES a
+   * command, and two bounds here are derived from a command's silence
+   * (`ensurePendingCapacity`'s tracked count, `maintenance-pass`'s `stalled`).
+   * `capAttempt` answers the caller and leaves the command tracked, so both keep
+   * reading the real queue — that difference is the whole of #277's first half.
+   *
+   * Per COMMAND, never per method: `getRoom` and `listClusterSessionsByRoom`
+   * load one session each, so a per-method budget would fail a healthy room for
+   * having members. Admission is checked first, so the refusal past
+   * `maxPendingOperations` is the one answer that carries no ambiguity at all —
+   * the command was never issued.
+   *
+   * Applied to reads, and to writes whose side effect expires on its own: an
+   * `acquireRoomLock` or `tryClaimMessageSlot` that secretly landed releases
+   * itself at its TTL, so "may have landed" costs at most one lock interval.
+   * The five durable writes are not in that class; see the note on the client.
+   */
+  function boundCommand<T>(
+    operationName: string,
+    issue: () => Promise<T>,
+  ): Promise<T> {
+    ensurePendingCapacity(operationName);
+    return commandPacer.capAttempt(issue(), pendingOperationTimeoutMs, () => {
+      const error = new Error(
+        `Redis runtime store operation timed out: ${operationName}.`,
+      );
+      // Bounded still owes a report, and the counter is the half that answers
+      // "still happening?" statelessly (#266).
+      metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
+      logPendingOperationError(
+        {
+          operationName,
+          pendingCount: pendingOperations.size,
+          reason: "timeout",
+        },
+        error,
+      );
+      return error;
+    });
+  }
+
   function trackOperation<T>(
     operationName: string,
     operation: Promise<T>,
@@ -992,14 +1075,18 @@ export async function createRedisRuntimeStore(
 
   /** Collect identities past their retention. Lazy — called on token reads/writes. */
   async function pruneExpiredMemberTokens(code: string): Promise<void> {
-    await redis.eval(
-      PRUNE_MEMBER_TOKENS_LUA,
-      2,
-      roomMemberTokenExpiryKey(keyPrefix, code),
-      roomMemberTokensKey(keyPrefix, code),
-      String(now()),
-      String(PRUNE_MEMBER_TOKENS_BATCH),
-      String(PRUNE_MEMBER_TOKENS_MAX_BATCHES),
+    // Only reached from the three request-path reads below, so it takes their
+    // bound rather than a parameter.
+    await boundCommand("prune_member_tokens", () =>
+      redis.eval(
+        PRUNE_MEMBER_TOKENS_LUA,
+        2,
+        roomMemberTokenExpiryKey(keyPrefix, code),
+        roomMemberTokensKey(keyPrefix, code),
+        String(now()),
+        String(PRUNE_MEMBER_TOKENS_BATCH),
+        String(PRUNE_MEMBER_TOKENS_MAX_BATCHES),
+      ),
     );
   }
 
@@ -1199,13 +1286,26 @@ export async function createRedisRuntimeStore(
     async confirmWrites() {
       await sessionWriteQueue.confirm();
     },
+    // Bootstrap awaits this before the process listens, and nothing out there
+    // stops waiting — the same shape `connectWithin` and `startWithin` exist for
+    // (#271), reached through a store method instead of a constructor. Capped
+    // per command rather than per call, because the work here grows with the
+    // number of sessions the previous run left behind while one unanswered
+    // command does not.
     async purgeSessionsByInstance(instanceId: string) {
       await store.flush();
-      const sessionIds = await redis.smembers(`${keyPrefix}sessions`);
+      const sessionIds = await boundCommand("purge_sessions_by_instance", () =>
+        redis.smembers(`${keyPrefix}sessions`),
+      );
       let purgedCount = 0;
 
       for (const sessionId of sessionIds) {
-        const session = await loadSession(redis, keyPrefix, sessionId);
+        const session = await loadSession(
+          redis,
+          keyPrefix,
+          sessionId,
+          boundCommand,
+        );
         if (!session || session.instanceId !== instanceId) {
           continue;
         }
@@ -1221,10 +1321,16 @@ export async function createRedisRuntimeStore(
           );
         }
 
-        if (session.roomCode && session.memberId) {
-          const currentSessionId = await redis.hget(
-            roomMembersKey(keyPrefix, session.roomCode),
-            session.memberId,
+        const seatedRoomCode = session.roomCode;
+        const seatedMemberId = session.memberId;
+        if (seatedRoomCode && seatedMemberId) {
+          const currentSessionId = await boundCommand(
+            "purge_sessions_by_instance",
+            () =>
+              redis.hget(
+                roomMembersKey(keyPrefix, seatedRoomCode),
+                seatedMemberId,
+              ),
           );
           if (currentSessionId === session.id) {
             // Clears the stale session→member binding left by the previous run
@@ -1239,8 +1345,8 @@ export async function createRedisRuntimeStore(
             // back would keep their token forever, since `removeMember` is the
             // only other place that arms it (#237 review).
             transaction.hdel(
-              roomMembersKey(keyPrefix, session.roomCode),
-              session.memberId,
+              roomMembersKey(keyPrefix, seatedRoomCode),
+              seatedMemberId,
             );
             // Only while the identity still exists. A kick deletes the token and
             // its expiry entry; if the process died before the socket close ran,
@@ -1248,27 +1354,32 @@ export async function createRedisRuntimeStore(
             // register an expiry for a token that is not there — the same defect
             // `REMOVE_MEMBER_LUA` fixed on the ordinary path (#237 review).
             if (
-              (await redis.hget(
-                roomMemberTokensKey(keyPrefix, session.roomCode),
-                session.memberId,
+              (await boundCommand("purge_sessions_by_instance", () =>
+                redis.hget(
+                  roomMemberTokensKey(keyPrefix, seatedRoomCode),
+                  seatedMemberId,
+                ),
               )) !== null
             ) {
               transaction.zadd(
-                roomMemberTokenExpiryKey(keyPrefix, session.roomCode),
+                roomMemberTokenExpiryKey(keyPrefix, seatedRoomCode),
                 String(now() + memberTokenRetentionMs),
-                session.memberId,
+                seatedMemberId,
               );
             }
           }
         }
 
-        await transaction.exec();
+        await boundCommand("purge_sessions_by_instance", () =>
+          transaction.exec(),
+        );
         if (session.roomCode) {
           await cleanupEmptyRoomIndex(
             redis,
             keyPrefix,
             session.roomCode,
             reportEmptyRoomCleanupFailure,
+            boundCommand,
           );
         }
         purgedCount += 1;
@@ -1282,7 +1393,8 @@ export async function createRedisRuntimeStore(
       queueSessionOperation(sessionId, "unregister_session", async () => {
         const roomCode =
           session?.roomCode ??
-          (await loadSession(redis, keyPrefix, sessionId))?.roomCode;
+          (await loadSession(redis, keyPrefix, sessionId, boundedByOuterCaller))
+            ?.roomCode;
         const transaction = redis.multi();
         transaction.srem(`${keyPrefix}sessions`, sessionId);
         transaction.del(sessionKey(keyPrefix, sessionId));
@@ -1296,6 +1408,7 @@ export async function createRedisRuntimeStore(
             keyPrefix,
             roomCode,
             reportEmptyRoomCleanupFailure,
+            boundedByOuterCaller,
           );
         }
       });
@@ -1376,7 +1489,12 @@ export async function createRedisRuntimeStore(
           // the backpressure cap and `close()` would quit under them (#242
           // review). Costs one round trip on a path that is not hot.
           const expectedGeneration = await pinnedGeneration;
-          const storedSession = await loadSession(redis, keyPrefix, sessionId);
+          const storedSession = await loadSession(
+            redis,
+            keyPrefix,
+            sessionId,
+            boundedByOuterCaller,
+          );
           const localSession = localRuntimeStore.getSession(sessionId);
           const roomCodeToLeave = getPreviousRoomToLeave(
             storedSession?.roomCode ?? null,
@@ -1424,6 +1542,7 @@ export async function createRedisRuntimeStore(
               keyPrefix,
               roomCodeToLeave,
               reportEmptyRoomCleanupFailure,
+              boundedByOuterCaller,
             );
           }
         },
@@ -1444,7 +1563,14 @@ export async function createRedisRuntimeStore(
         "mark_session_left_room",
         async () => {
           const targetRoomCode = resolveRoomCodeToLeave(
-            (await loadSession(redis, keyPrefix, sessionId))?.roomCode ?? null,
+            (
+              await loadSession(
+                redis,
+                keyPrefix,
+                sessionId,
+                boundedByOuterCaller,
+              )
+            )?.roomCode ?? null,
             roomCode,
           );
           if (!targetRoomCode) {
@@ -1482,6 +1608,7 @@ export async function createRedisRuntimeStore(
             keyPrefix,
             targetRoomCode,
             reportEmptyRoomCleanupFailure,
+            boundedByOuterCaller,
           );
         },
       );
@@ -1518,11 +1645,11 @@ export async function createRedisRuntimeStore(
     },
     async getRoom(code: string) {
       await pruneExpiredMemberTokens(code);
-      const memberTokens = await redis.hgetall(
-        roomMemberTokensKey(keyPrefix, code),
+      const memberTokens = await boundCommand("get_room", () =>
+        redis.hgetall(roomMemberTokensKey(keyPrefix, code)),
       );
-      const memberSessionIds = await redis.hgetall(
-        roomMembersKey(keyPrefix, code),
+      const memberSessionIds = await boundCommand("get_room", () =>
+        redis.hgetall(roomMembersKey(keyPrefix, code)),
       );
       if (
         Object.keys(memberTokens).length === 0 &&
@@ -1540,7 +1667,12 @@ export async function createRedisRuntimeStore(
         room.memberTokens.set(memberId, memberToken);
       }
       for (const [memberId, sessionId] of Object.entries(memberSessionIds)) {
-        const session = await loadSession(redis, keyPrefix, sessionId);
+        const session = await loadSession(
+          redis,
+          keyPrefix,
+          sessionId,
+          boundCommand,
+        );
         if (session) {
           room.members.set(memberId, session);
         }
@@ -1589,8 +1721,8 @@ export async function createRedisRuntimeStore(
       // otherwise miss its own write.
       await store.flush();
       await pruneExpiredMemberTokens(code);
-      const memberTokens = await redis.hgetall(
-        roomMemberTokensKey(keyPrefix, code),
+      const memberTokens = await boundCommand("find_member_id_by_token", () =>
+        redis.hgetall(roomMemberTokensKey(keyPrefix, code)),
       );
       return findMemberIdByTokenEntries(
         Object.entries(memberTokens),
@@ -1619,14 +1751,15 @@ export async function createRedisRuntimeStore(
       memberToken: string,
       currentTime = now(),
     ) {
-      await redis.zremrangebyscore(
-        blockedTokensKey(keyPrefix, code),
-        0,
-        currentTime,
+      await boundCommand("is_member_token_blocked", () =>
+        redis.zremrangebyscore(
+          blockedTokensKey(keyPrefix, code),
+          0,
+          currentTime,
+        ),
       );
-      const score = await redis.zscore(
-        blockedTokensKey(keyPrefix, code),
-        memberToken,
+      const score = await boundCommand("is_member_token_blocked", () =>
+        redis.zscore(blockedTokensKey(keyPrefix, code), memberToken),
       );
       if (score !== null) {
         return true;
@@ -1672,15 +1805,25 @@ export async function createRedisRuntimeStore(
       }
       const effectiveExpiresAt = Math.max(expiresAt, currentTime + ttlMs);
       const slotKey = dedupSlotKey(keyPrefix, roomCode, key);
-      const result = await redis.set(slotKey, "1", "NX", "PX", ttlMs);
+      // Capped, and safe to cap because the side effect expires: a `SET NX PX`
+      // that lands after this caller gave up holds the slot for at most `ttlMs`,
+      // so the worst case is one deduplicated message rather than a permanent
+      // wrong answer. Without a cap the message handler waits forever.
+      const result = await boundCommand("try_claim_message_slot", () =>
+        redis.set(slotKey, "1", "NX", "PX", ttlMs),
+      );
       if (result !== null) {
         const trackingKey = dedupTrackingZsetKey(keyPrefix, roomCode);
         try {
           // Await so deleteRoom's ZRANGE always sees this entry.
           // If tracking fails, the slot still expires via its TTL.
           await Promise.all([
-            redis.zadd(trackingKey, String(effectiveExpiresAt), slotKey),
-            redis.zremrangebyscore(trackingKey, 0, now() - 1),
+            boundCommand("try_claim_message_slot", () =>
+              redis.zadd(trackingKey, String(effectiveExpiresAt), slotKey),
+            ),
+            boundCommand("try_claim_message_slot", () =>
+              redis.zremrangebyscore(trackingKey, 0, now() - 1),
+            ),
           ]);
         } catch {
           // Tracking write failed; deleteRoom may miss this slot in ZRANGE,
@@ -1692,7 +1835,12 @@ export async function createRedisRuntimeStore(
     async releaseMessageSlot(roomCode: string, key: string) {
       const slotKey = dedupSlotKey(keyPrefix, roomCode, key);
       const trackingKey = dedupTrackingZsetKey(keyPrefix, roomCode);
-      await Promise.all([redis.del(slotKey), redis.zrem(trackingKey, slotKey)]);
+      await Promise.all([
+        boundCommand("release_message_slot", () => redis.del(slotKey)),
+        boundCommand("release_message_slot", () =>
+          redis.zrem(trackingKey, slotKey),
+        ),
+      ]);
     },
     async acquireRoomLock(
       roomCode: string,
@@ -1703,12 +1851,21 @@ export async function createRedisRuntimeStore(
       const currentTime = now();
       const ttlMs = Math.max(expiresAt - currentTime, 1);
       const lockKey = roomLockKey(keyPrefix, roomCode, key);
-      const result = await redis.set(lockKey, token, "NX", "PX", ttlMs);
+      // The join admission lock: capped, and safe to cap for the same reason as
+      // the dedup slot. A `SET NX PX` that lands after this caller gave up holds
+      // the lock until `ttlMs`, which is exactly the state a crashed holder
+      // leaves behind and which `JOIN_ADMISSION_LOCK_TTL_MS` already exists to
+      // recover from. Uncapped, a stalled Redis hangs the join itself (#277).
+      const result = await boundCommand("acquire_room_lock", () =>
+        redis.set(lockKey, token, "NX", "PX", ttlMs),
+      );
       return result !== null;
     },
     async releaseRoomLock(roomCode: string, key: string, token: string) {
       const lockKey = roomLockKey(keyPrefix, roomCode, key);
-      const result = await redis.eval(ROOM_LOCK_RELEASE_LUA, 1, lockKey, token);
+      const result = await boundCommand("release_room_lock", () =>
+        redis.eval(ROOM_LOCK_RELEASE_LUA, 1, lockKey, token),
+      );
       return result === 1;
     },
     removeMember(code: string, memberId: string, session?: Session) {
@@ -1815,21 +1972,28 @@ export async function createRedisRuntimeStore(
       // inherit (its own stamp overwrites it), and counting it would mean a code
       // is only ever freed by a successful teardown — losing the path where the
       // residue simply ages out.
-      const found = await redis.eval(
-        ROOM_RESIDUE_LUA,
-        6,
-        roomMembersKey(keyPrefix, code),
-        roomMemberTokensKey(keyPrefix, code),
-        roomMemberTokenExpiryKey(keyPrefix, code),
-        blockedTokensKey(keyPrefix, code),
-        roomSessionsKey(keyPrefix, code),
-        dedupTrackingZsetKey(keyPrefix, code),
-        String(now()),
+      const found = await boundCommand("has_room_residue", () =>
+        redis.eval(
+          ROOM_RESIDUE_LUA,
+          6,
+          roomMembersKey(keyPrefix, code),
+          roomMemberTokensKey(keyPrefix, code),
+          roomMemberTokenExpiryKey(keyPrefix, code),
+          blockedTokensKey(keyPrefix, code),
+          roomSessionsKey(keyPrefix, code),
+          dedupTrackingZsetKey(keyPrefix, code),
+          String(now()),
+        ),
       );
       return Number(found) === 1;
     },
     async getRoomGeneration(code: string) {
-      return await redis.get(roomGenerationKey(keyPrefix, code));
+      // The read a join makes before it may delete a room it believes is empty.
+      // It was the last command on that path with no bound of any kind, which
+      // is what an operator saw as a WebSocket join that never completed (#277).
+      return await boundCommand("get_room_generation", () =>
+        redis.get(roomGenerationKey(keyPrefix, code)),
+      );
     },
     markRoomGeneration(code: string, generation: string) {
       ensurePendingCapacity("mark_room_generation");
@@ -1961,6 +2125,10 @@ export async function createRedisRuntimeStore(
         });
       }
     },
+    // The three cluster-bookkeeping methods below are deliberately uncapped for
+    // the same reason as `listClusterSessions`: `node-heartbeat` and
+    // `runtime-index-reaper` drive them through `maintenance-pass`, which caps
+    // each tick and reads THIS call's silence to decide the pass is stalled.
     async heartbeatNode(status: ClusterNodeStatus) {
       await localRuntimeStore.heartbeatNode(status);
       await redis
@@ -2026,24 +2194,42 @@ export async function createRedisRuntimeStore(
         .exec();
     },
     async countClusterActiveRooms() {
-      return redis.scard(`${keyPrefix}rooms`);
+      return await boundCommand("count_cluster_active_rooms", () =>
+        redis.scard(`${keyPrefix}rooms`),
+      );
     },
     async listClusterActiveRoomCodes() {
-      return (await redis.smembers(`${keyPrefix}rooms`)).sort();
+      return (
+        await boundCommand("list_cluster_active_room_codes", () =>
+          redis.smembers(`${keyPrefix}rooms`),
+        )
+      ).sort();
     },
     async listClusterSessionsByRoom(roomCode: string) {
-      const sessionIds = await redis.smembers(
-        roomSessionsKey(keyPrefix, roomCode),
+      const sessionIds = await boundCommand(
+        "list_cluster_sessions_by_room",
+        () => redis.smembers(roomSessionsKey(keyPrefix, roomCode)),
       );
       const sessions = await Promise.all(
-        sessionIds.map((sessionId) => loadSession(redis, keyPrefix, sessionId)),
+        sessionIds.map((sessionId) =>
+          loadSession(redis, keyPrefix, sessionId, boundCommand),
+        ),
       );
       return sessions.filter((session): session is Session => session !== null);
     },
+    // Deliberately uncapped, unlike its by-room sibling: `runtime-index-reaper`
+    // calls this one, and its sweep is bounded by `maintenance-pass`, whose
+    // `stalled` outcome is derived from this call not coming back. Capping here
+    // would answer the pass at 5s and let the next tick issue a second sweep on
+    // top of the first — the defect #261 and #263 fixed. The admin overview
+    // shares it and is left with Node's 300s `requestTimeout`, which is a bound
+    // in the sense that matters here: nothing accumulates without limit.
     async listClusterSessions() {
       const sessionIds = await redis.smembers(`${keyPrefix}sessions`);
       const sessions = await Promise.all(
-        sessionIds.map((sessionId) => loadSession(redis, keyPrefix, sessionId)),
+        sessionIds.map((sessionId) =>
+          loadSession(redis, keyPrefix, sessionId, boundedByOuterCaller),
+        ),
       );
       return sessions.filter((session): session is Session => session !== null);
     },

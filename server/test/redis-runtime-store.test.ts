@@ -221,9 +221,12 @@ test("redis runtime store bounds its pre-QUIT drain and counts every active Redi
   // This helper deliberately gives a live caller the command's real outcome;
   // shutdown must bound its own wait without changing that API contract.
   void store.blockMemberToken("ROOMCLOSE", "token-close", 60_000);
-  // Direct reads/writes can outlive an upstream shutdown step too. They bypass
-  // the pending-operation wrappers, so only client-boundary tracking sees this.
-  void store.isMemberTokenBlocked("ROOMCLOSE", "token-close");
+  // Direct reads can outlive an upstream shutdown step too. Since #277 this one
+  // answers its caller at `pendingOperationTimeoutMs` — hence the catch — while
+  // its command stays tracked, so the drain below still has to wait for it.
+  void Promise.resolve(
+    store.isMemberTokenBlocked("ROOMCLOSE", "token-close"),
+  ).catch(() => undefined);
 
   const startedAt = Date.now();
   await store.close();
@@ -239,7 +242,10 @@ test("redis runtime store bounds its pre-QUIT drain and counts every active Redi
     {
       pendingOperations: 1,
       pendingCommands: 3,
-      pendingAttempts: 1,
+      // Two: the queued write's attempt, and the capped read — whose command
+      // `boundCommand` keeps tracked after answering its caller, which is what
+      // makes it visible to this report at all (#277).
+      pendingAttempts: 2,
       pendingOperationBudgetMs: 20,
       quitOutcome: "timed_out",
       budgetMs: 20,

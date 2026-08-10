@@ -115,9 +115,16 @@ test("every source file that builds a connection names its bound", () => {
       //   room event bus → `pending-resync-queue` waits on `inFlight` (#242)
       //
       // "It is already bounded" is NOT the criterion and must never be read as
-      // one — the runtime store passes that test while `trackAwaitedOperation`
-      // has no bound at all, and the room store's request path has none either
-      // (#271 review).
+      // one — when #271 was written the runtime store passed that test while
+      // `trackAwaitedOperation` had no bound at all, and the room store's
+      // request path had none either.
+      //
+      // Those two gaps are what #277 closed, and it closed them WITHOUT moving
+      // a line in this table: the request paths took a caller-side cap that
+      // leaves the command tracked, so every bound listed above still reads the
+      // same evidence. What each connection now bounds, and the durable writes
+      // still deliberately left out, is proved in
+      // `redis-store-command-bounds.test.ts`.
       "admin/redis-audit-store.ts": ["caller"],
       "admin/redis-event-store.ts": ["caller"],
       "redis-room-event-bus.ts": ["caller"],
