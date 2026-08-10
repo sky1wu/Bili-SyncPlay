@@ -50,27 +50,60 @@ export function readAddressBarEpisodeId(pathname: string): string | null {
 }
 
 /**
- * Whether an in-page identity contradicts the episode the address bar names.
+ * Whether an in-page identity has NOT been confirmed to be the episode the
+ * address bar names — the gate for using it as this page's video.
  *
  * Every source of in-player identity — the episode list's highlighted item,
  * `__INITIAL_STATE__`, `__playinfo__` — is a page global, and an SPA episode
- * switch updates the address bar before it updates those (#274). A contradiction
- * therefore means "the page globals have not caught up yet", never "the address
- * bar is wrong", so the caller must treat the identity as unresolved rather than
- * share the previous episode with the new episode's playback position.
+ * switch updates the address bar before it updates those (#274). On an `epNNN`
+ * route the burden of proof therefore runs against the page: an identity that
+ * cannot be confirmed to name this episode is "not resolved yet", and that
+ * includes one naming no episode at all. The page bridge answers `bvid:cid` for
+ * a bangumi page whose globals expose no `epId`, and in the switch window those
+ * are the *previous* episode's `bvid`/`cid` — indistinguishable from the current
+ * one's by inspection, which is the whole reason this cannot be a two-sided
+ * comparison.
  *
- * Both sides must be known: an unknown `episodeId` refutes nothing, and neither
+ * Rejecting an unconfirmed identity costs nothing here: the address bar names
+ * the episode completely, so the fallback is already the right answer. Routes
+ * that name no episode — `/festival/`, `/bangumi/play/ssNNN` — have nothing to
+ * confirm against and are never gated.
+ */
+export function lacksAddressBarEpisodeConfirmation(args: {
+  pathname: string;
+  episodeId: string | null | undefined;
+}): boolean {
+  const addressBarEpisodeId = readAddressBarEpisodeId(args.pathname);
+  if (addressBarEpisodeId === null) {
+    return false;
+  }
+  return args.episodeId?.toLowerCase() !== addressBarEpisodeId;
+}
+
+/**
+ * Whether an in-page identity is PROVEN to be a different episode than the one
+ * the address bar names — strictly stronger than
+ * {@link lacksAddressBarEpisodeConfirmation}, and used where the answer must be
+ * proof rather than mere doubt.
+ *
+ * The asymmetry between the two is deliberate. For identity, an unconfirmed
+ * snapshot is free to reject because the address bar already answers completely.
+ * For a *label* — the highlighted item's title — the address bar answers
+ * nothing, so dropping one on suspicion trades a possibly-correct title for a
+ * possibly-worse one. Doubt is enough to refuse a video; only proof is enough to
+ * discard a record.
+ *
+ * Both sides must be known: an unknown `episodeId` proves nothing, and neither
  * does a page whose address bar names no episode.
  */
 export function contradictsAddressBarEpisode(args: {
   pathname: string;
   episodeId: string | null | undefined;
 }): boolean {
-  const addressBarEpisodeId = readAddressBarEpisodeId(args.pathname);
-  if (addressBarEpisodeId === null || !args.episodeId) {
+  if (!args.episodeId) {
     return false;
   }
-  return args.episodeId.toLowerCase() !== addressBarEpisodeId;
+  return lacksAddressBarEpisodeConfirmation(args);
 }
 
 /**

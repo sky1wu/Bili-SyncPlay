@@ -8,6 +8,7 @@ import type { ContentRuntimeState } from "./runtime-state";
 import {
   contradictsAddressBarEpisode,
   isAddressBarOpaqueVideoUrl,
+  lacksAddressBarEpisodeConfirmation,
   normalizePageVisitUrl,
 } from "./video-identity";
 
@@ -139,18 +140,26 @@ export function createShareController(args: {
   }): CachedPageSnapshotMatch {
     const describesCurrentPart =
       cachedPageSnapshotDescribesCurrentPart(argsForMatch);
+    const snapshotEpisodeId =
+      argsForMatch.snapshot === null
+        ? null
+        : readSnapshotEpisodeId(argsForMatch.snapshot);
     // The address bar outranks a cached snapshot on `/bangumi/play/epNNN` for
-    // the same reason it outranks a fresh one (#274): a snapshot naming another
-    // episode was read from page globals that had not caught up with the switch.
-    const contradictsAddressBar =
-      argsForMatch.snapshot !== null &&
-      contradictsAddressBarEpisode({
-        pathname: argsForMatch.pathname,
-        episodeId: readSnapshotEpisodeId(argsForMatch.snapshot),
-      });
+    // the same reason it outranks a fresh one (#274). Using it takes
+    // confirmation; refuting the list item's title takes proof — see the two
+    // predicates for why those are different bars.
+    const isUnconfirmed = lacksAddressBarEpisodeConfirmation({
+      pathname: argsForMatch.pathname,
+      episodeId: snapshotEpisodeId,
+    });
     return {
-      usable: describesCurrentPart && !contradictsAddressBar,
-      refutesCurrentPart: describesCurrentPart && contradictsAddressBar,
+      usable: describesCurrentPart && !isUnconfirmed,
+      refutesCurrentPart:
+        describesCurrentPart &&
+        contradictsAddressBarEpisode({
+          pathname: argsForMatch.pathname,
+          episodeId: snapshotEpisodeId,
+        }),
     };
   }
 
@@ -389,8 +398,13 @@ export function createShareController(args: {
     // its unresolved path (the retry loop, then address-bar parsing) instead of
     // sharing the previous episode stamped with this episode's position. It also
     // must not count as the resolution that refutes the address bar below.
+    //
+    // Unconfirmed is enough to refuse: a snapshot naming no episode at all
+    // (`bvid:cid`, which the bridge answers when the page globals expose no
+    // `epId`) carries the previous episode's ids in exactly the same window,
+    // and nothing about it can be checked against the address bar.
     if (
-      contradictsAddressBarEpisode({
+      lacksAddressBarEpisodeConfirmation({
         pathname,
         episodeId: readSnapshotEpisodeId(nextSnapshot),
       })

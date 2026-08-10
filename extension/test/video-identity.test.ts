@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   contradictsAddressBarEpisode,
+  lacksAddressBarEpisodeConfirmation,
   readAddressBarEpisodeId,
 } from "../src/content/video-identity";
 
@@ -67,4 +68,50 @@ test("a contradiction needs both sides to be known", () => {
     }),
     false,
   );
+});
+
+test("using an identity takes confirmation, while discarding a record takes proof", () => {
+  // The two bars are deliberately different. An `ep` address bar answers identity
+  // completely, so an unconfirmed snapshot is free to reject; it answers nothing
+  // about titles, so a record is only discarded on proof.
+  const unknownEpisodeOnEpRoute = {
+    pathname: "/bangumi/play/ep396139",
+    episodeId: null,
+  };
+  assert.equal(
+    lacksAddressBarEpisodeConfirmation(unknownEpisodeOnEpRoute),
+    true,
+    "a bvid:cid snapshot is not confirmed to be this episode",
+  );
+  assert.equal(
+    contradictsAddressBarEpisode(unknownEpisodeOnEpRoute),
+    false,
+    "and it does not prove the list item stale either",
+  );
+});
+
+test("a route that names no episode confirms everything and refutes nothing", () => {
+  // Both predicates must stay inert off the `ep` route, or a season page ends up
+  // with no resolvable video at all.
+  for (const pathname of [
+    "/bangumi/play/ss357",
+    "/festival/MyMuji",
+    "/video/BV199W9zEEcH",
+  ]) {
+    assert.equal(
+      lacksAddressBarEpisodeConfirmation({ pathname, episodeId: null }),
+      false,
+      pathname,
+    );
+    assert.equal(
+      lacksAddressBarEpisodeConfirmation({ pathname, episodeId: "ep396138" }),
+      false,
+      pathname,
+    );
+    assert.equal(
+      contradictsAddressBarEpisode({ pathname, episodeId: "ep396138" }),
+      false,
+      pathname,
+    );
+  }
 });

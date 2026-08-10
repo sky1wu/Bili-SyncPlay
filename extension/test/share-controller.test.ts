@@ -1260,3 +1260,88 @@ test("bangumi ep page never refutes its own address bar after a snapshot resolve
     dom.restore();
   }
 });
+
+test("bangumi ep page refuses a snapshot that names no episode at all", async () => {
+  // The page bridge answers `bvid:cid` when a bangumi page's globals expose no
+  // `epId` — and in the switch window those are the *previous* episode's ids,
+  // indistinguishable from the current one's by inspection. Doubt has to be
+  // enough here, because the address bar already names the episode completely.
+  const dom = installEpisodePageDomStub({
+    currentPartTitle: "44 连影",
+    currentPartCid: "1200334",
+  });
+
+  let reads = 0;
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => {
+      reads += 1;
+      return {
+        videoId: "BVold:1200334",
+        url: "https://www.bilibili.com/video/BVold?cid=1200334",
+        title: "44 连影",
+      };
+    },
+  });
+
+  try {
+    const payload = await controller.resolveCurrentSharePayload();
+
+    assert.equal(
+      payload?.video.url,
+      "https://www.bilibili.com/bangumi/play/ep396139",
+      `settled after ${reads} read(s) on ${payload?.video.url}`,
+    );
+    assert.equal(payload?.video.videoId, "ep396139");
+    assert.ok(reads > 1, "gave up after the first unconfirmed read");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("bangumi season page still accepts a snapshot that names no episode", async () => {
+  // The opposite polarity of the same gate, and the reason it is keyed on the
+  // route rather than on "is this bangumi": a `ss` address bar names no episode,
+  // so there is nothing to confirm against and a `bvid:cid` snapshot is the best
+  // identity available. Widening the gate to all of `/bangumi/play/` would leave
+  // season pages with no resolvable video at all.
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/bangumi/play/ss357",
+    pathname: "/bangumi/play/ss357",
+    title: "猫和老鼠_番剧_bilibili",
+    video: {
+      currentTime: 10.01,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const runtimeState = createContentRuntimeState();
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 8,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => ({
+      videoId: "BV1xx411c7mD:9527",
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?cid=9527",
+      title: "第46话",
+    }),
+    debugLog: () => undefined,
+  });
+
+  try {
+    const payload = await controller.resolveCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "BV1xx411c7mD:9527");
+    assert.equal(
+      payload?.video.url,
+      "https://www.bilibili.com/video/BV1xx411c7mD?cid=9527",
+    );
+  } finally {
+    dom.restore();
+  }
+});

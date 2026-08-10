@@ -157,9 +157,19 @@ single predicate that states it (`video-identity.ts`):
   the address bar's `ep396139` wearing the previous episode's title. Whatever the
   contradiction reaches, discard; and discard the record, not the field today's
   caller happens to read.
-- **Both sides must be known.** A `bvid:cid` snapshot names no episode and a
-  season route names none either; refuting on an unknown is a guess, not a
-  contradiction.
+- **Using an identity takes confirmation; discarding a record takes proof.**
+  These are two different bars and the codebase carries two predicates for them,
+  `lacksAddressBarEpisodeConfirmation` and `contradictsAddressBarEpisode`. On an
+  `ep` route a snapshot must be _confirmed_ to name this episode before it may be
+  used — a `bvid:cid` snapshot names no episode at all (the bridge answers one
+  whenever the page globals expose no `epId`), and in the switch window those are
+  the previous episode's `bvid`/`cid`, indistinguishable from the current one's
+  by inspection. Rejecting an unconfirmed identity costs nothing, because the
+  address bar already answers completely. A _title_ is the other way round: the
+  address bar says nothing about titles, so dropping one on suspicion trades a
+  possibly-correct label for a possibly-worse one, and only a snapshot naming a
+  different episode is proof enough. Both predicates stay inert on routes that
+  name no episode.
 
 The coverage gap that let this ship is worth copying as a warning: every bangumi
 case in `share-controller.test.ts` used a `ss` season page, where snapshot-first

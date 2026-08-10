@@ -109,13 +109,16 @@ before changing the code it describes.
   outranks the address bar there — but `/bangumi/play/epNNN` names the episode
   itself, and an in-page switch moves the address bar _before_ the page globals,
   so there every in-page source is the one that can be stale.
-  `contradictsAddressBarEpisode` is the single predicate; a snapshot naming
-  another episode means "not resolved yet" (which is what makes the retry in
-  `resolveCurrentSharePayload` real), an `ep` route is never recorded as refuted,
-  and both sides must be known. The contradiction is transitive through whatever
-  matched — a list item carrying only a `cid` cannot refute itself, but a
-  snapshot matching it does — and it discards the whole record, not the field
-  today's caller reads. A regression on one polarity proves nothing about the
+  A snapshot that is not the address bar's episode means "not resolved yet"
+  (which is what makes the retry in `resolveCurrentSharePayload` real), and an
+  `ep` route is never recorded as refuted. **Using an identity takes
+  confirmation, discarding a record takes proof** — hence two predicates,
+  `lacksAddressBarEpisodeConfirmation` (a `bvid:cid` snapshot names no episode,
+  and rejecting it is free because the address bar answers completely) and
+  `contradictsAddressBarEpisode` (only a different episode is proof enough to
+  drop a title). The contradiction is transitive through whatever matched — a
+  list item carrying only a `cid` cannot refute itself, but a snapshot matching
+  it does — and it discards the whole record, not the field today's caller reads. A regression on one polarity proves nothing about the
   other — every bangumi test used a `ss` page, which is why this shipped.
 - **Share ownership** (#235, #242): `sharedVideo.sharedByMemberId` is a durable
   reference to a volatile identity, resolved at build time by
