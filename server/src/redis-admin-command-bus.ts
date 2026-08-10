@@ -4,6 +4,7 @@ import type {
   AdminCommandResult,
 } from "./admin-command-bus.js";
 import { quitAllWithin, type RedisQuitReport } from "./redis-graceful-close.js";
+import { createStalledConnectionGuard } from "./redis-command-timeout.js";
 import {
   createRedisPubSubClientPair,
   type RedisPubSubClientPair,
@@ -142,6 +143,23 @@ export async function createRedisAdminCommandBus(
      * failure that is also a silent one.
      */
     onResultPublishFailed?: (command: AdminCommand, error: unknown) => void;
+    /**
+     * A command this bus issued on its OWN connection failed — the reply
+     * channel `SUBSCRIBE`, the command `PUBLISH`, or the cleanup.
+     *
+     * Separate from {@link onResultPublishFailed}, which is the executor side.
+     */
+    onBusCommandFailed?: (info: {
+      operation: "subscribe" | "publish" | "unsubscribe" | "publish_result";
+      error: unknown;
+    }) => void;
+    /** Injectable so a test does not have to spend three real failures. */
+    stallDropThreshold?: number;
+    /** The socket was dropped after repeated failures; ioredis is reconnecting. */
+    onConnectionDropped?: (info: {
+      role: AdminCommandBusClientRole;
+      consecutiveFailures: number;
+    }) => void;
     closeQuitTimeoutMs?: number;
     onCloseUnfinished?: (
       info: RedisQuitReport<AdminCommandBusClientRole>,
@@ -165,6 +183,66 @@ export async function createRedisAdminCommandBus(
     (command: AdminCommand) => Promise<AdminCommandResult>
   >();
   let closing = false;
+  // The backstop answers the caller and leaves the command in ioredis's queue,
+  // and neither client here has an admission or depth limit. Closing the socket
+  // is the only thing on this side that empties that queue (#271 review).
+  const publisherGuard = createStalledConnectionGuard(publishClient, {
+    threshold: options.stallDropThreshold,
+    onDropped: ({ consecutiveFailures }) =>
+      options.onConnectionDropped?.({
+        role: "publisher",
+        consecutiveFailures,
+      }),
+  });
+  const subscriberGuard = createStalledConnectionGuard(subscribeClient, {
+    threshold: options.stallDropThreshold,
+    onDropped: ({ consecutiveFailures }) =>
+      options.onConnectionDropped?.({
+        role: "subscriber",
+        consecutiveFailures,
+      }),
+  });
+
+  /**
+   * Run one of this bus's OWN commands, reporting and counting it.
+   *
+   * The result of a failure is never a bare rejection out of `request`: the
+   * admin router has no branch for one, so it would answer a Redis outage with
+   * an undiagnosed 500 — the outcome the whole bounded-but-not-silent rule
+   * exists to refuse (#271 review).
+   */
+  async function runBusCommand<T>(
+    operation: "subscribe" | "publish" | "unsubscribe" | "publish_result",
+    guard: { recordSuccess: () => void; recordFailure: () => boolean },
+    call: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      const result = await call();
+      guard.recordSuccess();
+      return result;
+    } catch (error) {
+      guard.recordFailure();
+      options.onBusCommandFailed?.({ operation, error });
+      throw error;
+    }
+  }
+
+  function busUnavailable(
+    command: AdminCommand,
+    error: unknown,
+  ): AdminCommandResult {
+    return {
+      requestId: command.requestId,
+      targetInstanceId: command.targetInstanceId,
+      executorInstanceId: command.targetInstanceId,
+      status: "error",
+      code: "command_bus_unavailable",
+      message: `Admin command bus could not reach Redis: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      completedAt: Date.now(),
+    };
+  }
 
   await Promise.all([publishClient.connect(), subscribeClient.connect()]);
 
@@ -188,9 +266,11 @@ export async function createRedisAdminCommandBus(
 
     void handler(command)
       .then(async (result) => {
-        await publishClient.publish(
-          resultChannel(resultChannelPrefix, command.requestId),
-          JSON.stringify(result),
+        await runBusCommand("publish_result", publisherGuard, () =>
+          publishClient.publish(
+            resultChannel(resultChannelPrefix, command.requestId),
+            JSON.stringify(result),
+          ),
         );
       })
       .catch(async (error) => {
@@ -203,9 +283,11 @@ export async function createRedisAdminCommandBus(
           message: error instanceof Error ? error.message : String(error),
           completedAt: Date.now(),
         };
-        await publishClient.publish(
-          resultChannel(resultChannelPrefix, command.requestId),
-          JSON.stringify(fallback),
+        await runBusCommand("publish_result", publisherGuard, () =>
+          publishClient.publish(
+            resultChannel(resultChannelPrefix, command.requestId),
+            JSON.stringify(fallback),
+          ),
         );
       })
       // The fallback publish runs on the connection whose failure it is
@@ -249,7 +331,9 @@ export async function createRedisAdminCommandBus(
         // with retries would grow that set on both sides without bound (#271
         // review). Unsubscribing a channel that never got subscribed is a
         // no-op, so the cheap direction is the safe one.
-        await subscribeClient.subscribe(replyChannel);
+        await runBusCommand("subscribe", subscriberGuard, () =>
+          subscribeClient.subscribe(replyChannel),
+        );
 
         const responsePromise = new Promise<AdminCommandResult>((resolve) => {
           const timeout = setTimeout(() => {
@@ -282,12 +366,19 @@ export async function createRedisAdminCommandBus(
           subscribeClient.on("message", onReply);
         });
 
-        await publishClient.publish(
-          commandChannel(commandChannelPrefix, command.targetInstanceId),
-          JSON.stringify(command),
+        await runBusCommand("publish", publisherGuard, () =>
+          publishClient.publish(
+            commandChannel(commandChannelPrefix, command.targetInstanceId),
+            JSON.stringify(command),
+          ),
         );
 
         return await responsePromise;
+      } catch (error) {
+        // A `status: "error"` result, not a rejection: `action-service` maps it
+        // to a 502 with this code and message, so an operator sees "the bus
+        // could not reach Redis" instead of `internal_error` (#271 review).
+        return busUnavailable(command, error);
       } finally {
         // Cleanup, not part of the answer. This `UNSUBSCRIBE` runs on the very
         // connection whose trouble is the likeliest reason we are here, and
@@ -297,7 +388,9 @@ export async function createRedisAdminCommandBus(
         // instead. Unreachable before #271 gave this connection a
         // `commandTimeout`; reachable now, which is the point of writing it
         // down rather than discovering it.
-        await subscribeClient.unsubscribe(replyChannel).catch(() => undefined);
+        await runBusCommand("unsubscribe", subscriberGuard, () =>
+          subscribeClient.unsubscribe(replyChannel),
+        ).catch(() => undefined);
       }
     },
     async subscribe(instanceId, handler) {

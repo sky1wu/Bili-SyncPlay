@@ -705,10 +705,27 @@ ioredis in `server/test/redis-command-timeout.test.ts`:
 - It does not distinguish slow from dead. It is set far above ordinary latency
   precisely so a Redis that is merely behind is not converted into a failed one.
 
-Operationally: a Redis that stops answering now produces _failed commands_ on
-those four connections rather than silence. Expect `room_persist_failed`,
-`room_event_publish_failed` and `admin_session_store_command_failed` where an
-outage used to show up as requests that never returned.
+Operationally, a stalled Redis looks different on the three backstopped
+connections than on the five exempt ones, and expecting the wrong one wastes an
+incident:
+
+- **Admin session store, admin command bus.** Failed commands, not silence.
+  Expect `admin_session_store_command_failed`,
+  `admin_command_bus_command_failed` and `admin_command_result_publish_failed`,
+  a 503 `admin_session_store_unavailable` on admin requests, a 502
+  `command_bus_unavailable` on cross-node actions, and
+  `bili_syncplay_redis_operation_failures_total{component="admin_session_store"|"admin_command_bus"}`
+  climbing. After `REDIS_STALL_DROP_THRESHOLD` consecutive failures the socket
+  is reset and `admin_command_bus_connection_reset` says so — that reset is
+  also what empties ioredis's command queue, which the backstop cannot.
+- **Room store, runtime store, room event bus, event store, audit store.** The
+  commands stay out on the connection, so the signal is the CALLER's, not the
+  command's: `room_reaper_sweep_timeout` then `room_reaper_sweep_stalled`,
+  `node_heartbeat_failed`, `redis_runtime_store_operation_failed`, the event
+  store's shedding line, a 503 from the audit and event pages. Request paths
+  with no caller-side bound — `get_room` / `update_room` on join, the runtime
+  store's `trackAwaitedOperation` — stay **silent**, and a WebSocket join that
+  never completes is what that looks like from outside.
 
 ## Post-Change Regression Checklist
 

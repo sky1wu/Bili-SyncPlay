@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   connectWithin,
   createBoundedRedisClient,
+  startWithin,
 } from "../redis-command-timeout.js";
 import {
   createAppendChain,
@@ -369,6 +370,12 @@ export type RedisEventStoreOptions = {
   readSettleTimeoutMs?: number;
   readCommandTimeoutMs?: number;
   closeSettleTimeoutMs?: number;
+  /**
+   * How long construction's own commands may take. Injectable only so a test
+   * does not spend the real budget in wall clock; production uses
+   * `REDIS_CONNECT_TIMEOUT_MS`.
+   */
+  startupTimeoutMs?: number;
   metricsCollector?: Pick<
     MetricsCollector,
     "declareEventStoreAppends" | "recordEventStoreAppendDropped"
@@ -547,112 +554,122 @@ export async function createRedisEventStore(
     );
   }
 
-  await mergeLegacyCountsIfNeeded();
+  // Bounded as ONE startup step. These commands run before the store exists,
+  // so none of the append chain's deadlines covers them — and bootstrap awaits
+  // the whole construction, so a Redis that completes the handshake and then
+  // stops answering would hang the process here with the socket already up,
+  // exactly as an unbounded `connect()` would (#271 review).
+  await startWithin(redis, runStartupMigration, options.startupTimeoutMs);
 
-  // Backfill cumulative counts from existing stream entries if the hash
-  // does not exist yet (first startup after upgrade).
-  const hashExists = await redis.exists(countsKey);
-  if (!hashExists) {
-    const allEntries = await redis.xrange(streamKey, "-", "+");
-    if (allEntries.length > 0) {
-      const counts = new Map<string, number>();
-      for (const [, fieldValues] of allEntries) {
-        for (let i = 0; i < fieldValues.length; i += 2) {
-          if (fieldValues[i] === "event" && fieldValues[i + 1]) {
-            const name = fieldValues[i + 1];
-            counts.set(name, (counts.get(name) ?? 0) + 1);
+  /** Hoisted, so the bounded call above can read top-down. */
+  async function runStartupMigration(): Promise<void> {
+    await mergeLegacyCountsIfNeeded();
+
+    // Backfill cumulative counts from existing stream entries if the hash
+    // does not exist yet (first startup after upgrade).
+    const hashExists = await redis.exists(countsKey);
+    if (!hashExists) {
+      const allEntries = await redis.xrange(streamKey, "-", "+");
+      if (allEntries.length > 0) {
+        const counts = new Map<string, number>();
+        for (const [, fieldValues] of allEntries) {
+          for (let i = 0; i < fieldValues.length; i += 2) {
+            if (fieldValues[i] === "event" && fieldValues[i + 1]) {
+              const name = fieldValues[i + 1];
+              counts.set(name, (counts.get(name) ?? 0) + 1);
+            }
           }
         }
-      }
-      if (counts.size > 0) {
-        const args: string[] = [];
-        for (const [name, count] of counts) {
-          args.push(name, String(count));
+        if (counts.size > 0) {
+          const args: string[] = [];
+          for (const [name, count] of counts) {
+            args.push(name, String(count));
+          }
+          await redis.hset(countsKey, ...args);
         }
-        await redis.hset(countsKey, ...args);
       }
     }
-  }
 
-  // Drop window indexes for event names that are no longer indexed. Nothing
-  // prunes those keys once appends stop touching them, so a deploy that
-  // narrows the allowlist would otherwise leave the old high-volume ZSETs
-  // (24h of per-heartbeat system events) in Redis forever. UNLINK reclaims
-  // them off the main thread. A node still running the previous version may
-  // recreate a key during a rolling restart; the next startup removes it.
-  {
-    let cursor = "0";
-    const staleKeys: string[] = [];
-    const literalKeyPrefix = `${windowIndexKeyPrefix}:`;
-    do {
-      const [nextCursor, keys] = await redis.scan(
-        cursor,
-        "MATCH",
-        `${escapeRedisGlob(windowIndexKeyPrefix)}:*`,
-        "COUNT",
-        100,
-      );
-      cursor = nextCursor;
-      for (const key of keys) {
-        // Literal-prefix backstop in case the glob escaping above ever
-        // diverges from Redis's matching rules.
-        if (!key.startsWith(literalKeyPrefix)) {
-          continue;
+    // Drop window indexes for event names that are no longer indexed. Nothing
+    // prunes those keys once appends stop touching them, so a deploy that
+    // narrows the allowlist would otherwise leave the old high-volume ZSETs
+    // (24h of per-heartbeat system events) in Redis forever. UNLINK reclaims
+    // them off the main thread. A node still running the previous version may
+    // recreate a key during a rolling restart; the next startup removes it.
+    {
+      let cursor = "0";
+      const staleKeys: string[] = [];
+      const literalKeyPrefix = `${windowIndexKeyPrefix}:`;
+      do {
+        const [nextCursor, keys] = await redis.scan(
+          cursor,
+          "MATCH",
+          `${escapeRedisGlob(windowIndexKeyPrefix)}:*`,
+          "COUNT",
+          100,
+        );
+        cursor = nextCursor;
+        for (const key of keys) {
+          // Literal-prefix backstop in case the glob escaping above ever
+          // diverges from Redis's matching rules.
+          if (!key.startsWith(literalKeyPrefix)) {
+            continue;
+          }
+          const encodedEventName = key.slice(literalKeyPrefix.length);
+          let eventName = encodedEventName;
+          try {
+            eventName = decodeURIComponent(encodedEventName);
+          } catch {
+            // Not produced by eventWindowIndexKey; treat the raw suffix as the
+            // event name so unknown keys under the prefix still get removed.
+          }
+          if (!isWindowIndexedEvent(eventName)) {
+            staleKeys.push(key);
+          }
         }
-        const encodedEventName = key.slice(literalKeyPrefix.length);
-        let eventName = encodedEventName;
-        try {
-          eventName = decodeURIComponent(encodedEventName);
-        } catch {
-          // Not produced by eventWindowIndexKey; treat the raw suffix as the
-          // event name so unknown keys under the prefix still get removed.
-        }
-        if (!isWindowIndexedEvent(eventName)) {
-          staleKeys.push(key);
-        }
+      } while (cursor !== "0");
+      if (staleKeys.length > 0) {
+        await redis.unlink(...staleKeys);
       }
-    } while (cursor !== "0");
-    if (staleKeys.length > 0) {
-      await redis.unlink(...staleKeys);
     }
-  }
 
-  // Backfill the window indexes from retained stream entries on every startup.
-  // ZADD by stream id is idempotent, so this cannot overwrite or double-count
-  // entries written concurrently by another node during a rolling restart.
-  {
-    const allEntries = await redis.xrange(streamKey, "-", "+");
-    if (allEntries.length > 0) {
-      const touchedEvents = new Map<string, number>();
-      const transaction = redis.multi();
-      for (const [id, fieldValues] of allEntries) {
-        const fields = parseStreamFields(fieldValues);
-        const eventName = fields.event;
-        const timestamp = fields.timestamp;
-        if (!eventName || !timestamp) continue;
-        if (!isWindowIndexedEvent(eventName)) continue;
-        const ts = Date.parse(timestamp);
-        if (!Number.isFinite(ts)) continue;
-        transaction.zadd(
-          eventWindowIndexKey(windowIndexKeyPrefix, eventName),
-          String(ts),
-          id,
-        );
-        touchedEvents.set(
-          eventName,
-          Math.max(
-            touchedEvents.get(eventName) ?? Number.NEGATIVE_INFINITY,
-            ts,
-          ),
-        );
-      }
-      if (touchedEvents.size > 0) {
-        await transaction.exec();
-        await Promise.all(
-          Array.from(touchedEvents, ([eventName, timestampMs]) =>
-            pruneEventWindowIndexIfNeeded(eventName, timestampMs),
-          ),
-        );
+    // Backfill the window indexes from retained stream entries on every startup.
+    // ZADD by stream id is idempotent, so this cannot overwrite or double-count
+    // entries written concurrently by another node during a rolling restart.
+    {
+      const allEntries = await redis.xrange(streamKey, "-", "+");
+      if (allEntries.length > 0) {
+        const touchedEvents = new Map<string, number>();
+        const transaction = redis.multi();
+        for (const [id, fieldValues] of allEntries) {
+          const fields = parseStreamFields(fieldValues);
+          const eventName = fields.event;
+          const timestamp = fields.timestamp;
+          if (!eventName || !timestamp) continue;
+          if (!isWindowIndexedEvent(eventName)) continue;
+          const ts = Date.parse(timestamp);
+          if (!Number.isFinite(ts)) continue;
+          transaction.zadd(
+            eventWindowIndexKey(windowIndexKeyPrefix, eventName),
+            String(ts),
+            id,
+          );
+          touchedEvents.set(
+            eventName,
+            Math.max(
+              touchedEvents.get(eventName) ?? Number.NEGATIVE_INFINITY,
+              ts,
+            ),
+          );
+        }
+        if (touchedEvents.size > 0) {
+          await transaction.exec();
+          await Promise.all(
+            Array.from(touchedEvents, ([eventName, timestampMs]) =>
+              pruneEventWindowIndexIfNeeded(eventName, timestampMs),
+            ),
+          );
+        }
       }
     }
   }

@@ -135,6 +135,8 @@ export type MetricsCollector = {
    * tell thirty failures from thirty million (#271 review).
    */
   observeRedisAdminSessionStoreFailure: (operation: string) => void;
+  /** An admin command bus command failed. Counted for every failure. */
+  observeRedisAdminCommandBusFailure: (operation: string) => void;
   observeRedisRoomEventBusPublishDuration: (durationMs: number) => void;
   observeRedisRoomEventBusPublishFailure: () => void;
   recordRoomEventPublishDropped: (eventType: RoomEventType) => void;
@@ -747,6 +749,12 @@ export function createMetricsCollector(options: {
     observeRedisAdminSessionStoreFailure(operation) {
       incrementCounter(redisFailureCounter, {
         component: "admin_session_store",
+        operation,
+      });
+    },
+    observeRedisAdminCommandBusFailure(operation) {
+      incrementCounter(redisFailureCounter, {
+        component: "admin_command_bus",
         operation,
       });
     },

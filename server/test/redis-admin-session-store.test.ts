@@ -256,3 +256,61 @@ test("an unreadable session stays a null, not a dependency outage", async () => 
   assert.equal(await store.get("token-id"), null);
   assert.equal(reportedCalls, 0);
 });
+
+test("a cleanup that fails does not turn an expired session into an outage", async () => {
+  // `HGETALL` already answered, and it said the session is expired — so the
+  // caller is unauthenticated and that answer is settled. The `DEL` after it is
+  // housekeeping; letting it throw would turn a determined 401 into a 503, the
+  // same "cleanup rejection thrown over a real result" the command bus's
+  // `finally` had (#271 review). The key keeps its own TTL, so the residue is
+  // bounded — but the failure is still reported.
+  const reported: string[] = [];
+  const redis = createFakeSessionRedis(async () => "OK", {
+    hgetall: async () => ({
+      id: "session-1",
+      adminId: "admin-1",
+      username: "admin",
+      role: "admin",
+      createdAt: "1",
+      expiresAt: "2",
+      lastSeenAt: "1",
+    }),
+    del: async () => {
+      throw new Error("Command timed out");
+    },
+  });
+  const store = await createRedisAdminSessionStore("redis://unused", {
+    redisClient: redis.client,
+    now: () => 1_000,
+    onCommandFailed: ({ operation }) => {
+      reported.push(operation);
+    },
+  });
+
+  assert.equal(await store.get("token-id"), null);
+  assert.deepEqual(reported, ["delete"]);
+});
+
+test("a connection that keeps failing is reset rather than left queueing", async () => {
+  // The backstop answers the caller and leaves the command in ioredis's queue,
+  // and this store has no admission or depth limit — so an unauthenticated
+  // caller retrying every five seconds adds one queued command per retry. Only
+  // closing the socket empties that queue (#271 review).
+  const drops: Array<{ consecutiveFailures: number }> = [];
+  const redis = createFakeSessionRedis(async () => "OK", {
+    hgetall: async () => {
+      throw new Error("Command timed out");
+    },
+  });
+  const store = await createRedisAdminSessionStore("redis://unused", {
+    redisClient: redis.client,
+    stallDropThreshold: 2,
+    onConnectionDropped: (info) => drops.push(info),
+  });
+
+  await assert.rejects(store.get("a"), AdminSessionStoreUnavailableError);
+  assert.deepEqual(drops, []);
+  await assert.rejects(store.get("b"), AdminSessionStoreUnavailableError);
+  assert.deepEqual(drops, [{ consecutiveFailures: 2 }]);
+  assert.equal(redis.disconnectCalls(), 1);
+});

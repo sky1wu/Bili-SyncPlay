@@ -272,18 +272,25 @@ test("a SUBSCRIBE that outlived its timeout is still unsubscribed", async () => 
   });
 
   try {
-    await assert.rejects(
-      bus.request(
-        {
-          kind: "kick_member",
-          requestId: "request-1",
-          targetInstanceId: "instance-1",
-          roomCode: "ABC123",
-          memberId: "member-1",
-          requestedAt: 1,
-        },
-        20,
-      ),
+    const result = await bus.request(
+      {
+        kind: "kick_member",
+        requestId: "request-1",
+        targetInstanceId: "instance-1",
+        roomCode: "ABC123",
+        memberId: "member-1",
+        requestedAt: 1,
+      },
+      20,
+    );
+
+    // A diagnosable result, not a rejection: `action-service` turns this into a
+    // 502 carrying the code, where a bare throw reached the router's catch-all
+    // and answered a Redis outage with `internal_error` (#271 review).
+    assert.equal(result.status, "error");
+    assert.equal(
+      result.status === "error" ? result.code : null,
+      "command_bus_unavailable",
     );
     assert.deepEqual(unsubscribed, ["result:request-1"]);
   } finally {

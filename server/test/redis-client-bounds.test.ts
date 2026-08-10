@@ -17,8 +17,10 @@ import test from "node:test";
 import {
   connectWithin,
   createBoundedRedisClient,
+  createStalledConnectionGuard,
   REDIS_COMMAND_TIMEOUT_MS,
   RedisConnectTimeoutError,
+  startWithin,
 } from "../src/redis-command-timeout.js";
 
 const sourceRoot = path.resolve(
@@ -237,4 +239,98 @@ test("a handshake that lands inside the budget is left alone", async () => {
     1_000,
   );
   assert.equal(disconnectCalls, 0);
+});
+
+test("a connection that keeps failing is reset, which is what empties ioredis's queue", () => {
+  // The companion every backstopped connection needs. `commandTimeout` answers
+  // the caller and leaves the command in `commandQueue`, and neither
+  // backstopped connection has an admission or depth limit — so a caller
+  // retrying every five seconds adds one queued command per retry, remotely,
+  // for as long as the stall lasts. Closing the socket is the only thing on
+  // this side that empties that queue (#271 review).
+  const disconnects: Array<boolean | undefined> = [];
+  const dropped: Array<{ consecutiveFailures: number }> = [];
+  const guard = createStalledConnectionGuard(
+    {
+      disconnect: (reconnect) => {
+        disconnects.push(reconnect);
+      },
+    },
+    { threshold: 3, onDropped: (info) => dropped.push(info) },
+  );
+
+  assert.equal(guard.recordFailure(), false);
+  assert.equal(guard.recordFailure(), false);
+  assert.equal(guard.recordFailure(), true);
+  // `disconnect(true)`, never a bare `disconnect()`: the latter sets
+  // `manuallyClosing` and retires the connection for good, which would turn a
+  // reset into an outage.
+  assert.deepEqual(disconnects, [true]);
+  assert.deepEqual(dropped, [{ consecutiveFailures: 3 }]);
+});
+
+test("one success is enough to say the connection is alive", () => {
+  // Consecutive, not cumulative. A connection returning the occasional error is
+  // not a connection that stopped answering, and resetting it would cost a
+  // reconnect for nothing.
+  let disconnectCalls = 0;
+  const guard = createStalledConnectionGuard(
+    {
+      disconnect: () => {
+        disconnectCalls += 1;
+      },
+    },
+    { threshold: 3 },
+  );
+
+  guard.recordFailure();
+  guard.recordFailure();
+  guard.recordSuccess();
+  guard.recordFailure();
+  guard.recordFailure();
+  assert.equal(disconnectCalls, 0);
+});
+
+test("the guard does not trip again on the wreckage of its own reset", () => {
+  // Dropping the socket rejects everything still queued, and each of those
+  // rejections comes back through `recordFailure`. Without resetting the count
+  // first, one stall would drop the socket once per threshold rejections.
+  let disconnectCalls = 0;
+  const guard = createStalledConnectionGuard(
+    {
+      disconnect: () => {
+        disconnectCalls += 1;
+      },
+    },
+    { threshold: 2 },
+  );
+
+  guard.recordFailure();
+  assert.equal(guard.recordFailure(), true);
+  assert.equal(guard.recordFailure(), false);
+  assert.equal(disconnectCalls, 1);
+});
+
+test("a startup step that never answers fails the process instead of hanging it", () => {
+  // `connectWithin` closes the handshake and nothing else. A store that
+  // migrates at construction issues ordinary commands before it exists, so its
+  // exemption's deadlines do not cover them — and bootstrap awaits the whole
+  // construction (#271 review).
+  let disconnectCalls = 0;
+  return startWithin(
+    {
+      quit: async () => "OK",
+      disconnect: () => {
+        disconnectCalls += 1;
+      },
+    },
+    () => new Promise(() => undefined),
+    20,
+  ).then(
+    () => assert.fail("startWithin should not resolve"),
+    (error: unknown) => {
+      assert.ok(error instanceof RedisConnectTimeoutError);
+      assert.equal(disconnectCalls, 1);
+    },
+  );
 });

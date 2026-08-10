@@ -19,6 +19,12 @@ function createFakeEventRedis(
     xadd?: () => Promise<string>;
     /** Injected the same way `xadd` is, so the read path gets a seam too. */
     xrevrange?: () => Promise<Array<[string, string[]]>>;
+    /**
+     * The startup backfill's first read. Injected so a test can model a Redis
+     * that completes the handshake and then stops answering — the failure the
+     * bounded construction exists for (#271 review).
+     */
+    exists?: () => Promise<number>;
   } = {},
 ): {
   client: RedisEventStoreClient;
@@ -70,7 +76,7 @@ function createFakeEventRedis(
     eval: () => command("eval", async () => 0),
     // 1, so construction skips the counts backfill — this fixture is about the
     // append path, and a startup that reads the stream would only add noise.
-    exists: () => command("exists", async () => 1),
+    exists: () => command("exists", options.exists ?? (async () => 1)),
     scan: () => command("scan", async () => ["0", []]),
     unlink: () => command("unlink", async () => 0),
     multi: () => multi,
@@ -740,4 +746,25 @@ test("a read that slipped past the check still ends in an answer", async () => {
     hungRead.release();
     await store.close();
   }
+});
+
+test("construction fails loudly when Redis stops answering after the handshake", async () => {
+  // `connectWithin` closes the handshake and nothing else. The counts migration
+  // and the window-index backfill are ordinary commands issued BEFORE the store
+  // exists, so none of the append chain's deadlines covers them — and bootstrap
+  // awaits the whole construction. Unbounded, this is a process that never
+  // starts listening and never says why (#271 review).
+  const redis = createFakeEventRedis({
+    exists: () => new Promise(() => undefined),
+  });
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    createStore(redis.client, { startupTimeoutMs: 20 }),
+    /not ready within/,
+  );
+  assert.ok(Date.now() - startedAt < 1_000);
+  // The socket goes with it: a half-connected client retrying behind a process
+  // that is already failing to start helps nobody.
+  assert.equal(redis.disconnectCalls(), 1);
 });

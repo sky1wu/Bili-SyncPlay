@@ -641,9 +641,24 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 - **它分不清"慢"和"死"。** 阈值被刻意放在普通时延之上很远，就是为了不把"只是落后的
   Redis"判成"失败的 Redis"。
 
-运维含义：Redis 停止应答时，这四条连接现在产出的是**失败的命令**而不是沉默。原本表现
-为"请求再也不返回"的故障，现在会表现为 `room_persist_failed`、
-`room_event_publish_failed` 和 `admin_session_store_command_failed`。
+运维含义：Redis 僵死时，三条设兜底的连接和五条豁免的连接**表现完全不同**，等错了信号
+就等于白烧一次故障处理时间：
+
+- **管理会话存储、管理命令总线**：产出的是**失败的命令**而不是沉默。会看到
+  `admin_session_store_command_failed`、`admin_command_bus_command_failed`、
+  `admin_command_result_publish_failed`，后台请求返回 503
+  `admin_session_store_unavailable`，跨节点动作返回 502 `command_bus_unavailable`，
+  以及
+  `bili_syncplay_redis_operation_failures_total{component="admin_session_store"|"admin_command_bus"}`
+  上涨。连续失败达到 `REDIS_STALL_DROP_THRESHOLD` 后 socket 会被重置，
+  `admin_command_bus_connection_reset` 会说出来——这次重置也正是清空 ioredis 命令队列的
+  唯一手段，兜底本身做不到。
+- **房间存储、运行时存储、房间事件总线、事件存储、审计存储**：命令仍挂在连接上，所以
+  信号来自**调用方**而不是命令：`room_reaper_sweep_timeout` 之后是
+  `room_reaper_sweep_stalled`、`node_heartbeat_failed`、
+  `redis_runtime_store_operation_failed`、事件存储的丢弃日志、审计与事件页的 503。而
+  没有调用方界的请求路径——join 上的 `get_room` / `update_room`、运行时存储的
+  `trackAwaitedOperation`——**保持沉默**，从外面看就是一次永远完不成的 WebSocket join。
 
 ## 变更后回归清单
 

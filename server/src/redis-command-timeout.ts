@@ -197,15 +197,33 @@ export async function connectWithin(
   connection: ClosableRedisConnection & { connect: () => Promise<unknown> },
   budgetMs: number = REDIS_CONNECT_TIMEOUT_MS,
 ): Promise<void> {
+  await startWithin(connection, () => connection.connect(), budgetMs);
+}
+
+/**
+ * Run one step of a store's construction under the same bound.
+ *
+ * `connectWithin` closes the handshake; it does not close everything bootstrap
+ * awaits. A store that migrates or backfills at construction issues ORDINARY
+ * commands before it exists, so they are covered by none of the caller-side
+ * deadlines its exemption names — and a Redis that completes the handshake and
+ * then stops answering hangs startup just as completely as one that never
+ * shook hands (#271 review).
+ */
+export async function startWithin(
+  connection: ClosableRedisConnection,
+  work: () => Promise<unknown>,
+  budgetMs: number = REDIS_CONNECT_TIMEOUT_MS,
+): Promise<void> {
   let failed: unknown;
-  const connecting = connection.connect().then(
+  const running = work().then(
     () => undefined,
     (error: unknown) => {
       failed = error;
     },
   );
 
-  if (!(await settleWithin(connecting, budgetMs))) {
+  if (!(await settleWithin(running, budgetMs))) {
     // Nothing can cancel the handshake, so the socket goes instead — leaving it
     // open would keep a half-connected client retrying behind a process that is
     // already failing to start.
@@ -219,4 +237,87 @@ export async function connectWithin(
   if (failed !== undefined) {
     throw failed;
   }
+}
+
+/**
+ * How many consecutive failures mark a backstopped connection as dead.
+ *
+ * Three, so an isolated error — a `WRONGTYPE`, one dropped packet — never
+ * costs a reconnect, while a connection that has stopped answering reaches it
+ * in one backstop window per failure.
+ */
+export const REDIS_STALL_DROP_THRESHOLD = 3;
+
+/** A connection that can be reset without being retired. */
+export type ResettableRedisConnection = {
+  /**
+   * `disconnect(true)` drops the socket AND leaves ioredis's retry strategy in
+   * place. Plain `disconnect()` sets `manuallyClosing`, which would retire the
+   * connection for good — the difference between a reset and an outage.
+   */
+  disconnect: (reconnect?: boolean) => void;
+};
+
+export type StalledConnectionGuard = {
+  /** A command answered. */
+  recordSuccess: () => void;
+  /** A command failed. Returns true when this failure dropped the socket. */
+  recordFailure: () => boolean;
+};
+
+/**
+ * The companion every backstopped connection needs.
+ *
+ * `commandTimeout` answers the CALLER and leaves the command in ioredis's
+ * `commandQueue`, where nothing this side of the socket can remove it. On a
+ * connection with no admission or depth limit — and neither of the two that
+ * take the backstop has one — that turns a half-open Redis into unbounded
+ * growth at the request rate: every caller is answered in five seconds, retries
+ * immediately, and leaves one more command behind (#271 review).
+ *
+ * A depth limit cannot be built on top of the backstop either, because after it
+ * fires a settled command and a queued one look the same from here. What DOES
+ * empty the queue is closing the socket: ioredis's close handler flushes
+ * `commandQueue`, rejecting what is left, and then reconnects. So the bound on
+ * the real queue is "a connection that keeps failing gets reset", and that is
+ * this.
+ *
+ * Consecutive, not cumulative: the count is what distinguishes a connection
+ * that has stopped answering from one that is merely returning errors, and a
+ * single success is enough to say it is alive.
+ */
+export function createStalledConnectionGuard(
+  connection: ResettableRedisConnection,
+  options: {
+    threshold?: number;
+    /** The socket was dropped. Bounded and silent is not the trade here. */
+    onDropped?: (info: { consecutiveFailures: number }) => void;
+  } = {},
+): StalledConnectionGuard {
+  const threshold = options.threshold ?? REDIS_STALL_DROP_THRESHOLD;
+  let consecutiveFailures = 0;
+
+  return {
+    recordSuccess() {
+      consecutiveFailures = 0;
+    },
+    recordFailure() {
+      consecutiveFailures += 1;
+      if (consecutiveFailures < threshold) {
+        return false;
+      }
+      const dropped = consecutiveFailures;
+      // Reset first: the drop itself rejects everything still queued, and each
+      // of those rejections comes back through here. Without this the guard
+      // would trip again on the wreckage of its own reset.
+      consecutiveFailures = 0;
+      try {
+        connection.disconnect(true);
+      } catch {
+        // The report below is what the operator acts on.
+      }
+      options.onDropped?.({ consecutiveFailures: dropped });
+      return true;
+    },
+  };
 }

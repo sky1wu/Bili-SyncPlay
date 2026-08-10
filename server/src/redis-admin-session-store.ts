@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { AdminRole, AdminSession } from "./admin/types.js";
 import type { AdminSessionStore } from "./admin-session-store.js";
-import { createBoundedRedisClient } from "./redis-command-timeout.js";
+import {
+  createBoundedRedisClient,
+  createStalledConnectionGuard,
+} from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 
 const DEFAULT_ADMIN_SESSION_KEY_PREFIX = "bsp:admin:session:";
@@ -34,8 +37,13 @@ export type RedisAdminSessionStoreMulti = {
 export type RedisAdminSessionStoreClient = {
   connect: () => Promise<unknown>;
   quit: () => Promise<unknown>;
-  /** Tears the socket down without waiting for a reply. Synchronous. */
-  disconnect: () => void;
+  /**
+   * Tears the socket down without waiting for a reply. Synchronous.
+   *
+   * `disconnect(true)` keeps ioredis's retry strategy, which is what makes it a
+   * reset rather than a retirement; the shutdown path calls it with no argument.
+   */
+  disconnect: (reconnect?: boolean) => void;
   del: (key: string) => Promise<unknown>;
   hgetall: (key: string) => Promise<Record<string, string>>;
   multi: () => RedisAdminSessionStoreMulti;
@@ -129,6 +137,14 @@ export async function createRedisAdminSessionStore(
       operation: AdminSessionStoreOperation;
       error: unknown;
     }) => void;
+    /** Injectable so a test does not have to spend three real failures. */
+    stallDropThreshold?: number;
+    /**
+     * The socket was dropped after repeated failures, and ioredis is
+     * reconnecting. One line per reset, which is at most one per
+     * `stallDropThreshold` failures.
+     */
+    onConnectionDropped?: (info: { consecutiveFailures: number }) => void;
     redisClient?: RedisAdminSessionStoreClient;
   } = {},
 ): Promise<AdminSessionStore & { close: () => Promise<void> }> {
@@ -147,6 +163,17 @@ export async function createRedisAdminSessionStore(
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const keyPrefix = options.keyPrefix ?? DEFAULT_ADMIN_SESSION_KEY_PREFIX;
   const now = options.now ?? Date.now;
+  /**
+   * The backstop answers the caller and leaves the command in ioredis's queue,
+   * and this store has no admission or depth limit — so an unauthenticated
+   * caller retrying every five seconds would add one queued command per retry
+   * for as long as the stall lasts. Closing the socket is the only thing on
+   * this side that empties that queue (#271 review).
+   */
+  const guard = createStalledConnectionGuard(redis, {
+    threshold: options.stallDropThreshold,
+    onDropped: options.onConnectionDropped,
+  });
 
   await redis.connect();
 
@@ -160,8 +187,11 @@ export async function createRedisAdminSessionStore(
     call: () => Promise<T>,
   ): Promise<T> {
     try {
-      return await call();
+      const result = await call();
+      guard.recordSuccess();
+      return result;
     } catch (error) {
+      guard.recordFailure();
       options.onCommandFailed?.({ operation, error });
       throw new AdminSessionStoreUnavailableError(operation);
     }
@@ -218,9 +248,20 @@ export async function createRedisAdminSessionStore(
       }
 
       if (expiresAt <= now()) {
-        await guarded("delete", () =>
-          redis.del(sessionKey(keyPrefix, tokenId)),
-        );
+        // The ANSWER is already settled: this session is expired, so the caller is
+        // unauthenticated. The delete is housekeeping on top of it, and letting
+        // its failure throw would turn a determined 401 into a 503 — a cleanup
+        // rejection thrown over a real result, which is the same mistake as the
+        // command bus's `finally` (#271 review). Reported, not swallowed: the
+        // key keeps its own TTL, so the residue is bounded, but a connection
+        // that cannot delete is still worth a line.
+        try {
+          await redis.del(sessionKey(keyPrefix, tokenId));
+          guard.recordSuccess();
+        } catch (error) {
+          guard.recordFailure();
+          options.onCommandFailed?.({ operation: "delete", error });
+        }
         return null;
       }
 
