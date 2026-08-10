@@ -157,6 +157,14 @@ single predicate that states it (`video-identity.ts`):
   the address bar's `ep396139` wearing the previous episode's title. Whatever the
   contradiction reaches, discard; and discard the record, not the field today's
   caller happens to read.
+- **A refuted title is refuted wherever it appears.** Dropping the highlighted
+  item's title accomplishes nothing while `h1` and `document.title` still carry
+  the same string — they are page globals lagging the same switch, so the
+  resolver steps from one onto the next and rebuilds the hybrid record. The
+  proven-stale strings go to `resolveSharedVideoTitle` as `refutedTitles`, which
+  skips every candidate equal to one. And when that exhausts the list, the label
+  becomes the episode id: blank would be worse than plain, but the previous
+  episode's name is worse than either, because it is the only one that is false.
 - **Using an identity takes confirmation; discarding a record takes proof.**
   These are two different bars and the codebase carries two predicates for them,
   `lacksAddressBarEpisodeConfirmation` and `contradictsAddressBarEpisode`. On an

@@ -39,6 +39,18 @@ export interface PageVideoSource {
    * until the bridge resolves that is the only identity available.
    */
   addressBarIdentityRefuted?: boolean;
+  /**
+   * Titles PROVEN to name the video this page has already left — on
+   * `/bangumi/play/epNNN`, the previous episode's (#274).
+   *
+   * Refuting only the source that carried the proof is not enough: the title
+   * sources below are all page globals lagging the same SPA episode switch, so
+   * the resolver would step from the highlighted list item onto an `h1` holding
+   * the identical string and rebuild the record the refutation existed to
+   * prevent — the new episode's `videoId` wearing the old episode's name. A
+   * refuted title is refuted wherever it turns up.
+   */
+  refutedTitles?: readonly string[];
 }
 
 export interface VideoPlaybackSnapshot {
@@ -78,22 +90,35 @@ export function resolvePageSharedVideo(
   return {
     videoId: fallbackVideoRef.videoId,
     url: fallbackVideoRef.normalizedUrl,
-    title: resolveSharedVideoTitle(source),
+    // When every title on the page is refuted, the identity itself is the only
+    // truthful label left. Blank would be worse than plain: `ep396139` says
+    // nothing false, whereas the previous episode's name does.
+    title: resolveSharedVideoTitle(source) || fallbackVideoRef.videoId,
   };
 }
 
 export function resolveSharedVideoTitle(
   source: Pick<
     PageVideoSource,
-    "documentTitle" | "headingTitle" | "currentPartTitle"
+    "documentTitle" | "headingTitle" | "currentPartTitle" | "refutedTitles"
   >,
 ): string {
-  return (
-    source.currentPartTitle ||
-    source.headingTitle ||
-    source.documentTitle.split("_")[0]?.trim() ||
-    source.documentTitle.trim()
+  const refutedTitles = new Set(
+    (source.refutedTitles ?? []).map((title) => title.trim()).filter(Boolean),
   );
+  const candidates = [
+    source.currentPartTitle,
+    source.headingTitle,
+    source.documentTitle.split("_")[0],
+    source.documentTitle,
+  ];
+  for (const candidate of candidates) {
+    const title = candidate?.trim();
+    if (title && !refutedTitles.has(title)) {
+      return title;
+    }
+  }
+  return "";
 }
 
 /**

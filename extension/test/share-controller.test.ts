@@ -1345,3 +1345,143 @@ test("bangumi season page still accepts a snapshot that names no episode", async
     dom.restore();
   }
 });
+
+test("bangumi ep page does not step from the refuted list item onto an equally stale h1", async () => {
+  // Dropping the item's title accomplishes nothing if `h1` carries the same
+  // string: the resolver walks straight onto the next lagging page global and
+  // rebuilds the hybrid record — ep396139 wearing "44 连影".
+  const dom = installDomStub({
+    href: EP_PAGE_HREF,
+    pathname: "/bangumi/play/ep396139",
+    title: "45 某话_番剧_bilibili",
+    currentPartTitle: "44 连影",
+    currentPartEpId: "ep396138",
+    headingTitle: "44 连影",
+    video: {
+      currentTime: 0.27,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => null,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "ep396139");
+    assert.equal(payload?.video.title, "45 某话");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("bangumi ep page refutes a title proven stale by a snapshot, in every source", async () => {
+  // Same hole reached the other way: the list item carries no episode id, so the
+  // cached snapshot is what proves the title stale — and `h1` repeats it.
+  const dom = installDomStub({
+    href: EP_PAGE_HREF,
+    pathname: "/bangumi/play/ep396139",
+    title: "45 某话_番剧_bilibili",
+    currentPartTitle: "44 连影",
+    currentPartCid: "1200334",
+    headingTitle: "44 连影",
+    video: {
+      currentTime: 0.27,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => null,
+    getFestivalSnapshot: () => ({
+      videoId: "ep396138",
+      url: "https://www.bilibili.com/bangumi/play/ep396138",
+      title: "44 连影",
+      updatedAt: Date.now(),
+      epId: "ep396138",
+      cid: "1200334",
+      pathname: "/bangumi/play/ep396139",
+      pageUrl: EP_PAGE_HREF,
+    }),
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "ep396139");
+    assert.equal(payload?.video.title, "45 某话");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("bangumi ep page labels itself with its episode id when every title is refuted", async () => {
+  // The end of that chain: `document.title` lags too, so nothing truthful is
+  // left. Blank would be worse than plain — `ep396139` says nothing false,
+  // whereas the previous episode's name does.
+  const dom = installDomStub({
+    href: EP_PAGE_HREF,
+    pathname: "/bangumi/play/ep396139",
+    title: "44 连影",
+    currentPartTitle: "44 连影",
+    currentPartEpId: "ep396138",
+    headingTitle: "44 连影",
+    video: {
+      currentTime: 0.27,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => null,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "ep396139");
+    assert.equal(payload?.video.title, "ep396139");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("an agreeing list item keeps its title even when h1 repeats it", async () => {
+  // Reverse polarity: nothing is refuted here, so a page whose `h1` happens to
+  // match the list item must not lose its title.
+  const dom = installDomStub({
+    href: EP_PAGE_HREF,
+    pathname: "/bangumi/play/ep396139",
+    title: "45 某话_番剧_bilibili",
+    currentPartTitle: "45 某话 连影",
+    currentPartEpId: "ep396139",
+    headingTitle: "45 某话 连影",
+    video: {
+      currentTime: 0.27,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => null,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "ep396139");
+    assert.equal(payload?.video.title, "45 某话 连影");
+  } finally {
+    dom.restore();
+  }
+});

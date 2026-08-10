@@ -201,6 +201,12 @@ export function createShareController(args: {
     );
   }
 
+  /**
+   * The episode list's highlighted item, exactly as the DOM has it. Whether it
+   * is stale is decided by {@link getSharedVideo}, which is the only place that
+   * sees both ways of proving it — the item contradicting the address bar
+   * itself, and a snapshot that matched it doing so on its behalf (#274).
+   */
   function getCurrentPartIdentity(): CurrentPartIdentity {
     const active = document.querySelector<HTMLElement>(
       [
@@ -224,29 +230,13 @@ export function createShareController(args: {
       active?.getAttribute("data-episodeid") ??
       active?.getAttribute("data-epid") ??
       null;
-    const title = active?.textContent?.trim() || null;
-    const epId = rawEpId
-      ? rawEpId.startsWith("ep")
-        ? rawEpId
-        : `ep${rawEpId}`
-      : null;
-    // The highlighted list item is a page global like any other, so on
-    // `/bangumi/play/epNNN` it lags an SPA episode switch too (#274). When it
-    // names another episode, none of its three fields describe the current one:
-    // the title would go out on the new episode's identity, and the cid would
-    // match a cached snapshot of the previous one. Refute the whole item, not
-    // just the part that happens to be compared.
-    if (
-      contradictsAddressBarEpisode({
-        pathname: window.location.pathname,
-        episodeId: epId,
-      })
-    ) {
-      return { title: null, epId: null, cid: null };
-    }
     return {
-      title,
-      epId,
+      title: active?.textContent?.trim() || null,
+      epId: rawEpId
+        ? rawEpId.startsWith("ep")
+          ? rawEpId
+          : `ep${rawEpId}`
+        : null,
       cid: active?.getAttribute("data-cid") ?? null,
     };
   }
@@ -330,19 +320,42 @@ export function createShareController(args: {
     const festivalSnapshot = args.getFestivalSnapshot();
     const pathname = window.location.pathname;
     const pageUrl = window.location.href.split("#")[0];
-    const currentPart = getCurrentPartIdentity();
+    // Two independent ways the highlighted item is proven to name the previous
+    // episode (#274): it contradicts the address bar itself, or a snapshot that
+    // describes the same record does. Either way the whole item goes, not the
+    // field today's caller happens to read.
+    const observedPart = getCurrentPartIdentity();
+    const partContradictsAddressBar = contradictsAddressBarEpisode({
+      pathname,
+      episodeId: observedPart.epId,
+    });
+    const currentPart: CurrentPartIdentity = partContradictsAddressBar
+      ? { title: null, epId: null, cid: null }
+      : observedPart;
     const cachedSnapshotMatch = matchCachedPageSnapshot({
       pathname,
       pageUrl,
       snapshot: festivalSnapshot,
       currentPart,
     });
-    // Refute the record, not the field that happens to be read today — the same
-    // rule `getCurrentPartIdentity` applies when the item refutes itself (#274).
-    const resolvedCurrentPart: CurrentPartIdentity =
+    const currentPartRefuted =
+      partContradictsAddressBar || cachedSnapshotMatch.refutesCurrentPart;
+    const resolvedCurrentPart: CurrentPartIdentity = currentPartRefuted
+      ? { title: null, epId: null, cid: null }
+      : currentPart;
+    // Dropping the item's title accomplishes nothing while `h1` and
+    // `document.title` still carry the same string — the title resolver would
+    // step straight onto the next lagging page global and rebuild the hybrid
+    // record. A title proven to belong to the previous episode is refuted
+    // wherever it appears, so hand the resolver the strings themselves.
+    const refutedTitles = [
+      currentPartRefuted ? observedPart.title : null,
+      // Only the snapshot that did the refuting is itself proven stale; one that
+      // merely failed to describe this page says nothing about its own title.
       cachedSnapshotMatch.refutesCurrentPart
-        ? { title: null, epId: null, cid: null }
-        : currentPart;
+        ? (festivalSnapshot?.title ?? null)
+        : null,
+    ].filter((title): title is string => Boolean(title));
     const matchingFestivalSnapshot =
       festivalSnapshot && cachedSnapshotMatch.usable
         ? {
@@ -360,6 +373,7 @@ export function createShareController(args: {
       documentTitle: document.title,
       headingTitle: document.querySelector("h1")?.textContent?.trim() ?? null,
       currentPartTitle: resolvedCurrentPart.title,
+      refutedTitles,
       pageSnapshot: matchingFestivalSnapshot,
       festivalSnapshot: matchingFestivalSnapshot,
       addressBarIdentityRefuted: hasRefutedAddressBarIdentity(pageUrl),
