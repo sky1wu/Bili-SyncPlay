@@ -297,6 +297,7 @@ curl -fsS http://10.0.0.11:8788/readyz
 | 活跃房间数异常下降                             | `bili_syncplay_active_rooms`、`bili_syncplay_rooms_non_expired`                | Redis 连通性、房间过期配置、重启记录                   | 恢复 Redis，确认 `ROOM_STORE_PROVIDER` 未被改为内存  |
 | 过期房间不再被回收（reaper 停摆）              | `bili_syncplay_room_reaper_sweeps_total`                                       | 见 [reaper 还在扫吗？](#reaper-还在扫吗)               | 恢复 Redis；确认 `ROOM_CLEANUP_INTERVAL_MS` 未被调大 |
 | Redis 操作失败                                 | `bili_syncplay_redis_operation_failures_total`                                 | Redis 进程、网络、ACL、密码、慢查询                    | 优先恢复 Redis；必要时执行应急降级                   |
+| 已完成的管理命令结果发布路径失败               | `bili_syncplay_admin_command_result_publish_failures_total`                    | 管理命令 publisher 饱和、Redis pub/sub、结果发布日志   | 恢复 Redis；确认关房扇出和命令总线容量健康           |
 | Redis runtime store 延迟升高                   | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                    | Redis CPU、内存、网络 RTT、命令排队                    | 扩容 Redis 或降低入口层流量                          |
 | Redis room event bus publish 延迟或失败        | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`、失败计数 | Redis pub/sub 连通性、网络抖动、Room Node 日志         | 恢复 Redis 与网络；验证跨节点播放同步                |
 | 连接被拒绝增加                                 | `bili_syncplay_ws_connection_rejected_total`、结构化日志 `origin_not_allowed`  | `ALLOWED_ORIGINS`、入口层是否改写 Origin               | 修正 Origin 白名单或反代配置                         |
@@ -304,7 +305,7 @@ curl -fsS http://10.0.0.11:8788/readyz
 | 消息处理耗时升高                               | `bili_syncplay_message_handler_duration_seconds_bucket`                        | Node CPU、Redis 延迟、房间成员数、日志中的错误         | 限流、扩容 Room Node、排查慢 Redis                   |
 | Global Admin 看不到某个节点或节点显示过期      | Global Admin 概览、`node_heartbeat_failed` 日志                                | `NODE_HEARTBEAT_ENABLED`、`INSTANCE_ID`、Redis runtime | 修复心跳配置或 Redis runtime store                   |
 | 后台登录失败或频繁要求重新登录                 | `/api/admin/auth/login` 响应、审计日志                                         | `ADMIN_PASSWORD_HASH`、`ADMIN_SESSION_SECRET` 是否一致 | 同步 admin 认证配置并重启                            |
-| 跨节点房间动作失败，例如踢人或关闭房间返回 502 | 审计日志、`ADMIN_COMMAND_BUS_PROVIDER`、目标节点心跳                           | 管理命令总线、目标 `INSTANCE_ID`、Redis                | 恢复 Redis command bus 或在目标节点本地操作          |
+| 跨节点房间动作失败，例如踢人或关闭房间返回 503 | 审计日志、`ADMIN_COMMAND_BUS_PROVIDER`、目标节点心跳                           | 管理命令总线、目标 `INSTANCE_ID`、Redis                | 恢复 Redis command bus 或在目标节点本地操作          |
 
 ### reaper 还在扫吗？
 
@@ -647,10 +648,13 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 - **管理会话存储、管理命令总线**：产出的是**失败的命令**而不是沉默。会看到
   `admin_session_store_command_failed`、`admin_command_bus_command_failed`、
   `admin_command_result_publish_failed`，后台请求返回 503
-  `admin_session_store_unavailable`，跨节点动作返回 502 `command_bus_unavailable`，
+  `admin_session_store_unavailable`，跨节点动作返回 503 `command_bus_unavailable`，
   以及
   `bili_syncplay_redis_operation_failures_total{component="admin_session_store"|"admin_command_bus"}`
-  上涨。连续失败达到 `REDIS_STALL_DROP_THRESHOLD` 后 socket 会被重置，
+  上涨。`bili_syncplay_admin_command_result_publish_failures_total` 会统计每一条结果/fallback
+  发布路径以失败结束的已完成命令，包括从未成为 Redis 操作的 publisher 准入拒绝。它不是端到端
+  送达丢失计数：超时的 `PUBLISH` 仍可能稍后落地。连续失败达到
+  `REDIS_STALL_DROP_THRESHOLD` 后 socket 会被重置，
   `admin_command_bus_connection_reset` 会说出来——这次重置也正是清空 ioredis 命令队列的
   唯一手段，兜底本身做不到。
 - **房间存储、运行时存储、房间事件总线、事件存储、审计存储**：命令仍挂在连接上，所以
@@ -668,4 +672,5 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 - Global Admin 可登录，并能查看概览、房间、事件和审计日志。
 - 测试房间上的 `disconnect session`、`kick member`、`close room` 动作符合预期。
 - `bili_syncplay_redis_operation_failures_total` 无持续增长。
+- `bili_syncplay_admin_command_result_publish_failures_total` 无增长。
 - 入口层 upstream 与实际在线节点列表一致。

@@ -18,7 +18,8 @@ const MAX_TRACKED_COMMAND_BUS_FAILURE_DIAGNOSES = 16;
 export function createAdminCommandBusFailureHandlers(options: {
   metricsCollector: Pick<
     MetricsCollector,
-    "observeRedisAdminCommandBusFailure"
+    | "observeRedisAdminCommandBusFailure"
+    | "recordAdminCommandResultPublishFailure"
   >;
   getLogEvent: () => LogEvent;
   instanceId: string;
@@ -32,9 +33,13 @@ export function createAdminCommandBusFailureHandlers(options: {
 
   return {
     onResultPublishFailed(command: AdminCommand, error: unknown) {
-      // The failed Redis operations were already counted by
-      // onBusCommandFailed. This terminal callback describes a different fact:
-      // neither the result nor its fallback reached the requester.
+      // This is a terminal publish-path counter, not a Redis-operation counter.
+      // Admission can refuse both attempts before either reaches Redis. A
+      // timed-out PUBLISH can still land later, so do not claim this callback
+      // proves end-to-end result loss: Redis Pub/Sub has no delivery receipt.
+      options.metricsCollector.recordAdminCommandResultPublishFailure(
+        command.kind,
+      );
       if (!throttle.allow(`result:${command.kind}`)) {
         return;
       }

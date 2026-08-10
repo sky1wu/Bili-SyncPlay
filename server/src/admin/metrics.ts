@@ -5,6 +5,10 @@ import {
   PerformanceObserver,
   type PerformanceEntry,
 } from "node:perf_hooks";
+import {
+  ADMIN_COMMAND_KINDS,
+  type AdminCommandKind,
+} from "../admin-command-bus.js";
 import type { RuntimeStore } from "../runtime-store.js";
 import type { RoomStore } from "../room-store.js";
 import { ROOM_EVENT_TYPES, type RoomEventType } from "../room-event-bus.js";
@@ -137,6 +141,10 @@ export type MetricsCollector = {
   observeRedisAdminSessionStoreFailure: (operation: string) => void;
   /** An admin command bus command failed. Counted for every failure. */
   observeRedisAdminCommandBusFailure: (operation: string) => void;
+  /** A completed admin command whose result publish path ended in failure. */
+  recordAdminCommandResultPublishFailure: (
+    commandKind: AdminCommandKind,
+  ) => void;
   observeRedisRoomEventBusPublishDuration: (durationMs: number) => void;
   observeRedisRoomEventBusPublishFailure: () => void;
   recordRoomEventPublishDropped: (eventType: RoomEventType) => void;
@@ -299,6 +307,10 @@ export function createMetricsCollector(options: {
     help: "Total room event publishes dropped after backpressure timeout, grouped by event type",
     samples: new Map(),
   };
+  const adminCommandResultPublishFailureCounter: CounterMetric = {
+    help: "Total completed admin commands whose result publish path ended in failure, grouped by command kind",
+    samples: new Map(),
+  };
   const roomsExpiredDeletedCounter: CounterMetric = {
     help: "Total rooms deleted after expiry, by a reaper sweep or by the lazy read path",
     samples: new Map(),
@@ -375,6 +387,11 @@ export function createMetricsCollector(options: {
       event_type: eventType,
     });
   }
+  for (const commandKind of ADMIN_COMMAND_KINDS) {
+    ensureCounterSample(adminCommandResultPublishFailureCounter, {
+      command_kind: commandKind,
+    });
+  }
 
   function incrementCounter(
     metric: CounterMetric,
@@ -421,6 +438,11 @@ export function createMetricsCollector(options: {
       roomEventPublishDroppedCounter.samples.values(),
     ).sort((a, b) =>
       (a.labels.event_type ?? "").localeCompare(b.labels.event_type ?? ""),
+    );
+    const adminCommandResultPublishFailureSamples = Array.from(
+      adminCommandResultPublishFailureCounter.samples.values(),
+    ).sort((a, b) =>
+      (a.labels.command_kind ?? "").localeCompare(b.labels.command_kind ?? ""),
     );
     const rateLimitedSamples = Array.from(
       rateLimitedCounter.samples.values(),
@@ -648,6 +670,15 @@ export function createMetricsCollector(options: {
           sample.labels,
         ),
       ),
+      "# HELP bili_syncplay_admin_command_result_publish_failures_total Total completed admin commands whose result publish path ended in failure, grouped by command kind",
+      "# TYPE bili_syncplay_admin_command_result_publish_failures_total counter",
+      ...adminCommandResultPublishFailureSamples.map((sample) =>
+        formatMetricLine(
+          "bili_syncplay_admin_command_result_publish_failures_total",
+          sample.value,
+          sample.labels,
+        ),
+      ),
       "# HELP bili_syncplay_room_event_publish_dropped_total Total room event publishes dropped after backpressure timeout, grouped by event type",
       "# TYPE bili_syncplay_room_event_publish_dropped_total counter",
       ...roomEventPublishDroppedSamples.map((sample) =>
@@ -756,6 +787,11 @@ export function createMetricsCollector(options: {
       incrementCounter(redisFailureCounter, {
         component: "admin_command_bus",
         operation,
+      });
+    },
+    recordAdminCommandResultPublishFailure(commandKind) {
+      incrementCounter(adminCommandResultPublishFailureCounter, {
+        command_kind: commandKind,
       });
     },
     observeRedisRoomEventBusPublishDuration(durationMs) {

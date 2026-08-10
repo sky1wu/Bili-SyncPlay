@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { RedisCommandAdmissionError } from "../src/redis-command-timeout.js";
 import { createRedisAdminCommandBus } from "../src/redis-admin-command-bus.js";
 import { createFakeRedisPubSubClient } from "./redis-pubsub-test-helpers.js";
 
@@ -242,6 +243,86 @@ test("a fallback result that cannot be published is reported, not thrown at the 
     assert.deepEqual(unhandled, []);
   } finally {
     process.off("unhandledRejection", onUnhandled);
+    await bus.close();
+  }
+});
+
+test("publisher admission refusal reports every terminal result-publish failure", async () => {
+  let releaseBlockingPublish = (): void => {};
+  const blockingPublish = new Promise<void>((resolve) => {
+    releaseBlockingPublish = resolve;
+  });
+  let markBlockingPublishStarted = (): void => {};
+  const blockingPublishStarted = new Promise<void>((resolve) => {
+    markBlockingPublishStarted = resolve;
+  });
+  let publishCalls = 0;
+  const publisher = createFakeRedisPubSubClient(async () => "OK", {
+    publish: async () => {
+      publishCalls += 1;
+      markBlockingPublishStarted();
+      await blockingPublish;
+      return 1;
+    },
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => "OK");
+  const reported: Array<{ requestId: string; error: unknown }> = [];
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    commandChannelPrefix: "cmd:",
+    resultChannelPrefix: "result:",
+    maxPendingCommandsPerConnection: 1,
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+    onResultPublishFailed: (command, error) => {
+      reported.push({ requestId: command.requestId, error });
+    },
+  });
+
+  let occupyingRequest: Promise<unknown> | undefined;
+  try {
+    await bus.subscribe("instance-1", async (command) => ({
+      requestId: command.requestId,
+      targetInstanceId: command.targetInstanceId,
+      executorInstanceId: "instance-1",
+      status: "ok",
+      roomCode: null,
+      completedAt: 1,
+    }));
+    occupyingRequest = bus.request(
+      {
+        kind: "disconnect_session",
+        requestId: "occupying-request",
+        targetInstanceId: "other-instance",
+        sessionId: "other-session",
+        requestedAt: 1,
+      },
+      20,
+    );
+    await blockingPublishStarted;
+
+    subscriber.emitMessage(
+      "cmd:instance-1",
+      JSON.stringify({
+        kind: "disconnect_session",
+        requestId: "publish-failure-request",
+        targetInstanceId: "instance-1",
+        sessionId: "session-1",
+        requestedAt: 1,
+      }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(publishCalls, 1);
+    assert.equal(reported.length, 1);
+    assert.equal(reported[0]?.requestId, "publish-failure-request");
+    assert.ok(reported[0]?.error instanceof RedisCommandAdmissionError);
+  } finally {
+    releaseBlockingPublish();
+    await occupyingRequest;
     await bus.close();
   }
 });

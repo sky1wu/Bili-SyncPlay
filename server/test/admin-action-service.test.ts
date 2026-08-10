@@ -74,6 +74,7 @@ function createService(options: {
   deleteRuntimeRoom?: (roomCode: string) => void;
   publishRoomDeleted?: (roomCode: string) => Promise<void>;
   auditLogService?: ReturnType<typeof createAuditLogService>;
+  maxFanoutConcurrency?: number;
 }) {
   const auditLogService = options.auditLogService ?? createAuditLogService();
   return createAdminActionService({
@@ -114,6 +115,7 @@ function createService(options: {
     publishRoomDeleted: options.publishRoomDeleted ?? (async () => {}),
     logEvent: () => {},
     now: () => 10_000,
+    maxFanoutConcurrency: options.maxFanoutConcurrency,
   });
 }
 
@@ -307,7 +309,7 @@ test("admin action service keeps room state when closeRoom cannot disconnect eve
   assert.equal(auditLogs.items[0]?.reason, "command_failed");
 });
 
-test("admin closeRoom batches rooms larger than the command bus capacity", async () => {
+test("admin closeRoom stays within its shared fan-out budget", async () => {
   const sessions = Array.from(
     { length: ADMIN_COMMAND_FANOUT_CONCURRENCY * 2 + 1 },
     (_, index) =>
@@ -345,6 +347,98 @@ test("admin closeRoom batches rooms larger than the command bus capacity", async
   assert.equal(result.disconnectedSessionCount, sessions.length);
   assert.equal(calls, sessions.length);
   assert.equal(maxInFlight, ADMIN_COMMAND_FANOUT_CONCURRENCY);
+});
+
+test("concurrent closeRoom calls share one fan-out budget without blocking single actions", async () => {
+  const sessions = Array.from({ length: 3 }, (_, index) =>
+    createSession({
+      id: `room-session-${index}`,
+      memberId: `room-member-${index}`,
+    }),
+  );
+  const directSession = createSession({
+    id: "direct-session",
+    memberId: "direct-member",
+  });
+  let releaseFanout = (): void => {};
+  const fanoutBlocked = new Promise<void>((resolve) => {
+    releaseFanout = resolve;
+  });
+  let markFanoutCapacityReached = (): void => {};
+  const fanoutCapacityReached = new Promise<void>((resolve) => {
+    markFanoutCapacityReached = resolve;
+  });
+  let markDirectCommandStarted = (): void => {};
+  const directCommandStarted = new Promise<void>((resolve) => {
+    markDirectCommandStarted = resolve;
+  });
+  let fanoutInFlight = 0;
+  let maxFanoutInFlight = 0;
+  const service = createService({
+    session: directSession,
+    sessionsByRoom: sessions,
+    maxFanoutConcurrency: 2,
+    requestAdminCommand: async (command) => {
+      if (command.requestId.startsWith("close-room:")) {
+        fanoutInFlight += 1;
+        maxFanoutInFlight = Math.max(maxFanoutInFlight, fanoutInFlight);
+        if (fanoutInFlight === 2) {
+          markFanoutCapacityReached();
+        }
+        await fanoutBlocked;
+        fanoutInFlight -= 1;
+      } else {
+        markDirectCommandStarted();
+      }
+      return {
+        requestId: command.requestId,
+        targetInstanceId: command.targetInstanceId,
+        executorInstanceId: command.targetInstanceId,
+        status: "ok",
+        roomCode: null,
+        sessionId:
+          command.kind === "disconnect_session" ? command.sessionId : undefined,
+        completedAt: 10_004,
+      };
+    },
+  });
+  const closeCalls = [
+    service.closeRoom(ACTOR, "ROOM01", "shutdown"),
+    service.closeRoom(ACTOR, "ROOM02", "shutdown"),
+    service.closeRoom(ACTOR, "ROOM03", "shutdown"),
+  ];
+
+  try {
+    await fanoutCapacityReached;
+    const directCall = service.disconnectSession(
+      ACTOR,
+      directSession.id,
+      "cleanup",
+    );
+    await Promise.race([
+      directCommandStarted,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(new Error("Single admin command was blocked by fan-out.")),
+          100,
+        ),
+      ),
+    ]);
+
+    assert.equal(maxFanoutInFlight, 2);
+    await directCall;
+  } finally {
+    releaseFanout();
+    await Promise.allSettled(closeCalls);
+  }
+
+  assert.equal(maxFanoutInFlight, 2);
+  assert.deepEqual(await Promise.all(closeCalls), [
+    { roomCode: "ROOM01", disconnectedSessionCount: sessions.length },
+    { roomCode: "ROOM02", disconnectedSessionCount: sessions.length },
+    { roomCode: "ROOM03", disconnectedSessionCount: sessions.length },
+  ]);
 });
 
 test("admin closeRoom maps command bus unavailability to 503", async () => {

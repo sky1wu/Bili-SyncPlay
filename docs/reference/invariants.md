@@ -684,10 +684,13 @@ do NOT compose, and that is the part that decides which connection gets which:
   admission — remains essential and none may be retired on the strength of the
   option. The three backstopped connections synchronously cap commands before
   submission; the command bus separately caps active reply subscriptions and
-  their request closures. Room-close fan-out runs in batches below that cap, so
-  a supported large room is paced rather than deterministically refused. A
-  timed-out promise can free one admission slot while its command remains
-  queued, but the stalled guard resets after at most its
+  their request closures. That cap is a refusal-style safety boundary, not a
+  scheduler. All concurrent room-close calls in one admin service therefore
+  share a waiting fan-out limiter sized to half the reply capacity; single
+  `kickMember` / `disconnectSession` actions bypass it and retain the other half.
+  A per-call batch cannot make that promise because concurrent calls multiply
+  its budget. A timed-out promise can free one admission slot while its command
+  remains queued, but the stalled guard resets after at most its
   threshold, so the real queue is bounded by admission plus `threshold - 1`.
   They also disable `autoResendUnfulfilledCommands` and `autoResubscribe`.
   Ordinary command attempts are pinned to their submission generation: reset
@@ -730,7 +733,14 @@ do NOT compose, and that is the part that decides which connection gets which:
   `admin_session_store_unavailable` — never 401, which would read as a logout —
   and logs `admin_session_store_command_failed` with the Redis detail the
   response withholds from an unauthenticated caller. Requests refused while the
-  guard waits for `ready` go through the same reporting path.
+  guard waits for `ready` go through the same reporting path. An executor result
+  refused by publisher admission never became a Redis operation, so it must not
+  inflate the Redis-failure counter; the terminal result-publish callback instead
+  increments `bili_syncplay_admin_command_result_publish_failures_total`
+  unconditionally, before its diagnostic log is throttled. This says the executor
+  could not complete the publish path, not that delivery was certainly lost: a
+  timed-out Redis `PUBLISH` remains queued and Pub/Sub provides no requester
+  receipt.
 - **Cleanup on the same connection is not the answer.** Where a request brackets
   its real work with commands on the stalled connection, those rejections must
   not replace the result: the admin command bus's `finally` `UNSUBSCRIBE` would

@@ -482,8 +482,10 @@
   `commandQueue` 里以保持后续回复对齐。本仓每一道调用方侧的深度限制——
   `maxPendingAppends`、运行时存储的命令准入——仍然不可缺少，都不得因为有了这个选项而
   退役。三条采用兜底的连接会在提交前同步限制命令数；管理命令总线还会另外限制活跃的 reply
-  subscription 与相应的请求闭包。关闭房间的扇出会按低于该上限的批次执行，让受支持的大房间被
-  调速而不是必然拒绝尾部。一个超时 promise 可能在命令仍留在队列时释放一个准入槽，
+  subscription 与相应的请求闭包。该上限是会拒绝请求的安全边界，不是调度器。同一个管理服务
+  内所有并发的关闭房间调用因此共用一条等待型扇出限制器，容量取 reply 上限的一半；单条
+  `kickMember` / `disconnectSession` 不经过它，保留另一半容量。逐调用分批无法兑现该承诺，因为
+  并发调用会把局部预算相乘。一个超时 promise 可能在命令仍留在队列时释放一个准入槽，
   但 stalled guard 最多经历自身 threshold 次失败就会重置，所以真实队列的上限是准入上限再加
   `threshold - 1`。这些连接也关闭 `autoResendUnfulfilledCommands` 与 `autoResubscribe`。
   普通命令 attempt 会绑定提交时的连接代际：reset 到 `ready` 之间拒绝新 attempt，退役 socket
@@ -511,7 +513,11 @@
 - **有界了仍然欠一份上报。** 命令开始失败的连接欠调用方的是一个诊断而不只是一个错误：
   僵死的会话存储答 503 `admin_session_store_unavailable`——绝不能是 401，那会读作一次
   登出——并记 `admin_session_store_command_failed`，带上响应对未认证调用方隐去的 Redis
-  细节。guard 等待 `ready` 期间被拒的请求也走同一上报路径。
+  细节。guard 等待 `ready` 期间被拒的请求也走同一上报路径。被 publisher 准入拒绝的 executor
+  结果从未成为 Redis 操作，因此不得虚增 Redis failure counter；最终结果发布回调会在诊断日志
+  被节流之前，无条件增加 `bili_syncplay_admin_command_result_publish_failures_total`。它表达的是
+  executor 未能完成发布路径，不是断言送达一定丢失：超时的 Redis `PUBLISH` 仍留在队列中，
+  Pub/Sub 也不提供 requester 收件回执。
 - **同一条连接上的清理不是答案。** 当一个请求用同连接上的命令把真正的工作夹在中间时，
   这些清理的 reject 不得替换掉结果：否则管理命令总线 `finally` 里的 `UNSUBSCRIBE` 会
   把僵死本该产出的 `command_timeout` 结果抛掉。但清理也不能就此忘掉：清理失败会标记

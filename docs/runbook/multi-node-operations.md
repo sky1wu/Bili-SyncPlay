@@ -287,6 +287,7 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 | Abnormal drop in active rooms                                     | `bili_syncplay_active_rooms`, `bili_syncplay_rooms_non_expired`                        | Redis connectivity, room expiry settings, restart history                    | Restore Redis; confirm `ROOM_STORE_PROVIDER` was not switched to memory        |
 | Expired rooms stop being reclaimed (reaper stalled)               | `bili_syncplay_room_reaper_sweeps_total`                                               | See [Is the room reaper still sweeping?](#is-the-room-reaper-still-sweeping) | Restore Redis; confirm `ROOM_CLEANUP_INTERVAL_MS` was not raised               |
 | Redis operation failures                                          | `bili_syncplay_redis_operation_failures_total`                                         | Redis process, network, ACLs, password, slow queries                         | Restore Redis first; downgrade to in-memory only if necessary                  |
+| Completed admin command result publish paths fail                 | `bili_syncplay_admin_command_result_publish_failures_total`                            | Admin command bus publisher saturation, Redis pub/sub, result publish logs   | Restore Redis; confirm close-room fan-out and command-bus capacity are healthy |
 | Elevated Redis runtime store latency                              | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                            | Redis CPU, memory, network RTT, command queueing                             | Scale Redis or reduce edge-layer traffic                                       |
 | Redis room event bus publish latency or failures                  | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`, failure counters | Redis pub/sub connectivity, network jitter, room node logs                   | Restore Redis and the network; verify cross-node playback sync                 |
 | Increase in rejected connections                                  | `bili_syncplay_ws_connection_rejected_total`, structured `origin_not_allowed` logs     | `ALLOWED_ORIGINS`, whether the edge rewrites `Origin`                        | Fix the origin allowlist or the reverse-proxy configuration                    |
@@ -294,7 +295,7 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 | Elevated message handling latency                                 | `bili_syncplay_message_handler_duration_seconds_bucket`                                | Node CPU, Redis latency, room member counts, errors in logs                  | Rate-limit, scale room nodes, investigate slow Redis                           |
 | Global admin missing a node, or a node shown as expired           | Global admin overview, `node_heartbeat_failed` logs                                    | `NODE_HEARTBEAT_ENABLED`, `INSTANCE_ID`, Redis runtime store                 | Fix the heartbeat configuration or the Redis runtime store                     |
 | Admin login failures or frequent re-login prompts                 | `/api/admin/auth/login` responses, audit logs                                          | Whether `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET` are consistent        | Align the admin auth settings and restart                                      |
-| Cross-node room actions fail, e.g. kick or close room returns 502 | Audit logs, `ADMIN_COMMAND_BUS_PROVIDER`, target node heartbeat                        | Admin command bus, target `INSTANCE_ID`, Redis                               | Restore the Redis command bus or perform the action locally on the target node |
+| Cross-node room actions fail, e.g. kick or close room returns 503 | Audit logs, `ADMIN_COMMAND_BUS_PROVIDER`, target node heartbeat                        | Admin command bus, target `INSTANCE_ID`, Redis                               | Restore the Redis command bus or perform the action locally on the target node |
 
 ### Is the room reaper still sweeping?
 
@@ -712,10 +713,14 @@ incident:
 - **Admin session store, admin command bus.** Failed commands, not silence.
   Expect `admin_session_store_command_failed`,
   `admin_command_bus_command_failed` and `admin_command_result_publish_failed`,
-  a 503 `admin_session_store_unavailable` on admin requests, a 502
+  a 503 `admin_session_store_unavailable` on admin requests, a 503
   `command_bus_unavailable` on cross-node actions, and
   `bili_syncplay_redis_operation_failures_total{component="admin_session_store"|"admin_command_bus"}`
-  climbing. After `REDIS_STALL_DROP_THRESHOLD` consecutive failures the socket
+  climbing. `bili_syncplay_admin_command_result_publish_failures_total` counts
+  every completed command whose result/fallback publish path ended in failure,
+  including publisher admission refusals that never became Redis operations. It
+  is not an end-to-end delivery-loss counter: a timed-out `PUBLISH` can still land.
+  After `REDIS_STALL_DROP_THRESHOLD` consecutive failures the socket
   is reset and `admin_command_bus_connection_reset` says so — that reset is
   also what empties ioredis's command queue, which the backstop cannot.
 - **Room store, runtime store, room event bus, event store, audit store.** The
@@ -735,4 +740,5 @@ incident:
 - The global admin allows login and shows the overview, rooms, events, and audit logs.
 - `disconnect session`, `kick member`, and `close room` behave as expected on a test room.
 - `bili_syncplay_redis_operation_failures_total` shows no sustained growth.
+- `bili_syncplay_admin_command_result_publish_failures_total` shows no growth.
 - The edge-layer upstream list matches the nodes actually online.
