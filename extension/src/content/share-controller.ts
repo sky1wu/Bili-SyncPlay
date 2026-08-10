@@ -6,6 +6,7 @@ import {
 } from "./page-video";
 import type { ContentRuntimeState } from "./runtime-state";
 import {
+  contradictsAddressBarEpisode,
   isAddressBarOpaqueVideoUrl,
   normalizePageVisitUrl,
 } from "./video-identity";
@@ -101,6 +102,21 @@ export function createShareController(args: {
     );
   }
 
+  /**
+   * The episode a resolved snapshot names, if it names one. A bangumi snapshot
+   * carries its episode both as `epId` and as the `videoId` itself; a
+   * `bvid:cid` snapshot names no episode.
+   */
+  function readSnapshotEpisodeId(snapshot: {
+    videoId: string;
+    epId?: string;
+  }): string | null {
+    return (
+      snapshot.epId ??
+      (snapshot.videoId.startsWith("ep") ? snapshot.videoId : null)
+    );
+  }
+
   function canUseMatchingCachedPageSnapshot(argsForMatch: {
     pathname: string;
     pageUrl: string;
@@ -108,6 +124,17 @@ export function createShareController(args: {
     currentPart: CurrentPartIdentity;
   }): boolean {
     if (!argsForMatch.snapshot) {
+      return false;
+    }
+    // The address bar outranks a cached snapshot on `/bangumi/play/epNNN` for
+    // the same reason it outranks a fresh one (#274): a snapshot naming another
+    // episode was read from page globals that had not caught up with the switch.
+    if (
+      contradictsAddressBarEpisode({
+        pathname: argsForMatch.pathname,
+        episodeId: readSnapshotEpisodeId(argsForMatch.snapshot),
+      })
+    ) {
       return false;
     }
     if (canUseCachedPageSnapshot(argsForMatch.pathname)) {
@@ -119,11 +146,7 @@ export function createShareController(args: {
           normalizePageVisitUrl(argsForMatch.pageUrl)
       );
     }
-    const snapshotEpId =
-      argsForMatch.snapshot.epId ??
-      (argsForMatch.snapshot.videoId.startsWith("ep")
-        ? argsForMatch.snapshot.videoId
-        : null);
+    const snapshotEpId = readSnapshotEpisodeId(argsForMatch.snapshot);
     const snapshotCid =
       argsForMatch.snapshot.cid ??
       (argsForMatch.snapshot.videoId.includes(":")
@@ -167,13 +190,28 @@ export function createShareController(args: {
       active?.getAttribute("data-epid") ??
       null;
     const title = active?.textContent?.trim() || null;
+    const epId = rawEpId
+      ? rawEpId.startsWith("ep")
+        ? rawEpId
+        : `ep${rawEpId}`
+      : null;
+    // The highlighted list item is a page global like any other, so on
+    // `/bangumi/play/epNNN` it lags an SPA episode switch too (#274). When it
+    // names another episode, none of its three fields describe the current one:
+    // the title would go out on the new episode's identity, and the cid would
+    // match a cached snapshot of the previous one. Refute the whole item, not
+    // just the part that happens to be compared.
+    if (
+      contradictsAddressBarEpisode({
+        pathname: window.location.pathname,
+        episodeId: epId,
+      })
+    ) {
+      return { title: null, epId: null, cid: null };
+    }
     return {
       title,
-      epId: rawEpId
-        ? rawEpId.startsWith("ep")
-          ? rawEpId
-          : `ep${rawEpId}`
-        : null,
+      epId,
       cid: active?.getAttribute("data-cid") ?? null,
     };
   }
@@ -309,6 +347,25 @@ export function createShareController(args: {
       return null;
     }
     if (!nextSnapshot) {
+      return null;
+    }
+    // The visit check above only proves the page did not change under the read.
+    // On `/bangumi/play/epNNN` that is not enough: an SPA episode switch moves
+    // the address bar first, so a read that starts and ends on the new episode's
+    // URL can still answer with the previous episode's page globals (#274).
+    // "Not resolved yet" is what that is — answering `null` leaves the caller on
+    // its unresolved path (the retry loop, then address-bar parsing) instead of
+    // sharing the previous episode stamped with this episode's position. It also
+    // must not count as the resolution that refutes the address bar below.
+    if (
+      contradictsAddressBarEpisode({
+        pathname,
+        episodeId: readSnapshotEpisodeId(nextSnapshot),
+      })
+    ) {
+      args.debugLog(
+        `Discarded page video snapshot ${nextSnapshot.videoId}; address bar names ${pathname}`,
+      );
       return null;
     }
     // Recorded here as well as in `getSharedVideo`: a refresh is the

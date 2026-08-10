@@ -32,6 +32,47 @@ export function isAddressBarOpaqueVideoUrl(url: string | null): boolean {
   }
 }
 
+const BANGUMI_EPISODE_PATHNAME = /^\/bangumi\/play\/(ep\d+)$/i;
+
+/**
+ * The episode a `/bangumi/play/epNNN` address bar names, or `null` on every
+ * other page.
+ *
+ * This is the exact opposite polarity of {@link isAddressBarOpaqueVideoUrl}: on
+ * an `epNNN` route the address bar *is* the authoritative identity of the video
+ * in the player, because reaching another episode changes it (via `pushState`
+ * for an in-page switch). `/festival/<id>` and `/bangumi/play/ssNNN` name no
+ * episode at all, so they answer `null` and nothing about them is refuted here.
+ */
+export function readAddressBarEpisodeId(pathname: string): string | null {
+  const match = BANGUMI_EPISODE_PATHNAME.exec(pathname.replace(/\/+$/, ""));
+  return match ? match[1].toLowerCase() : null;
+}
+
+/**
+ * Whether an in-page identity contradicts the episode the address bar names.
+ *
+ * Every source of in-player identity — the episode list's highlighted item,
+ * `__INITIAL_STATE__`, `__playinfo__` — is a page global, and an SPA episode
+ * switch updates the address bar before it updates those (#274). A contradiction
+ * therefore means "the page globals have not caught up yet", never "the address
+ * bar is wrong", so the caller must treat the identity as unresolved rather than
+ * share the previous episode with the new episode's playback position.
+ *
+ * Both sides must be known: an unknown `episodeId` refutes nothing, and neither
+ * does a page whose address bar names no episode.
+ */
+export function contradictsAddressBarEpisode(args: {
+  pathname: string;
+  episodeId: string | null | undefined;
+}): boolean {
+  const addressBarEpisodeId = readAddressBarEpisodeId(args.pathname);
+  if (addressBarEpisodeId === null || !args.episodeId) {
+    return false;
+  }
+  return args.episodeId.toLowerCase() !== addressBarEpisodeId;
+}
+
 /**
  * Stable key for one address-bar page visit. Hash changes and trailing-slash
  * variants do not create a new visit; a different query does. That distinction

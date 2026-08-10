@@ -104,6 +104,17 @@ before changing the code it describes.
   current. A "the user did not cause this" marker asks about gestures over its
   own window, anchored on its own instant, with no exceptions — and is consumed,
   not merely bounded. A window constant read by two behaviours is two constants.
+- **Whether the address bar names the video is a per-route property** (#274):
+  `/festival/` and `/bangumi/play/ssNNN` name no episode, so the page snapshot
+  outranks the address bar there — but `/bangumi/play/epNNN` names the episode
+  itself, and an in-page switch moves the address bar _before_ the page globals,
+  so there every in-page source is the one that can be stale.
+  `contradictsAddressBarEpisode` is the single predicate; a snapshot naming
+  another episode means "not resolved yet" (which is what makes the retry in
+  `resolveCurrentSharePayload` real), an `ep` route is never recorded as refuted,
+  the whole stale record is dropped rather than the compared field, and both
+  sides must be known. A regression on one polarity proves nothing about the
+  other — every bangumi test used a `ss` page, which is why this shipped.
 - **Share ownership** (#235, #242): `sharedVideo.sharedByMemberId` is a durable
   reference to a volatile identity, resolved at build time by
   `roomStateFromSessions` and never rewritten into the room. A full `room:state`

@@ -106,6 +106,58 @@ background path touches room state or playback timing.
   `content/index.ts`: a test that re-types the number passes just as happily
   after someone edits the shipped one.
 
+## Whether the address bar names the video is a per-route property
+
+Two kinds of Bilibili page look alike to the content script and answer this
+question oppositely. Getting the polarity wrong is not a degraded answer, it is a
+confident wrong one, and #274 is what that costs: after an in-page episode
+switch the room's shared video stayed pinned to the previous episode — carrying
+the _new_ episode's position, so every other member was yanked back to the old
+episode's start — until the sharer reloaded the page.
+
+- `/festival/<id>` keeps its route, and any `?bvid=` it was opened with, while
+  the player walks a whole playlist. The address bar there is
+  {@link isAddressBarOpaqueVideoUrl}-opaque: the page-bridge snapshot is the only
+  identity, and once one resolves, the address bar is _proven_ stale and its
+  parse must not be used as a fallback (it would answer "some other, non-shared
+  video" and force-pause the page).
+- `/bangumi/play/ssNNN` names a season, never an episode, so the snapshot
+  outranks it for the same reason.
+- `/bangumi/play/epNNN` names the episode itself. Reaching another episode
+  changes it — through `pushState` for an in-page switch — and **the address bar
+  moves first**, before `__INITIAL_STATE__`, `__playinfo__`, and the episode
+  list's highlighted item catch up. Every in-page identity source is therefore
+  the one that can be stale here, and the address bar is the one that cannot.
+
+So on an `ep` route the rules invert, and `contradictsAddressBarEpisode` is the
+single predicate that states it (`video-identity.ts`):
+
+- **A snapshot naming another episode is "not resolved yet", not "resolved".**
+  Answering `null` is what makes the eight-attempt retry in
+  `resolveCurrentSharePayload` real — its exit condition is a non-null snapshot,
+  so before the gate the first stale read returned and the other seven never ran,
+  even though the page globals had already caught up by the second read. The
+  worst case then degrades to parsing the address bar rather than to sharing the
+  previous episode.
+- **An `ep` route must never be recorded as an address-bar identity refuted.**
+  `rememberSnapshotResolved` is guarded by `isAddressBarOpaqueVideoUrl`, which is
+  festival-only for exactly this reason. Refuting it would nail the wrong answer
+  in place for the rest of the page's life — which is precisely the reported
+  symptom of only a reload fixing it.
+- **Refute the whole stale record, not the field being compared.** The
+  highlighted list item lags the switch just like the page globals do, so when
+  its episode id contradicts the address bar its title and cid are stale too —
+  the title would go out labelling the new episode, and the cid would match a
+  cached snapshot of the previous one.
+- **Both sides must be known.** A `bvid:cid` snapshot names no episode and a
+  season route names none either; refuting on an unknown is a guess, not a
+  contradiction.
+
+The coverage gap that let this ship is worth copying as a warning: every bangumi
+case in `share-controller.test.ts` used a `ss` season page, where snapshot-first
+is correct, so the rule was applied across the polarity boundary with nothing to
+catch it. A regression for one of these routes proves nothing about the other.
+
 ## Share ownership is derived, and deltas do not carry it
 
 `sharedVideo.sharedByMemberId` is written once, at `video:share`, and is a
