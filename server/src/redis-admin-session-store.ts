@@ -167,8 +167,9 @@ export async function createRedisAdminSessionStore(
    * The backstop answers the caller and leaves the command in ioredis's queue,
    * and this store has no admission or depth limit — so an unauthenticated
    * caller retrying every five seconds would add one queued command per retry
-   * for as long as the stall lasts. Closing the socket is the only thing on
-   * this side that empties that queue (#271 review).
+   * for as long as the stall lasts. The centralized client policy disables
+   * replay, so dropping the socket is what retires that queue instead of
+   * resending it after reconnect (#271 review).
    */
   const guard = createStalledConnectionGuard(redis, {
     threshold: options.stallDropThreshold,

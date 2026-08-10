@@ -9,12 +9,15 @@ import {
   createRedisPubSubClientPair,
   type RedisPubSubClientPair,
 } from "./redis-pubsub-client.js";
+import { createRetryPacer } from "./retry-pacer.js";
 
 const DEFAULT_COMMAND_CHANNEL_PREFIX = "bsp:admin-command:";
 const DEFAULT_RESULT_CHANNEL_PREFIX = "bsp:admin-command-result:";
 
 /** Both clients close concurrently inside this facility's default 5s step. */
 const CLOSE_QUIT_TIMEOUT_MS = 4_000;
+const SUBSCRIPTION_RESTORE_INITIAL_RETRY_DELAY_MS = 250;
+const SUBSCRIPTION_RESTORE_MAX_RETRY_DELAY_MS = 30_000;
 type AdminCommandBusClientRole = "publisher" | "subscriber";
 
 function commandChannel(prefix: string, instanceId: string): string {
@@ -153,9 +156,16 @@ export async function createRedisAdminCommandBus(
       operation: "subscribe" | "publish" | "unsubscribe" | "publish_result";
       error: unknown;
     }) => void;
-    /** Injectable so a test does not have to spend three real failures. */
+    /**
+     * Injectable so a publisher test does not have to spend three failures.
+     * One subscription-state failure marks its generation for reset: the
+     * server-side effect is unknown until a fresh connection rebuilds the
+     * desired set. Reset waits only for already-active replies.
+     */
     stallDropThreshold?: number;
-    /** The socket was dropped after repeated failures; ioredis is reconnecting. */
+    /** Injectable so restore-backoff tests do not wait in wall-clock time. */
+    subscriptionRestoreSleep?: (delayMs: number) => Promise<void>;
+    /** The bus dropped a socket and ioredis is reconnecting. */
     onConnectionDropped?: (info: {
       role: AdminCommandBusClientRole;
       consecutiveFailures: number;
@@ -182,23 +192,28 @@ export async function createRedisAdminCommandBus(
     string,
     (command: AdminCommand) => Promise<AdminCommandResult>
   >();
+  const activeReplyChannels = new Set<string>();
   let closing = false;
+  let subscriberGeneration = 0;
+  let subscriberResetOwed = false;
+  let subscriberResetInProgress = false;
+  let subscriberResetFailures = 0;
+  let subscriberRestoring = false;
+  let subscriptionRestoreFailures = 0;
+  const subscriptionRestorePacer = createRetryPacer({
+    initialDelayMs: SUBSCRIPTION_RESTORE_INITIAL_RETRY_DELAY_MS,
+    maxDelayMs: SUBSCRIPTION_RESTORE_MAX_RETRY_DELAY_MS,
+    sleep: options.subscriptionRestoreSleep,
+  });
   // The backstop answers the caller and leaves the command in ioredis's queue,
-  // and neither client here has an admission or depth limit. Closing the socket
-  // is the only thing on this side that empties that queue (#271 review).
+  // and neither client here has an admission or depth limit. The centralized
+  // client policy disables replay, so dropping the socket is what retires that
+  // queue instead of resending it after reconnect (#271 review).
   const publisherGuard = createStalledConnectionGuard(publishClient, {
     threshold: options.stallDropThreshold,
     onDropped: ({ consecutiveFailures }) =>
       options.onConnectionDropped?.({
         role: "publisher",
-        consecutiveFailures,
-      }),
-  });
-  const subscriberGuard = createStalledConnectionGuard(subscribeClient, {
-    threshold: options.stallDropThreshold,
-    onDropped: ({ consecutiveFailures }) =>
-      options.onConnectionDropped?.({
-        role: "subscriber",
         consecutiveFailures,
       }),
   });
@@ -226,6 +241,145 @@ export async function createRedisAdminCommandBus(
       throw error;
     }
   }
+
+  function maybeResetSubscriber(): void {
+    if (
+      closing ||
+      subscriberResetInProgress ||
+      !subscriberResetOwed ||
+      activeReplyChannels.size > 0
+    ) {
+      return;
+    }
+    // Keep `subscriberResetOwed` set until the next ready event. New requests
+    // must not publish while this generation's subscription state is unknown.
+    subscriberResetInProgress = true;
+    const resetGeneration = subscriberGeneration;
+    try {
+      subscribeClient.disconnect(true);
+    } catch {
+      subscriberResetFailures += 1;
+      void subscriptionRestorePacer
+        .wait(subscriptionRestorePacer.delayFor(subscriberResetFailures))
+        .then(() => {
+          if (
+            closing ||
+            subscriptionRestorePacer.stopped() ||
+            resetGeneration !== subscriberGeneration ||
+            !subscriberResetOwed
+          ) {
+            return;
+          }
+          // Keep the failed drop single-flight while waiting. Old state-command
+          // failures can otherwise start parallel reset trails, and a ready
+          // event can make this retry stale before its backoff expires.
+          subscriberResetInProgress = false;
+          maybeResetSubscriber();
+        });
+      return;
+    }
+    subscriberResetFailures = 0;
+    options.onConnectionDropped?.({
+      role: "subscriber",
+      consecutiveFailures: 1,
+    });
+  }
+
+  function markSubscriberStateUnknown(submittedGeneration: number): void {
+    // A timeout from a command submitted on an old socket can land after a new
+    // connection is already healthy. It describes that old generation and must
+    // never be allowed to tear down the new one.
+    if (
+      closing ||
+      submittedGeneration !== subscriberGeneration ||
+      subscriberResetInProgress
+    ) {
+      return;
+    }
+    subscriberResetOwed = true;
+    maybeResetSubscriber();
+  }
+
+  async function runSubscriptionStateCommand<T>(
+    operation: "subscribe" | "unsubscribe",
+    call: () => Promise<T>,
+    beforeReset?: () => void,
+  ): Promise<T> {
+    const submittedGeneration = subscriberGeneration;
+    try {
+      return await call();
+    } catch (error) {
+      beforeReset?.();
+      markSubscriberStateUnknown(submittedGeneration);
+      options.onBusCommandFailed?.({ operation, error });
+      throw error;
+    }
+  }
+
+  const restoreDesiredSubscriptions = () => {
+    subscriberGeneration += 1;
+    const restoreGeneration = subscriberGeneration;
+    subscriberResetInProgress = false;
+    subscriberResetFailures = 0;
+    subscriberResetOwed = false;
+    if (closing) {
+      return;
+    }
+    if (handlers.size === 0 && activeReplyChannels.size === 0) {
+      subscriberRestoring = false;
+      subscriptionRestoreFailures = 0;
+      return;
+    }
+    subscriberRestoring = true;
+    void (async () => {
+      if (subscriptionRestoreFailures > 0) {
+        await subscriptionRestorePacer.wait(
+          subscriptionRestorePacer.delayFor(subscriptionRestoreFailures),
+        );
+      }
+      if (
+        closing ||
+        subscriptionRestorePacer.stopped() ||
+        restoreGeneration !== subscriberGeneration
+      ) {
+        return;
+      }
+      const channels = Array.from(
+        new Set([
+          ...[...handlers.keys()].map((instanceId) =>
+            commandChannel(commandChannelPrefix, instanceId),
+          ),
+          ...activeReplyChannels,
+        ]),
+      );
+      if (channels.length === 0) {
+        subscriberRestoring = false;
+        subscriptionRestoreFailures = 0;
+        return;
+      }
+      // Backstopped clients disable ioredis's indiscriminate auto-resubscribe:
+      // it cannot tell active one-shot result channels from channels whose
+      // cleanup timed out. These registries own the desired set.
+      try {
+        await runSubscriptionStateCommand(
+          "subscribe",
+          () => subscribeClient.subscribe(...channels),
+          () => {
+            if (restoreGeneration === subscriberGeneration) {
+              subscriptionRestoreFailures += 1;
+            }
+          },
+        );
+      } catch {
+        return;
+      }
+      if (restoreGeneration === subscriberGeneration) {
+        subscriptionRestoreFailures = 0;
+        subscriberRestoring = false;
+      }
+    })();
+  };
+  subscribeClient.on("ready", restoreDesiredSubscriptions);
 
   function busUnavailable(
     command: AdminCommand,
@@ -317,11 +471,34 @@ export async function createRedisAdminCommandBus(
           completedAt: Date.now(),
         };
       }
+      if (
+        subscriberRestoring ||
+        subscriberResetOwed ||
+        subscriberResetInProgress
+      ) {
+        return busUnavailable(
+          command,
+          new Error("Redis subscriber state is being restored."),
+        );
+      }
 
       const replyChannel = resultChannel(
         resultChannelPrefix,
         command.requestId,
       );
+      if (activeReplyChannels.has(replyChannel)) {
+        return {
+          requestId: command.requestId,
+          targetInstanceId: command.targetInstanceId,
+          executorInstanceId: command.targetInstanceId,
+          status: "error",
+          code: "duplicate_request_id",
+          message: `Admin command requestId ${command.requestId} is already in flight.`,
+          completedAt: Date.now(),
+        };
+      }
+      activeReplyChannels.add(replyChannel);
+      const requestSubscriberGeneration = subscriberGeneration;
       try {
         // INSIDE the try, so the `finally` below covers it. A `SUBSCRIBE` that
         // outlives its `commandTimeout` still reaches Redis and can succeed
@@ -331,9 +508,19 @@ export async function createRedisAdminCommandBus(
         // with retries would grow that set on both sides without bound (#271
         // review). Unsubscribing a channel that never got subscribed is a
         // no-op, so the cheap direction is the safe one.
-        await runBusCommand("subscribe", subscriberGuard, () =>
+        await runSubscriptionStateCommand("subscribe", () =>
           subscribeClient.subscribe(replyChannel),
         );
+        if (
+          requestSubscriberGeneration !== subscriberGeneration ||
+          subscriberRestoring ||
+          subscriberResetOwed ||
+          subscriberResetInProgress
+        ) {
+          throw new Error(
+            "Redis subscriber changed before the reply channel was ready.",
+          );
+        }
 
         const responsePromise = new Promise<AdminCommandResult>((resolve) => {
           const timeout = setTimeout(() => {
@@ -376,37 +563,113 @@ export async function createRedisAdminCommandBus(
         return await responsePromise;
       } catch (error) {
         // A `status: "error"` result, not a rejection: `action-service` maps it
-        // to a 502 with this code and message, so an operator sees "the bus
-        // could not reach Redis" instead of `internal_error` (#271 review).
+        // to a retryable 503 with this code and message, so an operator sees
+        // "the bus could not reach Redis" instead of `internal_error` (#271
+        // review).
         return busUnavailable(command, error);
       } finally {
-        // Cleanup, not part of the answer. This `UNSUBSCRIBE` runs on the very
-        // connection whose trouble is the likeliest reason we are here, and
-        // letting it reject would replace a well-formed result — including the
-        // `command_timeout` one produced two lines up — with a Redis error, so
-        // the one path that already handles a dead target would start throwing
-        // instead. Unreachable before #271 gave this connection a
-        // `commandTimeout`; reachable now, which is the point of writing it
-        // down rather than discovering it.
-        await runBusCommand("unsubscribe", subscriberGuard, () =>
-          subscribeClient.unsubscribe(replyChannel),
-        ).catch(() => undefined);
+        // Remove the channel from desired state before attempting the fallible
+        // Redis cleanup. If UNSUBSCRIBE fails, the generation is marked for
+        // reset; already-active replies finish before that reset, and `ready`
+        // restores durable channels without resurrecting this completed one.
+        activeReplyChannels.delete(replyChannel);
+        maybeResetSubscriber();
+        if (!closing && !subscriberResetOwed && !subscriberResetInProgress) {
+          // Cleanup, not part of the answer. This `UNSUBSCRIBE` runs on the very
+          // connection whose trouble is the likeliest reason we are here, and
+          // letting it reject would replace a well-formed result — including
+          // the `command_timeout` one produced two lines up — with a Redis
+          // error, so the one path that already handles a dead target would
+          // start throwing instead. Unreachable before #271 gave this
+          // connection a `commandTimeout`; reachable now, which is the point of
+          // writing it down rather than discovering it.
+          await runSubscriptionStateCommand("unsubscribe", () =>
+            subscribeClient.unsubscribe(replyChannel),
+          ).catch(() => undefined);
+        }
       }
     },
     async subscribe(instanceId, handler) {
-      handlers.set(instanceId, handler);
+      if (closing) {
+        throw new Error("Admin command bus is closed.");
+      }
+      if (
+        subscriberRestoring ||
+        subscriberResetOwed ||
+        subscriberResetInProgress
+      ) {
+        throw new Error("Redis subscriber state is being restored.");
+      }
+      if (handlers.has(instanceId)) {
+        throw new Error(
+          `Admin command handler for ${instanceId} is already registered.`,
+        );
+      }
       const channel = commandChannel(commandChannelPrefix, instanceId);
-      await subscribeClient.subscribe(channel);
-      return async () => {
+      const registrationGeneration = subscriberGeneration;
+      // Register the desired durable state before asking Redis to subscribe.
+      // ioredis can dispatch a message that follows the SUBSCRIBE ACK in the
+      // same socket read before this promise's continuation runs; registering
+      // afterwards silently drops that first command.
+      handlers.set(instanceId, handler);
+      try {
+        await runSubscriptionStateCommand("subscribe", () =>
+          subscribeClient.subscribe(channel),
+        );
+      } catch (error) {
         if (handlers.get(instanceId) === handler) {
           handlers.delete(instanceId);
         }
-        await subscribeClient.unsubscribe(channel);
+        maybeResetSubscriber();
+        throw error;
+      }
+      if (
+        closing ||
+        registrationGeneration !== subscriberGeneration ||
+        subscriberRestoring ||
+        subscriberResetOwed ||
+        subscriberResetInProgress
+      ) {
+        // `close()` clears the registry and closes the connection. Do not let a
+        // subscription that was already awaiting its ACK resurrect a handler
+        // after that lifecycle boundary. A generation change likewise means
+        // the acknowledged operation no longer proves the current socket's
+        // state.
+        if (handlers.get(instanceId) === handler) {
+          handlers.delete(instanceId);
+        }
+        if (!closing) {
+          markSubscriberStateUnknown(subscriberGeneration);
+        }
+        throw new Error(
+          closing
+            ? "Admin command bus is closed."
+            : "Redis subscriber changed before the command channel was ready.",
+        );
+      }
+      return async () => {
+        if (handlers.get(instanceId) !== handler) {
+          return;
+        }
+        handlers.delete(instanceId);
+        if (closing) {
+          return;
+        }
+        if (subscriberResetOwed || subscriberResetInProgress) {
+          maybeResetSubscriber();
+          return;
+        }
+        await runSubscriptionStateCommand("unsubscribe", () =>
+          subscribeClient.unsubscribe(channel),
+        );
       };
     },
     async close() {
       closing = true;
+      subscriptionRestorePacer.stop();
       handlers.clear();
+      activeReplyChannels.clear();
+      subscribeClient.off("ready", restoreDesiredSubscriptions);
       await quitAllWithin<AdminCommandBusClientRole>(
         [
           { role: "publisher", connection: publishClient },

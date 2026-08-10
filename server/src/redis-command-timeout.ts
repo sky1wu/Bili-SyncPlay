@@ -74,10 +74,12 @@
  *
  * So it releases the caller and the closures the caller was holding. It does
  * NOT shorten the command, take it off the connection, or bound how many
- * unanswered commands the connection accumulates. Every depth limit in this
- * server — `append-chain`'s `maxPendingAppends`, the runtime store's command
- * admission — is still the only thing bounding memory, and none of them may be
- * retired on the strength of this option.
+ * unanswered commands the connection accumulates. Every caller-side depth
+ * limit in this server — `append-chain`'s `maxPendingAppends`, the runtime
+ * store's command admission — remains essential and none may be retired on the
+ * strength of this option. The three backstopped connections instead pair it
+ * with a stalled-connection reset that disables replay of ioredis's saved
+ * `prevCommandQueue`; the timeout alone still supplies no queue bound.
  *
  * ## Two consequences of arming the timer at submission
  *
@@ -157,7 +159,24 @@ export function createBoundedRedisClient(
     // bounded while having no bound at all.
     maxRetriesPerRequest: 1,
     ...(bound.bound === "command_timeout"
-      ? { commandTimeout: REDIS_COMMAND_TIMEOUT_MS }
+      ? {
+          commandTimeout: REDIS_COMMAND_TIMEOUT_MS,
+          // A timed-out command stays in ioredis's commandQueue. When the
+          // stalled-connection guard drops that socket, ioredis moves the queue
+          // to prevCommandQueue; its default is to replay every entry after the
+          // reconnect. Backstopped callers have already received their timeout,
+          // so replaying only preserves the unbounded real queue the reset is
+          // meant to retire. Caller-bounded clients keep the default because
+          // their in-flight command is evidence that gates later work.
+          autoResendUnfulfilledCommands: false,
+          // The command bus has both durable command channels and one-shot reply
+          // channels. ioredis cannot distinguish them and would resubscribe both,
+          // including a reply-channel UNSUBSCRIBE that timed out just before the
+          // reset. The bus restores only its durable handlers and still-active
+          // result channels on `ready`; caller-bounded pub/sub keeps ioredis's
+          // default policy.
+          autoResubscribe: false,
+        }
       : {}),
   });
 }
@@ -184,6 +203,48 @@ export class RedisConnectTimeoutError extends Error {
   }
 }
 
+export class RedisStartupTimeoutError extends Error {
+  constructor(
+    readonly operation: string,
+    budgetMs: number,
+  ) {
+    super(
+      `Redis startup operation "${operation}" did not complete within ${budgetMs}ms.`,
+    );
+    this.name = "RedisStartupTimeoutError";
+  }
+}
+
+async function settleStartupWithin(
+  connection: ClosableRedisConnection,
+  work: () => Promise<unknown>,
+  budgetMs: number,
+  createTimeoutError: () => Error,
+): Promise<void> {
+  let failed: unknown;
+  const running = work().then(
+    () => undefined,
+    (error: unknown) => {
+      failed = error;
+    },
+  );
+
+  if (!(await settleWithin(running, budgetMs))) {
+    // Nothing can cancel the startup operation, so the socket goes instead —
+    // leaving it open would keep a client retrying behind a process that is
+    // already failing to start.
+    try {
+      connection.disconnect();
+    } catch {
+      // The throw below is what the caller acts on.
+    }
+    throw createTimeoutError();
+  }
+  if (failed !== undefined) {
+    throw failed;
+  }
+}
+
 /**
  * Open a `caller`-bounded connection, or fail loudly.
  *
@@ -197,7 +258,12 @@ export async function connectWithin(
   connection: ClosableRedisConnection & { connect: () => Promise<unknown> },
   budgetMs: number = REDIS_CONNECT_TIMEOUT_MS,
 ): Promise<void> {
-  await startWithin(connection, () => connection.connect(), budgetMs);
+  await settleStartupWithin(
+    connection,
+    () => connection.connect(),
+    budgetMs,
+    () => new RedisConnectTimeoutError(budgetMs),
+  );
 }
 
 /**
@@ -212,31 +278,16 @@ export async function connectWithin(
  */
 export async function startWithin(
   connection: ClosableRedisConnection,
+  operation: string,
   work: () => Promise<unknown>,
   budgetMs: number = REDIS_CONNECT_TIMEOUT_MS,
 ): Promise<void> {
-  let failed: unknown;
-  const running = work().then(
-    () => undefined,
-    (error: unknown) => {
-      failed = error;
-    },
+  await settleStartupWithin(
+    connection,
+    work,
+    budgetMs,
+    () => new RedisStartupTimeoutError(operation, budgetMs),
   );
-
-  if (!(await settleWithin(running, budgetMs))) {
-    // Nothing can cancel the handshake, so the socket goes instead — leaving it
-    // open would keep a half-connected client retrying behind a process that is
-    // already failing to start.
-    try {
-      connection.disconnect();
-    } catch {
-      // The throw below is what the caller acts on.
-    }
-    throw new RedisConnectTimeoutError(budgetMs);
-  }
-  if (failed !== undefined) {
-    throw failed;
-  }
 }
 
 /**
@@ -251,9 +302,11 @@ export const REDIS_STALL_DROP_THRESHOLD = 3;
 /** A connection that can be reset without being retired. */
 export type ResettableRedisConnection = {
   /**
-   * `disconnect(true)` drops the socket AND leaves ioredis's retry strategy in
-   * place. Plain `disconnect()` sets `manuallyClosing`, which would retire the
-   * connection for good — the difference between a reset and an outage.
+   * `disconnect(true)` drops the socket and leaves ioredis's retry strategy in
+   * place. Backstopped clients also disable replay of the resulting
+   * `prevCommandQueue`; plain `disconnect()` sets `manuallyClosing` and would
+   * retire the connection for good — the difference between a reset and an
+   * outage.
    */
   disconnect: (reconnect?: boolean) => void;
 };
@@ -277,10 +330,11 @@ export type StalledConnectionGuard = {
  *
  * A depth limit cannot be built on top of the backstop either, because after it
  * fires a settled command and a queued one look the same from here. What DOES
- * empty the queue is closing the socket: ioredis's close handler flushes
- * `commandQueue`, rejecting what is left, and then reconnects. So the bound on
- * the real queue is "a connection that keeps failing gets reset", and that is
- * this.
+ * retire the queue is closing the socket on a backstopped client: ioredis moves
+ * `commandQueue` to `prevCommandQueue`, and the centralized client policy
+ * disables command replay and automatic subscription replay before the
+ * reconnect. So the bound on the real queue is "a connection that keeps failing
+ * gets reset without replay", and that is this.
  *
  * Consecutive, not cumulative: the count is what distinguishes a connection
  * that has stopped answering from one that is merely returning errors, and a
@@ -307,9 +361,9 @@ export function createStalledConnectionGuard(
         return false;
       }
       const dropped = consecutiveFailures;
-      // Reset first: the drop itself rejects everything still queued, and each
-      // of those rejections comes back through here. Without this the guard
-      // would trip again on the wreckage of its own reset.
+      // Reset first: commands whose timers are landing alongside this one still
+      // come back through here. Without this the guard could trip again on the
+      // same stalled batch while the socket is being replaced.
       consecutiveFailures = 0;
       try {
         connection.disconnect(true);

@@ -666,10 +666,29 @@ do NOT compose, and that is the part that decides which connection gets which:
   waits forever on a host that accepts the socket and answers nothing, so an
   exempt connection opens through `connectWithin`.
 - **It bounds the caller's wait, not the connection's queue.** ioredis keeps a
-  timed-out command in `commandQueue` so later replies stay aligned. Every depth
-  limit here — `maxPendingAppends`, the runtime store's command admission — is
-  still the only thing bounding memory, and none may be retired on the strength
-  of the option. Proved, not assumed, in `redis-command-timeout.test.ts`.
+  timed-out command in `commandQueue` so later replies stay aligned. Every
+  caller-side depth limit here — `maxPendingAppends`, the runtime store's command
+  admission — remains essential and none may be retired on the strength of the
+  option. The three backstopped connections have the other half explicitly:
+  `autoResendUnfulfilledCommands` and `autoResubscribe` are disabled. Ordinary
+  commands reset their connection after consecutive failures. Every failed
+  subscription-state change marks that command-bus subscriber generation for
+  reset, because a failed `SUBSCRIBE` may still land and a failed `UNSUBSCRIBE`
+  may leave its unique channel behind. New commands are refused immediately;
+  the reset happens at once when no result is active, or after the already-active
+  replies finish so cleanup cannot sever another command's reply trail. Failures
+  submitted by an older generation cannot reset its replacement. ioredis then
+  moves `commandQueue` to `prevCommandQueue` and discards it instead of replaying
+  it after reconnect.
+  The admin command bus restores the durable command channels from its handler
+  registry and result channels for requests that are still awaiting an answer;
+  a completed request is removed from desired state before its fallible cleanup,
+  so that channel is not resurrected. A restore in progress gates new publishes,
+  and a failed restore carries its exponential `retry-pacer` backoff across
+  `ready` generations — ioredis resets its own retry counter at every `ready`,
+  so its reconnect policy alone would be a fixed-rate loop. The timeout alone
+  still provides no queue bound. Proved, not assumed, in
+  `redis-client-bounds.test.ts` and `redis-admin-command-bus.test.ts`.
 - **A threshold that cannot tell slow from dead is the failure to avoid.** It
   sits far above ordinary latency, because tripping it on a Redis that is merely
   behind converts a degraded dependency into a failed one on every connection at
@@ -683,6 +702,8 @@ do NOT compose, and that is the part that decides which connection gets which:
   its real work with commands on the stalled connection, those rejections must
   not replace the result: the admin command bus's `finally` `UNSUBSCRIBE` would
   otherwise throw over the `command_timeout` result the stall exists to produce.
+  It still cannot be forgotten: a failed cleanup marks the subscriber for reset,
+  protects replies already in flight, then restores the durable registry.
 
 ## Test fixtures must not cast past the checker
 

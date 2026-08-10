@@ -471,9 +471,20 @@
   bootstrap 会在一个"接受 socket 但什么都不回"的主机上永远等下去，所以豁免连接改用
   `connectWithin` 打开。
 - **它约束的是调用方等多久，不是连接上的队列。** ioredis 会把超时的命令留在
-  `commandQueue` 里以保持后续回复对齐。本仓每一道深度限制——`maxPendingAppends`、
-  运行时存储的命令准入——仍然是唯一约束内存的东西，都不得因为有了这个选项而退役。这一
-  条在 `redis-command-timeout.test.ts` 里是验证过的，不是假设的。
+  `commandQueue` 里以保持后续回复对齐。本仓每一道调用方侧的深度限制——
+  `maxPendingAppends`、运行时存储的命令准入——仍然不可缺少，都不得因为有了这个选项而
+  退役。三条采用兜底的连接显式带着另一半：关闭 `autoResendUnfulfilledCommands` 与
+  `autoResubscribe`。普通命令连续失败后重置连接；订阅状态的每一次变更失败都会把对应的管理
+  命令总线 subscriber 代际标记为待重置，因为失败的 `SUBSCRIBE` 仍可能落地，失败的
+  `UNSUBSCRIBE` 也可能留下它的唯一 channel。新命令会立即拒绝；没有活跃结果时马上重置，
+  否则等已经在途的结果结束后再重置，避免一次清理切断另一条命令的回复轨迹。旧代际迟到的
+  失败不得重置替代它的新连接。ioredis 随后把 `commandQueue` 移到 `prevCommandQueue` 后丢弃，
+  而不是在重连后重放。管理命令总线会从 handler 注册表恢复持久 command channel，也会恢复仍在
+  等待答案的请求所对应的 result channel；已经结束的请求会在执行可能失败的清理之前先退出
+  期望状态，所以它的 channel 不会被复活。恢复期间禁止新 publish；恢复失败则把指数
+  `retry-pacer` 退避跨 `ready` 代际保留下来——ioredis 自己的计数会在每次 `ready` 清零，单靠
+  它只会形成固定频率的循环。仅有 timeout 仍然没有队列界。这一条在
+  `redis-client-bounds.test.ts` 与 `redis-admin-command-bus.test.ts` 里是验证过的，不是假设的。
 - **分不清"慢"和"死"的阈值是要避免的失败。** 它被放在普通时延之上很远，因为在"只是
   落后的 Redis"上跳闸，会一次性把每条连接上的降级依赖变成失败依赖。
 - **有界了仍然欠一份上报。** 命令开始失败的连接欠调用方的是一个诊断而不只是一个错误：
@@ -482,7 +493,8 @@
   细节。
 - **同一条连接上的清理不是答案。** 当一个请求用同连接上的命令把真正的工作夹在中间时，
   这些清理的 reject 不得替换掉结果：否则管理命令总线 `finally` 里的 `UNSUBSCRIBE` 会
-  把僵死本该产出的 `command_timeout` 结果抛掉。
+  把僵死本该产出的 `command_timeout` 结果抛掉。但清理也不能就此忘掉：清理失败会标记
+  subscriber 待重置，先保护已经在途的回复，之后再恢复持久注册表。
 
 ## 测试夹具不得把类型检查绕过去
 

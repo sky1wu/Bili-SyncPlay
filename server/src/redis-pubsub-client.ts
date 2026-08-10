@@ -5,9 +5,11 @@ import {
 import type { ClosableRedisConnection } from "./redis-graceful-close.js";
 
 export type RedisMessageListener = (channel: string, payload: string) => void;
+export type RedisReadyListener = () => void;
 
 /** The Redis surface shared by both pub/sub-backed buses. */
-export type RedisPubSubClient = ClosableRedisConnection & {
+export type RedisPubSubClient = Omit<ClosableRedisConnection, "disconnect"> & {
+  disconnect: (reconnect?: boolean) => void;
   connect: () => Promise<unknown>;
   publish: (channel: string, payload: string) => Promise<unknown>;
   subscribe: (...channels: string[]) => Promise<unknown>;
@@ -15,8 +17,12 @@ export type RedisPubSubClient = ClosableRedisConnection & {
   on: {
     (event: "message", listener: RedisMessageListener): unknown;
     (event: "error", listener: (error: unknown) => void): unknown;
+    (event: "ready", listener: RedisReadyListener): unknown;
   };
-  off: (event: "message", listener: RedisMessageListener) => unknown;
+  off: {
+    (event: "message", listener: RedisMessageListener): unknown;
+    (event: "ready", listener: RedisReadyListener): unknown;
+  };
 };
 
 export type RedisPubSubClientPair = {

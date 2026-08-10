@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   AdminCommandBus,
   AdminCommandResult,
@@ -140,13 +141,22 @@ export function createAdminActionService(options: {
   function throwCommandFailure(
     result: Exclude<AdminCommandResult, { status: "ok" }>,
   ): never {
-    const statusCode =
-      result.status === "not_found"
-        ? 404
-        : result.status === "stale_target"
-          ? 409
-          : 502;
+    const statusCode = commandFailureStatusCode(result);
     throw new AdminActionError(statusCode, result.code, result.message);
+  }
+
+  function commandFailureStatusCode(
+    result: Exclude<AdminCommandResult, { status: "ok" }>,
+  ): number {
+    if (result.status === "not_found") {
+      return 404;
+    }
+    if (result.status === "stale_target") {
+      return 409;
+    }
+    // An executor error is a bad upstream result; failure to reach the command
+    // bus is this service's Redis dependency being unavailable and is retryable.
+    return result.code === "command_bus_unavailable" ? 503 : 502;
   }
 
   return {
@@ -158,7 +168,7 @@ export function createAdminActionService(options: {
           const targetInstanceId = session.instanceId ?? options.instanceId;
           const result = await options.requestAdminCommand({
             kind: "disconnect_session",
-            requestId: `close-room:${roomCode}:${session.id}:${now()}`,
+            requestId: `close-room:${roomCode}:${session.id}:${randomUUID()}`,
             targetInstanceId,
             sessionId: session.id,
             reason,
@@ -216,13 +226,16 @@ export function createAdminActionService(options: {
           "rejected",
           "command_failed",
         );
+        const representativeFailure =
+          failedCommands.find(
+            ({ result }) => commandFailureStatusCode(result) === 503,
+          ) ??
+          failedCommands.find(({ result }) => result.status === "error") ??
+          failedCommands.find(({ result }) => result.status === "not_found") ??
+          failedCommands[0]!;
         throw new AdminActionError(
-          failedCommands.some(({ result }) => result.status === "error")
-            ? 502
-            : failedCommands.some(({ result }) => result.status === "not_found")
-              ? 404
-              : 409,
-          failedCommands[0]?.result.code ?? "close_room_failed",
+          commandFailureStatusCode(representativeFailure.result),
+          representativeFailure.result.code,
           "Failed to close room because one or more member sessions could not be disconnected.",
           {
             roomCode,
@@ -330,7 +343,7 @@ export function createAdminActionService(options: {
       const targetInstanceId = session.instanceId ?? options.instanceId;
       const commandResult = await options.requestAdminCommand({
         kind: "kick_member",
-        requestId: `kick-member:${memberId}:${now()}`,
+        requestId: `kick-member:${memberId}:${randomUUID()}`,
         targetInstanceId,
         roomCode,
         memberId,
@@ -384,7 +397,7 @@ export function createAdminActionService(options: {
       const targetInstanceId = session.instanceId ?? options.instanceId;
       const commandResult = await options.requestAdminCommand({
         kind: "disconnect_session",
-        requestId: `disconnect-session:${sessionId}:${now()}`,
+        requestId: `disconnect-session:${sessionId}:${randomUUID()}`,
         targetInstanceId,
         sessionId,
         reason,

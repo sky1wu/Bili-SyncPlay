@@ -197,6 +197,60 @@ test("admin action service maps error command results to 502", async () => {
   );
 });
 
+test("admin action service maps command bus unavailability to 503", async () => {
+  const session = createSession();
+  const service = createService({
+    session,
+    requestAdminCommand: async () => ({
+      requestId: "req-unavailable",
+      targetInstanceId: "node-a",
+      executorInstanceId: "node-a",
+      status: "error",
+      code: "command_bus_unavailable",
+      message: "Admin command bus could not reach Redis.",
+      completedAt: 10_003,
+    }),
+  });
+
+  await assert.rejects(
+    () => service.disconnectSession(ACTOR, session.id, "cleanup"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.code, "command_bus_unavailable");
+      return true;
+    },
+  );
+});
+
+test("concurrent admin commands receive distinct request ids", async () => {
+  const session = createSession();
+  const requestIds: string[] = [];
+  const service = createService({
+    session,
+    requestAdminCommand: async (command) => {
+      requestIds.push(command.requestId);
+      return {
+        requestId: command.requestId,
+        targetInstanceId: command.targetInstanceId,
+        executorInstanceId: "node-a",
+        status: "ok",
+        roomCode: session.roomCode,
+        sessionId: session.id,
+        completedAt: 10_004,
+      };
+    },
+  });
+
+  await Promise.all([
+    service.disconnectSession(ACTOR, session.id, "first"),
+    service.disconnectSession(ACTOR, session.id, "second"),
+  ]);
+
+  assert.equal(requestIds.length, 2);
+  assert.notEqual(requestIds[0], requestIds[1]);
+});
+
 test("admin action service keeps room state when closeRoom cannot disconnect every session", async () => {
   let deletedPersistedRoom = false;
   let deletedRuntimeRoom = false;
@@ -250,6 +304,74 @@ test("admin action service keeps room state when closeRoom cannot disconnect eve
   assert.equal(auditLogs.total, 1);
   assert.equal(auditLogs.items[0]?.result, "rejected");
   assert.equal(auditLogs.items[0]?.reason, "command_failed");
+});
+
+test("admin closeRoom maps command bus unavailability to 503", async () => {
+  const session = createSession();
+  const service = createService({
+    sessionsByRoom: [session],
+    requestAdminCommand: async () => ({
+      requestId: "req-close-unavailable",
+      targetInstanceId: "node-a",
+      executorInstanceId: "node-a",
+      status: "error",
+      code: "command_bus_unavailable",
+      message: "Admin command bus could not reach Redis.",
+      completedAt: 10_004,
+    }),
+  });
+
+  await assert.rejects(
+    () => service.closeRoom(ACTOR, "ROOM01", "shutdown"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.details?.commandFailureCount, 1);
+      return true;
+    },
+  );
+});
+
+test("admin closeRoom keeps the 503 code aligned for mixed command failures", async () => {
+  const firstSession = createSession({ id: "session-1" });
+  const secondSession = createSession({
+    id: "session-2",
+    memberId: "member-2",
+  });
+  const service = createService({
+    sessionsByRoom: [firstSession, secondSession],
+    requestAdminCommand: async (command) =>
+      command.kind === "disconnect_session" && command.sessionId === "session-1"
+        ? {
+            requestId: "req-close-executor-error",
+            targetInstanceId: "node-a",
+            executorInstanceId: "node-a",
+            status: "error",
+            code: "socket_close_failed",
+            message: "Failed to close socket.",
+            completedAt: 10_004,
+          }
+        : {
+            requestId: "req-close-unavailable",
+            targetInstanceId: "node-a",
+            executorInstanceId: "node-a",
+            status: "error",
+            code: "command_bus_unavailable",
+            message: "Admin command bus could not reach Redis.",
+            completedAt: 10_004,
+          },
+  });
+
+  await assert.rejects(
+    () => service.closeRoom(ACTOR, "ROOM01", "shutdown"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.code, "command_bus_unavailable");
+      assert.equal(error.details?.commandFailureCount, 2);
+      return true;
+    },
+  );
 });
 
 test("admin expireRoom tears down the room's runtime state", async () => {

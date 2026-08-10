@@ -12,7 +12,7 @@ import {
   createNoopAdminCommandBus,
   type AdminCommandBus,
 } from "../admin-command-bus.js";
-import { createDiagnosisThrottle } from "../diagnosis-throttle.js";
+import { createAdminCommandBusFailureHandlers } from "../admin-command-bus-diagnostics.js";
 import { createStructuredLogger, DEFAULT_EVENT_SAMPLING } from "../logger.js";
 import { createMirroredRuntimeStore } from "../mirrored-runtime-store.js";
 import { createRedisAdminCommandBus } from "../redis-admin-command-bus.js";
@@ -63,17 +63,6 @@ import type {
 
 const DEFAULT_CLOSE_STEP_TIMEOUT_MS = 5_000;
 
-/**
- * How often a repeated admin command bus failure diagnosis may be logged.
- *
- * Its own constant, like every other throttle here: this one paces a report
- * driven by admin requests and by command fan-out, which are different rates
- * from the event store's log volume and the session store's request rate.
- */
-const COMMAND_BUS_FAILURE_REPORT_INTERVAL_MS = 60_000;
-
-/** Four operations plus one entry per command kind; the bound is the shared one. */
-const MAX_TRACKED_COMMAND_BUS_FAILURE_DIAGNOSES = 16;
 const PACKAGE_JSON_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../package.json",
@@ -364,9 +353,13 @@ export async function createServerBootstrapContext(
       ? createMirroredRuntimeStore(localRuntimeStore, sharedRuntimeStore)
       : sharedRuntimeStore;
   metricsCollector.bindRuntimeStore(runtimeStore);
-  const commandBusFailureThrottle = createDiagnosisThrottle({
-    intervalMs: COMMAND_BUS_FAILURE_REPORT_INTERVAL_MS,
-    maxTrackedDiagnoses: MAX_TRACKED_COMMAND_BUS_FAILURE_DIAGNOSES,
+  const commandBusFailureHandlers = createAdminCommandBusFailureHandlers({
+    metricsCollector,
+    // Components are built before the structured logger because that logger
+    // may itself use Redis. Read the binding at callback time so failures use
+    // the final logger rather than the bootstrap no-op.
+    getLogEvent: () => logEvent,
+    instanceId: persistenceConfig.instanceId,
     now,
   });
   const adminCommandBus =
@@ -378,53 +371,7 @@ export async function createServerBootstrapContext(
           resultChannelPrefix: getRedisAdminCommandResultChannelPrefix(
             persistenceConfig.redisNamespace,
           ),
-          onResultPublishFailed: (command, error) => {
-            // Counted every time, reported at most once a minute per command
-            // kind. "Admin actions are human-rate" was the earlier claim here
-            // and it is not a bound anyone enforces: closing a room fans out
-            // one command per session, in parallel, and a failing action gets
-            // retried (#271 review).
-            metricsCollector.observeRedisAdminCommandBusFailure(
-              "publish_result",
-            );
-            if (!commandBusFailureThrottle.allow(`result:${command.kind}`)) {
-              return;
-            }
-            logEvent("admin_command_result_publish_failed", {
-              instanceId: persistenceConfig.instanceId,
-              commandKind: command.kind,
-              requestId: command.requestId,
-              targetInstanceId: command.targetInstanceId,
-              result: "error",
-              error: error instanceof Error ? error.message : String(error),
-            });
-          },
-          onBusCommandFailed: ({ operation, error }) => {
-            // The requester's side. Same pairing: unconditional counter, then a
-            // throttled line — an admin console polling through an outage would
-            // otherwise write one of each per poll.
-            metricsCollector.observeRedisAdminCommandBusFailure(operation);
-            if (!commandBusFailureThrottle.allow(`bus:${operation}`)) {
-              return;
-            }
-            logEvent("admin_command_bus_command_failed", {
-              instanceId: persistenceConfig.instanceId,
-              operation,
-              result: "error",
-              error: error instanceof Error ? error.message : String(error),
-            });
-          },
-          onConnectionDropped: ({ role, consecutiveFailures }) => {
-            // At most one per `REDIS_STALL_DROP_THRESHOLD` failures, so it
-            // needs no throttle of its own — and it is the line that explains
-            // a reconnect an operator would otherwise see only in Redis's log.
-            logEvent("admin_command_bus_connection_reset", {
-              instanceId: persistenceConfig.instanceId,
-              role,
-              consecutiveFailures,
-              result: "error",
-            });
-          },
+          ...commandBusFailureHandlers,
           onCloseUnfinished: (report) =>
             logRedisCloseUnfinished(
               "admin_command_bus_close_unfinished",

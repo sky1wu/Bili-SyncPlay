@@ -1,6 +1,7 @@
 import type {
   RedisMessageListener,
   RedisPubSubClient,
+  RedisReadyListener,
 } from "../src/redis-pubsub-client.js";
 
 /**
@@ -12,7 +13,9 @@ import type {
  */
 export type FakeRedisPubSubCommands = Partial<
   Pick<RedisPubSubClient, "publish" | "subscribe" | "unsubscribe">
->;
+> & {
+  disconnect?: (reconnect?: boolean) => void;
+};
 
 export function createFakeRedisPubSubClient(
   quit: () => Promise<unknown>,
@@ -22,15 +25,19 @@ export function createFakeRedisPubSubClient(
   disconnectCalls: () => number;
   /** Deliver a message to every registered listener, as ioredis would. */
   emitMessage: (channel: string, payload: string) => void;
+  /** Announce a reconnect reaching ready. */
+  emitReady: () => void;
 } {
   let disconnectCalls = 0;
   const messageListeners = new Set<RedisMessageListener>();
+  const readyListeners = new Set<RedisReadyListener>();
   return {
     client: {
       connect: async () => undefined,
       quit,
-      disconnect: () => {
+      disconnect: (reconnect?: boolean) => {
         disconnectCalls += 1;
+        commands.disconnect?.(reconnect);
       },
       publish: commands.publish ?? (async () => 1),
       subscribe: commands.subscribe ?? (async () => 1),
@@ -38,12 +45,16 @@ export function createFakeRedisPubSubClient(
       on: (event: string, listener: unknown) => {
         if (event === "message") {
           messageListeners.add(listener as RedisMessageListener);
+        } else if (event === "ready") {
+          readyListeners.add(listener as RedisReadyListener);
         }
         return undefined;
       },
-      off: (event: "message", listener: RedisMessageListener) => {
+      off: (event: string, listener: unknown) => {
         if (event === "message") {
-          messageListeners.delete(listener);
+          messageListeners.delete(listener as RedisMessageListener);
+        } else if (event === "ready") {
+          readyListeners.delete(listener as RedisReadyListener);
         }
         return undefined;
       },
@@ -52,6 +63,11 @@ export function createFakeRedisPubSubClient(
     emitMessage: (channel, payload) => {
       for (const listener of [...messageListeners]) {
         listener(channel, payload);
+      }
+    },
+    emitReady: () => {
+      for (const listener of [...readyListeners]) {
+        listener();
       }
     },
   };

@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import test from "node:test";
 import { Redis } from "ioredis";
+import { createBoundedRedisClient } from "../src/redis-command-timeout.js";
 import { settleWithin } from "../src/retry-pacer.js";
 
 function bulk(payload: string): Buffer {
@@ -76,12 +77,33 @@ function completeCommandLength(buffer: Buffer): number | null {
   return offset;
 }
 
+function commandName(command: Buffer): string | null {
+  const headerEnd = command.indexOf("\r\n");
+  const lengthEnd = command.indexOf("\r\n", headerEnd + 2);
+  if (headerEnd < 0 || command[headerEnd + 2] !== DOLLAR || lengthEnd < 0) {
+    return null;
+  }
+  const payloadLength = Number(
+    command.subarray(headerEnd + 3, lengthEnd).toString(),
+  );
+  if (!Number.isInteger(payloadLength) || payloadLength < 0) {
+    return null;
+  }
+  return command
+    .subarray(lengthEnd + 2, lengthEnd + 2 + payloadLength)
+    .toString()
+    .toLowerCase();
+}
+
 type SilentRedis = {
   url: string;
   /** Accept commands and stop replying, keeping the socket open. */
   goSilent: () => void;
+  /** Resume answering, including the next connection's ready check. */
+  resume: () => void;
   /** Commands received since {@link SilentRedis.goSilent}. */
   unansweredCommands: () => number;
+  receivedCommands: () => readonly string[];
   /** Reply to the commands received while silent, in arrival order. */
   replay: (payloads: string[]) => void;
   close: () => Promise<void>;
@@ -97,6 +119,7 @@ async function startSilentRedis(
 ): Promise<SilentRedis> {
   let answering = true;
   let unanswered = 0;
+  const received: string[] = [];
   let live: net.Socket | null = null;
   const sockets = new Set<net.Socket>();
 
@@ -115,7 +138,12 @@ async function startSilentRedis(
         if (length === null) {
           return;
         }
+        const command = pending.subarray(0, length);
         pending = pending.subarray(length);
+        const name = commandName(command);
+        if (name) {
+          received.push(name);
+        }
         if (answering) {
           if (answerDelayMs > 0) {
             setTimeout(() => socket.write(HANDSHAKE_REPLY), answerDelayMs);
@@ -141,7 +169,11 @@ async function startSilentRedis(
     goSilent: () => {
       answering = false;
     },
+    resume: () => {
+      answering = true;
+    },
     unansweredCommands: () => unanswered,
+    receivedCommands: () => received,
     replay: (payloads) => {
       for (const payload of payloads) {
         live?.write(bulk(payload));
@@ -244,6 +276,45 @@ test("a timed-out command stays queued and keeps later replies aligned", async (
     // the queue, every reply on this connection would be off by one from here
     // on, and this caller would receive the abandoned one's answer.
     assert.equal(await later, "reply-for-later");
+  } finally {
+    client.disconnect();
+    await fixture.close();
+  }
+});
+
+test("a backstopped reset retires timed-out commands instead of replaying them", async () => {
+  const fixture = await startSilentRedis();
+  const client = createBoundedRedisClient(fixture.url, {
+    bound: "command_timeout",
+  });
+  // Production uses five seconds; shortening the same option keeps this a fast
+  // test of the reset/reconnect mechanism rather than the timeout magnitude.
+  client.options.commandTimeout = TEST_COMMAND_TIMEOUT_MS;
+
+  try {
+    await client.connect();
+    fixture.goSilent();
+    await assert.rejects(client.get("abandoned"));
+    assert.equal(
+      fixture.receivedCommands().filter((name) => name === "get").length,
+      1,
+    );
+
+    fixture.resume();
+    const reconnected = new Promise<void>((resolve) => {
+      client.once("ready", () => resolve());
+    });
+    client.disconnect(true);
+    assert.equal(await settleWithin(reconnected, 1_000), true);
+    // `ready` is emitted before ioredis processes prevCommandQueue, and the
+    // resent bytes cross a real socket, so leave a small window for a replay to
+    // reach the fixture if the option regresses.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(
+      fixture.receivedCommands().filter((name) => name === "get").length,
+      1,
+    );
   } finally {
     client.disconnect();
     await fixture.close();

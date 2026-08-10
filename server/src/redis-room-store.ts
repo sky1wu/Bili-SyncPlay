@@ -455,7 +455,11 @@ export async function createRedisRoomStore(
     try {
       return await redis.get(roomKey(code));
     } catch (error) {
-      if (error instanceof ReplyError) {
+      if (
+        error instanceof Error &&
+        error instanceof ReplyError &&
+        error.message.startsWith("WRONGTYPE ")
+      ) {
         return null;
       }
       throw error;

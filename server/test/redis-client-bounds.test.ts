@@ -20,6 +20,7 @@ import {
   createStalledConnectionGuard,
   REDIS_COMMAND_TIMEOUT_MS,
   RedisConnectTimeoutError,
+  RedisStartupTimeoutError,
   startWithin,
 } from "../src/redis-command-timeout.js";
 
@@ -161,7 +162,11 @@ test("a command_timeout client carries the backstop and a caller-bounded one doe
 
   try {
     assert.equal(backstopped.options.commandTimeout, REDIS_COMMAND_TIMEOUT_MS);
+    assert.equal(backstopped.options.autoResendUnfulfilledCommands, false);
+    assert.equal(backstopped.options.autoResubscribe, false);
     assert.equal(callerBounded.options.commandTimeout, undefined);
+    assert.equal(callerBounded.options.autoResendUnfulfilledCommands, true);
+    assert.equal(callerBounded.options.autoResubscribe, true);
     // Both keep the connection policy that was already shared, and neither may
     // silently acquire the OTHER meaning of "bounded": `maxRetriesPerRequest`
     // caps re-queues across reconnects and says nothing about how long an
@@ -241,13 +246,14 @@ test("a handshake that lands inside the budget is left alone", async () => {
   assert.equal(disconnectCalls, 0);
 });
 
-test("a connection that keeps failing is reset, which is what empties ioredis's queue", () => {
+test("a connection that keeps failing is reset without replaying ioredis's queue", () => {
   // The companion every backstopped connection needs. `commandTimeout` answers
   // the caller and leaves the command in `commandQueue`, and neither
   // backstopped connection has an admission or depth limit — so a caller
   // retrying every five seconds adds one queued command per retry, remotely,
-  // for as long as the stall lasts. Closing the socket is the only thing on
-  // this side that empties that queue (#271 review).
+  // for as long as the stall lasts. Dropping the socket while auto-resend is
+  // disabled is the only thing on this side that retires that queue without
+  // replaying it (#271 review).
   const disconnects: Array<boolean | undefined> = [];
   const dropped: Array<{ consecutiveFailures: number }> = [];
   const guard = createStalledConnectionGuard(
@@ -292,9 +298,9 @@ test("one success is enough to say the connection is alive", () => {
 });
 
 test("the guard does not trip again on the wreckage of its own reset", () => {
-  // Dropping the socket rejects everything still queued, and each of those
-  // rejections comes back through `recordFailure`. Without resetting the count
-  // first, one stall would drop the socket once per threshold rejections.
+  // Commands whose timers land alongside the threshold failure still come back
+  // through `recordFailure`. Without resetting the count first, one stalled
+  // batch could drop the socket repeatedly while it is being replaced.
   let disconnectCalls = 0;
   const guard = createStalledConnectionGuard(
     {
@@ -324,12 +330,17 @@ test("a startup step that never answers fails the process instead of hanging it"
         disconnectCalls += 1;
       },
     },
+    "event store migration and window-index backfill",
     () => new Promise(() => undefined),
     20,
   ).then(
     () => assert.fail("startWithin should not resolve"),
     (error: unknown) => {
-      assert.ok(error instanceof RedisConnectTimeoutError);
+      assert.ok(error instanceof RedisStartupTimeoutError);
+      assert.equal(
+        error.message,
+        'Redis startup operation "event store migration and window-index backfill" did not complete within 20ms.',
+      );
       assert.equal(disconnectCalls, 1);
     },
   );

@@ -7,6 +7,7 @@ import {
   type RedisEventStoreMulti,
   type RedisEventStoreOptions,
 } from "../src/admin/redis-event-store.js";
+import { RedisStartupTimeoutError } from "../src/redis-command-timeout.js";
 
 /**
  * The failure every test here is about: a command that is accepted and never
@@ -761,7 +762,15 @@ test("construction fails loudly when Redis stops answering after the handshake",
   const startedAt = Date.now();
   await assert.rejects(
     createStore(redis.client, { startupTimeoutMs: 20 }),
-    /not ready within/,
+    (error: unknown) => {
+      assert.ok(error instanceof RedisStartupTimeoutError);
+      assert.equal(
+        error.operation,
+        "event store migration and window-index backfill",
+      );
+      assert.match(error.message, /did not complete within 20ms/);
+      return true;
+    },
   );
   assert.ok(Date.now() - startedAt < 1_000);
   // The socket goes with it: a half-connected client retrying behind a process

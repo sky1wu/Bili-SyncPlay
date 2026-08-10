@@ -559,7 +559,12 @@ export async function createRedisEventStore(
   // the whole construction, so a Redis that completes the handshake and then
   // stops answering would hang the process here with the socket already up,
   // exactly as an unbounded `connect()` would (#271 review).
-  await startWithin(redis, runStartupMigration, options.startupTimeoutMs);
+  await startWithin(
+    redis,
+    "event store migration and window-index backfill",
+    runStartupMigration,
+    options.startupTimeoutMs,
+  );
 
   /** Hoisted, so the bounded call above can read top-down. */
   async function runStartupMigration(): Promise<void> {

@@ -1356,7 +1356,7 @@ test("redis room store reports which delete removed the room and still drops the
 
 test("a stalled GET is an unknown room body, not an absent one", async () => {
   // The listing reads every indexed room's body, and `readRoomBody` used to
-  // answer null for ANY failure. That is right for a reply — WRONGTYPE is a
+  // answer null for ANY failure. That is right for a WRONGTYPE reply — it is a
   // fact about one key, and one bad key must not reject a whole batch — and
   // wrong for everything else, because a connection that stopped answering
   // fails every key in the batch at once. Answering "no body" there empties the
@@ -1390,6 +1390,40 @@ test("a stalled GET is an unknown room body, not an absent one", async () => {
     );
     // And nothing was pruned or quarantined on the strength of an answer the
     // store never got.
+    assert.deepEqual(evals, []);
+  } finally {
+    await store.close();
+  }
+});
+
+test("a non-WRONGTYPE Redis reply is a dependency failure, not an unreadable key", async () => {
+  const evals: string[] = [];
+  const redis = createFakeRoomStoreRedis(async () => "OK", {
+    zrange: async () => ["ABC123"],
+    get: async () => {
+      throw new ReplyError(
+        "NOPERM this user has no permissions to run the 'get' command",
+      );
+    },
+  });
+  redis.client.eval = async (script: string) => {
+    evals.push(script);
+    return 0;
+  };
+  const store = await createRedisRoomStore("redis://unused", {
+    redisClient: redis.client,
+  });
+
+  try {
+    await assert.rejects(
+      store.listRooms({
+        page: 1,
+        pageSize: 10,
+        sortBy: "createdAt",
+        sortOrder: "desc",
+      }),
+      /NOPERM/,
+    );
     assert.deepEqual(evals, []);
   } finally {
     await store.close();
