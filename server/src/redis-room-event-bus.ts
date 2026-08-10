@@ -1,6 +1,11 @@
 import { performance } from "node:perf_hooks";
 import type { MetricsCollector } from "./admin/metrics.js";
-import { connectWithin } from "./redis-command-timeout.js";
+import {
+  connectWithin,
+  createRedisCommandAdmission,
+  REDIS_CONNECT_TIMEOUT_MS,
+  startWithin,
+} from "./redis-command-timeout.js";
 import { quitAllWithin, type RedisQuitReport } from "./redis-graceful-close.js";
 import {
   createRedisPubSubClientPair,
@@ -79,6 +84,10 @@ export async function createRedisRoomEventBus(
     ) => void;
     onInvalidMessage?: (payload: string) => void;
     onHandlerError?: (message: RoomEventBusMessage, error: unknown) => void;
+    /** Commands admitted here keep their slot until the real Redis reply. */
+    maxPendingPublishCommands?: number;
+    /** Bounds the first SUBSCRIBE that bootstrap waits for. */
+    subscriptionTimeoutMs?: number;
     closeQuitTimeoutMs?: number;
     onCloseUnfinished?: (info: RedisQuitReport<RoomEventBusClientRole>) => void;
     redisClients?: RedisPubSubClientPair;
@@ -91,23 +100,31 @@ export async function createRedisRoomEventBus(
 ): Promise<RoomEventBus & { close: () => Promise<void> }> {
   const { publisher: publishClient, subscriber: subscribeClient } =
     options.redisClients ??
-    // Exempt: `pending-resync-queue` keeps at most one publish per room out at
-    // a time, and it learns that the previous one is still out there only by
-    // its silence. A backstop would settle it and turn "one publish, retried
-    // when it answers" into one publish per retry (#242, #271).
+    // Exempt: the publisher's admission holds a slot until the REAL Redis reply,
+    // which preserves `pending-resync-queue`'s use of silence as evidence. The
+    // subscriber's startup SUBSCRIBE has its own `startWithin` deadline. A
+    // connection backstop would instead settle the publisher and turn "one
+    // publish, retried when it answers" into one publish per timeout (#242,
+    // #271 review).
     createRedisPubSubClientPair(redisUrl, {
       bound: "caller",
       boundedBy:
-        "pending-resync-queue's capAttempt and its in-flight wait; the room event consumer's own handling",
+        "room-event publish admission tracks real replies; startWithin bounds the initial SUBSCRIBE",
     });
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const channel = options.channel ?? DEFAULT_ROOM_EVENT_CHANNEL;
+  const publishAdmission = createRedisCommandAdmission(
+    options.maxPendingPublishCommands,
+  );
+  const subscriptionTimeoutMs =
+    options.subscriptionTimeoutMs ?? REDIS_CONNECT_TIMEOUT_MS;
   const subscribers = new Map<
     (message: RoomEventBusMessage) => Promise<void> | void,
     (incomingChannel: string, payload: string) => void
   >();
   let subscribed = false;
+  let subscriptionOperation: Promise<void> | null = null;
   let closing = false;
 
   publishClient.on("error", (error) => {
@@ -124,18 +141,53 @@ export async function createRedisRoomEventBus(
     connectWithin(subscribeClient),
   ]);
 
-  async function ensureSubscription(): Promise<void> {
-    if (!subscribed) {
-      await subscribeClient.subscribe(channel);
-      subscribed = true;
+  async function reconcileSubscription(): Promise<void> {
+    while (!closing) {
+      let operation = subscriptionOperation;
+      if (!operation) {
+        const subscriptionDesired = subscribers.size > 0;
+        if (subscriptionDesired === subscribed) {
+          return;
+        }
+        operation = subscriptionDesired
+          ? startWithin(
+              subscribeClient,
+              "room event bus SUBSCRIBE",
+              () => subscribeClient.subscribe(channel),
+              subscriptionTimeoutMs,
+            ).then(() => {
+              if (!closing) {
+                subscribed = true;
+              }
+            })
+          : subscribeClient.unsubscribe(channel).then(() => {
+              subscribed = false;
+            });
+        subscriptionOperation = operation;
+      }
+      try {
+        await operation;
+      } finally {
+        if (subscriptionOperation === operation) {
+          subscriptionOperation = null;
+        }
+      }
+      // Desired state may have changed while the command was awaiting its ACK.
+      // Re-read both sides before allowing the caller to observe completion.
     }
+    throw new Error("Room event bus closed while changing its subscription.");
   }
 
-  async function releaseSubscription(): Promise<void> {
-    if (subscribed && subscribers.size === 0) {
-      await subscribeClient.unsubscribe(channel);
-      subscribed = false;
+  async function removeSubscriber(
+    handler: (message: RoomEventBusMessage) => Promise<void> | void,
+    listener: (incomingChannel: string, payload: string) => void,
+  ): Promise<void> {
+    if (subscribers.get(handler) !== listener) {
+      return;
     }
+    subscribers.delete(handler);
+    subscribeClient.off("message", listener);
+    await reconcileSubscription();
   }
 
   return {
@@ -146,7 +198,9 @@ export async function createRedisRoomEventBus(
 
       const startedAt = performance.now();
       try {
-        await publishClient.publish(channel, JSON.stringify(message));
+        await publishAdmission.run(() =>
+          publishClient.publish(channel, JSON.stringify(message)),
+        );
       } catch (error) {
         options.metricsCollector?.observeRedisRoomEventBusPublishFailure();
         throw error;
@@ -160,8 +214,9 @@ export async function createRedisRoomEventBus(
       if (closing) {
         return async () => {};
       }
-
-      await ensureSubscription();
+      if (subscribers.has(handler)) {
+        throw new Error("Room event handler is already subscribed.");
+      }
 
       const listener = (incomingChannel: string, payload: string) => {
         if (incomingChannel !== channel) {
@@ -184,19 +239,23 @@ export async function createRedisRoomEventBus(
           });
       };
 
+      // Install the desired handler before SUBSCRIBE. ioredis can dispatch a
+      // message that follows the ACK in the same socket read before the awaited
+      // continuation runs; registering afterwards silently loses that first
+      // room event.
       subscribers.set(handler, listener);
       subscribeClient.on("message", listener);
-
-      return async () => {
-        const activeListener = subscribers.get(handler);
-        if (!activeListener) {
-          return;
+      try {
+        await reconcileSubscription();
+      } catch (error) {
+        if (subscribers.get(handler) === listener) {
+          subscribers.delete(handler);
+          subscribeClient.off("message", listener);
         }
+        throw error;
+      }
 
-        subscribers.delete(handler);
-        subscribeClient.off("message", activeListener);
-        await releaseSubscription();
-      };
+      return () => removeSubscriber(handler, listener);
     },
     async close() {
       closing = true;
@@ -204,12 +263,9 @@ export async function createRedisRoomEventBus(
         subscribeClient.off("message", listener);
       }
       subscribers.clear();
-      // Reset with the set it belongs to. `releaseSubscription`'s precondition
-      // is `subscribed && subscribers.size === 0`, so leaving this true makes
-      // that condition permanently satisfied — harmless only for as long as the
-      // `closing` guard happens to cover every caller, which is exactly the
-      // kind of "no state left behind" cleanup this repo asks to grep for
-      // (#270 review).
+      // Reset with the desired set and serialized operation it belongs to.
+      // `reconcileSubscription` exits on `closing`, so no late operation may
+      // make this closed bus observable as subscribed again (#270 review).
       subscribed = false;
       // `QUIT` ends subscriber mode too. Do not queue another `UNSUBSCRIBE`
       // here: an earlier consumer unsubscribe can already be stuck on this

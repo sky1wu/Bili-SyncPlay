@@ -316,6 +316,9 @@ export class RedisCommandAdmissionError extends Error {
  * in ioredis's queue. The stalled guard resets after at most `threshold` such
  * failures, so the real queue is bounded by this admission limit plus at most
  * `threshold - 1` timed-out entries from the same generation.
+ * A caller-bounded owner can instead keep this promise pending until the real
+ * command answers; its admission count is then the real queue bound even after
+ * an outer behaviour deadline has stopped waiting.
  */
 export function createRedisCommandAdmission(
   maxPendingCommands: number = DEFAULT_REDIS_COMMAND_ADMISSION_LIMIT,

@@ -40,12 +40,13 @@ export type RedisPubSubClientPair = {
  *   bound from a command's silence — `request` times out the REPLY on a
  *   `setTimeout`, which is a different promise from the `SUBSCRIBE` before it
  *   and the `UNSUBSCRIBE` after.
- * - The **room event bus** may not. `pending-resync-queue` waits on the
- *   publish it already started "rather than pile another on top — at most ONE
- *   publish per room is ever out there", and that wait ends only when the real
- *   command answers. A backstop would settle it and turn that bound into one
- *   publish per retry, for as long as the bus stays hung — the exact defect
- *   #242 wrote that loop to fix.
+ * - The **room event bus** may not. Its publisher admission and
+ *   `pending-resync-queue` both hold state until the REAL publish answers. A
+ *   backstop would settle that promise and turn the bound into one publish per
+ *   timeout, for as long as the bus stays hung — the exact defect #242 wrote
+ *   that loop to fix. Its separate subscriber connection instead bounds the
+ *   initial `SUBSCRIBE` with `startWithin`, so startup does not inherit the
+ *   publisher's deliberate wait.
  */
 export function createRedisPubSubClientPair(
   redisUrl: string,

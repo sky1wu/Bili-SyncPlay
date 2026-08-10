@@ -470,6 +470,14 @@
   ioredis 的 `connectTimeout` 只管 TCP 建连、不管其后的 `INFO`。两道界都没有时，
   bootstrap 会在一个"接受 socket 但什么都不回"的主机上永远等下去，所以豁免连接改用
   `connectWithin` 打开。
+- **握手完成，并不代表后续启动命令也有界。** 房间事件 consumer 会在服务开始监听前
+  await 第一次 `SUBSCRIBE`，所以这条命令会在独立 subscriber 连接上通过 `startWithin`
+  执行。Redis 若恰好在 `ready` 之后停止应答，启动会以分阶段错误失败并断开 subscriber；
+  publisher 仍不采用会破坏重试证据的兜底。handler 会在提交命令前先注册，因为 ioredis
+  可能在同一次 socket 读取中先处理 SUBSCRIBE ACK、紧接着就分发消息。SUBSCRIBE 与最后一次
+  UNSUBSCRIBE 共用一条串行 reconcile：后者尚未 ACK 时到来的新 handler，会先等它完成、再等
+  新 SUBSCRIBE ACK，不能继承一条马上就要被移除的频道。重复注册同一个 handler 会被拒绝，
+  而不是让 map 替换后遗留第一条 listener。
 - **它约束的是调用方等多久，不是连接上的队列。** ioredis 会把超时的命令留在
   `commandQueue` 里以保持后续回复对齐。本仓每一道调用方侧的深度限制——
   `maxPendingAppends`、运行时存储的命令准入——仍然不可缺少，都不得因为有了这个选项而
@@ -494,6 +502,10 @@
   它只会形成固定频率的循环。仅有 timeout 仍然没有队列界。这一条在
   `redis-client-bounds.test.ts`、`redis-admin-session-store.test.ts` 与
   `redis-admin-command-bus.test.ts` 里是验证过的，不是假设的。
+  采用调用方界的房间事件 publisher 则是互补形状：它的提交准入会一直占槽，直到真实的
+  Redis `PUBLISH` 结算。`firePublishRoomEvent` 的包装器超时不能重新放开该槽；普通事件、
+  一次性 resync、reaper 通告和管理端发布都会经过同一条总线级真实命令上限。
+  `redis-room-event-bus.test.ts` 固定了这项性质。
 - **分不清"慢"和"死"的阈值是要避免的失败。** 它被放在普通时延之上很远，因为在"只是
   落后的 Redis"上跳闸，会一次性把每条连接上的降级依赖变成失败依赖。
 - **有界了仍然欠一份上报。** 命令开始失败的连接欠调用方的是一个诊断而不只是一个错误：

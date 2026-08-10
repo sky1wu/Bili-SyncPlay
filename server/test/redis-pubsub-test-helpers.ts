@@ -7,9 +7,10 @@ import type {
 /**
  * Overrides for the commands a bus issues on a pub/sub connection.
  *
- * Rejection is the shape a stalled connection now takes: #271 gave both buses'
- * clients a `commandTimeout`, so `PUBLISH` / `SUBSCRIBE` / `UNSUBSCRIBE` answer
- * with an error instead of never answering at all.
+ * Rejection is one shape a stalled connection may take: #271 gave the admin
+ * command bus a `commandTimeout`, while the caller-bounded room-event bus keeps
+ * selected commands pending so its own admission/deadline tests can model the
+ * real ioredis queue.
  */
 export type FakeRedisPubSubCommands = Partial<
   Pick<RedisPubSubClient, "publish" | "subscribe" | "unsubscribe">

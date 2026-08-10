@@ -665,6 +665,19 @@ do NOT compose, and that is the part that decides which connection gets which:
   the TCP connect and not the `INFO` after it. Without either bound, bootstrap
   waits forever on a host that accepts the socket and answers nothing, so an
   exempt connection opens through `connectWithin`.
+- **A completed handshake does not cover the next startup command.** The room
+  event consumer awaits its first `SUBSCRIBE` before the server can listen, so
+  that command runs through `startWithin` on the dedicated subscriber
+  connection. If Redis stops replying in the gap after `ready`, startup fails
+  with a staged error and disconnects that subscriber; it does not add a
+  backstop to the publisher whose silence is retry evidence. The message
+  handler is installed before the command is submitted, because ioredis may
+  dispatch a message following the SUBSCRIBE ACK in the same socket read.
+  SUBSCRIBE and final UNSUBSCRIBE share one serialized reconcile: a handler
+  arriving during the latter waits for its ACK and a new SUBSCRIBE ACK before
+  registration succeeds, rather than inheriting a channel that is about to be
+  removed. Registering the same handler twice is refused instead of orphaning
+  the first listener behind a map replacement.
 - **It bounds the caller's wait, not the connection's queue.** ioredis keeps a
   timed-out command in `commandQueue` so later replies stay aligned. Every
   caller-side depth limit here — `maxPendingAppends`, the runtime store's command
@@ -702,6 +715,12 @@ do NOT compose, and that is the part that decides which connection gets which:
   still provides no queue bound. Proved, not assumed, in
   `redis-client-bounds.test.ts`, `redis-admin-session-store.test.ts`, and
   `redis-admin-command-bus.test.ts`.
+  The caller-bounded room-event publisher has the complementary shape: its
+  submission admission retains a slot until the real Redis `PUBLISH` settles.
+  A `firePublishRoomEvent` wrapper timing out therefore cannot reopen that slot;
+  ordinary events, one-shot resyncs, reaper announcements and admin publishes
+  all meet the same bus-wide real-command cap. This is covered by
+  `redis-room-event-bus.test.ts`.
 - **A threshold that cannot tell slow from dead is the failure to avoid.** It
   sits far above ordinary latency, because tripping it on a Redis that is merely
   behind converts a degraded dependency into a failed one on every connection at
