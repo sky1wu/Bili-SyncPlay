@@ -1,3 +1,4 @@
+import { createRoomFanOutLimiter } from "./room-fanout.js";
 import {
   WINDOW_INDEXED_EVENTS,
   type GlobalEventStore,
@@ -86,6 +87,7 @@ export function createAdminOverviewService(options: {
   now?: () => number;
 }) {
   const now = options.now ?? Date.now;
+  const roomFanOut = createRoomFanOutLimiter();
 
   return {
     async getOverview() {
@@ -119,23 +121,30 @@ export function createAdminOverviewService(options: {
       });
       const clusterActiveRoomCodes =
         await options.runtimeStore.listClusterActiveRoomCodes();
+      // Sized by the cluster's room count, so it goes through the shared
+      // budget rather than into the room store's command admission (#277).
       const activePersistedRoomCodes = (
         await Promise.all(
-          clusterActiveRoomCodes.map(async (roomCode) => {
-            const room = await options.roomStore.getRoom(roomCode);
-            if (!room) {
-              return null;
-            }
-            if (room.expiresAt !== null && room.expiresAt <= currentTime) {
-              return null;
-            }
-            return roomCode;
-          }),
+          clusterActiveRoomCodes.map(async (roomCode) =>
+            roomFanOut.run(async () => {
+              const room = await options.roomStore.getRoom(roomCode);
+              if (!room) {
+                return null;
+              }
+              if (room.expiresAt !== null && room.expiresAt <= currentTime) {
+                return null;
+              }
+              return roomCode;
+            }),
+          ),
         )
       ).filter((roomCode): roomCode is string => typeof roomCode === "string");
-      const nodeStatuses =
-        await options.runtimeStore.listNodeStatuses(currentTime);
-      const clusterSessions = await options.runtimeStore.listClusterSessions();
+      const nodeStatuses = await options.runtimeStore.listNodeStatuses(
+        "request",
+        currentTime,
+      );
+      const clusterSessions =
+        await options.runtimeStore.listClusterSessions("request");
       const nodeWorkloads = summarizeNodeWorkloads(
         clusterSessions,
         options.instanceId,

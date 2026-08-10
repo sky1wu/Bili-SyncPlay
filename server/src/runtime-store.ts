@@ -18,6 +18,23 @@ type TimedEvent = {
 
 const COUNTER_WINDOW_MS = 60_000;
 
+/**
+ * Who is waiting on a cluster read, and therefore what bounds its commands.
+ *
+ * Two of these reads serve both an HTTP request and a `maintenance-pass` tick,
+ * and the two want opposite treatment: the pass derives `stalled` from its call
+ * not coming back, so capping it lets the next tick run a second pass on top of
+ * the first (#261, #263) — while an HTTP handler has nothing behind it at all.
+ * Node's `requestTimeout` is NOT a backstop for the second case: it bounds
+ * RECEIVING a request, not producing its response, so a handler awaiting a
+ * stalled Redis is never answered (measured, #277 review).
+ *
+ * So the bound is chosen per CALL, exactly as it is for `loadSession` inside
+ * the Redis store, and this parameter is how the call says which. Required, so
+ * a new call site cannot inherit the wrong one by saying nothing.
+ */
+export type RuntimeReadCaller = "request" | "maintenance_pass";
+
 export type RuntimeStore = {
   /**
    * Record the full session snapshot. The returned promise, where the store has
@@ -224,12 +241,15 @@ export type RuntimeStore = {
     generation: string,
   ) => void | Promise<void>;
   heartbeatNode: (status: ClusterNodeStatus) => Promise<void>;
-  listNodeStatuses: (currentTime?: number) => Promise<ClusterNodeStatus[]>;
+  listNodeStatuses: (
+    caller: RuntimeReadCaller,
+    currentTime?: number,
+  ) => Promise<ClusterNodeStatus[]>;
   purgeNodeStatus: (instanceId: string) => Promise<void>;
   countClusterActiveRooms: () => Promise<number>;
   listClusterActiveRoomCodes: () => Promise<string[]>;
   listClusterSessionsByRoom: (roomCode: string) => Promise<Session[]>;
-  listClusterSessions: () => Promise<Session[]>;
+  listClusterSessions: (caller: RuntimeReadCaller) => Promise<Session[]>;
   tryClaimMessageSlot: (
     roomCode: string,
     key: string,
@@ -593,7 +613,7 @@ export function createInMemoryRuntimeStore(
     async heartbeatNode(status) {
       nodeStatuses.set(status.instanceId, { ...status });
     },
-    async listNodeStatuses(currentTime = now()) {
+    async listNodeStatuses(_caller: RuntimeReadCaller, currentTime = now()) {
       return Array.from(nodeStatuses.values())
         .map((status): ClusterNodeStatus => {
           const health: ClusterNodeStatus["health"] =
@@ -624,7 +644,7 @@ export function createInMemoryRuntimeStore(
         .map((sessionId) => sessionsById.get(sessionId) ?? null)
         .filter((session): session is Session => session !== null);
     },
-    async listClusterSessions() {
+    async listClusterSessions(_caller: RuntimeReadCaller) {
       return Array.from(sessionsById.values());
     },
   };

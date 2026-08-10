@@ -572,8 +572,10 @@ event_store_unavailable`), not delayed. The fix for an unbounded queue is
   that is merely behind. So the two bounds split the work, and neither
   substitutes for the other: the head check stops a read being issued per poll
   for the whole length of a stall, and the read's own command timeout stops the
-  one read already in flight when the stall began from waiting on Node's default
-  300s `requestTimeout` (#269 review). It costs one refused read at the onset of
+  one read already in flight when the stall began from never being answered at
+  all — Node's `requestTimeout` bounds RECEIVING a request, not producing its
+  response, so it is not the backstop #269 took it for (measured in #277). It
+  costs one refused read at the onset of
   a stall — the next poll finds the connection unanswered and is refused before
   anything is issued.
 - **`close` drains, bounded, then drops the socket — `QUIT` is not an escape
@@ -773,6 +775,28 @@ do NOT compose, and that is the part that decides which connection gets which:
   is why every pass command declares `boundedByOuterCaller` rather than calling
   the client directly. The absorbed rejection is not optional either: the pass
   outlives the wait, and an unhandled rejection ends the process on Node 22.
+- **A cap that can be reached must never be reached by ordinary fan-out.**
+  Admission is a refusal-style safety boundary; it is not a scheduler. Every
+  read that maps over a collection sized by the deployment — a room listing's
+  `REPAIR_CHUNK_SIZE` batch, one `HGETALL` per session, an admin service asking
+  about every room — runs straight into it and fails on a completely healthy
+  Redis (257 rooms was enough). Each of those fan-outs goes through a waiting
+  `concurrency-limiter` sized under the admission limit, and the limiter sits at
+  the FAN-OUT rather than inside the bound: a limiter in front of every command
+  would grow its own unbounded queue of waiters during a stall, which is the
+  defect it exists to prevent. `ADMIN_ROOM_FANOUT_LIMIT` is per service, not per
+  call, because concurrent calls multiply a per-call batch.
+- **A bound must not be able to leave its function synchronously.** Two callers
+  build a `Promise.all([...])` literal out of two bounded commands. A
+  synchronous throw from the second abandons the argument list with the first
+  command already issued and nobody left to handle it; its cap then rejects into
+  an unhandled rejection, which ends the process on Node 22. `boundCommand` is
+  `async` in both stores for that reason alone.
+- **Node's `requestTimeout` is not a backstop for a slow handler.** It bounds
+  RECEIVING a request, not producing its response, so an HTTP handler awaiting a
+  stalled Redis is never answered — measured, after #269 and the first round of
+  #277 both leaned on it in a comment. Any argument of the form "this path is at
+  least bounded by the HTTP server" is false here.
 - **Still open, deliberately: the durable writes.** The runtime store's five
   `trackAwaitedOperation` writes and the room store's four room-body writes stay
   uncapped, because #237 settled that an answer which can be wrong is worse than

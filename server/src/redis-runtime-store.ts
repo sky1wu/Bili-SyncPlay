@@ -9,6 +9,7 @@ import type { ActiveRoom, ClusterNodeStatus, Session } from "./types.js";
 import {
   createInMemoryRuntimeStore,
   DEFAULT_MEMBER_TOKEN_RETENTION_MS,
+  type RuntimeReadCaller,
   type RuntimeStore,
 } from "./runtime-store.js";
 import {
@@ -17,6 +18,7 @@ import {
   resolveRoomCodeToLeave,
 } from "./runtime-store-state.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
+import { createConcurrencyLimiter } from "./concurrency-limiter.js";
 import { createRetryPacer, settleWithin } from "./retry-pacer.js";
 import {
   createDurableWriteQueue,
@@ -929,30 +931,70 @@ export async function createRedisRuntimeStore(
    * `acquireRoomLock` or `tryClaimMessageSlot` that secretly landed releases
    * itself at its TTL, so "may have landed" costs at most one lock interval.
    * The five durable writes are not in that class; see the note on the client.
+   *
+   * `async`, and that is load-bearing rather than style: two callers build a
+   * `Promise.all([...])` literal out of two of these, and a SYNCHRONOUS throw
+   * from the second abandons the argument list with the first command already
+   * issued and nobody left to handle it. Its cap then fires into an unhandled
+   * rejection, which on Node 22 is a process exit. Every failure here — the
+   * admission refusal and anything `issue()` throws before returning a promise —
+   * has to arrive as a rejection so the sibling still gets its handler
+   * (#277 review).
    */
-  function boundCommand<T>(
+  async function boundCommand<T>(
     operationName: string,
     issue: () => Promise<T>,
   ): Promise<T> {
     ensurePendingCapacity(operationName);
-    return commandPacer.capAttempt(issue(), pendingOperationTimeoutMs, () => {
-      const error = new Error(
-        `Redis runtime store operation timed out: ${operationName}.`,
-      );
-      // Bounded still owes a report, and the counter is the half that answers
-      // "still happening?" statelessly (#266).
-      metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
-      logPendingOperationError(
-        {
-          operationName,
-          pendingCount: pendingOperations.size,
-          reason: "timeout",
-        },
-        error,
-      );
-      return error;
-    });
+    return await commandPacer.capAttempt(
+      issue(),
+      pendingOperationTimeoutMs,
+      () => {
+        const error = new Error(
+          `Redis runtime store operation timed out: ${operationName}.`,
+        );
+        // Bounded still owes a report, and the counter is the half that answers
+        // "still happening?" statelessly (#266).
+        metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
+        logPendingOperationError(
+          {
+            operationName,
+            pendingCount: pendingOperations.size,
+            reason: "timeout",
+          },
+          error,
+        );
+        return error;
+      },
+    );
   }
+
+  /**
+   * Picks the bound from who is waiting, for the two cluster reads that serve
+   * both an HTTP request and a `maintenance-pass` tick. Same reasoning as
+   * `loadSession`'s parameter: the bound belongs to the CALL.
+   */
+  function boundFor(caller: RuntimeReadCaller): CommandBound {
+    return caller === "request" ? boundCommand : boundedByOuterCaller;
+  }
+
+  /**
+   * A waiting budget for the per-session fan-outs, kept clear of the admission
+   * limit above it.
+   *
+   * `listClusterSessionsByRoom` and `listClusterSessions` issue one `HGETALL`
+   * per session, all at once. Admission is a refusal-style safety boundary, so
+   * a room with more sessions than the limit — or an admin read spanning that
+   * many — would fail on a completely healthy Redis (#277 review). Half the
+   * limit, so one fan-out can never refuse a join's own commands.
+   *
+   * It bounds work already accepted; it never sits in front of a caller's FIRST
+   * command, which is what keeps a stalled Redis from growing a queue of
+   * waiters here instead of in ioredis.
+   */
+  const sessionFanOut = createConcurrencyLimiter(
+    Math.max(1, Math.floor(maxPendingOperations / 2)),
+  );
 
   function trackOperation<T>(
     operationName: string,
@@ -2125,10 +2167,11 @@ export async function createRedisRuntimeStore(
         });
       }
     },
-    // The three cluster-bookkeeping methods below are deliberately uncapped for
-    // the same reason as `listClusterSessions`: `node-heartbeat` and
-    // `runtime-index-reaper` drive them through `maintenance-pass`, which caps
-    // each tick and reads THIS call's silence to decide the pass is stalled.
+    // `heartbeatNode` and `purgeNodeStatus` are deliberately uncapped: only
+    // `node-heartbeat` and `runtime-index-reaper` call them, through
+    // `maintenance-pass`, which caps each tick and reads THIS call's silence to
+    // decide the pass is stalled. Unlike the two reads below them, they have no
+    // second caller, so the choice does not have to travel with the call.
     async heartbeatNode(status: ClusterNodeStatus) {
       await localRuntimeStore.heartbeatNode(status);
       await redis
@@ -2147,12 +2190,15 @@ export async function createRedisRuntimeStore(
         })
         .exec();
     },
-    async listNodeStatuses(currentTime = now()) {
-      const instanceIds = await redis.smembers(nodesKey(keyPrefix));
+    async listNodeStatuses(caller: RuntimeReadCaller, currentTime = now()) {
+      const bound = boundFor(caller);
+      const instanceIds = await bound("list_node_statuses", () =>
+        redis.smembers(nodesKey(keyPrefix)),
+      );
       const statuses = await Promise.all(
         instanceIds.map(async (instanceId) => {
-          const fields = await redis.hgetall(
-            nodeStatusKey(keyPrefix, instanceId),
+          const fields = await bound("list_node_statuses", () =>
+            redis.hgetall(nodeStatusKey(keyPrefix, instanceId)),
           );
           if (Object.keys(fields).length === 0) {
             return null;
@@ -2212,23 +2258,30 @@ export async function createRedisRuntimeStore(
       );
       const sessions = await Promise.all(
         sessionIds.map((sessionId) =>
-          loadSession(redis, keyPrefix, sessionId, boundCommand),
+          sessionFanOut.run(() =>
+            loadSession(redis, keyPrefix, sessionId, boundCommand),
+          ),
         ),
       );
       return sessions.filter((session): session is Session => session !== null);
     },
-    // Deliberately uncapped, unlike its by-room sibling: `runtime-index-reaper`
-    // calls this one, and its sweep is bounded by `maintenance-pass`, whose
-    // `stalled` outcome is derived from this call not coming back. Capping here
-    // would answer the pass at 5s and let the next tick issue a second sweep on
-    // top of the first — the defect #261 and #263 fixed. The admin overview
-    // shares it and is left with Node's 300s `requestTimeout`, which is a bound
-    // in the sense that matters here: nothing accumulates without limit.
-    async listClusterSessions() {
-      const sessionIds = await redis.smembers(`${keyPrefix}sessions`);
+    // Two callers, opposite answers, so the bound comes from the CALL. The
+    // reaper's sweep must stay unanswered — `maintenance-pass` reads that
+    // silence as `stalled`, and capping it lets the next tick run a second
+    // sweep on top of the first (#261, #263). The admin overview has nothing
+    // behind it at all: Node's `requestTimeout` bounds RECEIVING a request, not
+    // producing its response, so that handler would simply never answer
+    // (measured, #277 review).
+    async listClusterSessions(caller: RuntimeReadCaller) {
+      const bound = boundFor(caller);
+      const sessionIds = await bound("list_cluster_sessions", () =>
+        redis.smembers(`${keyPrefix}sessions`),
+      );
       const sessions = await Promise.all(
         sessionIds.map((sessionId) =>
-          loadSession(redis, keyPrefix, sessionId, boundedByOuterCaller),
+          sessionFanOut.run(() =>
+            loadSession(redis, keyPrefix, sessionId, bound),
+          ),
         ),
       );
       return sessions.filter((session): session is Session => session !== null);

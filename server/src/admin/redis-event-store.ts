@@ -74,8 +74,9 @@ const READ_APPEND_SETTLE_TIMEOUT_MS = 1_000;
  * head-of-connection check, and this catches the one read that slips past it
  * because the stall began after the check and before the command. Same order
  * and same reasoning as {@link APPEND_TIMEOUT_MS} — long enough that ordinary
- * latency never trips it, short enough that the answer does not wait on Node's
- * default 300s `requestTimeout` (#269 review).
+ * latency never trips it, and load-bearing because nothing else would ever
+ * answer: Node's `requestTimeout` bounds RECEIVING a request, not producing its
+ * response (#269, corrected by measurement in #277).
  */
 const READ_COMMAND_TIMEOUT_MS = 5_000;
 

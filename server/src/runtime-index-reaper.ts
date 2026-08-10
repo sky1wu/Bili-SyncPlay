@@ -304,8 +304,10 @@ export function createRuntimeIndexReaper(options: {
     await flushPendingResyncs();
 
     const currentTime = now();
-    const nodeStatuses =
-      await options.runtimeStore.listNodeStatuses(currentTime);
+    const nodeStatuses = await options.runtimeStore.listNodeStatuses(
+      "maintenance_pass",
+      currentTime,
+    );
     const offlineInstanceIds = new Set(
       nodeStatuses
         .filter((status) => status.health === "offline")
@@ -315,7 +317,8 @@ export function createRuntimeIndexReaper(options: {
       return 0;
     }
 
-    const sessions = await options.runtimeStore.listClusterSessions();
+    const sessions =
+      await options.runtimeStore.listClusterSessions("maintenance_pass");
     let cleanedSessions = 0;
     const roomsToResync = new Set<string>();
     for (const session of sessions) {
@@ -430,7 +433,8 @@ export function createRuntimeIndexReaper(options: {
     }
     await flushPendingResyncs();
 
-    const remainingSessions = await options.runtimeStore.listClusterSessions();
+    const remainingSessions =
+      await options.runtimeStore.listClusterSessions("maintenance_pass");
     const activeInstanceIds = new Set(
       remainingSessions
         .map((session) => session.instanceId)

@@ -57,18 +57,27 @@ test("node heartbeat writes shared node status into redis runtime store", async 
   try {
     await heartbeat.beat();
 
-    let statuses = await sharedRuntimeStore.listNodeStatuses(currentTime);
+    let statuses = await sharedRuntimeStore.listNodeStatuses(
+      "maintenance_pass",
+      currentTime,
+    );
     assert.equal(statuses.length, 1);
     assert.equal(statuses[0]?.instanceId, instanceId);
     assert.equal(statuses[0]?.version, "test-version");
     assert.equal(statuses[0]?.health, "ok");
 
     currentTime += 120;
-    statuses = await sharedRuntimeStore.listNodeStatuses(currentTime);
+    statuses = await sharedRuntimeStore.listNodeStatuses(
+      "maintenance_pass",
+      currentTime,
+    );
     assert.equal(statuses[0]?.health, "stale");
 
     currentTime += 120;
-    statuses = await sharedRuntimeStore.listNodeStatuses(currentTime);
+    statuses = await sharedRuntimeStore.listNodeStatuses(
+      "maintenance_pass",
+      currentTime,
+    );
     assert.equal(statuses[0]?.health, "offline");
   } finally {
     await heartbeat.stop();

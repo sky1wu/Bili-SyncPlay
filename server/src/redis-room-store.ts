@@ -8,6 +8,7 @@ import {
   RedisCommandAdmissionError,
 } from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
+import { createConcurrencyLimiter } from "./concurrency-limiter.js";
 import { createRetryPacer, settleWithin } from "./retry-pacer.js";
 import { getRedisRoomStoreKeys } from "./redis-namespace.js";
 import {
@@ -490,6 +491,22 @@ export async function createRedisRoomStore(
     initialDelayMs: commandTimeoutMs,
     maxDelayMs: commandTimeoutMs,
   });
+  /**
+   * Keeps a listing's own fan-out clear of the admission limit.
+   *
+   * Admission is a refusal-style safety boundary; this is a waiting budget for
+   * work already accepted, and mixing the two roles is what turns a boundary
+   * into a partial business operation (`concurrency-limiter`, #275). Without it
+   * `listRooms` reads a whole `REPAIR_CHUNK_SIZE` batch at once, so a
+   * deployment with more rooms than `maxPendingCommands` fails every listing on
+   * a perfectly healthy Redis — 257 rooms was enough (#277 review).
+   *
+   * Half the limit, so a listing in flight can never refuse a join's `getRoom`
+   * either, and vice versa.
+   */
+  const listingFanOut = createConcurrencyLimiter(
+    Math.max(1, Math.floor(maxPendingCommands / 2)),
+  );
 
   /**
    * The caller-side bound for a command nobody else is waiting behind.
@@ -501,15 +518,21 @@ export async function createRedisRoomStore(
    * lets the two maintenance passes on this connection keep deriving their own
    * bounds from its silence, and what a connection-wide `commandTimeout` could
    * not do (#271, #277).
+   *
+   * `async` so that no failure — the refusal, or anything `issue()` throws
+   * before it returns a promise — can leave this function synchronously. A
+   * caller assembling several of these into one `Promise.all` literal would
+   * otherwise abandon the list with earlier commands already issued and
+   * unhandled (#277 review).
    */
-  function boundCommand<T>(
+  async function boundCommand<T>(
     operationName: string,
     issue: () => Promise<T>,
   ): Promise<T> {
     if (commandPacer.trackedCount() >= maxPendingCommands) {
-      return Promise.reject(new RedisCommandAdmissionError(maxPendingCommands));
+      throw new RedisCommandAdmissionError(maxPendingCommands);
     }
-    return commandPacer.capAttempt(
+    return await commandPacer.capAttempt(
       issue(),
       commandTimeoutMs,
       () =>
@@ -816,10 +839,12 @@ export async function createRedisRoomStore(
     for (let offset = 0; offset < codes.length; offset += REPAIR_CHUNK_SIZE) {
       const batch = codes.slice(offset, offset + REPAIR_CHUNK_SIZE);
       const loaded = await Promise.all(
-        batch.map(async (code) => {
-          const raw = await readRoomBody(code, boundCommand);
-          return { code, raw, room: parseRoomOrNull(raw) };
-        }),
+        batch.map(async (code) =>
+          listingFanOut.run(async () => {
+            const raw = await readRoomBody(code, boundCommand);
+            return { code, raw, room: parseRoomOrNull(raw) };
+          }),
+        ),
       );
 
       // Codes with no body at all: the script re-checks EXISTS, so a body
@@ -851,14 +876,16 @@ export async function createRedisRoomStore(
         try {
           await Promise.all(
             unreadable.map(async ({ code, raw }) =>
-              boundCommand("list_rooms", () =>
-                redis.eval(
-                  QUARANTINE_MEMBER_LUA,
-                  2,
-                  roomsByExpiryKey,
-                  roomKey(code),
-                  raw as string,
-                  code,
+              listingFanOut.run(() =>
+                boundCommand("list_rooms", () =>
+                  redis.eval(
+                    QUARANTINE_MEMBER_LUA,
+                    2,
+                    roomsByExpiryKey,
+                    roomKey(code),
+                    raw as string,
+                    code,
+                  ),
                 ),
               ),
             ),

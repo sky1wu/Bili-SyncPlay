@@ -421,7 +421,8 @@ test("redis runtime store keeps only the latest room membership after rapid room
 
     const roomA = await observer.listClusterSessionsByRoom("ROOMA1");
     const roomB = await observer.listClusterSessionsByRoom("ROOMB1");
-    const clusterSessions = await observer.listClusterSessions();
+    const clusterSessions =
+      await observer.listClusterSessions("maintenance_pass");
     const storedSession = clusterSessions.find(
       (entry) => entry.id === session.id,
     );

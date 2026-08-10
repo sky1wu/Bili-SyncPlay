@@ -234,7 +234,8 @@ export function createAdminServices(args: {
       runtimeStore: args.runtimeStore,
       teardownRoomRuntime: (roomCode) =>
         args.roomService.teardownRoomRuntime(roomCode),
-      listClusterSessions: () => args.runtimeStore.listClusterSessions(),
+      listClusterSessions: () =>
+        args.runtimeStore.listClusterSessions("request"),
       listClusterSessionsByRoom: (roomCode) =>
         args.runtimeStore.listClusterSessionsByRoom(roomCode),
       requestAdminCommand: args.requestAdminCommand,

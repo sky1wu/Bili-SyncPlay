@@ -201,6 +201,15 @@ before changing the code it describes.
   own WAIT, absorbing the pass's rejection so it cannot end the process. Still
   open on purpose: the nine durable writes, where #237's trade holds because
   their effects — unlike a lock's or a dedup slot's — do not expire.
+  Three more the review round added: **a refusal cap must never be reachable by
+  ordinary fan-out** (every read that maps over a deployment-sized collection
+  goes through a waiting limiter sized under admission, placed at the fan-out
+  and not inside the bound, or the limiter grows its own unbounded queue);
+  **a bound must not leave its function synchronously** (a sibling in the same
+  `Promise.all` literal is then issued with nobody to handle it — a process exit
+  on Node 22); and **Node's `requestTimeout` bounds receiving a request, not
+  producing its response**, so "at least the HTTP server bounds it" is never an
+  argument.
 - **One-shot broadcasts need a retry trail** (#242): most `room_state_updated`
   sends are repeated by the next update, but the share-ownership resync and the
   runtime index reaper's announcement are not — losing one loses the room until a

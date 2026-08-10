@@ -33,6 +33,7 @@ import {
   type RedisRoomStoreClient,
 } from "../src/redis-room-store.js";
 import { RedisCommandAdmissionError } from "../src/redis-command-timeout.js";
+import type { RuntimeReadCaller } from "../src/runtime-store.js";
 import { settleWithin } from "../src/retry-pacer.js";
 
 /** Short enough to keep the sweep fast; the mechanism is the same at 5s. */
@@ -199,9 +200,25 @@ const RUNTIME_BOUNDED_ELSEWHERE: Record<string, string> = {
   confirmWrites: "the durable write queue it confirms",
   close: "settleWithin and quitWithin, both inside the shutdown step's budget",
   heartbeatNode: "maintenance-pass: node-heartbeat's per-tick cap",
-  listNodeStatuses: "maintenance-pass: runtime-index-reaper's per-tick cap",
   purgeNodeStatus: "maintenance-pass: runtime-index-reaper's per-tick cap",
-  listClusterSessions: "maintenance-pass: runtime-index-reaper's per-tick cap",
+};
+
+/**
+ * Reads whose bound travels with the CALL, because both kinds of caller use
+ * them: the runtime index reaper (through `maintenance-pass`) and
+ * `/api/admin/overview`. Classifying them by method is what #277's first round
+ * got wrong — and the excuse for it, that Node's `requestTimeout` catches the
+ * HTTP side, is not true: it bounds RECEIVING a request, not producing its
+ * response.
+ */
+const RUNTIME_CALLER_CHOSEN: Record<
+  string,
+  (store: RuntimeStoreUnderTest, caller: RuntimeReadCaller) => Promise<unknown>
+> = {
+  listNodeStatuses: (store, caller) =>
+    Promise.resolve(store.listNodeStatuses?.(caller, 1_000)),
+  listClusterSessions: (store, caller) =>
+    Promise.resolve(store.listClusterSessions?.(caller)),
 };
 
 /**
@@ -241,6 +258,7 @@ test("every runtime store method is classified by what bounds its commands", asy
     const classified = new Set([
       ...Object.keys(RUNTIME_REQUEST_PATH),
       ...Object.keys(RUNTIME_BOUNDED_ELSEWHERE),
+      ...Object.keys(RUNTIME_CALLER_CHOSEN),
       ...Object.keys(RUNTIME_UNBOUNDED_DURABLE_WRITES),
       ...RUNTIME_LOCAL_ONLY,
     ]);
@@ -288,17 +306,50 @@ test("every request-path runtime command answers its caller, whichever one stall
 
 test("a runtime command whose bound belongs to a maintenance pass is left unanswered", async () => {
   // The control, and the half that keeps this change from undoing #261/#263:
-  // `listClusterSessions` is the reaper's, and `maintenance-pass` decides a
-  // pass is stalled precisely because this call has not come back. An answer
-  // here would be the connection-wide backstop's behaviour, arrived at by
-  // another route.
-  await withRuntimeStore(0, async (store) => {
-    const answered = await settleWithin(
-      Promise.resolve(store.listClusterSessions?.()).catch(() => undefined),
-      OBSERVATION_MS,
-    );
-    assert.equal(answered, false);
-  });
+  // `maintenance-pass` decides a pass is stalled precisely because this call
+  // has not come back. An answer here would be the connection-wide backstop's
+  // behaviour, arrived at by another route.
+  for (const [method, call] of Object.entries(RUNTIME_CALLER_CHOSEN)) {
+    await withRuntimeStore(0, async (store) => {
+      const answered = await settleWithin(
+        call(store, "maintenance_pass").catch(() => undefined),
+        OBSERVATION_MS,
+      );
+      assert.equal(
+        answered,
+        false,
+        `${method} must not answer a maintenance pass`,
+      );
+    });
+  }
+});
+
+test("the same runtime read DOES answer when an HTTP request is the caller", async () => {
+  // The other polarity, and the finding this test exists for: both of these
+  // also serve /api/admin/overview, where nothing else is counting down.
+  // `requestTimeout` is not a backstop there — it bounds receiving a request,
+  // not producing its response (measured, #277 review).
+  for (const [method, call] of Object.entries(RUNTIME_CALLER_CHOSEN)) {
+    const issued = await withRuntimeStore(null, async (store, commands) => {
+      await call(store, "request").catch(() => undefined);
+      return commands.issuedCount();
+    });
+    assert.ok(issued > 0, `${method} issued no Redis command`);
+
+    for (let hangAt = 0; hangAt < issued; hangAt += 1) {
+      await withRuntimeStore(hangAt, async (store) => {
+        const answered = await settleWithin(
+          call(store, "request").catch(() => undefined),
+          OBSERVATION_MS,
+        );
+        assert.equal(
+          answered,
+          true,
+          `${method} never answered a request with command #${hangAt} unanswered`,
+        );
+      });
+    }
+  }
 });
 
 test("a runtime command that is merely slow is not judged dead", async () => {
@@ -604,6 +655,161 @@ test("a room store command that is merely slow is not judged dead", async () => 
   });
   try {
     assert.equal(await store.getRoom("ROOM01"), null);
+  } finally {
+    await store.close();
+  }
+});
+
+test("an admission refusal never abandons a sibling command that was already issued", async () => {
+  // `tryClaimMessageSlot` and `releaseMessageSlot` each build a
+  // `Promise.all([...])` literal out of two bounded commands. A SYNCHRONOUS
+  // throw from the second abandons the argument list with the first already
+  // issued and nobody left to handle it; its cap then fires into an unhandled
+  // rejection, which on Node 22 is a process exit rather than a warning.
+  //
+  // `maxPendingOperations: 1` makes the second call refuse deterministically,
+  // and the first command never answers so its cap really does fire.
+  for (const method of ["tryClaimMessageSlot", "releaseMessageSlot"] as const) {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const commands = createProbeCommands(null);
+      const store = await createRedisRuntimeStore("redis://unused", {
+        redisClient: {
+          ...createRuntimeProbeClient(commands),
+          // The pair that runs under one `Promise.all`; neither ever answers,
+          // so both would outlive their caller.
+          zadd: () => new Promise(() => undefined),
+          zremrangebyscore: () => new Promise(() => undefined),
+          del: () => new Promise(() => undefined),
+          zrem: () => new Promise(() => undefined),
+        },
+        pendingOperationTimeoutMs: BUDGET_MS,
+        closeQuitTimeoutMs: BUDGET_MS,
+        maxPendingOperations: 1,
+        onPendingOperationError() {},
+        onCloseUnfinished() {},
+      });
+      try {
+        await (
+          method === "tryClaimMessageSlot"
+            ? Promise.resolve(
+                store.tryClaimMessageSlot("ROOM01", "share:1", 60_000),
+              )
+            : Promise.resolve(store.releaseMessageSlot("ROOM01", "share:1"))
+        ).catch(() => undefined);
+        // Long enough for the abandoned command's cap to fire and for Node to
+        // decide the rejection had no handler.
+        await settleWithin(new Promise(() => undefined), BUDGET_MS * 6);
+      } finally {
+        await store.close();
+      }
+      assert.deepEqual(
+        unhandled.map((reason) =>
+          reason instanceof Error ? reason.message : String(reason),
+        ),
+        [],
+        `${method} left a command rejecting with no handler`,
+      );
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  }
+});
+
+test("a listing reads more rooms than the admission limit without being refused", async () => {
+  // Admission is a refusal boundary, not a scheduler. `listRooms` reads a whole
+  // REPAIR_CHUNK_SIZE batch at once, so before the fan-out budget a deployment
+  // with more rooms than `maxPendingCommands` failed every listing on a
+  // completely healthy Redis — 257 rooms was enough (#277 review).
+  const roomCount = 300;
+  const codes = Array.from(
+    { length: roomCount },
+    (_, index) => `ROOM${String(index).padStart(4, "0")}`,
+  );
+  const bodies = new Map(
+    codes.map((code) => [
+      code,
+      JSON.stringify({
+        code,
+        version: 1,
+        createdAt: 1,
+        lastActiveAt: 1,
+        expiresAt: null,
+      }),
+    ]),
+  );
+  let peakConcurrentGets = 0;
+  let liveGets = 0;
+  const commands = createProbeCommands(null);
+  const store = await createRedisRoomStore("redis://unused", {
+    redisClient: {
+      ...createRoomStoreProbeClient(commands),
+      zrange: async () => codes,
+      get: async (key: string) => {
+        liveGets += 1;
+        peakConcurrentGets = Math.max(peakConcurrentGets, liveGets);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        liveGets -= 1;
+        return bodies.get(key.slice(key.lastIndexOf(":") + 1)) ?? null;
+      },
+    },
+    commandTimeoutMs: BUDGET_MS,
+    closeQuitTimeoutMs: BUDGET_MS,
+    maxPendingCommands: 256,
+  });
+  try {
+    const listed = await store.listRooms({
+      keyword: "",
+      includeExpired: true,
+      page: 1,
+      pageSize: roomCount,
+      sortBy: "createdAt",
+      sortOrder: "desc",
+    });
+    assert.equal(listed.length, roomCount);
+    assert.ok(
+      peakConcurrentGets <= 128,
+      `fan-out reached ${peakConcurrentGets}, which admission would refuse`,
+    );
+  } finally {
+    await store.close();
+  }
+});
+
+test("a room with more sessions than the admission limit still lists them", async () => {
+  // The same shape one layer down: `listClusterSessionsByRoom` issues one
+  // HGETALL per session, all at once.
+  const sessionCount = 300;
+  const sessionIds = Array.from(
+    { length: sessionCount },
+    (_, index) => `session-${index}`,
+  );
+  const commands = createProbeCommands(null);
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: {
+      ...createRuntimeProbeClient(commands),
+      smembers: async () => sessionIds,
+      hgetall: async (key: string): Promise<Record<string, string>> => {
+        if (!key.includes(":session:")) {
+          return {};
+        }
+        const id = key.slice(key.lastIndexOf(":") + 1);
+        return { id, displayName: id };
+      },
+    },
+    pendingOperationTimeoutMs: BUDGET_MS,
+    closeQuitTimeoutMs: BUDGET_MS,
+    maxPendingOperations: 256,
+    onPendingOperationError() {},
+    onCloseUnfinished() {},
+  });
+  try {
+    const sessions = await store.listClusterSessionsByRoom?.("ROOM01");
+    assert.equal(sessions?.length, sessionCount);
   } finally {
     await store.close();
   }

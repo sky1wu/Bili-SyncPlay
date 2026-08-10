@@ -89,11 +89,17 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
     // queue drains in order — the session write lands (so `listClusterSessions`
     // is right) while the room-index write is still pending (so
     // `countClusterActiveRooms` reads 0).
-    assert.equal((await runtimeStore.listClusterSessions()).length, 1);
+    assert.equal(
+      (await runtimeStore.listClusterSessions("maintenance_pass")).length,
+      1,
+    );
     assert.equal(await runtimeStore.countClusterActiveRooms(), 1);
 
     currentTime += 200;
-    const offlineStatuses = await runtimeStore.listNodeStatuses(currentTime);
+    const offlineStatuses = await runtimeStore.listNodeStatuses(
+      "maintenance_pass",
+      currentTime,
+    );
     assert.equal(offlineStatuses.length, 1);
     assert.equal(offlineStatuses[0]?.instanceId, "offline-node");
     assert.equal(offlineStatuses[0]?.health, "offline");
@@ -101,7 +107,10 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
     const cleanedSessions = await reaper.sweep();
     assert.equal(cleanedSessions, 1);
 
-    assert.equal((await runtimeStore.listClusterSessions()).length, 0);
+    assert.equal(
+      (await runtimeStore.listClusterSessions("maintenance_pass")).length,
+      0,
+    );
     assert.equal(await runtimeStore.countClusterActiveRooms(), 0);
     // The offline node's members are gone, but their identity is not: those
     // clients are alive and reconnecting to a surviving node, and they must
@@ -113,7 +122,10 @@ test("runtime index reaper clears sessions left behind by offline nodes", async 
       "member-offline",
     );
 
-    assert.deepEqual(await runtimeStore.listNodeStatuses(currentTime), []);
+    assert.deepEqual(
+      await runtimeStore.listNodeStatuses("maintenance_pass", currentTime),
+      [],
+    );
   } finally {
     await reaper.stop();
     await runtimeStore.close();
