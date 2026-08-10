@@ -1559,3 +1559,36 @@ test("bangumi ep page refutes a contradicting snapshot's title even when the lis
     dom.restore();
   }
 });
+
+test("bangumi ep page refutes a title whose own text contains the suffix separator", async () => {
+  // The resolver sheds the site suffix by cutting at the first `_`, and applies
+  // that cut to titles that contain one themselves. Comparing the derived
+  // candidate against the raw refuted string lets the derivation launder it:
+  // refuted `OVA_1`, `document.title` `OVA_1_番剧_bilibili`, candidate `OVA`.
+  const dom = installDomStub({
+    href: EP_PAGE_HREF,
+    pathname: "/bangumi/play/ep396139",
+    title: "OVA_1_番剧_bilibili",
+    currentPartTitle: "OVA_1",
+    currentPartEpId: "ep396138",
+    video: {
+      currentTime: 0.27,
+      playbackRate: 1,
+      paused: true,
+      readyState: 4,
+    } as HTMLVideoElement,
+  });
+
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => null,
+  });
+
+  try {
+    const payload = controller.getCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "ep396139");
+    assert.equal(payload?.video.title, "ep396139");
+  } finally {
+    dom.restore();
+  }
+});
