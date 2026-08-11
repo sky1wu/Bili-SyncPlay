@@ -845,7 +845,15 @@ do NOT compose, and that is the part that decides which connection gets which:
   failure to publish an answer is not evidence that execution failed and must
   never erase its confirmation state. Retrying is safe across nodes because the
   eviction script keeps the maximum block deadline: two attempts commute even
-  when the older one lands last.
+  when the older one lands last. That ownership extends through shutdown: the
+  consumer closes its dispatch gate before unsubscribe can wait, then gives the
+  subscription, every accepted handler, and every eviction that outlived its
+  handler one shared close budget. Exhausting it records
+  `admin_command_consumer_close_unfinished` with separate pending counts rather
+  than relying on a later runtime-store close to drain an effect the consumer
+  owns. The gate matters because the Redis bus may already have captured a
+  handler behind a promise boundary; such a handler answers `stale_target`
+  instead of creating fresh work after the drain snapshot.
   The remaining seven differ from
   `acquireRoomLock` and `tryClaimMessageSlot`, which ARE capped at the store:
   a `SET NX PX` that lands after its caller gave up releases itself at its TTL,

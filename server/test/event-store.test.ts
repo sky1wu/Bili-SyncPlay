@@ -361,6 +361,7 @@ test("bounded shutdown plumbing events are hidden alongside their siblings", asy
   // event feed exactly when Redis is stalled and it is longest.
   const hidden = [
     "admin_command_bus_close_unfinished",
+    "admin_command_consumer_close_unfinished",
     "node_heartbeat_abandoned_at_shutdown",
     "node_heartbeat_skipped",
     "room_event_bus_close_unfinished",

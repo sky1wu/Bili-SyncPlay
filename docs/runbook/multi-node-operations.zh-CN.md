@@ -584,6 +584,15 @@ sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<wind
   `operation` 节流为每分钟至多一行。后台 API 没有通用请求限流，这正是日志必须自带节流的
   原因。
 
+房间节点也必须拥有关服开始时已经接受的管理命令效果的完整生命周期：
+
+- `admin_command_consumer_close_unfinished`——consumer 共享的 4s 预算耗尽时，订阅、已接受
+  handler 与迟到的成员驱逐里仍有至少一项没有结束。`pendingHandlers` 是仍在产出结果的命令
+  handler 数，`pendingMemberEvictions` 是活得比 handler 返回的确认更久的持久踢人效果数，
+  `unsubscribePending` 表示命令频道还没有确认移除。consumer 会先关闭分发闸门再取这些快照，
+  所以 Redis listener 已捕获的命令也不能在关服后补充这些计数。该事件属于关服基础设施，
+  默认从管理事件列表隐藏。
+
 另外四个 Redis 关服步骤也采用同一条有界关闭规则（#270）：
 
 - `room_store_close_unfinished`——`close_room_store` 没能完成 `QUIT`。

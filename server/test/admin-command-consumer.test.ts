@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createInMemoryAdminCommandBus } from "../src/admin-command-bus.js";
+import {
+  createInMemoryAdminCommandBus,
+  type AdminCommand,
+  type AdminCommandBus,
+} from "../src/admin-command-bus.js";
 import { createAdminCommandConsumer } from "../src/admin-command-consumer.js";
 import { createMirroredRuntimeStore } from "../src/mirrored-runtime-store.js";
 import {
@@ -440,4 +444,320 @@ test("admin command consumer reports a disconnect that fails after an unconfirme
     releaseEviction();
     await consumer.close();
   }
+});
+
+test("admin command consumer close waits for an eviction that outlived confirmation", async () => {
+  const currentTime = 9_000;
+  const bus = createInMemoryAdminCommandBus(() => currentTime);
+  const session = createSession("session-h", "ROOM08", "member-h");
+  let releaseEviction!: () => void;
+  const evictionGate = new Promise<void>((resolve) => {
+    releaseEviction = resolve;
+  });
+  let disconnected = false;
+
+  const consumer = await createAdminCommandConsumer({
+    instanceId: "node-a",
+    adminCommandBus: bus,
+    getLocalSession() {
+      return null;
+    },
+    listLocalSessionsByRoom(roomCode) {
+      return roomCode === "ROOM08" ? [session] : [];
+    },
+    async evictMemberToken() {
+      await evictionGate;
+    },
+    disconnectSessionSocket() {
+      disconnected = true;
+    },
+    memberEvictionConfirmTimeoutMs: 10,
+    closeBudgetMs: 200,
+    now: () => currentTime,
+  });
+
+  try {
+    const result = await bus.request({
+      kind: "kick_member",
+      requestId: "req-8",
+      targetInstanceId: "node-a",
+      roomCode: "ROOM08",
+      memberId: "member-h",
+      requestedAt: currentTime - 1_000,
+    });
+    assert.equal(result.status, "error");
+    assert.equal(result.confirmation, "unconfirmed");
+
+    const closing = consumer.close();
+    assert.equal(
+      await settleWithin(closing, 20),
+      false,
+      "close must still own the eviction after its caller stopped waiting",
+    );
+    releaseEviction();
+    assert.equal(await settleWithin(closing, 200), true);
+    await closing;
+    assert.equal(disconnected, true);
+  } finally {
+    releaseEviction();
+    await consumer.close();
+  }
+});
+
+test("admin command consumer close bounds and reports an unanswered effect", async () => {
+  const currentTime = 10_000;
+  const bus = createInMemoryAdminCommandBus(() => currentTime);
+  const session = createSession("session-i", "ROOM09", "member-i");
+  let releaseEviction!: () => void;
+  const evictionGate = new Promise<void>((resolve) => {
+    releaseEviction = resolve;
+  });
+  let signalDisconnected!: () => void;
+  const disconnected = new Promise<void>((resolve) => {
+    signalDisconnected = resolve;
+  });
+  const closeReports: Record<string, unknown>[] = [];
+
+  const consumer = await createAdminCommandConsumer({
+    instanceId: "node-a",
+    adminCommandBus: bus,
+    getLocalSession() {
+      return null;
+    },
+    listLocalSessionsByRoom(roomCode) {
+      return roomCode === "ROOM09" ? [session] : [];
+    },
+    async evictMemberToken() {
+      await evictionGate;
+    },
+    disconnectSessionSocket() {
+      signalDisconnected();
+    },
+    memberEvictionConfirmTimeoutMs: 10,
+    closeBudgetMs: 20,
+    now: () => currentTime,
+    logEvent(event, data) {
+      if (event === "admin_command_consumer_close_unfinished") {
+        closeReports.push(data);
+      }
+    },
+  });
+
+  try {
+    const result = await bus.request({
+      kind: "kick_member",
+      requestId: "req-9",
+      targetInstanceId: "node-a",
+      roomCode: "ROOM09",
+      memberId: "member-i",
+      requestedAt: currentTime - 1_000,
+    });
+    assert.equal(result.status, "error");
+    assert.equal(result.confirmation, "unconfirmed");
+
+    const closing = consumer.close();
+    assert.equal(
+      await settleWithin(closing, 100),
+      true,
+      "the component close must stay inside its own budget",
+    );
+    await closing;
+    assert.deepEqual(closeReports, [
+      {
+        instanceId: "node-a",
+        pendingHandlers: 0,
+        pendingMemberEvictions: 1,
+        unsubscribePending: false,
+        budgetMs: 20,
+        result: "timeout",
+      },
+    ]);
+
+    releaseEviction();
+    assert.equal(await settleWithin(disconnected, 200), true);
+  } finally {
+    releaseEviction();
+    await consumer.close();
+  }
+});
+
+test("admin command consumer close shares its budget with unsubscribe", async () => {
+  let releaseUnsubscribe!: () => void;
+  const unsubscribeGate = new Promise<void>((resolve) => {
+    releaseUnsubscribe = resolve;
+  });
+  const closeReports: Record<string, unknown>[] = [];
+  const bus: AdminCommandBus = {
+    async request(command) {
+      return {
+        requestId: command.requestId,
+        targetInstanceId: command.targetInstanceId,
+        executorInstanceId: command.targetInstanceId,
+        status: "stale_target",
+        code: "unused",
+        message: "Unused in this test.",
+        completedAt: 0,
+      };
+    },
+    async subscribe() {
+      return async () => {
+        await unsubscribeGate;
+      };
+    },
+  };
+
+  const consumer = await createAdminCommandConsumer({
+    instanceId: "node-a",
+    adminCommandBus: bus,
+    getLocalSession() {
+      return null;
+    },
+    listLocalSessionsByRoom() {
+      return [];
+    },
+    evictMemberToken() {},
+    disconnectSessionSocket() {},
+    closeBudgetMs: 20,
+    now: () => 13_000,
+    logEvent(event, data) {
+      if (event === "admin_command_consumer_close_unfinished") {
+        closeReports.push(data);
+      }
+    },
+  });
+
+  try {
+    const closing = consumer.close();
+    assert.equal(
+      await settleWithin(closing, 100),
+      true,
+      "unsubscribe must not receive a second shutdown budget",
+    );
+    await closing;
+    assert.deepEqual(closeReports, [
+      {
+        instanceId: "node-a",
+        pendingHandlers: 0,
+        pendingMemberEvictions: 0,
+        unsubscribePending: true,
+        budgetMs: 20,
+        result: "timeout",
+      },
+    ]);
+  } finally {
+    releaseUnsubscribe();
+    await consumer.close();
+  }
+});
+
+test("admin command consumer close also owns direct disconnect handlers", async () => {
+  const currentTime = 11_000;
+  const bus = createInMemoryAdminCommandBus(() => currentTime);
+  const session = createSession("session-j", "ROOM10", "member-j");
+  let signalDisconnectStarted!: () => void;
+  const disconnectStarted = new Promise<void>((resolve) => {
+    signalDisconnectStarted = resolve;
+  });
+  let releaseDisconnect!: () => void;
+  const disconnectGate = new Promise<void>((resolve) => {
+    releaseDisconnect = resolve;
+  });
+
+  const consumer = await createAdminCommandConsumer({
+    instanceId: "node-a",
+    adminCommandBus: bus,
+    getLocalSession(sessionId) {
+      return sessionId === session.id ? session : null;
+    },
+    listLocalSessionsByRoom() {
+      return [];
+    },
+    evictMemberToken() {},
+    async disconnectSessionSocket() {
+      signalDisconnectStarted();
+      await disconnectGate;
+    },
+    closeBudgetMs: 200,
+    now: () => currentTime,
+  });
+
+  try {
+    const request = bus.request({
+      kind: "disconnect_session",
+      requestId: "req-10",
+      targetInstanceId: "node-a",
+      sessionId: session.id,
+      requestedAt: currentTime - 1_000,
+    });
+    await disconnectStarted;
+
+    const closing = consumer.close();
+    assert.equal(
+      await settleWithin(closing, 20),
+      false,
+      "close must wait for every accepted handler, not only member eviction",
+    );
+    releaseDisconnect();
+    assert.equal(await settleWithin(closing, 200), true);
+    assert.equal((await request).status, "ok");
+  } finally {
+    releaseDisconnect();
+    await consumer.close();
+  }
+});
+
+test("admin command consumer close refuses a captured handler before it starts", async () => {
+  const currentTime = 12_000;
+  const session = createSession("session-k", "ROOM11", "member-k");
+  let dispatch!: Parameters<AdminCommandBus["subscribe"]>[1];
+  const bus: AdminCommandBus = {
+    async request(command) {
+      return await dispatch(command);
+    },
+    async subscribe(_instanceId, handler) {
+      dispatch = handler;
+      return async () => {};
+    },
+  };
+  let evictions = 0;
+  let disconnects = 0;
+
+  const consumer = await createAdminCommandConsumer({
+    instanceId: "node-a",
+    adminCommandBus: bus,
+    getLocalSession() {
+      return null;
+    },
+    listLocalSessionsByRoom(roomCode) {
+      return roomCode === "ROOM11" ? [session] : [];
+    },
+    evictMemberToken() {
+      evictions += 1;
+    },
+    disconnectSessionSocket() {
+      disconnects += 1;
+    },
+    memberEvictionConfirmTimeoutMs: 10,
+    closeBudgetMs: 50,
+    now: () => currentTime,
+  });
+  const command: AdminCommand = {
+    kind: "kick_member",
+    requestId: "req-11",
+    targetInstanceId: "node-a",
+    roomCode: "ROOM11",
+    memberId: "member-k",
+    requestedAt: currentTime - 1_000,
+  };
+
+  const capturedHandler = dispatch;
+  const queued = Promise.resolve().then(() => capturedHandler(command));
+  const closing = consumer.close();
+  const result = await queued;
+  await closing;
+
+  assert.equal(result.status, "stale_target");
+  assert.equal(result.code, "command_consumer_closed");
+  assert.equal(evictions, 0);
+  assert.equal(disconnects, 0);
 });

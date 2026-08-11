@@ -5,7 +5,7 @@ import {
   type AdminCommandFailureResult,
   type AdminCommandResult,
 } from "./admin-command-bus.js";
-import { createRetryPacer } from "./retry-pacer.js";
+import { createRetryPacer, settleWithin } from "./retry-pacer.js";
 import type { LogEvent, Session } from "./types.js";
 
 /**
@@ -14,6 +14,14 @@ import type { LogEvent, Session } from "./types.js";
  */
 export const DEFAULT_MEMBER_EVICTION_CONFIRM_TIMEOUT_MS =
   DEFAULT_ADMIN_COMMAND_REPLY_TIMEOUT_MS - 1_000;
+
+/**
+ * Total budget for removing the subscription and settling effects owned by the
+ * consumer. Kept inside the enclosing shutdown step's default five seconds so
+ * an unanswered dependency is reported as a degraded close here rather than
+ * timing out the whole step.
+ */
+export const DEFAULT_ADMIN_COMMAND_CONSUMER_CLOSE_BUDGET_MS = 4_000;
 
 class MemberEvictionUnconfirmedError extends Error {
   constructor(timeoutMs: number) {
@@ -65,8 +73,15 @@ export async function createAdminCommandConsumer(options: {
    * Bounds only this command handler's wait. The full eviction effect keeps
    * running so a late durable success can still update every local mirror,
    * disconnect the socket, and trigger normal leave cleanup.
+   *
+   * This must remain below every production request's command-bus reply
+   * deadline. `AdminCommandBus.request` accepts a shorter override for tests and
+   * special callers, but such a caller deliberately gives up before it can
+   * receive this consumer's typed `confirmation=unconfirmed` result.
    */
   memberEvictionConfirmTimeoutMs?: number;
+  /** Shared by unsubscribe and every command effect already in flight. */
+  closeBudgetMs?: number;
   now?: () => number;
   logEvent?: LogEvent;
 }): Promise<{ close: () => Promise<void> }> {
@@ -74,10 +89,17 @@ export async function createAdminCommandConsumer(options: {
   const memberEvictionConfirmTimeoutMs =
     options.memberEvictionConfirmTimeoutMs ??
     DEFAULT_MEMBER_EVICTION_CONFIRM_TIMEOUT_MS;
+  const closeBudgetMs =
+    options.closeBudgetMs ?? DEFAULT_ADMIN_COMMAND_CONSUMER_CLOSE_BUDGET_MS;
   const memberEvictionPacer = createRetryPacer({
     initialDelayMs: memberEvictionConfirmTimeoutMs,
     maxDelayMs: memberEvictionConfirmTimeoutMs,
   });
+  const commandHandlerPacer = createRetryPacer({
+    initialDelayMs: closeBudgetMs,
+    maxDelayMs: closeBudgetMs,
+  });
+  let closing = false;
 
   function buildFailureResult(
     command: AdminCommand,
@@ -316,14 +338,101 @@ export async function createAdminCommandConsumer(options: {
     }
   }
 
+  function dispatchCommand(command: AdminCommand): Promise<AdminCommandResult> {
+    if (closing) {
+      return Promise.resolve(
+        buildFailureResult(
+          command,
+          "stale_target",
+          "command_consumer_closed",
+          "Target instance is shutting down.",
+        ),
+      );
+    }
+
+    // Track every handler, not only the eviction that can outlive its
+    // confirmation cap. This gives the consumer one lifecycle boundary for
+    // direct disconnects, tokenless kicks, and capped eviction handlers alike.
+    return commandHandlerPacer.trackCall(handleCommand(command));
+  }
+
   const unsubscribe = await options.adminCommandBus.subscribe(
     options.instanceId,
-    handleCommand,
+    dispatchCommand,
   );
+  let closePromise: Promise<void> | null = null;
+
+  async function closeConsumer(): Promise<void> {
+    const deadline = performance.now() + closeBudgetMs;
+    const remainingBudgetMs = (): number =>
+      Math.max(deadline - performance.now(), 0);
+    let unsubscribeSettled = false;
+    let unsubscribeFailed = false;
+    let unsubscribeError: unknown;
+    const unsubscribing = Promise.resolve()
+      .then(unsubscribe)
+      .then(
+        () => {
+          unsubscribeSettled = true;
+        },
+        (error: unknown) => {
+          unsubscribeSettled = true;
+          unsubscribeFailed = true;
+          unsubscribeError = error;
+        },
+      );
+
+    const settleAcceptedEffects = async (): Promise<void> => {
+      // Drain handlers first: an accepted handler owns any late eviction it
+      // creates. Taking both pacer snapshots at once would let such an eviction
+      // appear just after the member-eviction snapshot and escape this close.
+      await commandHandlerPacer.settleTracked(remainingBudgetMs());
+      const remaining = remainingBudgetMs();
+      if (remaining > 0) {
+        await memberEvictionPacer.settleTracked(remaining);
+      }
+    };
+
+    // Unsubscribe and effect draining share ONE absolute deadline. Making
+    // either phase sequential with a fresh timeout would move the overrun
+    // outside this component's shutdown step.
+    const closeWork = Promise.all([
+      unsubscribing,
+      settleAcceptedEffects(),
+    ]).then(() => undefined);
+    const settled = await settleWithin(closeWork, remainingBudgetMs());
+    const pendingHandlers = commandHandlerPacer.trackedCount();
+    const pendingMemberEvictions = memberEvictionPacer.trackedCount();
+    if (
+      !settled ||
+      !unsubscribeSettled ||
+      pendingHandlers > 0 ||
+      pendingMemberEvictions > 0
+    ) {
+      options.logEvent?.("admin_command_consumer_close_unfinished", {
+        instanceId: options.instanceId,
+        pendingHandlers,
+        pendingMemberEvictions,
+        unsubscribePending: !unsubscribeSettled,
+        budgetMs: closeBudgetMs,
+        result: "timeout",
+      });
+    }
+    if (unsubscribeFailed) {
+      throw unsubscribeError;
+    }
+  }
 
   return {
-    async close() {
-      await unsubscribe();
+    close() {
+      if (!closePromise) {
+        // Close the gate before unsubscribe reaches its first await. A Redis
+        // message listener may already have captured `dispatchCommand`; that
+        // queued handler must not create a new effect after the drain snapshot.
+        closing = true;
+        closePromise = closeConsumer();
+      }
+      return closePromise;
     },
   };
 }

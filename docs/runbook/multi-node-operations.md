@@ -635,6 +635,19 @@ admin request into a 503:
   The admin API has no general request-rate limit, which is why the log needs
   its own throttle.
 
+The room node also owns the lifetime of admin command effects that were already
+accepted when shutdown began:
+
+- `admin_command_consumer_close_unfinished` — the consumer's shared 4s budget
+  expired before its subscription, accepted handlers, and late member evictions
+  all settled. `pendingHandlers` counts command handlers still producing a
+  result; `pendingMemberEvictions` counts durable kick effects that outlived the
+  confirmation returned to their handler; `unsubscribePending` says the command
+  channel itself has not acknowledged removal. The consumer closes its dispatch
+  gate before taking these snapshots, so none of the counts can be replenished
+  by a command the Redis listener had already captured. This event is hidden
+  from the default admin feed as shutdown plumbing.
+
 The other Redis-backed shutdown steps use the same bounded-close rule (#270):
 
 - `room_store_close_unfinished` — `close_room_store` could not finish `QUIT`.

@@ -23,6 +23,7 @@ export const EVENT_LABELS: Record<string, string> = {
   admin_member_kicked: "管理端踢出成员",
   admin_command_unconfirmed: "管理命令效果未确认",
   admin_command_confirmation_timed_out: "管理命令确认超时",
+  admin_command_consumer_close_unfinished: "管理命令效果关服未排空",
   admin_session_disconnected: "管理端断开会话",
 };
 

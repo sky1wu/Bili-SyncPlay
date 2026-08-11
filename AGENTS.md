@@ -205,7 +205,10 @@ before changing the code it describes.
   retries resend the exact executor result rather than rewriting transport
   failure as execution failure. Atomic member eviction owns its terminal
   logging independently of that wait, and its block deadline is a monotonic
-  maximum so cross-node retries commute. Still
+  maximum so cross-node retries commute. That effect ownership includes close:
+  shut the dispatch gate before unsubscribe can wait, and drain accepted
+  handlers plus late evictions inside one shared budget; report what remains
+  instead of relying on a later store close to do it implicitly. Still
   open on purpose: the seven durable writes, where #237's trade holds because
   their effects — unlike a lock's or a dedup slot's — do not expire. The former
   standalone `blockMemberToken` had no production caller and was removed rather

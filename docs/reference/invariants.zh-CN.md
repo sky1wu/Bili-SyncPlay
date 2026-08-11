@@ -589,7 +589,13 @@
   已确认的 `stale_target`。管理动作层因此审计这个有类型的确认标记，而不维护一张错误码名单；
   这是最后一个仍知道操作者身份的层。结果传输重试必须原样重发执行器结果：发布答复失败不等于
   执行失败，也绝不能抹掉其确认状态。跨节点重试之所以安全，是因为驱逐脚本保留最长封禁期限：
-  即使旧尝试最后落地，两次尝试也可交换。剩下七个与在
+  即使旧尝试最后落地，两次尝试也可交换。这份所有权一直延伸到关服：consumer 会在
+  unsubscribe 可能开始等待之前先关掉分发闸门，再让订阅、所有已接受的 handler，以及所有
+  活得比 handler 更久的驱逐效果共享同一份关闭预算。预算耗尽时记录
+  `admin_command_consumer_close_unfinished`，分别报告仍未结束的 handler 与驱逐，而不是依赖
+  更晚的 runtime-store 关闭去排空一份本来属于 consumer 的效果。分发闸门不可省：Redis 总线
+  可能已经在 Promise 边界后捕获了 handler；这类 handler 在关服后应答 `stale_target`，不能在
+  drain 快照之后再创建新工作。剩下七个与在
   store 内**已经**加了上限的
   `acquireRoomLock`、`tryClaimMessageSlot` 不同：一条 `SET NX PX` 即使在调用方放弃之后
   才落地，也会在 TTL 到期时自行释放，"可能已经落地"的代价是一个锁周期，而不是一个永久
