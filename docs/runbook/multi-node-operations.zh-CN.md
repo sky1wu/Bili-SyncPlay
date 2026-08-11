@@ -625,8 +625,8 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
   的耐心倒推。`REDIS_COMMAND_TIMEOUT_MS` 为 5s。它从不决定接下来做什么，只保证有人做。
 
 一条连接至少要有其中一层。到 #271 之前有四条两层都没有——还有第五条，运行时存储，它
-只在写回队列的 attempt 上有界，而 `trackAwaitedOperation`（WebSocket join 真正阻塞的
-那一半）上什么都没有。
+只在写回队列的 attempt 上有界，而请求路径（WebSocket join 真正阻塞的那一半）上什么都
+没有；那一半由 #277 补齐，见下。
 
 **但这两层并不能叠加，而这才是决定下表的东西。** 本服务里几乎每一道期限都建立在同一套
 机制上（`retry-pacer`，以及架在它之上的准入门与后台轮次）：上限不取消调用，所以调用
@@ -647,11 +647,26 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 | 管理事件存储                           | 调用方一侧       | `writeIsStalled` 把控读取拒绝                            |
 | 管理审计存储                           | 调用方一侧       | 同一条 append 链                                         |
 
-**豁免不等于"这里没问题"。** 其中两条仍有完全没有调用方界的命令路径——房间存储的请求
-路径（join 上的 `get_room` / `update_room`），以及运行时存储的 `trackAwaitedOperation`
-和它旁边的两条裸读。僵死的 Redis 在那里依然会挂住一次 join。这个缺口是真实的，而且
-**这个选项修不了它**：要修得靠一道"保持调用被追踪"的上限，或者给需要兜底的路径单独一条
-连接。
+**豁免曾经不等于"这里没问题"。** 其中两条有过完全没有调用方界的命令路径——房间存储的请求
+路径和运行时存储的请求路径——僵死的 Redis 在那里挂住一次 WebSocket join，全程没有任何东西
+在倒计时。#277 在**不动上表任何一行**的前提下补上了它：两个 store 现在把请求路径上的每条
+命令都过一道调用方一侧的上限，而这道上限会把命令继续留在追踪里，于是"为什么"那一列里的各道
+界读到的仍是连接级选项会结算掉的那份证据。
+
+于是 Redis 僵死时的表现变成**请求路径吵、后台 pass 依旧沉默**，这是刻意的：
+
+- 请求路径上的命令会答复调用方，并打出
+  `redis_runtime_store_operation_failed reason=timeout`，或让管理端列表失败。未应答命令
+  超过 `maxPendingCommands` 后，下一条会在发出**之前**被拒绝——这是唯一一种不可能"其实
+  后来落地了"的答复。
+- reaper 的清扫、索引对账、心跳仍然拿不到答复，因为 `maintenance-pass` 判定一趟 pass
+  僵住，靠的正是这份沉默。它们的信号还是调用方的那些：`room_reaper_sweep_timeout` →
+  `room_reaper_sweep_stalled`、`node_heartbeat_failed`。
+
+仍有两处按设计不设上限：运行时存储经 `trackAwaitedOperation` 的五个持久写（踢人 / 吊销 /
+generation / 删房），以及房间存储的四个房间体写。#237 已经判过"一个可能是错的答复比一个慢
+的答复更糟"，而且与锁或去重槽不同，它们的副作用不会自己过期——所以那些命令仍是一次请求可能
+无限等待的地方。
 
 所有客户端都由 `createBoundedRedisClient` 构造，它**强制**要求声明采用了两层中的哪
 一层——而且调用方一侧那一层必须**点名**那道期限，因为"这条已经有界了"这句话在运行时
@@ -690,9 +705,10 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 - **房间存储、运行时存储、房间事件总线、事件存储、审计存储**：命令仍挂在连接上，所以
   信号来自**调用方**而不是命令：`room_reaper_sweep_timeout` 之后是
   `room_reaper_sweep_stalled`、`node_heartbeat_failed`、
-  `redis_runtime_store_operation_failed`、事件存储的丢弃日志、审计与事件页的 503。而
-  没有调用方界的请求路径——join 上的 `get_room` / `update_room`、运行时存储的
-  `trackAwaitedOperation`——**保持沉默**，从外面看就是一次永远完不成的 WebSocket join。
+  `redis_runtime_store_operation_failed`、事件存储的丢弃日志、审计与事件页的 503。#277
+  之后房间存储与运行时存储的**请求路径也在这份名单里**——它们会打 `reason=timeout` 并答复
+  调用方。仍然**保持沉默**的是上面点名的那些持久写；从外面看，就是一次永远不返回的踢人或
+  删房。
 
 ## 变更后回归清单
 

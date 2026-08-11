@@ -477,6 +477,58 @@ test("redis room orphan prune keeps the index member when its cleanup handoff fa
   }
 });
 
+test("redis room reaper validates the orphan handoff before deleting any room", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("reaperhandoff");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    await settleRoomIndexBootstrap(store);
+    const room = await store.createRoom({
+      code: "EARLY1",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    const expiring = await store.updateRoom(room.code, room.version, {
+      expiresAt: 10,
+    });
+    assert.equal(expiring.ok, true);
+    await redis.zadd(roomsKey, 20, "ZZORPH");
+    await redis.zadd(orphanKeys.queue, 0, "!sequence");
+    await redis.set(orphanKeys.hash, "wrong type");
+
+    // EARLY1 sorts before the orphan. Without a sweep-wide preflight the Lua
+    // script deletes it, then hits WRONGTYPE while staging ZZORPH; the caller
+    // receives no deletedCodes and runtime teardown loses its only trail.
+    await assert.rejects(store.deleteExpiredRooms(100), /WRONGTYPE/);
+    assert.ok(await redis.get(`${namespace}:room:EARLY1`));
+    assert.equal(await redis.zscore(roomsKey, "EARLY1"), "10");
+    assert.equal(await redis.zscore(roomsKey, "ZZORPH"), "20");
+
+    await redis.del(orphanKeys.hash);
+    const swept = await store.deleteExpiredRooms(100);
+    assert.deepEqual(swept.deletedRoomCodes, ["EARLY1"]);
+    assert.deepEqual(swept.orphanedIndexCodes, ["ZZORPH"]);
+    await acknowledgeOrphanClaims(store, swept);
+  } finally {
+    await redis.del(
+      `${namespace}:room:EARLY1`,
+      roomsKey,
+      orphanKeys.hash,
+      orphanKeys.queue,
+    );
+    await redis.quit();
+    await store.close();
+  }
+});
+
 test("redis room reconcile sweeps orphans again when the reconciler drives it", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
@@ -668,10 +720,15 @@ test("redis room reaper keeps orphan claims behind corrupt room bodies", async (
     await seedOrphanClaims(redis, namespace, [
       { code: "BADTYP", token: "claim-wrong-type" },
       { code: "BADJSN", token: "claim-invalid-json" },
+      { code: "BADSHAPE", token: "claim-invalid-shape" },
       { code: "REUSED", token: "claim-reused" },
     ]);
     await redis.hset(`${namespace}:room:BADTYP`, "field", "value");
     await redis.set(`${namespace}:room:BADJSN`, "{not valid json");
+    await redis.set(
+      `${namespace}:room:BADSHAPE`,
+      legacyRoomBody("BADSHAPE", { joinToken: 123 }),
+    );
     await store.createRoom({
       code: "REUSED",
       joinToken: "join-token-123456",
@@ -690,11 +747,23 @@ test("redis room reaper keeps orphan claims behind corrupt room bodies", async (
       await redis.hget(orphanKeys.hash, "BADJSN"),
       "claim-invalid-json",
     );
+    assert.equal(
+      await redis.hget(orphanKeys.hash, "BADSHAPE"),
+      "claim-invalid-shape",
+    );
     assert.equal(await redis.hget(orphanKeys.hash, "REUSED"), null);
 
-    await redis.del(`${namespace}:room:BADTYP`, `${namespace}:room:BADJSN`);
+    await redis.del(
+      `${namespace}:room:BADTYP`,
+      `${namespace}:room:BADJSN`,
+      `${namespace}:room:BADSHAPE`,
+    );
     const released = await store.deleteExpiredRooms(0);
-    assert.deepEqual(released.orphanedIndexCodes.sort(), ["BADJSN", "BADTYP"]);
+    assert.deepEqual(released.orphanedIndexCodes.sort(), [
+      "BADJSN",
+      "BADSHAPE",
+      "BADTYP",
+    ]);
     await acknowledgeOrphanClaims(store, released);
     assert.equal(await redis.hlen(orphanKeys.hash), 0);
   } finally {
@@ -702,6 +771,7 @@ test("redis room reaper keeps orphan claims behind corrupt room bodies", async (
     await redis.del(
       `${namespace}:room:BADTYP`,
       `${namespace}:room:BADJSN`,
+      `${namespace}:room:BADSHAPE`,
       orphanKeys.hash,
       orphanKeys.queue,
     );
@@ -719,6 +789,8 @@ test("redis room orphan acknowledgement cannot consume a newer claim", async (t)
   const namespace = uniqueNamespace("orphanack");
   const orphanKeys = orphanClaimKeys(namespace);
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const acknowledgeOrphanedIndexClaims = store.acknowledgeOrphanedIndexClaims;
+  assert.ok(acknowledgeOrphanedIndexClaims);
   const redis = await connect();
 
   try {
@@ -729,13 +801,26 @@ test("redis room orphan acknowledgement cannot consume a newer claim", async (t)
 
     // A previous process can finish late after the code was reused and became
     // orphaned again. Its old token must not erase the new occurrence's debt.
-    await store.acknowledgeOrphanedIndexClaims?.([
+    await acknowledgeOrphanedIndexClaims([
       { code: "RECYC1", token: "old-claim" },
     ]);
     assert.equal(await redis.hget(orphanKeys.hash, "RECYC1"), "new-claim");
     assert.ok(await redis.zscore(orphanKeys.queue, "RECYC1"));
 
-    await store.acknowledgeOrphanedIndexClaims?.([
+    // A bad queue must be rejected before HDEL. Lua errors do not roll writes
+    // back, so checking it after removing the hash entry would consume the
+    // claim even though acknowledgement itself failed.
+    await redis.del(orphanKeys.queue);
+    await redis.set(orphanKeys.queue, "wrong type");
+    await assert.rejects(
+      acknowledgeOrphanedIndexClaims([{ code: "RECYC1", token: "new-claim" }]),
+      /WRONGTYPE/,
+    );
+    assert.equal(await redis.hget(orphanKeys.hash, "RECYC1"), "new-claim");
+
+    await redis.del(orphanKeys.queue);
+    await redis.zadd(orphanKeys.queue, 1, "RECYC1");
+    await acknowledgeOrphanedIndexClaims([
       { code: "RECYC1", token: "new-claim" },
     ]);
     assert.equal(await redis.hget(orphanKeys.hash, "RECYC1"), null);
@@ -1328,6 +1413,43 @@ test("redis room store skips bodies whose fields are the wrong shape", async (t)
     );
     await redis.quit();
     await store?.close();
+  }
+});
+
+test("redis room point reads reject parseable bodies that are not this room", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("pointvalidation");
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+  const key = `${namespace}:room:BADONE`;
+
+  try {
+    await settleRoomIndexBootstrap(store);
+    await redis.set(key, "{}");
+    await assert.rejects(
+      store.getRoom("BADONE"),
+      /Room BADONE contains an invalid room body/,
+    );
+
+    await redis.set(key, legacyRoomBody("BADONE", { joinToken: 123 }));
+    await assert.rejects(
+      store.getRoom("BADONE"),
+      /Room BADONE contains an invalid room body/,
+    );
+
+    await redis.set(key, legacyRoomBody("OTHER1"));
+    await assert.rejects(
+      store.getRoom("BADONE"),
+      /Room BADONE contains an invalid room body/,
+    );
+  } finally {
+    await redis.del(key);
+    await redis.quit();
+    await store.close();
   }
 });
 

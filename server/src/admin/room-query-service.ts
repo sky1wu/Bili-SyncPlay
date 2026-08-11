@@ -1,3 +1,4 @@
+import { createRoomFanOutLimiter } from "./room-fanout.js";
 import type { GlobalEventStore } from "./global-event-store.js";
 import type { RoomDetail, RoomListQuery, RoomSummary } from "./types.js";
 import type { PersistedRoom, Session } from "../types.js";
@@ -88,14 +89,21 @@ export function createAdminRoomQueryService(options: {
   runtimeStore: RuntimeStore;
   eventStore: GlobalEventStore;
 }) {
+  // Every fan-out in this service shares one budget: they are sized by how
+  // many rooms the deployment has, and the store's command admission is a
+  // boundary they must never reach (#277 review).
+  const roomFanOut = createRoomFanOutLimiter();
+
   async function enrichWithSessions(rooms: PersistedRoom[]) {
     return Promise.all(
-      rooms.map(async (room) => ({
-        room,
-        sessions: await options.runtimeStore.listClusterSessionsByRoom(
-          room.code,
-        ),
-      })),
+      rooms.map(async (room) =>
+        roomFanOut.run(async () => ({
+          room,
+          sessions: await options.runtimeStore.listClusterSessionsByRoom(
+            room.code,
+          ),
+        })),
+      ),
     );
   }
 
@@ -112,15 +120,17 @@ export function createAdminRoomQueryService(options: {
         const baseRooms = await options.roomStore.listRooms(normalizedQuery);
         const total = await options.roomStore.countRooms(normalizedQuery);
         const roomItems = await Promise.all(
-          baseRooms.map(async (room) => {
-            const activeSessions =
-              await options.runtimeStore.listClusterSessionsByRoom(room.code);
-            const summary = toSummary(room, activeSessions);
-            return {
-              ...summary,
-              instanceId: summary.instanceId ?? options.instanceId,
-            };
-          }),
+          baseRooms.map(async (room) =>
+            roomFanOut.run(async () => {
+              const activeSessions =
+                await options.runtimeStore.listClusterSessionsByRoom(room.code);
+              const summary = toSummary(room, activeSessions);
+              return {
+                ...summary,
+                instanceId: summary.instanceId ?? options.instanceId,
+              };
+            }),
+          ),
         );
         return {
           items: roomItems,

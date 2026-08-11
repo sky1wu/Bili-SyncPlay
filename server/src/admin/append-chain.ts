@@ -104,8 +104,9 @@ export type AppendChainOptions = {
    * head-of-connection check in {@link AppendChain.runRead}. This exists for the
    * one read that slips past it: a stall that begins between the check and the
    * command, which no check made before issuing can see. Without it that
-   * request ends only when Node's default 300s `requestTimeout` kills it (#269
-   * review).
+   * request is never answered at all — Node's `requestTimeout` bounds RECEIVING
+   * a request, not producing its response, so nothing downstream of a stalled
+   * command has a deadline (#269, corrected by measurement in #277).
    *
    * Generous on purpose, and for the same reason the append cap is: it must
    * never trip on ordinary latency, only on a connection that has stopped

@@ -9,7 +9,7 @@ import {
 } from "../src/app.js";
 import { createSessionRateLimitState } from "../src/rate-limit.js";
 import { createInMemoryRoomStore, type RoomStore } from "../src/room-store.js";
-import { createRoomService } from "../src/room-service.js";
+import { createRoomService, RoomServiceError } from "../src/room-service.js";
 import {
   createInMemoryRuntimeStore,
   type RuntimeStore,
@@ -1200,7 +1200,7 @@ test("room service flushes pending runtime store writes before exposing updated 
       return Promise.resolve(true);
     },
     releaseMessageSlot() {
-      return Promise.resolve();
+      return Promise.resolve(true);
     },
     acquireRoomLock() {
       return Promise.resolve(true);
@@ -2657,10 +2657,10 @@ test("cross-node concurrent joins respect capacity via shared admission lock", a
       flush: async () => {
         await Promise.allSettled(pendingSharedWrites.splice(0));
       },
-      tryClaimMessageSlot: (roomCode, key, expiresAt) =>
-        shared.tryClaimMessageSlot(roomCode, key, expiresAt),
-      releaseMessageSlot: (roomCode, key) =>
-        shared.releaseMessageSlot(roomCode, key),
+      tryClaimMessageSlot: (roomCode, key, token, expiresAt) =>
+        shared.tryClaimMessageSlot(roomCode, key, token, expiresAt),
+      releaseMessageSlot: (roomCode, key, token) =>
+        shared.releaseMessageSlot(roomCode, key, token),
       acquireRoomLock: (roomCode, key, token, expiresAt) =>
         shared.acquireRoomLock(roomCode, key, token, expiresAt),
       releaseRoomLock: (roomCode, key, token) =>
@@ -3390,6 +3390,54 @@ test("concurrent duplicate video:share requests are deduplicated to a single wri
     finalRoom?.version,
     (versionAfterCreate ?? 0) + 1,
     "exactly one updateRoom write must have occurred; version must advance by 1",
+  );
+});
+
+test("message-slot cleanup failures do not replace playback validation errors", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry(() => currentTime);
+  const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      async releaseMessageSlot() {
+        throw new Error("cleanup timed out");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent(event, data) {
+      events.push({ event, data });
+    },
+    now: () => currentTime,
+    createRoomCode: () => "ROOMCL",
+  });
+
+  const owner = createSession("owner-cleanup");
+  const created = await service.createRoomForSession(owner, "Alice");
+  await assert.rejects(
+    service.updatePlaybackForSession(
+      owner,
+      created.memberToken,
+      createPlayback(owner.memberId ?? owner.id),
+    ),
+    (error: unknown) =>
+      error instanceof RoomServiceError && error.code === "invalid_message",
+  );
+  assert.equal(
+    events.some(
+      (entry) =>
+        entry.event === "message_slot_release_failed" &&
+        entry.data.slotKind === "playback" &&
+        entry.data.error === "cleanup timed out",
+    ),
+    true,
   );
 });
 
@@ -5163,8 +5211,15 @@ test("room service keeps an orphan claim until runtime teardown succeeds", async
   const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
   const claim = { code: "ORPHAN", token: "claim-1" };
   const acknowledged: string[] = [];
+  let roomReadFails = true;
   const roomStore = {
     ...baseRoomStore,
+    async getRoom(code: string) {
+      if (roomReadFails) {
+        throw new Error("invalid persisted room body");
+      }
+      return baseRoomStore.getRoom(code);
+    },
     async deleteExpiredRooms() {
       return {
         deletedRoomCodes: [],
@@ -5178,6 +5233,7 @@ test("room service keeps an orphan claim until runtime teardown succeeds", async
   };
   const runtime = createInMemoryRuntimeStore(() => currentTime);
   let teardownFails = true;
+  let teardownAttempts = 0;
   const service = createRoomService({
     config: getDefaultSecurityConfig(),
     persistence: getDefaultPersistenceConfig(),
@@ -5185,6 +5241,7 @@ test("room service keeps an orphan claim until runtime teardown succeeds", async
     activeRooms: {
       ...runtime,
       deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+        teardownAttempts += 1;
         if (teardownFails) {
           throw new Error("redis unavailable");
         }
@@ -5199,8 +5256,15 @@ test("room service keeps an orphan claim until runtime teardown succeeds", async
 
   await service.deleteExpiredRooms();
   assert.deepEqual(acknowledged, []);
+  assert.equal(teardownAttempts, 0);
+
+  roomReadFails = false;
+  await service.deleteExpiredRooms();
+  assert.deepEqual(acknowledged, []);
+  assert.equal(teardownAttempts, 1);
 
   teardownFails = false;
   await service.deleteExpiredRooms();
   assert.deepEqual(acknowledged, [claim.token]);
+  assert.equal(teardownAttempts, 2);
 });

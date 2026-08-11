@@ -3,6 +3,8 @@ import {
   isMetricsRequestAuthorized,
   sendMetricsUnauthorized,
 } from "../metrics-auth.js";
+import { sendError } from "../admin/response.js";
+import { toRedisStoreUnavailableHttpError } from "../redis-store-unavailable.js";
 
 export function createMetricsRequestHandler(args: {
   getMetrics: () => Promise<string> | string;
@@ -49,17 +51,18 @@ export function createMetricsRequestHandler(args: {
         "content-type": "text/plain; version=0.0.4; charset=utf-8",
       });
       response.end(body);
-    } catch {
-      response.writeHead(500, { "content-type": "application/json" });
-      response.end(
-        JSON.stringify({
-          ok: false,
-          error: {
-            code: "internal_error",
-            message: "Internal server error.",
-          },
-        }),
-      );
+    } catch (error) {
+      const redisStoreUnavailable = toRedisStoreUnavailableHttpError(error);
+      if (redisStoreUnavailable) {
+        sendError(
+          response,
+          redisStoreUnavailable.statusCode,
+          redisStoreUnavailable.code,
+          redisStoreUnavailable.message,
+        );
+        return;
+      }
+      sendError(response, 500, "internal_error", "Internal server error.");
     }
   };
 }

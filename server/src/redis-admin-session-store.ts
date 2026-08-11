@@ -160,8 +160,9 @@ export async function createRedisAdminSessionStore(
     options.redisClient ??
     // The FIRST command of every authenticated admin request, and until #271 an
     // unbounded one: a Redis that stopped answering hung every request at
-    // `authenticate`, before any route ran, until Node's 300s `requestTimeout`
-    // killed the socket. Nothing here is large — one `HGETALL` of a handful of
+    // `authenticate`, before any route ran, and nothing else would ever answer
+    // it — Node's `requestTimeout` bounds RECEIVING a request, not producing its
+    // response (measured, #277 review). Nothing here is large — one `HGETALL` of a handful of
     // fields — so the backstop cannot be tripped by a legitimately slow read the
     // way an admin console query might be.
     (createBoundedRedisClient(redisUrl, {

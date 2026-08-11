@@ -185,10 +185,31 @@ before changing the code it describes.
   `new Redis` in one module and makes exempt connections open through
   `connectWithin`, since no per-command deadline reaches the handshake. The
   backstop bounds the caller's wait and not ioredis's queue, so no depth limit
-  retires because of it; exempt does not mean fine (the room store's request
-  path and `trackAwaitedOperation` are still unbounded); and bounded still owes
-  a report: 503 with a diagnosis, never 401, never a cleanup rejection thrown
-  over a real result, and never a precondition nobody enforces.
+  retires because of it; and bounded still owes a report: 503 with a diagnosis,
+  never 401, never a cleanup rejection thrown over a real result, and never a
+  precondition nobody enforces.
+- **Exempt did not mean fine, and the fix is a cap that keeps the call tracked**
+  (#277): both stores' request paths had no bound at all, so a stalled Redis hung
+  a WebSocket join in silence. `boundCommand` (`capAttempt` + admission) answers
+  the caller while the command stays tracked, so no bound above loses its
+  evidence and no declaration moved. **Which bound applies is a property of the
+  CALL, not the method** — `loadSession` and `readRoomBody` are each reached from
+  a request AND from a maintenance pass, so the bound is passed in and the
+  pass-driven callers pass `boundedByOuterCaller`; capping those would make
+  `stalled` unreachable. Per command, never per operation (`getRoom` reads one
+  session per member). A request that merely joins a background pass bounds its
+  own WAIT, absorbing the pass's rejection so it cannot end the process. Still
+  open on purpose: the nine durable writes, where #237's trade holds because
+  their effects — unlike a lock's or a dedup slot's — do not expire.
+  Three more the review round added: **a refusal cap must never be reachable by
+  ordinary fan-out** (every read that maps over a deployment-sized collection
+  goes through a waiting limiter sized under admission, placed at the fan-out
+  and not inside the bound, or the limiter grows its own unbounded queue);
+  **a bound must not leave its function synchronously** (a sibling in the same
+  `Promise.all` literal is then issued with nobody to handle it — a process exit
+  on Node 22); and **Node's `requestTimeout` bounds receiving a request, not
+  producing its response**, so "at least the HTTP server bounds it" is never an
+  argument.
 - **One-shot broadcasts need a retry trail** (#242): most `room_state_updated`
   sends are repeated by the next update, but the share-ownership resync and the
   runtime index reaper's announcement are not — losing one loses the room until a

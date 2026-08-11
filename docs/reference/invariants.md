@@ -356,9 +356,15 @@ decides something has to know which of the two questions it is asking (#242):
   re-checks that no room body took the code meanwhile, and reports the
   survivors as `orphanedIndexCodes` plus their claim tokens. `room-service`
   acknowledges a token only after its existing
-  generation-guarded runtime teardown settles. A process crash therefore leaves
-  the claim for another room node, while a late acknowledgement cannot erase a
-  newer claim created after the same room code was recycled.
+  generation-guarded runtime teardown settles. Every script validates both
+  handoff key types before any irreversible write, because a Redis Lua runtime
+  error does not roll back earlier writes in that script. The point room read
+  and sweep both validate the complete persisted-room shape (including nested
+  share/playback state) and the expected code: corruption is unknown, not proof
+  of code reuse, and cannot consume the claim. A process
+  crash therefore leaves the claim for another room node, while a late
+  acknowledgement cannot erase a newer claim created after the same room code
+  was recycled.
 
 ## One-shot broadcasts need a retry trail; repeated ones do not
 
@@ -590,8 +596,10 @@ event_store_unavailable`), not delayed. The fix for an unbounded queue is
   that is merely behind. So the two bounds split the work, and neither
   substitutes for the other: the head check stops a read being issued per poll
   for the whole length of a stall, and the read's own command timeout stops the
-  one read already in flight when the stall began from waiting on Node's default
-  300s `requestTimeout` (#269 review). It costs one refused read at the onset of
+  one read already in flight when the stall began from never being answered at
+  all — Node's `requestTimeout` bounds RECEIVING a request, not producing its
+  response, so it is not the backstop #269 took it for (measured in #277). It
+  costs one refused read at the onset of
   a stall — the next poll finds the connection unanswered and is refused before
   anything is issued.
 - **`close` drains, bounded, then drops the socket — `QUIT` is not an escape
@@ -757,10 +765,84 @@ do NOT compose, and that is the part that decides which connection gets which:
   `redis-client-bounds.test.ts` keeps `new Redis` out of every other module,
   because the option's absence is invisible in a diff, which is how it stayed
   invisible five times.
-- **Exempt does not mean fine.** The room store's request path and the runtime
-  store's `trackAwaitedOperation` still have no caller-side bound, so a stalled
-  Redis still hangs a join. The fix is a cap that keeps the call tracked, or a
-  separate connection for the paths that want a backstop — never this option.
+- **Exempt does not mean fine, and the fix is a cap that keeps the call
+  tracked.** The room store's request path and the runtime store's had no
+  caller-side bound at all, so a stalled Redis hung a WebSocket join with
+  nothing counting down anywhere. #277 closed that with `boundCommand` on both
+  stores: `capAttempt` answers the caller and leaves the command tracked, so
+  `ensurePendingCapacity` and `maintenance-pass` keep reading exactly the
+  evidence a connection-wide option would have destroyed. Nothing in the bound
+  declarations moved, which is the point — the two layers are still separate.
+- **Which bound applies is a property of the CALL, not of the method.** Both
+  kinds of caller share these connections and reach the same helpers:
+  `loadSession` runs on the join path and inside the runtime index reaper,
+  `readRoomBody` inside an admin listing and inside the index reconcile. So the
+  bound is passed in (`CommandBound`), and the pass-driven callers pass
+  `boundedByOuterCaller` — a claim, written down, that something further out
+  stops waiting. Capping those would make `stalled` unreachable and let the next
+  tick run a second pass on top of the first, which is #261 and #263 arrived at
+  by another route. `redis-store-command-bounds.test.ts` asserts both polarities,
+  and hangs the k-th command of every request-path method in turn, because a
+  method that bounds its first command and not its third passes any single probe.
+- **A bound belongs to each command, never to the operation.** `getRoom` loads
+  one session per member and `purgeSessionsByInstance` one per session left
+  behind, so a per-method budget fails a healthy Redis for having data — the
+  same mistake as giving a startup migration one total budget (#271 review).
+- **A request that merely joins a background pass needs its wait bounded, not
+  the pass — and bounded on SILENCE, not on duration.** A room listing waits for
+  the first index reconcile, whose commands are deliberately uncapped;
+  `awaitBootstrapReconcile` bounds the WAIT instead, so the pass keeps running
+  and its next caller can still join it. A total budget there would fail every
+  admin listing for the length of a HEALTHY migration on a large database, which
+  is the same defect as a whole-migration startup budget — so the wait gives up
+  only after a full window in which no reconcile command answered at all, which
+  is why every pass command declares `boundedByOuterCaller` rather than calling
+  the client directly. The absorbed rejection is not optional either: the pass
+  outlives the wait, and an unhandled rejection ends the process on Node 22.
+- **A cap that can be reached must never be reached by ordinary fan-out.**
+  Admission is a refusal-style safety boundary; it is not a scheduler. Every
+  read that maps over a collection sized by the deployment — a room listing's
+  `REPAIR_CHUNK_SIZE` batch, one `HGETALL` per session or node, an admin service
+  asking about every room — runs straight into it and fails on a completely
+  healthy Redis (257 rooms was enough). Each of those fan-outs goes through a
+  waiting `concurrency-limiter` sized under the admission limit, and the limiter
+  sits at the FAN-OUT rather than inside the bound: a limiter in front of every
+  command would grow its own unbounded queue of waiters during a stall, which is
+  the defect it exists to prevent. `ADMIN_ROOM_FANOUT_LIMIT` is per service, not
+  per call, because concurrent calls multiply a per-call batch. The runtime store's
+  node and session readers share one limiter for the same reason: two separate
+  half-limit pools can jointly consume the whole admission budget.
+- **A bound must not be able to leave its function synchronously.** Two callers
+  build a `Promise.all([...])` literal out of two bounded commands. A
+  synchronous throw from the second abandons the argument list with the first
+  command already issued and nobody left to handle it; its cap then rejects into
+  an unhandled rejection, which ends the process on Node 22. `boundCommand` is
+  `async` in both stores for that reason alone.
+- **Node's `requestTimeout` is not a backstop for a slow handler.** It bounds
+  RECEIVING a request, not producing its response, so an HTTP handler awaiting a
+  stalled Redis is never answered — measured, after #269 and the first round of
+  #277 both leaned on it in a comment. Any argument of the form "this path is at
+  least bounded by the HTTP server" is false here.
+- **Still open, deliberately: the durable writes.** The runtime store's five
+  `trackAwaitedOperation` writes and the room store's four room-body writes stay
+  uncapped, because #237 settled that an answer which can be wrong is worse than
+  a slow one and their effects do not expire on their own. That is the whole of
+  the difference from `acquireRoomLock` and `tryClaimMessageSlot`, which ARE
+  capped: a `SET NX PX` that lands after its caller gave up releases itself at
+  its TTL, so "may have landed" costs one lock interval rather than a permanent
+  wrong answer.
+- **An expiring claim still has an owner.** Claiming writes the token, slot TTL,
+  and teardown-index score in one Lua operation, so an old tracking write cannot
+  arrive after a newer owner and overwrite its score. Early cleanup uses a
+  second Lua operation to check that token before deleting both the slot and its
+  teardown index. A capped release may land after the old TTL and after another
+  node has claimed the same logical key; an unconditional `DEL`/`ZREM` would
+  erase the new generation. Cleanup is also
+  subordinate to the business outcome already chosen: its timeout is logged and
+  absorbed rather than replacing a validation, persistence, or version error.
+  The score and its residue-prune cutoff both use Redis `TIME`, matching the
+  clock that advances the slot TTL; blocked-token scores remain on the
+  application clock and are pruned separately.
 - **An exemption covers commands, not the handshake.** `connect()` runs before
   the store exists and resolves on `ready`; ioredis's `connectTimeout` bounds
   the TCP connect and not the `INFO` after it. Without either bound, bootstrap
@@ -832,14 +914,20 @@ do NOT compose, and that is the part that decides which connection gets which:
 - **Bounded still owes a report.** A connection whose commands now fail owes the
   caller a diagnosis, not just an error: a stalled session store answers 503
   `admin_session_store_unavailable` — never 401, which would read as a logout —
-  and logs `admin_session_store_command_failed` with the Redis detail the
-  response withholds from an unauthenticated caller. Requests refused while the
-  guard waits for `ready` go through the same reporting path. An executor result
-  refused by publisher admission never became a Redis operation, so it must not
-  inflate the Redis-failure counter; the terminal result-publish callback instead
-  increments `bili_syncplay_admin_command_result_publish_failures_total`
-  unconditionally, before its diagnostic log is throttled. This says the executor
-  could not complete the publish path, not that delivery was certainly lost: a
+  while room/runtime timeout and admission failures answer 503
+  `room_store_unavailable` / `runtime_store_unavailable`, not the catch-all 500.
+  That translation is one shared HTTP-boundary policy: both the admin router
+  and the dedicated metrics server use it, so moving `/metrics` to its own port
+  cannot turn the same dependency outage back into an undiagnosed 500.
+  The session path logs `admin_session_store_command_failed` with the Redis
+  detail the response withholds from an unauthenticated caller. Requests refused
+  while the guard waits for `ready` go through the same reporting path. An
+  executor result refused by publisher admission never became a Redis
+  operation, so it must not inflate the Redis-failure counter; the terminal
+  result-publish callback instead increments
+  `bili_syncplay_admin_command_result_publish_failures_total`
+  unconditionally, before its diagnostic log is throttled. This says the
+  executor could not complete the publish path, not that delivery was certainly lost: a
   timed-out Redis `PUBLISH` remains queued and Pub/Sub provides no requester
   receipt.
 - **Cleanup on the same connection is not the answer.** Where a request brackets
@@ -847,7 +935,9 @@ do NOT compose, and that is the part that decides which connection gets which:
   not replace the result: the admin command bus's `finally` `UNSUBSCRIBE` would
   otherwise throw over the `command_timeout` result the stall exists to produce.
   It still cannot be forgotten: a failed cleanup marks the subscriber for reset,
-  protects replies already in flight, then restores the durable registry.
+  protects replies already in flight, then restores the durable registry. A
+  message-slot rollback follows the same ordering rule: report the cleanup
+  failure, but preserve the business error that triggered it.
 
 ## Test fixtures must not cast past the checker
 

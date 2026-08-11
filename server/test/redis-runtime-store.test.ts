@@ -137,7 +137,7 @@ function createFakeRedisClient(execPromises: Promise<unknown>[]) {
     async get() {
       return null;
     },
-    // 仅用于 releaseRoomLock 的 CAS 脚本;这些用例不走锁路径,返回 null 表示未释放。
+    // 默认脚本结果；需要覆盖 claim/release 语义的用例会自行实现 eval。
     async eval() {
       return null;
     },
@@ -221,9 +221,12 @@ test("redis runtime store bounds its pre-QUIT drain and counts every active Redi
   // This helper deliberately gives a live caller the command's real outcome;
   // shutdown must bound its own wait without changing that API contract.
   void store.blockMemberToken("ROOMCLOSE", "token-close", 60_000);
-  // Direct reads/writes can outlive an upstream shutdown step too. They bypass
-  // the pending-operation wrappers, so only client-boundary tracking sees this.
-  void store.isMemberTokenBlocked("ROOMCLOSE", "token-close");
+  // Direct reads can outlive an upstream shutdown step too. Since #277 this one
+  // answers its caller at `pendingOperationTimeoutMs` — hence the catch — while
+  // its command stays tracked, so the drain below still has to wait for it.
+  void Promise.resolve(
+    store.isMemberTokenBlocked("ROOMCLOSE", "token-close"),
+  ).catch(() => undefined);
 
   const startedAt = Date.now();
   await store.close();
@@ -239,7 +242,10 @@ test("redis runtime store bounds its pre-QUIT drain and counts every active Redi
     {
       pendingOperations: 1,
       pendingCommands: 3,
-      pendingAttempts: 1,
+      // Two: the queued write's attempt, and the capped read — whose command
+      // `boundCommand` keeps tracked after answering its caller, which is what
+      // makes it visible to this report at all (#277).
+      pendingAttempts: 2,
       pendingOperationBudgetMs: 20,
       quitOutcome: "timed_out",
       budgetMs: 20,
@@ -415,7 +421,8 @@ test("redis runtime store keeps only the latest room membership after rapid room
 
     const roomA = await observer.listClusterSessionsByRoom("ROOMA1");
     const roomB = await observer.listClusterSessionsByRoom("ROOMB1");
-    const clusterSessions = await observer.listClusterSessions();
+    const clusterSessions =
+      await observer.listClusterSessions("maintenance_pass");
     const storedSession = clusterSessions.find(
       (entry) => entry.id === session.id,
     );
@@ -524,29 +531,20 @@ test("redis runtime store keeps the member token when only presence is dropped",
 });
 
 test("redis runtime store clamps dedup slot TTL to a floor when expiresAt is already in the past", async () => {
-  const setCalls: Array<{
-    key: string;
-    value: string;
-    nx: string;
-    px: string;
-    ms: number;
+  const claimCalls: Array<{
+    script: string;
+    numKeys: number;
+    args: Array<string | number>;
   }> = [];
-  const zaddCalls: Array<{ key: string; score: string; member: string }> = [];
   const fakeRedis = {
     ...createFakeRedisClient([]),
-    async set(
-      key: string,
-      value: string,
-      nx: "NX",
-      px: "PX",
-      milliseconds: number,
+    async eval(
+      script: string,
+      numKeys: number,
+      ...args: Array<string | number>
     ) {
-      setCalls.push({ key, value, nx, px, ms: milliseconds });
-      return "OK";
-    },
-    async zadd(key: string, score: string, member: string) {
-      zaddCalls.push({ key, score, member });
-      return null;
+      claimCalls.push({ script, numKeys, args });
+      return 1;
     },
   };
 
@@ -567,18 +565,15 @@ test("redis runtime store clamps dedup slot TTL to a floor when expiresAt is alr
     const claimed = await store.tryClaimMessageSlot(
       "ROOMXX",
       "share:actor:url:1",
+      "claim-token-1",
       currentTime - 10,
     );
     assert.equal(claimed, true, "slot should still be claimed via minimum TTL");
-    assert.equal(setCalls.length, 1);
-    assert.ok(
-      setCalls[0].ms >= 1_000,
-      `expected minimum TTL >= 1000ms, got ${setCalls[0].ms}`,
-    );
-    assert.equal(setCalls[0].nx, "NX");
-    assert.equal(setCalls[0].px, "PX");
-    assert.equal(zaddCalls.length, 1);
-    assert.equal(Number(zaddCalls[0].score), currentTime + setCalls[0].ms);
+    assert.equal(claimCalls.length, 1);
+    assert.equal(claimCalls[0]?.numKeys, 2);
+    assert.match(claimCalls[0]?.script ?? "", /SET.*NX.*PX/s);
+    assert.match(claimCalls[0]?.script ?? "", /ZADD/);
+    assert.equal(claimCalls[0]?.args.at(-1), 1_000);
 
     const clampLog = logs
       .map((line) => {
@@ -605,18 +600,16 @@ test("redis runtime store clamps dedup slot TTL to a floor when expiresAt is alr
 });
 
 test("redis runtime store preserves caller-provided TTL without clamping when expiresAt is in the future", async () => {
-  const setCalls: Array<{ ms: number }> = [];
+  const ttlCalls: number[] = [];
   const fakeRedis = {
     ...createFakeRedisClient([]),
-    async set(
-      _key: string,
-      _value: string,
-      _nx: "NX",
-      _px: "PX",
-      milliseconds: number,
+    async eval(
+      _script: string,
+      _numKeys: number,
+      ...args: Array<string | number>
     ) {
-      setCalls.push({ ms: milliseconds });
-      return "OK";
+      ttlCalls.push(Number(args.at(-1)));
+      return 1;
     },
   };
 
@@ -638,20 +631,22 @@ test("redis runtime store preserves caller-provided TTL without clamping when ex
     const claimedLarge = await store.tryClaimMessageSlot(
       "ROOMYY",
       "share:actor:url:1",
+      "claim-token-1",
       currentTime + 5_000,
     );
     assert.equal(claimedLarge, true);
-    assert.equal(setCalls.at(-1)?.ms, 5_000);
+    assert.equal(ttlCalls.at(-1), 5_000);
 
     // Small but positive TTL: must not be extended to the floor — the caller
     // controls the dedup window and clamping would change its semantics.
     const claimedSmall = await store.tryClaimMessageSlot(
       "ROOMYY",
       "share:actor:url:2",
+      "claim-token-2",
       currentTime + 50,
     );
     assert.equal(claimedSmall, true);
-    assert.equal(setCalls.at(-1)?.ms, 50);
+    assert.equal(ttlCalls.at(-1), 50);
 
     const clampLogged = logs.some((line) =>
       line.includes("dedup_slot_ttl_clamped"),
@@ -660,6 +655,125 @@ test("redis runtime store preserves caller-provided TTL without clamping when ex
   } finally {
     console.log = originalLog;
     await store.close();
+  }
+});
+
+test("late claim tracking and release cannot alter a newer owner's slot", async () => {
+  const currentTime = 1_000;
+  const slots = new Map<string, { token: string; expiresAt: number }>();
+  const trackingScores = new Map<string, number>();
+  const delayedClaim = {
+    gate: createDeferred<void>(),
+    operation: null as Promise<unknown> | null,
+  };
+
+  function applyMessageSlotScript(
+    script: string,
+    numKeys: number,
+    args: Array<string | number>,
+  ): number {
+    assert.equal(numKeys, 2);
+    const slotKey = String(args[0]);
+    const token = String(args[2]);
+    if (script.includes("local claimed")) {
+      const ttlMs = Number(args[3]);
+      const existing = slots.get(slotKey);
+      if (existing && existing.expiresAt > currentTime) {
+        return 0;
+      }
+      slots.set(slotKey, { token, expiresAt: currentTime + ttlMs });
+      trackingScores.set(slotKey, currentTime + ttlMs);
+      return 1;
+    }
+    if (
+      script.includes("redis.call('GET'") &&
+      slots.get(slotKey)?.token !== token
+    ) {
+      return 0;
+    }
+    slots.delete(slotKey);
+    trackingScores.delete(slotKey);
+    return 1;
+  }
+
+  function createOwnershipClient(delayFirstClaim: boolean) {
+    let shouldDelayClaim = delayFirstClaim;
+    return {
+      ...createFakeRedisClient([]),
+      eval(
+        script: string,
+        numKeys: number,
+        ...args: Array<string | number>
+      ): Promise<unknown> {
+        if (shouldDelayClaim && script.includes("local claimed")) {
+          shouldDelayClaim = false;
+          delayedClaim.operation = delayedClaim.gate.promise.then(() =>
+            applyMessageSlotScript(script, numKeys, args),
+          );
+          return delayedClaim.operation;
+        }
+        return Promise.resolve(applyMessageSlotScript(script, numKeys, args));
+      },
+    };
+  }
+
+  const storeA = await createRedisRuntimeStore("redis://unused", {
+    redisClient: createOwnershipClient(true),
+    keyPrefix: "bsp:test:dedup-owner:",
+    now: () => currentTime,
+    pendingOperationTimeoutMs: 20,
+    closeQuitTimeoutMs: 20,
+    onPendingOperationError() {},
+    onCloseUnfinished() {},
+  });
+  const storeB = await createRedisRuntimeStore("redis://unused", {
+    redisClient: createOwnershipClient(false),
+    keyPrefix: "bsp:test:dedup-owner:",
+    now: () => currentTime,
+  });
+
+  try {
+    await assert.rejects(
+      storeA.tryClaimMessageSlot(
+        "ROOMOW",
+        "playback:1",
+        "owner-a",
+        currentTime + 500,
+      ),
+      /timed out/,
+    );
+    assert.equal(
+      await storeB.tryClaimMessageSlot(
+        "ROOMOW",
+        "playback:1",
+        "owner-b",
+        currentTime + 1_000,
+      ),
+      true,
+    );
+
+    delayedClaim.gate.resolve(undefined);
+    assert.ok(delayedClaim.operation);
+    await delayedClaim.operation;
+    assert.deepEqual(Array.from(slots.values()), [
+      { token: "owner-b", expiresAt: currentTime + 1_000 },
+    ]);
+    assert.deepEqual(Array.from(trackingScores.values()), [
+      currentTime + 1_000,
+    ]);
+    assert.equal(
+      await storeA.releaseMessageSlot("ROOMOW", "playback:1", "owner-a"),
+      false,
+      "the old owner must not release the replacement slot",
+    );
+    assert.equal(
+      await storeB.releaseMessageSlot("ROOMOW", "playback:1", "owner-b"),
+      true,
+    );
+    assert.equal(trackingScores.size, 0);
+  } finally {
+    await storeA.close();
+    await storeB.close();
   }
 });
 
@@ -1784,16 +1898,18 @@ test("redis runtime store stops reserving a code whose blocked and dedup entries
     await store.tryClaimMessageSlot(
       "ROOMLP",
       "dedup-lapsed",
-      currentTime + 30_000,
+      "claim-token-lapsed",
+      currentTime + 200,
     );
     await store.flush?.();
     assert.equal(await store.hasRoomResidue("ROOMLP"), true);
 
     currentTime += 3_600_000;
+    await new Promise((resolve) => setTimeout(resolve, 250));
 
-    // Redis does not drop zset members when their score passes, and the lazy
-    // sweeps that normally do it are only reached through a room that no longer
-    // exists — so without trimming here the code stayed reserved forever.
+    // The blocked-token index uses the injected application clock, while the
+    // dedup index is tied to Redis's own TTL clock. Both must lapse before this
+    // code is reusable, and neither zset removes expired scores on its own.
     assert.equal(await store.hasRoomResidue("ROOMLP"), false);
   } finally {
     await store.close();

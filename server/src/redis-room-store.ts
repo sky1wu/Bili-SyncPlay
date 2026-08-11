@@ -4,9 +4,15 @@ import type { RoomListQuery } from "./admin/types.js";
 import {
   connectWithin,
   createBoundedRedisClient,
+  DEFAULT_REDIS_COMMAND_ADMISSION_LIMIT,
+  REDIS_COMMAND_TIMEOUT_MS,
+  RedisCommandAdmissionError,
 } from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
+import { createConcurrencyLimiter } from "./concurrency-limiter.js";
+import { createRetryPacer, settleWithin } from "./retry-pacer.js";
 import { getRedisRoomStoreKeys } from "./redis-namespace.js";
+import { RedisStoreUnavailableError } from "./redis-store-unavailable.js";
 import {
   createPersistedRoom,
   type OrphanedIndexClaim,
@@ -22,6 +28,34 @@ import type { PersistedRoom } from "./types.js";
  * retaining one second for shutdown bookkeeping and the degraded report.
  */
 const CLOSE_QUIT_TIMEOUT_MS = 4_000;
+
+/**
+ * Issues one Redis command under whatever bounds its caller.
+ *
+ * Both kinds of caller share this connection and reach the same helpers, so the
+ * bound is a property of the CALL: `readRoomBody` runs inside an admin listing,
+ * where nothing else stops waiting, and inside the index reconcile, where
+ * `maintenance-pass` is already reading this command's silence (#277).
+ */
+type CommandBound = <T>(
+  operationName: string,
+  issue: () => Promise<T>,
+) => Promise<T>;
+
+export class RedisRoomStoreCommandTimeoutError extends RedisStoreUnavailableError {
+  constructor(
+    readonly operationName: string,
+    readonly budgetMs: number,
+  ) {
+    super(
+      "room",
+      operationName,
+      "timeout",
+      `Redis room store command "${operationName}" went unanswered for ${budgetMs}ms.`,
+    );
+    this.name = "RedisRoomStoreCommandTimeoutError";
+  }
+}
 
 /** Injectable so shutdown tests can model a `QUIT` reply that never arrives. */
 export type RedisRoomStoreClient = {
@@ -70,7 +104,26 @@ export type RedisRoomStoreClient = {
 // before ZREM; a loser restores the claim it observed before trying. Keeping
 // this in one source block is the invariant — prune, quarantine, and reaper
 // candidate handling must not grow their own hand-written variants.
-const REMOVE_INDEX_WITH_ORPHAN_CLAIM_LUA = `
+const VALIDATE_ORPHAN_CLAIM_KEYS_LUA = `
+-- Redis scripts are atomic with respect to other commands, but a runtime
+-- error does not roll back writes this script already made. Validate both
+-- handoff keys before any caller reaches an irreversible DEL/ZREM so one bad
+-- key cannot hide rooms deleted earlier in the same sweep from its caller.
+local orphanedRoomsKind = redis.call("TYPE", orphanedRoomsKey)["ok"]
+if orphanedRoomsKind ~= "none" and orphanedRoomsKind ~= "hash" then
+  return redis.error_reply("WRONGTYPE orphan cleanup claims must be a hash")
+end
+local orphanedRoomsQueueKind = redis.call(
+  "TYPE", orphanedRoomsQueueKey
+)["ok"]
+if orphanedRoomsQueueKind ~= "none" and orphanedRoomsQueueKind ~= "zset" then
+  return redis.error_reply("WRONGTYPE orphan cleanup queue must be a sorted set")
+end
+`;
+
+const ORPHAN_CLAIM_PRIMITIVES_LUA = `
+${VALIDATE_ORPHAN_CLAIM_KEYS_LUA}
+
 local sequenceMember = "!sequence"
 
 local function rotateOrphanClaim(code)
@@ -123,7 +176,7 @@ local roomKeyPrefix = ARGV[1]
 local claimToken = ARGV[2]
 local removed = 0
 
-${REMOVE_INDEX_WITH_ORPHAN_CLAIM_LUA}
+${ORPHAN_CLAIM_PRIMITIVES_LUA}
 
 for index = 3, #ARGV do
   local code = ARGV[index]
@@ -176,7 +229,7 @@ local kind = redis.call("TYPE", roomKey)["ok"]
 local code = ARGV[2]
 local claimToken = ARGV[3]
 
-${REMOVE_INDEX_WITH_ORPHAN_CLAIM_LUA}
+${ORPHAN_CLAIM_PRIMITIVES_LUA}
 
 if kind == "none" then
   -- No body at all; the orphan prune owns that case.
@@ -320,7 +373,80 @@ local deletedCodes = {}
 local orphanClaims = {}
 local orphanPositions = {}
 
-${REMOVE_INDEX_WITH_ORPHAN_CLAIM_LUA}
+${ORPHAN_CLAIM_PRIMITIVES_LUA}
+
+local function isFiniteNumber(value)
+  return type(value) == "number"
+    and value == value
+    and value ~= math.huge
+    and value ~= -math.huge
+end
+
+local function isOptionalNullableString(value)
+  return value == nil or value == cjson.null or type(value) == "string"
+end
+
+local function isSharedVideo(value)
+  if value == cjson.null then
+    return true
+  end
+  return type(value) == "table"
+    and type(value["videoId"]) == "string"
+    and type(value["url"]) == "string"
+    and type(value["title"]) == "string"
+    and (value["sharedByMemberId"] == nil
+      or type(value["sharedByMemberId"]) == "string")
+    and (value["sharedByDisplayName"] == nil
+      or type(value["sharedByDisplayName"]) == "string")
+end
+
+local function isPlayback(value)
+  if value == cjson.null then
+    return true
+  end
+  if type(value) ~= "table" then
+    return false
+  end
+  local playState = value["playState"]
+  local syncIntent = value["syncIntent"]
+  return type(value["url"]) == "string"
+    and isFiniteNumber(value["currentTime"])
+    and (playState == "playing"
+      or playState == "paused"
+      or playState == "buffering")
+    and (syncIntent == nil
+      or syncIntent == "explicit-seek"
+      or syncIntent == "explicit-ratechange")
+    and (value["userInitiated"] == nil
+      or type(value["userInitiated"]) == "boolean")
+    and (value["naturalEnd"] == nil
+      or type(value["naturalEnd"]) == "boolean")
+    and isFiniteNumber(value["playbackRate"])
+    and isFiniteNumber(value["updatedAt"])
+    and isFiniteNumber(value["serverTime"])
+    and type(value["actorId"]) == "string"
+    and isFiniteNumber(value["seq"])
+end
+
+local function isUsableRoom(room, code)
+  if type(room) ~= "table" then
+    return false
+  end
+  local version = room["version"]
+  local expiresAt = room["expiresAt"]
+  return room["code"] == code
+    and type(room["joinToken"]) == "string"
+    and isFiniteNumber(room["createdAt"])
+    and isOptionalNullableString(room["ownerMemberId"])
+    and isOptionalNullableString(room["ownerDisplayName"])
+    and isSharedVideo(room["sharedVideo"])
+    and isPlayback(room["playback"])
+    and isFiniteNumber(version)
+    and version >= 0
+    and version % 1 == 0
+    and isFiniteNumber(room["lastActiveAt"])
+    and (expiresAt == cjson.null or isFiniteNumber(expiresAt))
+end
 
 local function roomBodyState(code)
   local readable, rawRoom = pcall(function()
@@ -334,18 +460,7 @@ local function roomBodyState(code)
   end
 
   local ok, room = pcall(cjson.decode, rawRoom)
-  if not ok or type(room) ~= "table" then
-    return "unusable"
-  end
-  local expiresAt = room["expiresAt"]
-  if room["code"] ~= code
-    or type(room["version"]) ~= "number"
-    or type(room["createdAt"]) ~= "number"
-    or type(room["lastActiveAt"]) ~= "number"
-    or not (
-      expiresAt == cjson.null
-      or type(expiresAt) == "number"
-    ) then
+  if not ok or not isUsableRoom(room, code) then
     return "unusable"
   end
   return "usable"
@@ -424,14 +539,14 @@ for _, code in ipairs(candidates) do
     end
   else
     local ok, room = pcall(cjson.decode, rawRoom)
-    -- cjson.decode("1") yields a truthy scalar; indexing it raises a Lua
-    -- error that aborts the whole reaper run, so the member stays a candidate
-    -- and every expired room ordered after it stops being collected too.
-    if ok and type(room) == "table" then
+    -- Use the same complete body predicate as the orphan-claim path. A body
+    -- that merely has a plausible expiry is still corruption, not permission
+    -- to delete it and report a room teardown as though its full state existed.
+    if ok and isUsableRoom(room, code) then
       local expiresAt = room["expiresAt"]
-      if expiresAt == cjson.null or expiresAt == nil then
+      if expiresAt == cjson.null then
         redis.call("ZADD", roomsKey, "+inf", code)
-      elseif tonumber(expiresAt) ~= nil and tonumber(expiresAt) <= now then
+      elseif expiresAt <= now then
         redis.call("DEL", key)
         redis.call("ZREM", roomsKey, code)
         deletedCodes[#deletedCodes + 1] = code
@@ -444,13 +559,18 @@ return { deletedCodes, orphanClaims }
 `;
 
 const ACKNOWLEDGE_ORPHANED_INDEX_CLAIMS_LUA = `
+local orphanedRoomsKey = KEYS[1]
+local orphanedRoomsQueueKey = KEYS[2]
+
+${VALIDATE_ORPHAN_CLAIM_KEYS_LUA}
+
 local acknowledged = 0
 for index = 1, #ARGV, 2 do
   local code = ARGV[index]
   local token = ARGV[index + 1]
-  if redis.call("HGET", KEYS[1], code) == token then
-    redis.call("HDEL", KEYS[1], code)
-    redis.call("ZREM", KEYS[2], code)
+  if redis.call("HGET", orphanedRoomsKey, code) == token then
+    redis.call("HDEL", orphanedRoomsKey, code)
+    redis.call("ZREM", orphanedRoomsQueueKey, code)
     acknowledged = acknowledged + 1
   end
 end
@@ -479,45 +599,125 @@ function serializeRoom(room: PersistedRoom): string {
   return JSON.stringify(room);
 }
 
-function parseRoom(value: string | null): PersistedRoom | null {
-  if (!value) {
-    return null;
-  }
-  return JSON.parse(value) as PersistedRoom;
+// One unusable value must not take down a whole batch. Batch reads quarantine
+// it from the enumeration index only after staging a durable cleanup claim;
+// point reads reject it as unknown. That lets healthy rooms keep reconciling
+// without treating corruption as proof that a live room or cleanup debt is
+// safe to consume.
+//
+// Valid JSON is not enough: every point-read consumer trusts the complete
+// PersistedRoom contract, while the reaper uses this same answer as proof that
+// a room code was recycled and an older cleanup claim may be consumed. Keep a
+// single complete predicate for both point and batch reads; the Lua reaper
+// mirrors it before making the same code-reuse decision atomically in Redis.
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-// One unusable value must not take down a whole batch. The reaper's script
-// already skips such a body via pcall, and the orphan prune keys off EXISTS,
-// so a bad room keeps its membership and is simply not enumerated — rather
-// than rejecting the reconcile that the reaper now waits on, which would stop
-// every other room from ever being collected.
-//
-// Valid JSON is not enough: a body carrying `expiresAt: "bad"` parses fine,
-// and expiryScore() would then hand Redis "bad" as a score, failing the ZADD
-// and blocking the reaper just the same. Every field this store actually
-// reads is checked before the body is trusted.
-function isUsableRoom(value: unknown): value is PersistedRoom {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-  const room = value as Partial<PersistedRoom>;
+function isOptionalNullableString(
+  value: unknown,
+): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isUsableSharedVideo(
+  value: unknown,
+): value is NonNullable<PersistedRoom["sharedVideo"]> {
   return (
-    typeof room.code === "string" &&
-    typeof room.version === "number" &&
-    typeof room.createdAt === "number" &&
-    typeof room.lastActiveAt === "number" &&
-    (room.expiresAt === null || typeof room.expiresAt === "number")
+    isRecord(value) &&
+    typeof value.videoId === "string" &&
+    typeof value.url === "string" &&
+    typeof value.title === "string" &&
+    (value.sharedByMemberId === undefined ||
+      typeof value.sharedByMemberId === "string") &&
+    (value.sharedByDisplayName === undefined ||
+      typeof value.sharedByDisplayName === "string")
   );
 }
 
-function parseRoomOrNull(value: string | null): PersistedRoom | null {
+function isUsablePlayback(
+  value: unknown,
+): value is NonNullable<PersistedRoom["playback"]> {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.url === "string" &&
+    isFiniteNumber(value.currentTime) &&
+    (value.playState === "playing" ||
+      value.playState === "paused" ||
+      value.playState === "buffering") &&
+    (value.syncIntent === undefined ||
+      value.syncIntent === "explicit-seek" ||
+      value.syncIntent === "explicit-ratechange") &&
+    (value.userInitiated === undefined ||
+      typeof value.userInitiated === "boolean") &&
+    (value.naturalEnd === undefined || typeof value.naturalEnd === "boolean") &&
+    isFiniteNumber(value.playbackRate) &&
+    isFiniteNumber(value.updatedAt) &&
+    isFiniteNumber(value.serverTime) &&
+    typeof value.actorId === "string" &&
+    isFiniteNumber(value.seq)
+  );
+}
+
+function isUsableRoom(
+  value: unknown,
+  expectedCode: string,
+): value is PersistedRoom {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    value.code === expectedCode &&
+    typeof value.joinToken === "string" &&
+    isFiniteNumber(value.createdAt) &&
+    isOptionalNullableString(value.ownerMemberId) &&
+    isOptionalNullableString(value.ownerDisplayName) &&
+    (value.sharedVideo === null || isUsableSharedVideo(value.sharedVideo)) &&
+    (value.playback === null || isUsablePlayback(value.playback)) &&
+    isFiniteNumber(value.version) &&
+    Number.isInteger(value.version) &&
+    value.version >= 0 &&
+    isFiniteNumber(value.lastActiveAt) &&
+    (value.expiresAt === null || isFiniteNumber(value.expiresAt))
+  );
+}
+
+function parseRoom(
+  value: string | null,
+  expectedCode: string,
+): PersistedRoom | null {
+  if (value === null) {
+    return null;
+  }
   let parsed: unknown;
   try {
-    parsed = value === null || value === "" ? null : JSON.parse(value);
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(`Room ${expectedCode} contains invalid JSON.`, {
+      cause: error,
+    });
+  }
+  if (!isUsableRoom(parsed, expectedCode)) {
+    throw new Error(`Room ${expectedCode} contains an invalid room body.`);
+  }
+  return parsed;
+}
+
+function parseRoomOrNull(
+  value: string | null,
+  expectedCode: string,
+): PersistedRoom | null {
+  try {
+    return parseRoom(value, expectedCode);
   } catch {
     return null;
   }
-  return isUsableRoom(parsed) ? parsed : null;
 }
 
 // JS formats the score, never Lua: String() renders a millisecond timestamp
@@ -561,6 +761,15 @@ export async function createRedisRoomStore(
     // Date.now.
     now?: () => number;
     closeQuitTimeoutMs?: number;
+    /**
+     * How long a request-path command may go unanswered. A liveness bound, not
+     * a deadline: it asks the same question as `REDIS_COMMAND_TIMEOUT_MS` and
+     * carries the same magnitude, because a shorter one would fail a merely
+     * slow Redis.
+     */
+    commandTimeoutMs?: number;
+    /** Commands admitted here hold their slot until the real Redis reply. */
+    maxPendingCommands?: number;
     /** Report the graceful close that was replaced by a forced disconnect. */
     onCloseUnfinished?: (info: {
       quitOutcome: RedisQuitOutcome;
@@ -587,13 +796,19 @@ export async function createRedisRoomStore(
     // of those races: `stalled` becomes unreachable, and every interval issues
     // a fresh sweep onto a connection still holding the last one.
     //
-    // So the request path's gap stays open here and is named rather than
-    // papered over: closing it needs a bound that keeps the call tracked, or a
-    // separate connection for the paths that want a backstop (#271 review).
+    // The request path is bounded HERE instead, by `boundCommand`: a cap that
+    // answers the caller and leaves the command tracked, so both passes keep
+    // reading the silence they derive their bounds from (#277). That is why the
+    // choice is per CALL — the two passes reach the very same helpers.
+    //
+    // What this does NOT resolve: the four durable writes (`createRoom`,
+    // `saveRoom`, `updateRoom`, `deleteRoom`). Capping a write whose effect
+    // does not expire on its own tells a caller it failed while the write may
+    // still land, which is #237's trade and needs its own derivation.
     (createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the request path",
+        "boundCommand's cap on the request path, plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the four durable writes",
     }) as RedisRoomStoreClient);
   const {
     orphanedRoomCodesKey,
@@ -604,6 +819,94 @@ export async function createRedisRoomStore(
   const now = options.now ?? Date.now;
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
+  const commandTimeoutMs = options.commandTimeoutMs ?? REDIS_COMMAND_TIMEOUT_MS;
+  const maxPendingCommands =
+    options.maxPendingCommands ?? DEFAULT_REDIS_COMMAND_ADMISSION_LIMIT;
+  /**
+   * Only the cap and the tracking are used; this store does not retry. Sharing
+   * the primitive is what keeps "a timeout is not a cancel" from acquiring
+   * another private implementation (#242), and `trackedCount()` is the
+   * admission counter below — one number for both halves of #277, counting
+   * commands that outlived their cap because those are exactly the ones still
+   * sitting in ioredis's queue.
+   */
+  const commandPacer = createRetryPacer({
+    initialDelayMs: commandTimeoutMs,
+    maxDelayMs: commandTimeoutMs,
+  });
+  /**
+   * Keeps a listing's own fan-out clear of the admission limit.
+   *
+   * Admission is a refusal-style safety boundary; this is a waiting budget for
+   * work already accepted, and mixing the two roles is what turns a boundary
+   * into a partial business operation (`concurrency-limiter`, #275). Without it
+   * `listRooms` reads a whole `REPAIR_CHUNK_SIZE` batch at once, so a
+   * deployment with more rooms than `maxPendingCommands` fails every listing on
+   * a perfectly healthy Redis — 257 rooms was enough (#277 review).
+   *
+   * Half the limit, so a listing in flight can never refuse a join's `getRoom`
+   * either, and vice versa.
+   */
+  const listingFanOut = createConcurrencyLimiter(
+    Math.max(1, Math.floor(maxPendingCommands / 2)),
+  );
+
+  /**
+   * The caller-side bound for a command nobody else is waiting behind.
+   *
+   * Refuse-then-cap, in that order, because the refusal is the one answer with
+   * no ambiguity in it: past `maxPendingCommands` unanswered commands the next
+   * one is never issued, so nothing can land later. The cap that follows only
+   * answers the caller — `capAttempt` leaves the command tracked, which is what
+   * lets the two maintenance passes on this connection keep deriving their own
+   * bounds from its silence, and what a connection-wide `commandTimeout` could
+   * not do (#271, #277).
+   *
+   * `async` so that no failure — the refusal, or anything `issue()` throws
+   * before it returns a promise — can leave this function synchronously. A
+   * caller assembling several of these into one `Promise.all` literal would
+   * otherwise abandon the list with earlier commands already issued and
+   * unhandled (#277 review).
+   */
+  async function boundCommand<T>(
+    operationName: string,
+    issue: () => Promise<T>,
+  ): Promise<T> {
+    if (commandPacer.trackedCount() >= maxPendingCommands) {
+      const cause = new RedisCommandAdmissionError(maxPendingCommands);
+      throw new RedisStoreUnavailableError(
+        "room",
+        operationName,
+        "admission",
+        cause.message,
+        { cause },
+      );
+    }
+    return await commandPacer.capAttempt(
+      issue(),
+      commandTimeoutMs,
+      () =>
+        new RedisRoomStoreCommandTimeoutError(operationName, commandTimeoutMs),
+    );
+  }
+
+  /**
+   * Commands answered by a pass-bounded caller. Any answer counts, including an
+   * error: the question is whether the connection is still moving, and
+   * `awaitBootstrapReconcile` is the only reader.
+   */
+  let reconcileProgress = 0;
+
+  /**
+   * For a command whose caller already derives a bound from its silence — the
+   * room reaper's sweep and the index reconcile, both through
+   * `maintenance-pass`, whose `stalled` outcome exists to stop a pass running
+   * on top of one that never came back (#261, #263).
+   */
+  const boundedByOuterCaller: CommandBound = (_operationName, issue) =>
+    issue().finally(() => {
+      reconcileProgress += 1;
+    });
 
   function roomKey(code: string): string {
     return `${roomKeyPrefix}${code}`;
@@ -624,9 +927,12 @@ export async function createRedisRoomStore(
   // rather than rejecting it, but a dropped socket or an exhausted
   // `maxRetriesPerRequest` rejects it — and either way "no reply" is not "no
   // room" (#271 review).
-  async function readRoomBody(code: string): Promise<string | null> {
+  async function readRoomBody(
+    code: string,
+    bound: CommandBound,
+  ): Promise<string | null> {
     try {
-      return await redis.get(roomKey(code));
+      return await bound("read_room_body", () => redis.get(roomKey(code)));
     } catch (error) {
       if (
         error instanceof Error &&
@@ -649,12 +955,16 @@ export async function createRedisRoomStore(
   async function reconcileFromRoomBodies(): Promise<void> {
     let cursor = "0";
     do {
-      const [nextCursor, keys] = await redis.scan(
-        cursor,
-        "MATCH",
-        `${escapeGlobPattern(roomKeyPrefix)}*`,
-        "COUNT",
-        REPAIR_CHUNK_SIZE,
+      const [nextCursor, keys] = await boundedByOuterCaller(
+        "reconcile_scan",
+        () =>
+          redis.scan(
+            cursor,
+            "MATCH",
+            `${escapeGlobPattern(roomKeyPrefix)}*`,
+            "COUNT",
+            REPAIR_CHUNK_SIZE,
+          ),
       );
       cursor = nextCursor;
       if (keys.length === 0) {
@@ -669,10 +979,12 @@ export async function createRedisRoomStore(
           // One key of the wrong type must not reject the whole batch and,
           // with it, the reconcile the reaper waits on.
           const [raw, score] = await Promise.all([
-            readRoomBody(code),
-            redis.zscore(roomsByExpiryKey, code),
+            readRoomBody(code, boundedByOuterCaller),
+            boundedByOuterCaller("reconcile_score", () =>
+              redis.zscore(roomsByExpiryKey, code),
+            ),
           ]);
-          return { code, raw, score, room: parseRoomOrNull(raw) };
+          return { code, raw, score, room: parseRoomOrNull(raw, code) };
         }),
       );
 
@@ -686,14 +998,16 @@ export async function createRedisRoomStore(
       );
       await Promise.all(
         drifted.map(async ({ code, raw, room }) =>
-          redis.eval(
-            RECONCILE_MEMBER_LUA,
-            2,
-            roomsByExpiryKey,
-            roomKey(code),
-            raw as string,
-            expiryScore(room as PersistedRoom),
-            code,
+          boundedByOuterCaller("reconcile_member", () =>
+            redis.eval(
+              RECONCILE_MEMBER_LUA,
+              2,
+              roomsByExpiryKey,
+              roomKey(code),
+              raw as string,
+              expiryScore(room as PersistedRoom),
+              code,
+            ),
           ),
         ),
       );
@@ -705,18 +1019,20 @@ export async function createRedisRoomStore(
       );
       await Promise.all(
         unreadable.map(async ({ code, raw }) =>
-          redis.eval(
-            QUARANTINE_MEMBER_LUA,
-            4,
-            roomsByExpiryKey,
-            roomKey(code),
-            orphanedRoomCodesKey,
-            orphanedRoomQueueKey,
-            // Empty when the read itself failed; the script's type check
-            // decides that case without consulting these bytes.
-            raw ?? "",
-            code,
-            randomUUID(),
+          boundedByOuterCaller("reconcile_quarantine", () =>
+            redis.eval(
+              QUARANTINE_MEMBER_LUA,
+              4,
+              roomsByExpiryKey,
+              roomKey(code),
+              orphanedRoomCodesKey,
+              orphanedRoomQueueKey,
+              // Empty when the read itself failed; the script's type check
+              // decides that case without consulting these bytes.
+              raw ?? "",
+              code,
+              randomUUID(),
+            ),
           ),
         ),
       );
@@ -727,11 +1043,9 @@ export async function createRedisRoomStore(
   async function pruneOrphanedMembers(): Promise<void> {
     let cursor = "0";
     do {
-      const [nextCursor, entries] = await redis.zscan(
-        roomsByExpiryKey,
-        cursor,
-        "COUNT",
-        REPAIR_CHUNK_SIZE,
+      const [nextCursor, entries] = await boundedByOuterCaller(
+        "prune_orphaned_scan",
+        () => redis.zscan(roomsByExpiryKey, cursor, "COUNT", REPAIR_CHUNK_SIZE),
       );
       cursor = nextCursor;
 
@@ -741,15 +1055,17 @@ export async function createRedisRoomStore(
         continue;
       }
 
-      await redis.eval(
-        PRUNE_ORPHANED_MEMBERS_LUA,
-        3,
-        roomsByExpiryKey,
-        orphanedRoomCodesKey,
-        orphanedRoomQueueKey,
-        roomKeyPrefix,
-        randomUUID(),
-        ...codes,
+      await boundedByOuterCaller("prune_orphaned_members", () =>
+        redis.eval(
+          PRUNE_ORPHANED_MEMBERS_LUA,
+          3,
+          roomsByExpiryKey,
+          orphanedRoomCodesKey,
+          orphanedRoomQueueKey,
+          roomKeyPrefix,
+          randomUUID(),
+          ...codes,
+        ),
       );
     } while (cursor !== "0");
   }
@@ -806,6 +1122,47 @@ export async function createRedisRoomStore(
     return reconcileRoomIndex();
   }
 
+  /**
+   * The migration wait, for a caller that has to be answered.
+   *
+   * `boundCommand` bounds the commands a read issues itself, and would leave
+   * the read hanging on a pass it merely joined: the reconcile's own commands
+   * are deliberately uncapped, because the reconciler's `maintenance-pass` is
+   * reading their silence. So the request side bounds the WAIT rather than the
+   * pass — the pass keeps running, and its next caller can still join it.
+   *
+   * On SILENCE, not on duration. The bootstrap pass walks the whole keyspace, so
+   * on a large database it legitimately takes far longer than any one command
+   * may; a total budget here would fail every admin listing for the length of a
+   * healthy migration. Healthy work grows with the database, one unanswered
+   * command does not — the same rule that keeps a startup migration on a
+   * per-command deadline (#271 review). So this gives up only when a whole
+   * window passes with no reconcile command answering at all.
+   */
+  async function awaitBootstrapReconcile(operationName: string): Promise<void> {
+    if (bootstrapReconciled) {
+      return;
+    }
+    const pass = ensureBootstrapReconciled();
+    let observedProgress = reconcileProgress;
+    // `settleWithin` absorbs the pass's rejection, which is what makes the
+    // timed-out branch safe: the pass outlives this wait, and a rejection with
+    // nobody left listening is an unhandled rejection — a process exit on
+    // Node 22, not a logged warning (#275).
+    while (!(await settleWithin(pass, commandTimeoutMs))) {
+      if (reconcileProgress === observedProgress) {
+        throw new RedisRoomStoreCommandTimeoutError(
+          `${operationName}:bootstrap_reconcile`,
+          commandTimeoutMs,
+        );
+      }
+      observedProgress = reconcileProgress;
+    }
+    // Settled, so this only re-raises a real failure. A listing built on an
+    // index known to be incomplete is what the wait exists to prevent.
+    await pass;
+  }
+
   // Started here but deliberately not awaited: createSyncServer resolves
   // before httpServer.listen, so awaiting a keyspace walk would delay
   // readiness and can trip deployment health checks on a Redis shared with
@@ -823,11 +1180,13 @@ export async function createRedisRoomStore(
       | "sortOrder"
     >,
   ) {
-    await ensureBootstrapReconciled();
+    await awaitBootstrapReconcile("list_rooms");
 
     // Members are the room codes; ordering here is irrelevant because rooms
     // are re-sorted below by query.sortBy once their bodies are loaded.
-    const codes = await redis.zrange(roomsByExpiryKey, 0, -1);
+    const codes = await boundCommand("list_rooms", () =>
+      redis.zrange(roomsByExpiryKey, 0, -1),
+    );
 
     // Batched rather than one Promise.all over every code: a database that
     // has just been migrated can hand back every room at once, and queueing
@@ -836,10 +1195,12 @@ export async function createRedisRoomStore(
     for (let offset = 0; offset < codes.length; offset += REPAIR_CHUNK_SIZE) {
       const batch = codes.slice(offset, offset + REPAIR_CHUNK_SIZE);
       const loaded = await Promise.all(
-        batch.map(async (code) => {
-          const raw = await readRoomBody(code);
-          return { code, raw, room: parseRoomOrNull(raw) };
-        }),
+        batch.map(async (code) =>
+          listingFanOut.run(async () => {
+            const raw = await readRoomBody(code, boundCommand);
+            return { code, raw, room: parseRoomOrNull(raw, code) };
+          }),
+        ),
       );
 
       // Codes with no body at all: the script re-checks EXISTS, so a body
@@ -849,15 +1210,17 @@ export async function createRedisRoomStore(
         .map(({ code }) => code);
       if (orphanedCodes.length > 0) {
         try {
-          await redis.eval(
-            PRUNE_ORPHANED_MEMBERS_LUA,
-            3,
-            roomsByExpiryKey,
-            orphanedRoomCodesKey,
-            orphanedRoomQueueKey,
-            roomKeyPrefix,
-            randomUUID(),
-            ...orphanedCodes,
+          await boundCommand("list_rooms", () =>
+            redis.eval(
+              PRUNE_ORPHANED_MEMBERS_LUA,
+              3,
+              roomsByExpiryKey,
+              orphanedRoomCodesKey,
+              orphanedRoomQueueKey,
+              roomKeyPrefix,
+              randomUUID(),
+              ...orphanedCodes,
+            ),
           );
         } catch {
           // Best effort: a failed prune only means the next call retries it.
@@ -872,16 +1235,20 @@ export async function createRedisRoomStore(
         try {
           await Promise.all(
             unreadable.map(async ({ code, raw }) =>
-              redis.eval(
-                QUARANTINE_MEMBER_LUA,
-                4,
-                roomsByExpiryKey,
-                roomKey(code),
-                orphanedRoomCodesKey,
-                orphanedRoomQueueKey,
-                raw as string,
-                code,
-                randomUUID(),
+              listingFanOut.run(() =>
+                boundCommand("list_rooms", () =>
+                  redis.eval(
+                    QUARANTINE_MEMBER_LUA,
+                    4,
+                    roomsByExpiryKey,
+                    roomKey(code),
+                    orphanedRoomCodesKey,
+                    orphanedRoomQueueKey,
+                    raw as string,
+                    code,
+                    randomUUID(),
+                  ),
+                ),
               ),
             ),
           );
@@ -930,7 +1297,12 @@ export async function createRedisRoomStore(
       return room;
     },
     async getRoom(code) {
-      return parseRoom(await redis.get(roomKey(code)));
+      // On the join path. Uncapped, a stalled Redis held the WebSocket join
+      // open with nothing else waiting behind it (#277).
+      return parseRoom(
+        await boundCommand("get_room", () => redis.get(roomKey(code))),
+        code,
+      );
     },
     async saveRoom(room) {
       const saved = await redis.eval(
@@ -951,11 +1323,13 @@ export async function createRedisRoomStore(
     },
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
       const key = roomKey(code);
-      const rawRoom = await redis.get(key);
+      // The read half is capped like any other read; the CAS below is one of
+      // the four durable writes this change leaves for its own derivation.
+      const rawRoom = await boundCommand("update_room", () => redis.get(key));
       if (rawRoom === null) {
         return { ok: false, reason: "not_found" };
       }
-      const currentRoom = parseRoom(rawRoom);
+      const currentRoom = parseRoom(rawRoom, code);
       if (!currentRoom) {
         return { ok: false, reason: "not_found" };
       }
@@ -1009,19 +1383,25 @@ export async function createRedisRoomStore(
       // that one pass only — keeping it waiting on every later pass put a
       // keyspace walk inside one reaper tick per interval, which is what made
       // this operation's histogram bimodal.
+      //
+      // Uncapped, unlike the listing's wait on the same pass: this caller is
+      // the reaper, and `maintenance-pass` is already deriving `stalled` from
+      // this call not coming back.
       await ensureBootstrapReconciled();
       // Two nested arrays, in this order — a Lua table with string keys does
       // not survive the RESP conversion, only its array part does.
-      const swept = await redis.eval(
-        DELETE_EXPIRED_ROOMS_LUA,
-        3,
-        roomsByExpiryKey,
-        orphanedRoomCodesKey,
-        orphanedRoomQueueKey,
-        roomKeyPrefix,
-        String(currentTime),
-        REPAIR_CHUNK_SIZE,
-        randomUUID(),
+      const swept = await boundedByOuterCaller("delete_expired_rooms", () =>
+        redis.eval(
+          DELETE_EXPIRED_ROOMS_LUA,
+          3,
+          roomsByExpiryKey,
+          orphanedRoomCodesKey,
+          orphanedRoomQueueKey,
+          roomKeyPrefix,
+          String(currentTime),
+          REPAIR_CHUNK_SIZE,
+          randomUUID(),
+        ),
       );
       const codesAt = (index: number): string[] => {
         const group = Array.isArray(swept) ? swept[index] : null;
@@ -1045,12 +1425,14 @@ export async function createRedisRoomStore(
       if (claims.length === 0) {
         return;
       }
-      await redis.eval(
-        ACKNOWLEDGE_ORPHANED_INDEX_CLAIMS_LUA,
-        2,
-        orphanedRoomCodesKey,
-        orphanedRoomQueueKey,
-        ...claims.flatMap(({ code, token }) => [code, token]),
+      await boundedByOuterCaller("acknowledge_orphaned_index_claims", () =>
+        redis.eval(
+          ACKNOWLEDGE_ORPHANED_INDEX_CLAIMS_LUA,
+          2,
+          orphanedRoomCodesKey,
+          orphanedRoomQueueKey,
+          ...claims.flatMap(({ code, token }) => [code, token]),
+        ),
       );
     },
     async listRooms(
@@ -1071,26 +1453,37 @@ export async function createRedisRoomStore(
     // and none of them loads a room body — which matters because the metrics
     // collector calls this on every scrape.
     async countRooms(query: Pick<RoomListQuery, "keyword" | "includeExpired">) {
-      await ensureBootstrapReconciled();
+      await awaitBootstrapReconcile("count_rooms");
 
       if (!query.keyword) {
         return query.includeExpired
-          ? await redis.zcard(roomsByExpiryKey)
-          : await redis.zcount(roomsByExpiryKey, `(${now()}`, "+inf");
+          ? await boundCommand("count_rooms", () =>
+              redis.zcard(roomsByExpiryKey),
+            )
+          : await boundCommand("count_rooms", () =>
+              redis.zcount(roomsByExpiryKey, `(${now()}`, "+inf"),
+            );
       }
 
       // Keyword search has to look at every candidate code, but codes come
       // straight out of the set — no room bodies are fetched.
       const keyword = query.keyword.toLowerCase();
       const codes = query.includeExpired
-        ? await redis.zrange(roomsByExpiryKey, 0, -1)
-        : await redis.zrangebyscore(roomsByExpiryKey, `(${now()}`, "+inf");
+        ? await boundCommand("count_rooms", () =>
+            redis.zrange(roomsByExpiryKey, 0, -1),
+          )
+        : await boundCommand("count_rooms", () =>
+            redis.zrangebyscore(roomsByExpiryKey, `(${now()}`, "+inf"),
+          );
       return codes.filter((code) => code.toLowerCase().includes(keyword))
         .length;
     },
     async isReady() {
       try {
-        const pong = await redis.ping();
+        // The readiness probe is the one caller that must never wait: an
+        // unanswered PING is the exact condition it is asked to report, and
+        // uncapped it answered neither ready nor not-ready.
+        const pong = await boundCommand("is_ready", () => redis.ping());
         return pong === "PONG";
       } catch {
         return false;

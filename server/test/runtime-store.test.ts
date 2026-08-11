@@ -85,16 +85,16 @@ test("runtime store tracks node heartbeat state and derives health", async () =>
     health: "ok",
   });
 
-  let statuses = await store.listNodeStatuses(currentTime);
+  let statuses = await store.listNodeStatuses("request", currentTime);
   assert.equal(statuses.length, 1);
   assert.equal(statuses[0]?.health, "ok");
 
   currentTime += 250;
-  statuses = await store.listNodeStatuses(currentTime);
+  statuses = await store.listNodeStatuses("request", currentTime);
   assert.equal(statuses[0]?.health, "stale");
 
   currentTime += 250;
-  statuses = await store.listNodeStatuses(currentTime);
+  statuses = await store.listNodeStatuses("request", currentTime);
   assert.equal(statuses[0]?.health, "offline");
 });
 

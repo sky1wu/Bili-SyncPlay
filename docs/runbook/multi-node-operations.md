@@ -687,8 +687,9 @@ There are two layers and they are not interchangeable:
   next; it only makes sure something does.
 
 A connection needs at least one. Four had neither until #271 — and a fifth, the
-runtime store, had one over its write queue's attempts and nothing over
-`trackAwaitedOperation`, which is the half a WebSocket join blocks on.
+runtime store, had one over its write queue's attempts and nothing over its
+request path, which is the half a WebSocket join blocks on. #277 closed that
+half; see below.
 
 **But the two layers do not compose, and that is what decides the table.**
 Nearly every deadline in this server is built on one mechanism (`retry-pacer`,
@@ -712,12 +713,34 @@ timeout window. So the criterion is not "is this connection already bounded":
 | admin event store                          | caller-side      | `writeIsStalled` gates the read refusal                                 |
 | admin audit store                          | caller-side      | the same append chain                                                   |
 
-**The exemptions are not "already fine".** Two of them still have command paths
-with no caller-side bound at all — the room store's request path (`get_room` /
-`update_room` on join) and the runtime store's `trackAwaitedOperation` plus its
-two plain reads. A stalled Redis still hangs a join there. That gap is real, and
-it is not closeable by this option: the fix is a cap that keeps the call tracked,
-or a separate connection for the paths that want a backstop.
+**The exemptions were not "already fine".** Two of them had command paths with no
+caller-side bound at all — the room store's request path and the runtime store's
+— so a stalled Redis held a WebSocket join open with nothing counting down. #277
+closed that without changing one row above: both stores now put every
+request-path command through a caller-side cap that leaves the command tracked,
+so the bounds in the "Why" column keep reading exactly the evidence the
+connection-wide option would have settled.
+
+Which means a stalled Redis is now **noisy on the request path and still silent
+on the background passes**, on purpose:
+
+- Request-path commands answer their caller and log
+  `redis_runtime_store_operation_failed reason=timeout`, or reject an admin
+  listing. Past `maxPendingCommands` unanswered commands the next one is refused
+  before it is issued, which is the only answer that cannot mean "it may have
+  landed later".
+- The reaper's sweep, the index reconcile and the heartbeat still go unanswered,
+  because `maintenance-pass` decides a pass is stalled precisely from that
+  silence. Their signals are the caller's, as before:
+  `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
+  `node_heartbeat_failed`.
+
+Two paths remain uncapped by design: the runtime store's five durable writes
+through `trackAwaitedOperation` (kick / revoke / generation / delete) and the
+room store's four room-body writes. #237 settled that an answer which can be
+wrong is worse than a slow one, and unlike a lock or a dedup slot their effects
+do not expire on their own — so those commands are still where a request can
+wait without limit.
 
 Every client is built by `createBoundedRedisClient`, which takes a **required**
 declaration of which of the two it has — and a caller-side one has to NAME the
@@ -764,10 +787,11 @@ incident:
   commands stay out on the connection, so the signal is the CALLER's, not the
   command's: `room_reaper_sweep_timeout` then `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`, `redis_runtime_store_operation_failed`, the event
-  store's shedding line, a 503 from the audit and event pages. Request paths
-  with no caller-side bound — `get_room` / `update_room` on join, the runtime
-  store's `trackAwaitedOperation` — stay **silent**, and a WebSocket join that
-  never completes is what that looks like from outside.
+  store's shedding line, a 503 from the audit and event pages. Since #277 the
+  request paths on the room and runtime stores are in that list too — they log
+  `reason=timeout` and answer their caller. What still stays **silent** is the
+  durable writes named above; a kick or a room delete that never returns is what
+  that looks like from outside.
 
 ## Post-Change Regression Checklist
 

@@ -14,6 +14,8 @@ import {
 import { createInMemoryAdminSessionStore } from "../src/admin/auth-store.js";
 import { AuditStoreUnavailableError } from "../src/admin/redis-audit-store.js";
 import { AdminSessionStoreUnavailableError } from "../src/redis-admin-session-store.js";
+import { RedisStoreUnavailableError } from "../src/redis-store-unavailable.js";
+import { createInMemoryRoomStore } from "../src/room-store.js";
 import type { AdminRole, AdminSession } from "../src/admin/types.js";
 
 const ALLOWED_ORIGIN = "chrome-extension://allowed-extension";
@@ -2152,5 +2154,50 @@ test("an audit list refused by a stalled store answers 503, not 500", async () =
     );
   } finally {
     await server.close();
+  }
+});
+
+test("room and runtime store availability failures answer retryable 503s", async () => {
+  for (const storeKind of ["room", "runtime"] as const) {
+    const memoryRoomStore = createInMemoryRoomStore();
+    const server = await startAdminServer({
+      ...adminDependencies(),
+      roomStore: {
+        ...memoryRoomStore,
+        async listRooms() {
+          throw new RedisStoreUnavailableError(
+            storeKind,
+            "sensitive_operation_name",
+            "timeout",
+            "sensitive Redis detail",
+          );
+        },
+      },
+    });
+
+    try {
+      const token = await login(server.httpBaseUrl);
+      const response = await requestJson(
+        server.httpBaseUrl,
+        "/api/admin/rooms",
+        { token },
+      );
+
+      assert.equal(response.status, 503);
+      const error = response.body.error as {
+        code: string;
+        message: string;
+      };
+      assert.equal(error.code, `${storeKind}_store_unavailable`);
+      assert.equal(
+        error.message,
+        storeKind === "room"
+          ? "Room store is unavailable."
+          : "Runtime store is unavailable.",
+      );
+      assert.doesNotMatch(error.message, /sensitive/);
+    } finally {
+      await server.close();
+    }
   }
 });
