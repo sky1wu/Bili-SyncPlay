@@ -205,11 +205,12 @@ export type RuntimeStore = {
    * teardown is decided and pass it here; a mismatch means the code changed
    * hands and the teardown is skipped. `null` matches only `null`, so a room
    * that predates generations is still collected, and one that has since been
-   * stamped is left alone.
+   * stamped is left alone. The generation is required: an unguarded teardown
+   * is not part of the shared-store contract.
    */
   deleteRoom: (
     code: string,
-    expectedGeneration?: string | null,
+    expectedGeneration: string | null,
   ) => boolean | Promise<boolean>;
   /**
    * Whether ANY runtime state remains under this code.
@@ -221,7 +222,10 @@ export type RuntimeStore = {
    */
   hasRoomResidue: (code: string) => boolean | Promise<boolean>;
   /** The generation stamped on this code's runtime state, or null. */
-  getRoomGeneration: (code: string) => string | null | Promise<string | null>;
+  getRoomGeneration: (
+    code: string,
+    caller?: RuntimeReadCaller,
+  ) => string | null | Promise<string | null>;
   /**
    * Stamp a fresh generation on a code, marking the start of a new room
    * instance. Called once when a room is created.
@@ -596,17 +600,14 @@ export function createInMemoryRuntimeStore(
         claimedSlotsByRoom.has(code)
       );
     },
-    getRoomGeneration(code) {
+    getRoomGeneration(code, _caller = "request") {
       return roomGenerations.get(code) ?? null;
     },
     markRoomGeneration(code, generation) {
       roomGenerations.set(code, generation);
     },
     deleteRoom(code, expectedGeneration) {
-      if (
-        expectedGeneration !== undefined &&
-        (roomGenerations.get(code) ?? null) !== expectedGeneration
-      ) {
+      if ((roomGenerations.get(code) ?? null) !== expectedGeneration) {
         return false;
       }
       roomGenerations.delete(code);

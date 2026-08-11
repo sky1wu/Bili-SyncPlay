@@ -50,7 +50,10 @@ function mirrorConditionalTeardown(
   return async (code, expectedGeneration) => {
     const applied = await sharedDelete(code, expectedGeneration);
     if (applied) {
-      localDelete(code);
+      // This process-local mirror deliberately carries no generation; the
+      // shared store above already made the ownership decision. `null` is the
+      // mirror's actual expected state, not an unguarded delete.
+      localDelete(code, null);
     }
     return applied;
   };

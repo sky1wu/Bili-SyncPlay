@@ -208,9 +208,25 @@ before changing the code it describes.
   maximum so cross-node retries commute. That effect ownership includes close:
   shut the dispatch gate before unsubscribe can wait, and drain accepted
   handlers plus late evictions inside one shared budget; report what remains
-  instead of relying on a later store close to do it implicitly. Still
-  open on purpose: the six durable writes, where #237's trade holds because
-  their effects — unlike a lock's or a dedup slot's — do not expire. The former
+  instead of relying on a later store close to do it implicitly. Runtime room
+  teardown follows the same two-lifetime rule one layer up: its generation is
+  mandatory (there is no wildcard delete), one real effect per room generation
+  remains tracked through every local mirror, and every request waiting on that
+  exact effect shares one confirmation cap. Maintenance callers keep awaiting
+  the real effect so `stalled` remains observable; the request deadline is its
+  own constant rather than the Redis connection's liveness backstop. Retry debt
+  is assigned only when the latest exact effect is created (or has no owner
+  while awaiting a fresh attempt); a waiter reusing an effect never transfers
+  ownership. The generation pinned before the room read is confirmed again
+  after that await before any effect can be created or reused. Each pending debt
+  is also a unique record: a maintenance candidate snapshots that identity and
+  re-checks it after all precondition awaits, so a debt settled meanwhile
+  cannot be recreated. Thus a newer generation's success or a live persisted
+  room supersedes older effects whose late skip/failure must not retain or
+  resurrect the debt.
+  Still open on purpose: the five durable writes, where
+  #237's trade holds because their effects — unlike a lock's or a dedup slot's
+  — do not expire. The former
   standalone `blockMemberToken` had no production caller and was removed rather
   than kept as another unbounded path beside atomic eviction; the room store's
   unused unconditional `saveRoom` write was removed for the same reason.

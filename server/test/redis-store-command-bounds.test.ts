@@ -33,6 +33,7 @@ import {
   type RedisRoomStoreClient,
 } from "../src/redis-room-store.js";
 import { RedisStoreUnavailableError } from "../src/redis-store-unavailable.js";
+import type { RoomReadCaller } from "../src/room-store.js";
 import type { RuntimeReadCaller } from "../src/runtime-store.js";
 import { settleWithin } from "../src/retry-pacer.js";
 
@@ -164,8 +165,6 @@ const RUNTIME_REQUEST_PATH: Record<
   isMemberTokenBlocked: (store) =>
     Promise.resolve(store.isMemberTokenBlocked("ROOM01", "token-1", 1_000)),
   hasRoomResidue: (store) => Promise.resolve(store.hasRoomResidue("ROOM01")),
-  getRoomGeneration: (store) =>
-    Promise.resolve(store.getRoomGeneration("ROOM01")),
   tryClaimMessageSlot: (store) =>
     Promise.resolve(
       store.tryClaimMessageSlot("ROOM01", "share:1", "claim-token", 60_000),
@@ -207,6 +206,8 @@ const RUNTIME_BOUNDED_ELSEWHERE: Record<string, string> = {
   purgeNodeStatus: "maintenance-pass: runtime-index-reaper's per-tick cap",
   evictMemberToken:
     "admin-command-consumer: typed member-eviction confirmation deadline; the real effect stays tracked and retry deadlines are monotonic",
+  deleteRoom:
+    "room-service: request confirmation deadline or maintenance-pass; one real guarded effect stays tracked through local mirror settlement",
 };
 
 /**
@@ -221,6 +222,8 @@ const RUNTIME_CALLER_CHOSEN: Record<
   string,
   (store: RuntimeStoreUnderTest, caller: RuntimeReadCaller) => Promise<unknown>
 > = {
+  getRoomGeneration: (store, caller) =>
+    Promise.resolve(store.getRoomGeneration("ROOM01", caller)),
   listNodeStatuses: (store, caller) =>
     Promise.resolve(store.listNodeStatuses?.(caller, 1_000)),
   listClusterSessions: (store, caller) =>
@@ -228,7 +231,7 @@ const RUNTIME_CALLER_CHOSEN: Record<
 };
 
 /**
- * The three remaining durable writes #237 argued must never be told they failed
+ * The two remaining durable writes #237 argued must never be told they failed
  * while their write may still land. Their side effect does not expire on its
  * own, so bounding them re-opens that trade — deliberately still open (#277).
  * The unused standalone token-block write was deleted, and the production
@@ -240,7 +243,6 @@ const RUNTIME_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
     "#237: an answer that can be wrong is worse than a slow one",
   markRoomGeneration:
     "#237: an answer that can be wrong is worse than a slow one",
-  deleteRoom: "#237: an answer that can be wrong is worse than a slow one",
 };
 
 /** Methods that answer from the in-process mirror and issue no command. */
@@ -475,7 +477,6 @@ const ROOM_REQUEST_PATH: Record<
   string,
   (store: RoomStoreUnderTest) => Promise<unknown>
 > = {
-  getRoom: (store) => store.getRoom("ROOM01"),
   listRooms: (store) =>
     store.listRooms({
       keyword: "",
@@ -488,6 +489,13 @@ const ROOM_REQUEST_PATH: Record<
   countRooms: (store) =>
     store.countRooms({ keyword: "", includeExpired: true }),
   isReady: (store) => store.isReady(),
+};
+
+const ROOM_CALLER_CHOSEN: Record<
+  string,
+  (store: RoomStoreUnderTest, caller: RoomReadCaller) => Promise<unknown>
+> = {
+  getRoom: (store, caller) => store.getRoom("ROOM01", caller),
 };
 
 const ROOM_BOUNDED_ELSEWHERE: Record<string, string> = {
@@ -510,6 +518,7 @@ test("every room store method is classified by what bounds its commands", async 
   await withRoomStore(null, async (store) => {
     const classified = new Set([
       ...Object.keys(ROOM_REQUEST_PATH),
+      ...Object.keys(ROOM_CALLER_CHOSEN),
       ...Object.keys(ROOM_BOUNDED_ELSEWHERE),
       ...Object.keys(ROOM_UNBOUNDED_DURABLE_WRITES),
     ]);
@@ -522,6 +531,65 @@ test("every room store method is classified by what bounds its commands", async 
       "a new room store method must declare what bounds its Redis commands",
     );
   });
+});
+
+test("a room read whose bound belongs to a maintenance pass is left unanswered", async () => {
+  const bootstrapCommands = await withRoomStore(
+    null,
+    async (_store, commands) => commands.issuedCount(),
+    { settleBootstrap: true },
+  );
+
+  for (const [method, call] of Object.entries(ROOM_CALLER_CHOSEN)) {
+    await withRoomStore(
+      bootstrapCommands,
+      async (store) => {
+        const answered = await settleWithin(
+          call(store, "maintenance_pass").catch(() => undefined),
+          OBSERVATION_MS,
+        );
+        assert.equal(
+          answered,
+          false,
+          `${method} must not answer a maintenance pass`,
+        );
+      },
+      { settleBootstrap: true },
+    );
+  }
+});
+
+test("the same room read DOES answer when a request is the caller", async () => {
+  for (const [method, call] of Object.entries(ROOM_CALLER_CHOSEN)) {
+    const { firstOwnCommand, issued } = await withRoomStore(
+      null,
+      async (store, commands) => {
+        const before = commands.issuedCount();
+        await call(store, "request").catch(() => undefined);
+        return { firstOwnCommand: before, issued: commands.issuedCount() };
+      },
+      { settleBootstrap: true },
+    );
+    assert.ok(issued > firstOwnCommand, `${method} issued no Redis command`);
+
+    for (let hangAt = firstOwnCommand; hangAt < issued; hangAt += 1) {
+      await withRoomStore(
+        hangAt,
+        async (store) => {
+          const answered = await settleWithin(
+            call(store, "request").catch(() => undefined),
+            OBSERVATION_MS,
+          );
+          assert.equal(
+            answered,
+            true,
+            `${method} never answered a request with command #${hangAt} unanswered`,
+          );
+        },
+        { settleBootstrap: true },
+      );
+    }
+  }
 });
 
 test("every request-path room command answers its caller, whichever one stalls", async () => {

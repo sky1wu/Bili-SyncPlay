@@ -75,6 +75,25 @@ test("instrumented room store counts failures and still records duration", async
   );
 });
 
+test("instrumented room store forwards the caller that owns the read bound", async () => {
+  const recorder = createRecorder();
+  const base = createInMemoryRoomStore({ now: () => 0 });
+  let receivedCaller: string | undefined;
+  const store = instrumentRoomStore(
+    {
+      ...base,
+      getRoom(code, caller) {
+        receivedCaller = caller;
+        return base.getRoom(code, caller);
+      },
+    },
+    recorder.collector,
+  );
+
+  await store.getRoom("ROOM01", "maintenance_pass");
+  assert.equal(receivedCaller, "maintenance_pass");
+});
+
 test("instrumented room store preserves the underlying close hook", async () => {
   const recorder = createRecorder();
   let closed = 0;
