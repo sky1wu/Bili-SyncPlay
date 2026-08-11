@@ -1268,11 +1268,13 @@ export async function createRedisRoomStore(
       }
       return room;
     },
-    async getRoom(code) {
-      // On the join path. Uncapped, a stalled Redis held the WebSocket join
-      // open with nothing else waiting behind it (#277).
+    async getRoom(code, caller = "request") {
+      // Requests own this deadline; the runtime-teardown precondition read is
+      // also reached from the room reaper, whose maintenance pass must keep
+      // deriving `stalled` from the command's silence (#277).
+      const bound = caller === "request" ? boundCommand : boundedByOuterCaller;
       return parseRoom(
-        await boundCommand("get_room", () => redis.get(roomKey(code))),
+        await bound("get_room", () => redis.get(roomKey(code))),
         code,
       );
     },

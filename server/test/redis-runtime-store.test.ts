@@ -1536,9 +1536,40 @@ test("redis runtime store surfaces a failed room teardown to the caller", async 
 
   try {
     await assert.rejects(
-      Promise.resolve(store.deleteRoom("ROOMTD")),
+      Promise.resolve(store.deleteRoom("ROOMTD", null)),
       /redis unavailable/,
     );
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime teardown always carries an explicit generation guard", async () => {
+  const guardedValues: string[] = [];
+  const fakeRedis = {
+    ...createFakeRedisClient([]),
+    async zrange() {
+      return [];
+    },
+    async eval(
+      _script: string,
+      keyCount: number,
+      ...keysAndArguments: Array<string | number>
+    ) {
+      guardedValues.push(String(keysAndArguments[keyCount] ?? "missing"));
+      return 0;
+    },
+  };
+  const store = await createRedisRuntimeStore("redis://unused", {
+    keyPrefix: "bsp:test:teardown-guard:",
+    redisClient: fakeRedis,
+  });
+
+  try {
+    assert.equal(await store.deleteRoom("ROOMG0", null), false);
+    assert.equal(await store.deleteRoom("ROOMG1", "generation-1"), false);
+    assert.deepEqual(guardedValues, ["", "generation-1"]);
+    assert.equal(guardedValues.includes("*"), false);
   } finally {
     await store.close();
   }

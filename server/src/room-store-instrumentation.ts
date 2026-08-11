@@ -48,7 +48,9 @@ export function instrumentRoomStore(
 
   const instrumented: RoomStore = {
     createRoom: measure("create_room", (input) => roomStore.createRoom(input)),
-    getRoom: measure("get_room", (code) => roomStore.getRoom(code)),
+    getRoom: measure("get_room", (code, caller) =>
+      roomStore.getRoom(code, caller),
+    ),
     updateRoom: measure("update_room", (code, expectedVersion, patch) =>
       roomStore.updateRoom(code, expectedVersion, patch),
     ),

@@ -28,6 +28,9 @@ export type RoomUpdateResult =
   | { ok: true; room: PersistedRoom }
   | { ok: false; reason: "not_found" | "version_conflict" };
 
+/** Chooses whether this read owns its deadline or is inside a maintenance pass. */
+export type RoomReadCaller = "request" | "maintenance_pass";
+
 /** A durable handoff naming one discovery of an orphaned room-index entry. */
 export type OrphanedIndexClaim = {
   code: string;
@@ -53,7 +56,10 @@ export type ExpiredRoomSweep = {
 
 export type RoomStore = {
   createRoom: (input: CreatePersistedRoomInput) => Promise<PersistedRoom>;
-  getRoom: (code: string) => Promise<PersistedRoom | null>;
+  getRoom: (
+    code: string,
+    caller?: RoomReadCaller,
+  ) => Promise<PersistedRoom | null>;
   updateRoom: (
     code: string,
     expectedVersion: number,
@@ -187,7 +193,7 @@ export function createInMemoryRoomStore(
       rooms.set(room.code, room);
       return cloneRoom(room);
     },
-    async getRoom(code): Promise<PersistedRoom | null> {
+    async getRoom(code, _caller = "request"): Promise<PersistedRoom | null> {
       const room = rooms.get(code);
       return room ? cloneRoom(room) : null;
     },

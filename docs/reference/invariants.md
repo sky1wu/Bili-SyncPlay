@@ -823,8 +823,9 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: six durable writes.** Three runtime-store writes
-  through `trackAwaitedOperation` and three room-body writes stay uncapped,
+- **Still open, deliberately: five durable writes.** Two runtime-store writes
+  through `trackAwaitedOperation` (`revokeMemberToken` and
+  `markRoomGeneration`) and three room-body writes stay uncapped,
   because #237 settled that an answer which can be wrong is worse than a slow
   one and their effects do not expire on their own. The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
@@ -854,8 +855,18 @@ do NOT compose, and that is the part that decides which connection gets which:
   than relying on a later runtime-store close to drain an effect the consumer
   owns. The gate matters because the Redis bus may already have captured a
   handler behind a promise boundary; such a handler answers `stale_target`
-  instead of creating fresh work after the drain snapshot.
-  The remaining six differ from
+  instead of creating fresh work after the drain snapshot. Runtime room
+  teardown is bounded without cutting that effect trail: its generation
+  argument is mandatory and the Redis script has no wildcard mode;
+  `room-service` keeps one real teardown promise per room generation through the
+  Redis write and every local mirror, so an old unanswered effect cannot hide
+  cleanup for a later occupant of the same code. Every request waiting on that
+  exact effect shares one confirmation promise and one behaviour-deadline
+  constant; it is deliberately not Redis's connection-liveness constant. A
+  request records an unconfirmed outcome, while a reaper passes
+  `maintenance_pass` to both precondition reads and awaits the real promise so
+  `stalled` remains reachable. Late success clears the retry debt; late failure
+  leaves it queued, and each owns a terminal log. The remaining five differ from
   `acquireRoomLock` and `tryClaimMessageSlot`, which ARE capped at the store:
   a `SET NX PX` that lands after its caller gave up releases itself at its TTL,
   so "may have landed" costs one lock interval rather than a permanent wrong

@@ -8,10 +8,16 @@ import {
   getDefaultSecurityConfig,
 } from "../src/app.js";
 import { createSessionRateLimitState } from "../src/rate-limit.js";
-import { createInMemoryRoomStore, type RoomStore } from "../src/room-store.js";
+import {
+  createInMemoryRoomStore,
+  type RoomReadCaller,
+  type RoomStore,
+} from "../src/room-store.js";
 import { createRoomService, RoomServiceError } from "../src/room-service.js";
+import { settleWithin } from "../src/retry-pacer.js";
 import {
   createInMemoryRuntimeStore,
+  type RuntimeReadCaller,
   type RuntimeStore,
 } from "../src/runtime-store.js";
 import type { ActiveRoom, LogEvent, Session } from "../src/types.js";
@@ -166,8 +172,8 @@ test("room service rejects reconnect skip path when room was deleted concurrentl
   let validationReadCount = 0;
   const roomStore = {
     ...baseRoomStore,
-    async getRoom(code: string) {
-      const room = await baseRoomStore.getRoom(code);
+    async getRoom(code: string, caller?: RoomReadCaller) {
+      const room = await baseRoomStore.getRoom(code, caller);
       if (validateDeletedRoom) {
         validationReadCount += 1;
         if (validationReadCount === 2) {
@@ -374,7 +380,7 @@ test("room service does not recover stale session leave state when member remova
   });
   const failingRoomStore = {
     ...roomStore,
-    async getRoom() {
+    async getRoom(_code: string, _caller?: RoomReadCaller) {
       throw new Error("transient read failure");
     },
   };
@@ -636,7 +642,7 @@ test("room service still notifies remaining members when socket-detached leave h
   // `room_member_changed` and remaining clients see a fresh roster.
   const failingRoomStore = {
     ...roomStore,
-    async getRoom() {
+    async getRoom(_code: string, _caller?: RoomReadCaller) {
       throw new Error("transient read failure");
     },
   };
@@ -1217,15 +1223,15 @@ test("room service flushes pending runtime store writes before exposing updated 
     hasRoomResidue(code) {
       return activeRooms.hasRoomResidue(code);
     },
-    getRoomGeneration(code) {
-      return activeRooms.getRoomGeneration(code);
+    getRoomGeneration(code, caller?: RuntimeReadCaller) {
+      return activeRooms.getRoomGeneration(code, caller);
     },
     markRoomGeneration(code, generation) {
       return activeRooms.markRoomGeneration(code, generation);
     },
-    deleteRoom(code) {
+    deleteRoom(code, expectedGeneration) {
       clusterSessionsByRoom.delete(code);
-      return activeRooms.deleteRoom(code);
+      return activeRooms.deleteRoom(code, expectedGeneration);
     },
     async heartbeatNode() {},
     async listNodeStatuses() {
@@ -4001,6 +4007,303 @@ test("restores the member when revoking their identity fails on leave", async ()
   );
 });
 
+test("a request stops waiting for runtime teardown while its one real effect still converges", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const created = await roomStore.createRoom({
+    code: "ROOMUC",
+    joinToken: "join-token-123456",
+    createdAt: 1,
+  });
+  await roomStore.updateRoom(created.code, created.version, {
+    expiresAt: currentTime,
+  });
+
+  const activeRooms = createActiveRoomRegistry();
+  const ghost = createSession("runtime-teardown-ghost");
+  ghost.memberId = "member-runtime-teardown-ghost";
+  ghost.memberToken = "token-runtime-teardown-ghost";
+  activeRooms.addMember(created.code, ghost.memberId, ghost, ghost.memberToken);
+
+  let releaseDelete!: () => void;
+  const deleteGate = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  let deleteCalls = 0;
+  let realEffect: Promise<boolean> | null = null;
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom(code, expectedGeneration) {
+        deleteCalls += 1;
+        realEffect = deleteGate.then(() =>
+          activeRooms.deleteRoom(code, expectedGeneration),
+        );
+        return realEffect;
+      },
+    },
+    generateToken: () => "generated-token-123456",
+    logEvent: ((event) => events.push(event)) satisfies LogEvent,
+    now: () => currentTime,
+    runtimeTeardownConfirmationTimeoutMs: 10,
+  });
+
+  const request = service.getRoomStateByCode(created.code);
+  assert.equal(await settleWithin(request, 200), true);
+  assert.equal(await request, null);
+  assert.equal(deleteCalls, 1);
+  assert.ok(activeRooms.getRoom(created.code));
+  assert.ok(events.includes("room_runtime_cleanup_unconfirmed"));
+
+  releaseDelete();
+  assert.ok(realEffect);
+  await realEffect;
+  await Promise.resolve();
+  assert.equal(activeRooms.getRoom(created.code), null);
+  assert.ok(events.includes("room_runtime_cleanup_late_settled"));
+
+  // The late success retired the debt itself. An empty later sweep must not
+  // issue a second teardown merely to discover that the first one landed.
+  await service.deleteExpiredRooms();
+  assert.equal(deleteCalls, 1);
+});
+
+test("request waiters reuse one confirmation cap for the same runtime teardown effect", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const created = await roomStore.createRoom({
+    code: "ROOMUD",
+    joinToken: "join-token-123456",
+    createdAt: 1,
+  });
+  await roomStore.updateRoom(created.code, created.version, {
+    expiresAt: currentTime,
+  });
+
+  const activeRooms = createActiveRoomRegistry();
+  let releaseDelete!: () => void;
+  const deleteGate = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  let deleteCalls = 0;
+  let realEffect: Promise<boolean> | null = null;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom(code, expectedGeneration) {
+        deleteCalls += 1;
+        realEffect = deleteGate.then(() =>
+          activeRooms.deleteRoom(code, expectedGeneration),
+        );
+        return realEffect;
+      },
+    },
+    generateToken: () => "generated-token-123456",
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    runtimeTeardownConfirmationTimeoutMs: 40,
+  });
+
+  assert.equal(await service.getRoomStateByCode(created.code), null);
+
+  // The exact effect is already known to be unconfirmed. A new waiter shares
+  // that settled confirmation instead of creating another timer and another
+  // tracked promise which would live as long as the unanswered Redis command.
+  const repeatedWait = service.teardownRoomRuntime(created.code);
+  assert.equal(await settleWithin(repeatedWait, 10), true);
+  await repeatedWait;
+  assert.equal(deleteCalls, 1);
+
+  releaseDelete();
+  assert.ok(realEffect);
+  await realEffect;
+  await service.deleteExpiredRooms();
+  assert.equal(deleteCalls, 1);
+});
+
+test("a stale teardown effect does not hide cleanup for a reused room generation", async () => {
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime, 5_000);
+  let releaseFirstDelete!: () => void;
+  const firstDeleteGate = new Promise<void>((resolve) => {
+    releaseFirstDelete = resolve;
+  });
+  const deleteGenerations: Array<string | null> = [];
+  let firstDeleteEffect: Promise<boolean> | null = null;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 1_000,
+    },
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      deleteRoom(code, expectedGeneration) {
+        deleteGenerations.push(expectedGeneration);
+        if (deleteGenerations.length === 1) {
+          firstDeleteEffect = firstDeleteGate.then(() =>
+            runtime.deleteRoom(code, expectedGeneration),
+          );
+          return firstDeleteEffect;
+        }
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMUG",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+    runtimeTeardownConfirmationTimeoutMs: 10,
+  });
+
+  const first = createSession("first-generation-owner");
+  const firstRoom = await service.createRoomForSession(first, "Alice");
+  await service.leaveRoomForSession(first, "disconnect");
+  currentTime += 1_001;
+  assert.equal(await service.getRoomStateByCode(firstRoom.room.code), null);
+  assert.equal(deleteGenerations.length, 1);
+
+  // The old identity ages out, so allocation may reuse the code even though
+  // its guarded teardown command is still unanswered.
+  currentTime += 5_001;
+  const second = createSession("second-generation-owner");
+  const secondRoom = await service.createRoomForSession(second, "Bob");
+  assert.equal(secondRoom.room.code, firstRoom.room.code);
+  await roomStore.deleteRoom(secondRoom.room.code);
+
+  // Cleanup for the new generation is a distinct effect. Keying only by code
+  // reused the old promise here, returned unconfirmed, and stranded the new
+  // room's runtime state until some unrelated future teardown happened.
+  await service.teardownRoomRuntime(secondRoom.room.code);
+  assert.equal(deleteGenerations.length, 2);
+  assert.notEqual(deleteGenerations[0], deleteGenerations[1]);
+  assert.equal(runtime.getRoom(secondRoom.room.code), null);
+
+  releaseFirstDelete();
+  assert.ok(firstDeleteEffect);
+  await firstDeleteEffect;
+});
+
+test("a late runtime teardown failure stays on the retry trail", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const created = await roomStore.createRoom({
+    code: "ROOMUF",
+    joinToken: "join-token-123456",
+    createdAt: 1,
+  });
+  await roomStore.updateRoom(created.code, created.version, {
+    expiresAt: currentTime,
+  });
+
+  const activeRooms = createActiveRoomRegistry();
+  const ghost = createSession("runtime-teardown-failure");
+  ghost.memberId = "member-runtime-teardown-failure";
+  ghost.memberToken = "token-runtime-teardown-failure";
+  activeRooms.addMember(created.code, ghost.memberId, ghost, ghost.memberToken);
+
+  let rejectDelete!: (error: Error) => void;
+  const firstDelete = new Promise<boolean>((_resolve, reject) => {
+    rejectDelete = reject;
+  });
+  let deleteCalls = 0;
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom(code, expectedGeneration) {
+        deleteCalls += 1;
+        if (deleteCalls === 1) {
+          return firstDelete;
+        }
+        return activeRooms.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: () => "generated-token-123456",
+    logEvent: ((event) => events.push(event)) satisfies LogEvent,
+    now: () => currentTime,
+    runtimeTeardownConfirmationTimeoutMs: 10,
+  });
+
+  const request = service.getRoomStateByCode(created.code);
+  assert.equal(await settleWithin(request, 200), true);
+  assert.equal(await request, null);
+  assert.equal(deleteCalls, 1);
+
+  rejectDelete(new Error("redis unavailable after deadline"));
+  await assert.rejects(firstDelete, /redis unavailable after deadline/);
+  await Promise.resolve();
+  assert.ok(events.includes("room_runtime_cleanup_late_failed"));
+
+  await service.deleteExpiredRooms();
+  assert.equal(deleteCalls, 2);
+  assert.equal(activeRooms.getRoom(created.code), null);
+});
+
+test("a maintenance pass keeps waiting for the real runtime teardown effect", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const created = await roomStore.createRoom({
+    code: "ROOMUM",
+    joinToken: "join-token-123456",
+    createdAt: 1,
+  });
+  await roomStore.updateRoom(created.code, created.version, {
+    expiresAt: currentTime,
+  });
+
+  const activeRooms = createActiveRoomRegistry();
+  let releaseDelete!: () => void;
+  const deleteGate = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  let deleteCalls = 0;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom(code, expectedGeneration) {
+        deleteCalls += 1;
+        return deleteGate.then(() =>
+          activeRooms.deleteRoom(code, expectedGeneration),
+        );
+      },
+    },
+    generateToken: () => "generated-token-123456",
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    runtimeTeardownConfirmationTimeoutMs: 10,
+  });
+
+  const reaping = service.deleteExpiredRooms();
+  assert.equal(await settleWithin(reaping, 50), false);
+  assert.equal(deleteCalls, 1);
+
+  releaseDelete();
+  assert.deepEqual(await reaping, {
+    deletedRooms: 1,
+    orphanedIndexEntries: 0,
+  });
+});
+
 test("reaper keeps collecting rooms when one runtime teardown fails", async () => {
   let currentTime = 1_000;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });
@@ -4012,12 +4315,12 @@ test("reaper keeps collecting rooms when one runtime teardown fails", async () =
     roomStore,
     activeRooms: {
       ...activeRooms,
-      deleteRoom: async (code: string) => {
+      deleteRoom: async (code: string, expectedGeneration: string | null) => {
         if (code === "ROOMF1") {
           failedFor.push(code);
           throw new Error("redis unavailable");
         }
-        return activeRooms.deleteRoom(code);
+        return activeRooms.deleteRoom(code, expectedGeneration);
       },
     },
     generateToken: (() => {
@@ -4062,12 +4365,12 @@ test("retries a failed runtime teardown on the next reaper pass", async () => {
     roomStore,
     activeRooms: {
       ...activeRooms,
-      deleteRoom: async (code: string) => {
+      deleteRoom: async (code: string, expectedGeneration: string | null) => {
         if (failTeardown) {
           throw new Error("redis unavailable");
         }
         teardowns.push(code);
-        return activeRooms.deleteRoom(code);
+        return activeRooms.deleteRoom(code, expectedGeneration);
       },
     },
     generateToken: (() => {
@@ -4118,11 +4421,11 @@ test("does not hand out a room code that still has runtime state under it", asyn
     roomStore,
     activeRooms: {
       ...activeRooms,
-      deleteRoom: async (code: string) => {
+      deleteRoom: async (code: string, expectedGeneration: string | null) => {
         if (failTeardown) {
           throw new Error("redis unavailable");
         }
-        return activeRooms.deleteRoom(code);
+        return activeRooms.deleteRoom(code, expectedGeneration);
       },
     },
     generateToken: (() => {
@@ -4178,21 +4481,21 @@ test("keeps an owed teardown when the room store cannot be read", async () => {
     persistence: getDefaultPersistenceConfig(),
     roomStore: {
       ...roomStore,
-      getRoom: async (code: string) => {
+      getRoom: async (code: string, caller?: RoomReadCaller) => {
         if (failRoomRead) {
           throw new Error("redis unavailable");
         }
-        return roomStore.getRoom(code);
+        return roomStore.getRoom(code, caller);
       },
     },
     activeRooms: {
       ...activeRooms,
-      deleteRoom: async (code: string) => {
+      deleteRoom: async (code: string, expectedGeneration: string | null) => {
         if (failTeardown) {
           throw new Error("redis unavailable");
         }
         teardowns.push(code);
-        return activeRooms.deleteRoom(code);
+        return activeRooms.deleteRoom(code, expectedGeneration);
       },
     },
     generateToken: (() => {
@@ -4245,7 +4548,7 @@ test("an owed teardown does not wipe a room that took the code in the meantime",
     roomStore,
     activeRooms: {
       ...runtime,
-      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+      deleteRoom: async (code: string, expectedGeneration: string | null) => {
         if (gateTeardown) {
           await teardownGate;
         }
@@ -4308,8 +4611,8 @@ test("pins the teardown generation before checking whether the room is gone", as
       ...roomStore,
       // Stall the absence check itself. Reading the generation after this point
       // hands the teardown the NEW room's value, which then matches.
-      getRoom: async (code: string) => {
-        const room = await roomStore.getRoom(code);
+      getRoom: async (code: string, caller?: RoomReadCaller) => {
+        const room = await roomStore.getRoom(code, caller);
         if (gateRoomRead) {
           await roomReadGate;
         }
@@ -4449,7 +4752,7 @@ test("an admin teardown works through the retry backlog", async () => {
     roomStore,
     activeRooms: {
       ...runtime,
-      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+      deleteRoom: async (code: string, expectedGeneration: string | null) => {
         if (failTeardown) {
           throw new Error("redis unavailable");
         }
@@ -5166,7 +5469,7 @@ test("room service tears down orphaned index codes without metering them as recl
     roomStore,
     activeRooms: {
       ...runtime,
-      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+      deleteRoom: async (code: string, expectedGeneration: string | null) => {
         cleanupOrder.push(`teardown:${code}`);
         tornDown.push(code);
         return runtime.deleteRoom(code, expectedGeneration);
@@ -5208,11 +5511,11 @@ test("room service keeps an orphan claim until runtime teardown succeeds", async
   let roomReadFails = true;
   const roomStore = {
     ...baseRoomStore,
-    async getRoom(code: string) {
+    async getRoom(code: string, caller?: RoomReadCaller) {
       if (roomReadFails) {
         throw new Error("invalid persisted room body");
       }
-      return baseRoomStore.getRoom(code);
+      return baseRoomStore.getRoom(code, caller);
     },
     async deleteExpiredRooms() {
       return {
@@ -5234,7 +5537,7 @@ test("room service keeps an orphan claim until runtime teardown succeeds", async
     roomStore,
     activeRooms: {
       ...runtime,
-      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+      deleteRoom: async (code: string, expectedGeneration: string | null) => {
         teardownAttempts += 1;
         if (teardownFails) {
           throw new Error("redis unavailable");

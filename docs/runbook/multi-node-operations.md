@@ -748,9 +748,9 @@ on the background passes**, on purpose:
   `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`.
 
-Six persistent writes remain uncapped by design: the runtime store's three
-writes through `trackAwaitedOperation` (revoke / generation / delete) and the
-room store's three room-body writes. Their effects do not expire, so #237's rule
+Five persistent writes remain uncapped by design: the runtime store's two
+writes through `trackAwaitedOperation` (revoke / generation) and the room
+store's three room-body writes. Their effects do not expire, so #237's rule
 still applies: an answer that may be wrong is worse than a slow one. The unused
 standalone `blockMemberToken` operation and the unused unconditional room-store
 `saveRoom` write were removed in #277. The atomic
@@ -818,10 +818,15 @@ incident:
   `reason=timeout` and answer their caller. A stalled kick returns
   `status=error, confirmation=unconfirmed`; its complete kick effect remains
   outstanding. Retry is safe because the block deadline only moves later. What
-  still stays **silent**
-  is the six durable writes named above; a
-  revoke, teardown write, or room-body write that never returns is what that
-  looks like from outside.
+  still stays **silent** is the five durable writes named above; a revoke,
+  generation stamp, or room-body write that never returns is what that looks
+  like from outside. Runtime room teardown is different: its generation guard
+  is mandatory, requests stop waiting with
+  `room_runtime_cleanup_unconfirmed`, and one real effect per room generation
+  continues through local-mirror settlement. Waiters on the exact effect share
+  one confirmation deadline, independent of the Redis liveness constant. A
+  maintenance-driven teardown deliberately stays silent so the reaper can
+  report `timed_out` and then `stalled`.
 
 ## Post-Change Regression Checklist
 

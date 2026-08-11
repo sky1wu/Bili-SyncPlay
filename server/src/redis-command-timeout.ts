@@ -57,14 +57,18 @@
  * ## What that leaves open, deliberately
  *
  * #277 closed the request-path gap with a cap that keeps each command tracked.
- * Six persistent writes deliberately remain uncapped: three runtime-store
+ * Five persistent writes deliberately remain uncapped: two runtime-store
  * writes through `trackAwaitedOperation` and three room-body writes. Their
  * effects do not expire, so a timed-out answer could be contradicted by a late
  * write. The unused standalone `blockMemberToken` path and unconditional
  * room-store `saveRoom` write were removed in #277; atomic eviction instead
  * bounds the executor's wait while keeping its real
  * effect alive, reports a typed unconfirmed outcome, and keeps its block
- * deadline monotonic so cross-node retries can land in either order.
+ * deadline monotonic so cross-node retries can land in either order. Runtime
+ * room teardown instead requires a generation guard and keeps one real effect
+ * per room generation alive in `room-service`; waiters on the same effect share
+ * one confirmation cap whose behaviour-deadline constant is independent of
+ * this liveness backstop, while maintenance passes still await the real effect.
  *
  * ## What `commandTimeout` does NOT do
  *

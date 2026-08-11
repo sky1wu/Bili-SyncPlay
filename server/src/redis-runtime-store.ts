@@ -521,11 +521,9 @@ return 1
  * since been stamped by a new occupant is left alone.
  */
 const DELETE_ROOM_LUA = `
-if ARGV[1] ~= "*" then
-  local stored = redis.call("GET", KEYS[1])
-  if (stored or "") ~= ARGV[1] then
-    return 0
-  end
+local stored = redis.call("GET", KEYS[1])
+if (stored or "") ~= ARGV[1] then
+  return 0
 end
 for index = 3, #KEYS do
   redis.call("DEL", KEYS[index])
@@ -816,18 +814,21 @@ export async function createRedisRuntimeStore(
     // also why the bound has to be chosen per CALL, not per method:
     // `loadSession` is reached from the join path AND from the reaper.
     //
-    // What this does NOT resolve: the three durable writes through
-    // `trackAwaitedOperation` (`revokeMemberToken`, `markRoomGeneration`,
-    // `deleteRoom`). Capping those
+    // What this does NOT resolve: two durable writes through
+    // `trackAwaitedOperation` (`revokeMemberToken`, `markRoomGeneration`).
+    // Capping those
     // re-opens #237's trade that an answer which can be wrong is worse than a
     // slow one, and their side effects do not expire on their own the way a
     // lock or a dedup slot does. The former standalone `blockMemberToken` path
     // had no production caller and was removed in #277 rather than preserving
-    // another unbounded persistent write.
+    // another unbounded persistent write. `deleteRoom` is different: its
+    // generation guard is mandatory, and `room-service` caps only a request's
+    // wait while retaining one real per-room effect through local settlement;
+    // maintenance callers still await that effect.
     createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's three durable writes",
+        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's two remaining durable writes",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
@@ -972,9 +973,10 @@ export async function createRedisRuntimeStore(
    * Applied to reads, and to writes whose side effect expires on its own. An
    * `acquireRoomLock` or `tryClaimMessageSlot` that secretly landed releases
    * itself at its TTL, so "may have landed" costs at most one lock interval.
-   * The three remaining durable writes are not in that class; see the note on
-   * the client. Eviction is bounded at its informed caller so its complete
-   * mirrored effect, rather than only this Redis command, remains alive.
+   * The two remaining durable writes are not in that class; see the note on the
+   * client. Eviction and guarded room teardown are bounded at their informed
+   * callers so their complete mirrored effects, rather than only one Redis
+   * command, remain alive.
    *
    * `async`, and that is load-bearing rather than style: two callers build a
    * `Promise.all([...])` literal out of two of these, and a SYNCHRONOUS throw
@@ -2050,11 +2052,14 @@ export async function createRedisRuntimeStore(
       );
       return Number(found) === 1;
     },
-    async getRoomGeneration(code: string) {
-      // The read a join makes before it may delete a room it believes is empty.
-      // It was the last command on that path with no bound of any kind, which
-      // is what an operator saw as a WebSocket join that never completed (#277).
-      return await boundCommand("get_room_generation", () =>
+    async getRoomGeneration(
+      code: string,
+      caller: RuntimeReadCaller = "request",
+    ) {
+      // Requests own this deadline; the same generation pin is also read by a
+      // room-reaper teardown, where `maintenance-pass` must keep deriving
+      // `stalled` from the command's silence (#277).
+      return await boundFor(caller)("get_room_generation", () =>
         redis.get(roomGenerationKey(keyPrefix, code)),
       );
     },
@@ -2070,7 +2075,7 @@ export async function createRedisRuntimeStore(
         ),
       ).then(() => undefined);
     },
-    deleteRoom(code: string, expectedGeneration?: string | null) {
+    deleteRoom(code: string, expectedGeneration: string | null) {
       ensurePendingCapacity("delete_room");
       // Shared first here, unlike the other teardowns: whether this delete may
       // proceed at all is decided by the script, against the generation every
@@ -2096,7 +2101,7 @@ export async function createRedisRuntimeStore(
             DELETE_ROOM_LUA,
             keys.length,
             ...keys,
-            expectedGeneration === undefined ? "*" : (expectedGeneration ?? ""),
+            expectedGeneration ?? "",
             code,
             ROOM_GENERATION_TOMBSTONE,
           );
@@ -2105,7 +2110,11 @@ export async function createRedisRuntimeStore(
         if (Number(applied) !== 1) {
           return false;
         }
-        localRuntimeStore.deleteRoom(code);
+        // This private mirror deliberately carries no generation; the shared
+        // script above already made the ownership decision. Passing `null`
+        // keeps even the local cleanup conditional instead of preserving an
+        // unguarded mode in the public RuntimeStore contract.
+        localRuntimeStore.deleteRoom(code, null);
         return true;
       });
     },

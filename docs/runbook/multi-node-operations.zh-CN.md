@@ -672,8 +672,8 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
   僵住，靠的正是这份沉默。它们的信号还是调用方的那些：`room_reaper_sweep_timeout` →
   `room_reaper_sweep_stalled`、`node_heartbeat_failed`。
 
-仍有六个持久写按设计不设上限：运行时存储经 `trackAwaitedOperation` 的三个（吊销 /
-generation / 删房），以及房间存储的三个房间体写。它们的副作用不会自行过期，所以 #237 的
+仍有五个持久写按设计不设上限：运行时存储经 `trackAwaitedOperation` 的两个（吊销 /
+generation），以及房间存储的三个房间体写。它们的副作用不会自行过期，所以 #237 的
 规则仍适用：一个可能是错的答复比一个慢的答复更糟。独立的 `blockMemberToken` 操作和房间存储
 中未被使用的无条件 `saveRoom` 写都在 #277 中被删除。原子的 `evictMemberToken` 现在只限制执行
 节点的等待：到期返回
@@ -725,8 +725,11 @@ generation / 删房），以及房间存储的三个房间体写。它们的副�
   之后房间存储与运行时存储的**请求路径也在这份名单里**——它们会打 `reason=timeout` 并答复
   调用方。僵住的踢人会返回 `status=error, confirmation=unconfirmed`，其完整踢出效果仍在
   进行中；封禁截止时间只会向后推进，所以可以安全重试。
-  仍然**保持沉默**的是上面点名的六个持久写；从外面看，就是一次永远不返回的吊销、teardown
-  写或房间体写。
+  仍然**保持沉默**的是上面点名的五个持久写；从外面看，就是一次永远不返回的吊销、
+  generation 写或房间体写。运行时删房不同：generation 守卫为必填，请求等待到期会记录
+  `room_runtime_cleanup_unconfirmed`，每个房间 generation 唯一一条真实效果继续完成本地镜像
+  收敛；同一效果的等待者共用一条独立于 Redis liveness 常量的确认期限。由 maintenance 驱动
+  的删房则刻意保持沉默，让 reaper 仍能报告 `timed_out`，下一轮再报告 `stalled`。
 
 ## 变更后回归清单
 
