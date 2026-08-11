@@ -4195,6 +4195,12 @@ test("a stale teardown effect does not hide cleanup for a reused room generation
   releaseFirstDelete();
   assert.ok(firstDeleteEffect);
   await firstDeleteEffect;
+
+  // The new generation's successful effect owned and satisfied the retry
+  // debt. The older generation now settles as skipped; it must not retain that
+  // debt merely because it happened to finish last.
+  await service.deleteExpiredRooms();
+  assert.equal(deleteGenerations.length, 2);
 });
 
 test("a late runtime teardown failure stays on the retry trail", async () => {

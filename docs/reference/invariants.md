@@ -865,8 +865,12 @@ do NOT compose, and that is the part that decides which connection gets which:
   constant; it is deliberately not Redis's connection-liveness constant. A
   request records an unconfirmed outcome, while a reaper passes
   `maintenance_pass` to both precondition reads and awaits the real promise so
-  `stalled` remains reachable. Late success clears the retry debt; late failure
-  leaves it queued, and each owns a terminal log. The remaining five differ from
+  `stalled` remains reachable. Retry debt names the latest exact effect that
+  owns it (or no effect while awaiting a fresh attempt); a newer generation's
+  success or a live persisted room supersedes older effects, so their late skip
+  or failure cannot retain or resurrect the debt. An owning late success clears
+  the debt, an owning late failure leaves it queued, and each effect owns a
+  terminal log. The remaining five differ from
   `acquireRoomLock` and `tryClaimMessageSlot`, which ARE capped at the store:
   a `SET NX PX` that lands after its caller gave up releases itself at its TTL,
   so "may have landed" costs one lock interval rather than a permanent wrong

@@ -504,14 +504,6 @@ export function createRoomService(options: {
   }
 
   /**
-   * Room codes whose runtime teardown is unfinished, retried on every later
-   * reaper pass. Kept because a failed teardown is otherwise unrecoverable: the
-   * persisted room and its expiry index are already gone, so nothing else will
-   * ever produce this code again (#237 review).
-   */
-  const pendingRuntimeTeardowns = new Set<string>();
-
-  /**
    * One real teardown effect per room generation. A request may stop waiting
    * for confirmation, but this promise stays alive until the guarded Redis
    * write and every local mirror behind it have settled. The generation belongs
@@ -526,10 +518,35 @@ export function createRoomService(options: {
     requestConfirmation: Promise<boolean> | null;
     confirmationTimedOut: boolean;
   };
+
+  /**
+   * Room codes whose runtime teardown is unfinished, and the exact effect that
+   * most recently took responsibility for each debt. `null` means the debt is
+   * waiting for a fresh attempt after an unreadable precondition or a terminal
+   * skip/failure. A newer generation effect, or observing a live persisted
+   * room, supersedes an older owner; that older effect may still settle and log
+   * its own outcome, but cannot resurrect or retain someone else's debt.
+   *
+   * Kept because a failed teardown is otherwise unrecoverable: the persisted
+   * room and its expiry index are already gone, so nothing else will ever
+   * produce this code again (#237 review, #277).
+   */
+  const pendingRuntimeTeardowns = new Map<
+    string,
+    RuntimeTeardownEffect | null
+  >();
   const runtimeTeardownEffects = new Map<
     string,
     Map<string | null, RuntimeTeardownEffect>
   >();
+
+  function rememberRuntimeTeardownDebt(code: string): void {
+    if (!pendingRuntimeTeardowns.has(code)) {
+      // Do not replace an in-flight owner merely because a sibling precondition
+      // read was inconclusive. Its terminal result still answers this debt.
+      pendingRuntimeTeardowns.set(code, null);
+    }
+  }
 
   function removeRuntimeTeardownEffect(
     code: string,
@@ -570,10 +587,10 @@ export function createRoomService(options: {
     let effectsByGeneration = runtimeTeardownEffects.get(code);
     const existing = effectsByGeneration?.get(expectedGeneration);
     if (existing) {
+      pendingRuntimeTeardowns.set(code, existing);
       return existing;
     }
 
-    pendingRuntimeTeardowns.add(code);
     let effect: Promise<boolean>;
     try {
       effect = Promise.resolve(
@@ -593,12 +610,17 @@ export function createRoomService(options: {
       runtimeTeardownEffects.set(code, effectsByGeneration);
     }
     effectsByGeneration.set(expectedGeneration, entry);
+    pendingRuntimeTeardowns.set(code, entry);
 
     void effect.then(
       (applied) => {
         removeRuntimeTeardownEffect(code, entry);
-        if (applied && !runtimeTeardownEffects.has(code)) {
-          pendingRuntimeTeardowns.delete(code);
+        if (pendingRuntimeTeardowns.get(code) === entry) {
+          if (applied) {
+            pendingRuntimeTeardowns.delete(code);
+          } else {
+            pendingRuntimeTeardowns.set(code, null);
+          }
         }
         if (entry.confirmationTimedOut) {
           logRuntimeTeardownTerminal(
@@ -610,7 +632,9 @@ export function createRoomService(options: {
       },
       (error: unknown) => {
         removeRuntimeTeardownEffect(code, entry);
-        pendingRuntimeTeardowns.add(code);
+        if (pendingRuntimeTeardowns.get(code) === entry) {
+          pendingRuntimeTeardowns.set(code, null);
+        }
         if (entry.confirmationTimedOut) {
           logRuntimeTeardownTerminal("room_runtime_cleanup_late_failed", code, {
             result: "error",
@@ -687,7 +711,7 @@ export function createRoomService(options: {
       try {
         expectedGeneration = await runtimeStore.getRoomGeneration(code, caller);
       } catch {
-        pendingRuntimeTeardowns.add(code);
+        rememberRuntimeTeardownDebt(code);
         continue;
       }
 
@@ -698,7 +722,7 @@ export function createRoomService(options: {
         // A read failure is "unknown", NOT "absent". Treating it as absent made
         // this guard fail in exactly the conditions that queue teardowns in the
         // first place. Keep the debt and try again later.
-        pendingRuntimeTeardowns.add(code);
+        rememberRuntimeTeardownDebt(code);
         continue;
       }
       if (currentRoom) {
@@ -1473,7 +1497,7 @@ export function createRoomService(options: {
       // reaper — an admin close/expire whose teardown failed there would have
       // queued a retry nothing ever performed (#237 review).
       await collectRuntimeStateForDeletedRooms(
-        [...pendingRuntimeTeardowns, code],
+        [...pendingRuntimeTeardowns.keys(), code],
         "request",
       );
     },
@@ -2149,7 +2173,7 @@ export function createRoomService(options: {
       // code again.
       const settledCodes = await collectRuntimeStateForDeletedRooms(
         [
-          ...pendingRuntimeTeardowns,
+          ...pendingRuntimeTeardowns.keys(),
           ...swept.deletedRoomCodes,
           ...swept.orphanedIndexCodes,
         ],

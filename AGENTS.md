@@ -214,8 +214,11 @@ before changing the code it describes.
   remains tracked through every local mirror, and every request waiting on that
   exact effect shares one confirmation cap. Maintenance callers keep awaiting
   the real effect so `stalled` remains observable; the request deadline is its
-  own constant rather than the Redis connection's liveness backstop. Still open
-  on purpose: the five durable writes, where
+  own constant rather than the Redis connection's liveness backstop. Retry debt
+  is owned by the latest exact effect (or by no effect while awaiting a fresh
+  attempt), so a newer generation's success or a live persisted room supersedes
+  older effects whose late skip/failure must not retain or resurrect the debt.
+  Still open on purpose: the five durable writes, where
   #237's trade holds because their effects — unlike a lock's or a dedup slot's
   — do not expire. The former
   standalone `blockMemberToken` had no production caller and was removed rather

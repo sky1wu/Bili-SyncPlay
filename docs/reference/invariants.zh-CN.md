@@ -602,8 +602,10 @@
   一条真实 teardown Promise，直到 Redis 写和每层本地镜像全部结算，因此旧 generation 的
   僵死效果不会遮住复用房间码后的清理。同一效果的所有请求等待者复用同一条确认 Promise 和
   同一个行为期限；这个期限使用独立常量，不与 Redis 连接的 liveness 常量耦合。reaper 给两条
-  前置读取都传 `maintenance_pass`，继续等待真实 Promise，因此 `stalled` 仍可达。迟到成功会
-  清掉重试债，迟到失败会把债留在队列里，两者都有最终日志。
+  前置读取都传 `maintenance_pass`，继续等待真实 Promise，因此 `stalled` 仍可达。重试债会
+  点名当前拥有它的最新 generation 效果（等待新尝试时则没有 owner）：owner 迟到成功会清债，
+  owner 迟到失败会留债，两者都有最终日志。新 generation 成功或观察到仍存在的持久房间会
+  取代旧 owner，因此旧效果迟到的跳过或失败不能继续占着、也不能复活这笔债。
   剩下五个与在
   store 内**已经**加了上限的
   `acquireRoomLock`、`tryClaimMessageSlot` 不同：一条 `SET NX PX` 即使在调用方放弃之后

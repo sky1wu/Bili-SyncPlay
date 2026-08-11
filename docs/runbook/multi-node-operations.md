@@ -824,7 +824,9 @@ incident:
   is mandatory, requests stop waiting with
   `room_runtime_cleanup_unconfirmed`, and one real effect per room generation
   continues through local-mirror settlement. Waiters on the exact effect share
-  one confirmation deadline, independent of the Redis liveness constant. A
+  one confirmation deadline, independent of the Redis liveness constant. The
+  retry debt belongs to the latest exact effect, so a newer generation's
+  success or a live persisted room supersedes any older late skip/failure. A
   maintenance-driven teardown deliberately stays silent so the reaper can
   report `timed_out` and then `stalled`.
 
