@@ -341,6 +341,24 @@ decides something has to know which of the two questions it is asking (#242):
   fails, the socket is dropped: `leaveCurrentRoom` restores the member when its
   own persistence fails and the socket is open, so reporting the join refused
   while the server still holds the seat leaves the two disagreeing.
+- **Pruning an orphaned room-index member still owes runtime teardown.** Both
+  the periodic reconcile and room listing remove a member whose room body is
+  gone so enumeration and counts agree, but removal alone used to consume the
+  only code the room reaper could hand to `room-service` (#258). Every prune
+  therefore atomically adds a tokened claim to the shared
+  `room-index-orphans` hash and its `room-index-orphans-queue` delivery index.
+  Quarantining an unreadable body owes the same deferred claim before its index
+  member is removed: the bad body blocks delivery while it exists, then repair
+  clears the claim or deletion makes it deliverable.
+  Shared is essential: the standalone global-admin reconciles the index but
+  runs no room reaper. `deleteExpiredRooms` reads that handoff in bounded
+  rotating batches using Redis 6.0 commands, without consuming a claim,
+  re-checks that no room body took the code meanwhile, and reports the
+  survivors as `orphanedIndexCodes` plus their claim tokens. `room-service`
+  acknowledges a token only after its existing
+  generation-guarded runtime teardown settles. A process crash therefore leaves
+  the claim for another room node, while a late acknowledgement cannot erase a
+  newer claim created after the same room code was recycled.
 
 ## One-shot broadcasts need a retry trail; repeated ones do not
 

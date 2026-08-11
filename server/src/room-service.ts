@@ -460,7 +460,8 @@ export function createRoomService(options: {
 
   async function collectRuntimeStateForDeletedRooms(
     codes: Iterable<string>,
-  ): Promise<void> {
+  ): Promise<Set<string>> {
+    const settledCodes = new Set<string>();
     for (const code of new Set(codes)) {
       // Defence in depth behind the allocation-time check: a teardown queued
       // for retry could otherwise fire after its code came back into use — the
@@ -495,6 +496,7 @@ export function createRoomService(options: {
       }
       if (currentRoom) {
         pendingRuntimeTeardowns.delete(code);
+        settledCodes.add(code);
         continue;
       }
       try {
@@ -503,6 +505,7 @@ export function createRoomService(options: {
         // delete itself conditional, which is what actually closes the race.
         await runtimeStore.deleteRoom(code, expectedGeneration);
         pendingRuntimeTeardowns.delete(code);
+        settledCodes.add(code);
       } catch (error) {
         pendingRuntimeTeardowns.add(code);
         logEvent("room_runtime_cleanup_failed", {
@@ -514,6 +517,7 @@ export function createRoomService(options: {
         });
       }
     }
+    return settledCodes;
   }
 
   async function resolveRoom(code: string): Promise<PersistedRoom | null> {
@@ -1927,11 +1931,37 @@ export function createRoomService(options: {
       // state that outlives it (member tokens survive a disconnect on purpose,
       // #234), and once the persisted room is gone nothing will ever name that
       // code again.
-      await collectRuntimeStateForDeletedRooms([
+      const settledCodes = await collectRuntimeStateForDeletedRooms([
         ...pendingRuntimeTeardowns,
         ...swept.deletedRoomCodes,
         ...swept.orphanedIndexCodes,
       ]);
+      const settledClaims = (swept.orphanedIndexClaims ?? []).filter(
+        ({ code }) => settledCodes.has(code),
+      );
+      if (
+        settledClaims.length > 0 &&
+        roomStore.acknowledgeOrphanedIndexClaims
+      ) {
+        try {
+          // The shared claim is the crash-recovery trail. Remove it only after
+          // the guarded runtime delete above has settled; a token comparison in
+          // the room store keeps this late acknowledgement from consuming a
+          // newer orphan occurrence under a recycled code (#258 review).
+          await roomStore.acknowledgeOrphanedIndexClaims(settledClaims);
+        } catch (error) {
+          // Runtime cleanup already landed. Rejecting now would overwrite that
+          // real result, while leaving the shared claim is safe and lets any
+          // later room-node sweep retry the idempotent teardown.
+          logEvent("room_persist_failed", {
+            provider: persistence.provider,
+            result: "error",
+            reason: "orphan_runtime_cleanup_ack_failed",
+            claimCount: settledClaims.length,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
       return {
         deletedRooms: swept.deletedRoomCodes.length,
         orphanedIndexEntries: swept.orphanedIndexCodes.length,

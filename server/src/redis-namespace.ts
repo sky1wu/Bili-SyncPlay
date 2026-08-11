@@ -20,6 +20,15 @@ export function getRedisRoomStoreKeys(namespace?: string) {
     // the same source instead of reconciling separate indexes against each
     // other. It supersedes the room-index and room-expiry pair.
     roomsByExpiryKey: `${base}rooms-by-expiry`,
+    // A reconciler or listing can discover an index member whose room body is
+    // already gone, including in the standalone global-admin process that runs
+    // no room reaper. Keep the runtime-cleanup handoff shared so a room-serving
+    // process can still collect the residue (#258).
+    orphanedRoomCodesKey: `${base}room-index-orphans`,
+    // A bounded, rotating index over the claim hash. Its reserved sequence
+    // member supplies monotonic scores without requiring Redis newer than the
+    // 6.0 minimum documented for this project.
+    orphanedRoomQueueKey: `${base}room-index-orphans-queue`,
   };
 }
 

@@ -10,6 +10,53 @@ import {
 const REDIS_URL = process.env.REDIS_URL;
 
 type Store = Awaited<ReturnType<typeof createRedisRoomStore>>;
+type Sweep = Awaited<ReturnType<Store["deleteExpiredRooms"]>>;
+
+/**
+ * A setup barrier for tests that mutate the room index through a second Redis
+ * connection. The store starts its bootstrap reconcile in the background, so
+ * constructing drift before this resolves makes the fixture race that pass.
+ */
+async function settleRoomIndexBootstrap(store: Store): Promise<void> {
+  await store.reconcileRoomIndex();
+}
+
+async function acknowledgeOrphanClaims(
+  store: Store,
+  sweep: Sweep,
+): Promise<void> {
+  assert.ok(store.acknowledgeOrphanedIndexClaims);
+  assert.ok(sweep.orphanedIndexClaims);
+  await store.acknowledgeOrphanedIndexClaims(sweep.orphanedIndexClaims);
+}
+
+function orphanClaimKeys(namespace: string): {
+  hash: string;
+  queue: string;
+} {
+  return {
+    hash: `${namespace}:room-index-orphans`,
+    queue: `${namespace}:room-index-orphans-queue`,
+  };
+}
+
+async function seedOrphanClaims(
+  redis: Redis,
+  namespace: string,
+  claims: readonly { code: string; token: string }[],
+): Promise<void> {
+  const keys = orphanClaimKeys(namespace);
+  await redis.hset(
+    keys.hash,
+    ...claims.flatMap(({ code, token }) => [code, token]),
+  );
+  const pipeline = redis.pipeline();
+  claims.forEach(({ code }, index) => {
+    pipeline.zadd(keys.queue, index + 1, code);
+  });
+  pipeline.zadd(keys.queue, claims.length, "!sequence");
+  await pipeline.exec();
+}
 
 function uniqueNamespace(label: string): string {
   return `bsp-test-${label}-${Date.now().toString(36)}-${Math.random()
@@ -348,6 +395,7 @@ test("redis room listing prunes members whose room body is gone", async (t) => {
 
   const namespace = uniqueNamespace("orphan");
   const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
   const redis = await connect();
 
@@ -367,9 +415,63 @@ test("redis room listing prunes members whose room body is gone", async (t) => {
       [room.code],
     );
     assert.equal(await redis.zscore(roomsKey, "GHOST1"), null);
+    // Removing the member keeps listing/counting accurate, but must not consume
+    // the runtime-cleanup debt that only the reaper's caller can settle.
+    const swept = await store.deleteExpiredRooms(0);
+    assert.deepEqual(swept.orphanedIndexCodes, ["GHOST1"]);
+    assert.deepEqual(swept.deletedRoomCodes, []);
+    assert.ok(await redis.hget(orphanKeys.hash, "GHOST1"));
+    assert.ok(await redis.zscore(orphanKeys.queue, "GHOST1"));
+    await acknowledgeOrphanClaims(store, swept);
+    assert.equal(await redis.hlen(orphanKeys.hash), 0);
+    assert.equal(await redis.zscore(orphanKeys.queue, "GHOST1"), null);
   } finally {
     await store.deleteRoom("LIVE01");
-    await redis.del(roomsKey);
+    await redis.del(roomsKey, orphanKeys.hash, orphanKeys.queue);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room orphan prune keeps the index member when its cleanup handoff fails", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("orphanhandoff");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    await settleRoomIndexBootstrap(store);
+    await redis.zadd(roomsKey, "+inf", "GHOST2");
+    // HGET now raises WRONGTYPE. The handoff must be attempted before the
+    // member is removed so a later pass still has a retry trail.
+    await redis.set(orphanKeys.hash, "wrong type");
+
+    assert.deepEqual(await store.listRooms(LIST_ALL), []);
+    assert.equal(await redis.zscore(roomsKey, "GHOST2"), "inf");
+
+    // The rotating queue is equally required. Its WRONGTYPE failure must also
+    // retain the index member instead of stranding a hash-only claim.
+    await redis.del(orphanKeys.hash);
+    await redis.set(orphanKeys.queue, "wrong type");
+    assert.deepEqual(await store.listRooms(LIST_ALL), []);
+    assert.equal(await redis.zscore(roomsKey, "GHOST2"), "inf");
+
+    // Once both handoff keys are writable, the same listing retries the prune
+    // and the next reaper sweep receives the code.
+    await redis.del(orphanKeys.queue);
+    assert.deepEqual(await store.listRooms(LIST_ALL), []);
+    assert.equal(await redis.zscore(roomsKey, "GHOST2"), null);
+    const swept = await store.deleteExpiredRooms(0);
+    assert.deepEqual(swept.orphanedIndexCodes, ["GHOST2"]);
+    await acknowledgeOrphanClaims(store, swept);
+  } finally {
+    await redis.del(roomsKey, orphanKeys.hash, orphanKeys.queue);
     await redis.quit();
     await store.close();
   }
@@ -383,6 +485,7 @@ test("redis room reconcile sweeps orphans again when the reconciler drives it", 
 
   const namespace = uniqueNamespace("resweep");
   const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
   let clock = 1_000_000;
   const store = await createRedisRoomStore(REDIS_URL, {
     namespace,
@@ -410,8 +513,11 @@ test("redis room reconcile sweeps orphans again when the reconciler drives it", 
     await store.reconcileRoomIndex();
     assert.equal(await store.countRooms({ includeExpired: true }), 0);
     assert.equal(await redis.zcard(roomsKey), 0);
+    const swept = await store.deleteExpiredRooms(clock);
+    assert.deepEqual(swept.orphanedIndexCodes, ["LATEGH"]);
+    await acknowledgeOrphanClaims(store, swept);
   } finally {
-    await redis.del(roomsKey);
+    await redis.del(roomsKey, orphanKeys.hash, orphanKeys.queue);
     await redis.quit();
     await store.close();
   }
@@ -444,6 +550,200 @@ test("redis room store still reconciles once before answering the first read", a
     await redis.del(`${namespace}:room:OLDBLD`, roomsKey);
     await redis.quit();
     await store?.close();
+  }
+});
+
+test("redis room bootstrap reconcile preserves orphan codes for the next reaper sweep", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("bootstraporphan");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
+  const redis = await connect();
+
+  let reconcilerStore: Store | null = null;
+  let reaperStore: Store | null = null;
+  try {
+    // A body removed by an older build before this process starts. The
+    // constructor's background reconcile wins the race in #258 and removes
+    // the member before the reaper can see it.
+    await redis.zadd(roomsKey, "+inf", "BOOTGH");
+    reconcilerStore = await createRedisRoomStore(REDIS_URL, { namespace });
+    await settleRoomIndexBootstrap(reconcilerStore);
+
+    assert.equal(await redis.zscore(roomsKey, "BOOTGH"), null);
+    // The standalone global-admin runs this reconcile but no reaper. Close that
+    // store and let a separate room-serving process claim the shared handoff.
+    await reconcilerStore.close();
+    reconcilerStore = null;
+    reaperStore = await createRedisRoomStore(REDIS_URL, { namespace });
+    const first = await reaperStore.deleteExpiredRooms(0);
+    assert.deepEqual(first.orphanedIndexCodes, ["BOOTGH"]);
+    // Simulate the room process exiting after it received the claim but before
+    // runtime teardown settled. The shared debt must survive for the next pass.
+    await reaperStore.close();
+    reaperStore = await createRedisRoomStore(REDIS_URL, { namespace });
+    const retried = await reaperStore.deleteExpiredRooms(0);
+    assert.deepEqual(retried.orphanedIndexCodes, ["BOOTGH"]);
+    assert.deepEqual(retried.orphanedIndexClaims, first.orphanedIndexClaims);
+    await acknowledgeOrphanClaims(reaperStore, retried);
+    assert.deepEqual(
+      (await reaperStore.deleteExpiredRooms(0)).orphanedIndexCodes,
+      [],
+    );
+  } finally {
+    await redis.del(roomsKey, orphanKeys.hash, orphanKeys.queue);
+    await redis.quit();
+    await reconcilerStore?.close();
+    await reaperStore?.close();
+  }
+});
+
+test("redis room reaper bounds the shared orphan handoff and skips a reused code", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("orphanbatch");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    await settleRoomIndexBootstrap(store);
+    const orphanedCodes = Array.from(
+      { length: 501 },
+      (_, index) => `OR${index.toString().padStart(4, "0")}`,
+    );
+    await seedOrphanClaims(redis, namespace, [
+      ...orphanedCodes.map((code) => ({ code, token: `claim-${code}` })),
+      { code: "REUSED", token: "claim-reused" },
+    ]);
+    await store.createRoom({
+      code: "REUSED",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+
+    const deliveredCodes: string[] = [];
+    for (let pass = 0; pass < 4; pass += 1) {
+      const swept = await store.deleteExpiredRooms(0);
+      assert.ok(swept.orphanedIndexCodes.length <= 500);
+      deliveredCodes.push(...swept.orphanedIndexCodes);
+      await acknowledgeOrphanClaims(store, swept);
+      if ((await redis.hlen(orphanKeys.hash)) === 0) {
+        break;
+      }
+    }
+    assert.deepEqual(deliveredCodes.sort(), orphanedCodes);
+    assert.equal(await redis.hlen(orphanKeys.hash), 0);
+    assert.equal(await redis.zcard(orphanKeys.queue), 1);
+    assert.ok(await store.getRoom("REUSED"));
+  } finally {
+    await store.deleteRoom("REUSED");
+    await redis.del(roomsKey, orphanKeys.hash, orphanKeys.queue);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room reaper keeps orphan claims behind corrupt room bodies", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("orphanbadbody");
+  const orphanKeys = orphanClaimKeys(namespace);
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    await settleRoomIndexBootstrap(store);
+    await seedOrphanClaims(redis, namespace, [
+      { code: "BADTYP", token: "claim-wrong-type" },
+      { code: "BADJSN", token: "claim-invalid-json" },
+      { code: "REUSED", token: "claim-reused" },
+    ]);
+    await redis.hset(`${namespace}:room:BADTYP`, "field", "value");
+    await redis.set(`${namespace}:room:BADJSN`, "{not valid json");
+    await store.createRoom({
+      code: "REUSED",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+
+    // Only a usable persisted room proves the code was recycled. Corruption
+    // must keep rotating the debt until the bad body is repaired or removed.
+    const blocked = await store.deleteExpiredRooms(0);
+    assert.deepEqual(blocked.orphanedIndexCodes, []);
+    assert.equal(
+      await redis.hget(orphanKeys.hash, "BADTYP"),
+      "claim-wrong-type",
+    );
+    assert.equal(
+      await redis.hget(orphanKeys.hash, "BADJSN"),
+      "claim-invalid-json",
+    );
+    assert.equal(await redis.hget(orphanKeys.hash, "REUSED"), null);
+
+    await redis.del(`${namespace}:room:BADTYP`, `${namespace}:room:BADJSN`);
+    const released = await store.deleteExpiredRooms(0);
+    assert.deepEqual(released.orphanedIndexCodes.sort(), ["BADJSN", "BADTYP"]);
+    await acknowledgeOrphanClaims(store, released);
+    assert.equal(await redis.hlen(orphanKeys.hash), 0);
+  } finally {
+    await store.deleteRoom("REUSED");
+    await redis.del(
+      `${namespace}:room:BADTYP`,
+      `${namespace}:room:BADJSN`,
+      orphanKeys.hash,
+      orphanKeys.queue,
+    );
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room orphan acknowledgement cannot consume a newer claim", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("orphanack");
+  const orphanKeys = orphanClaimKeys(namespace);
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    await settleRoomIndexBootstrap(store);
+    await seedOrphanClaims(redis, namespace, [
+      { code: "RECYC1", token: "new-claim" },
+    ]);
+
+    // A previous process can finish late after the code was reused and became
+    // orphaned again. Its old token must not erase the new occurrence's debt.
+    await store.acknowledgeOrphanedIndexClaims?.([
+      { code: "RECYC1", token: "old-claim" },
+    ]);
+    assert.equal(await redis.hget(orphanKeys.hash, "RECYC1"), "new-claim");
+    assert.ok(await redis.zscore(orphanKeys.queue, "RECYC1"));
+
+    await store.acknowledgeOrphanedIndexClaims?.([
+      { code: "RECYC1", token: "new-claim" },
+    ]);
+    assert.equal(await redis.hget(orphanKeys.hash, "RECYC1"), null);
+    assert.equal(await redis.zscore(orphanKeys.queue, "RECYC1"), null);
+  } finally {
+    await redis.del(orphanKeys.hash, orphanKeys.queue);
+    await redis.quit();
+    await store.close();
   }
 });
 
@@ -1092,6 +1392,7 @@ test("redis room count and listing agree about an unreadable room body", async (
 
   const namespace = uniqueNamespace("quarantine");
   const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
   let clock = 1_000_000;
   const store = await createRedisRoomStore(REDIS_URL, {
     namespace,
@@ -1124,17 +1425,32 @@ test("redis room count and listing agree about an unreadable room body", async (
     );
     assert.equal(await store.countRooms({ includeExpired: true }), 1);
     assert.equal(await redis.zscore(roomsKey, "ROTTEN"), null);
+    assert.ok(await redis.hget(orphanKeys.hash, "ROTTEN"));
+    assert.ok(await redis.zscore(orphanKeys.queue, "ROTTEN"));
 
     // The body is kept: it cannot be interpreted, so deleting it would be a
-    // guess. It also must not creep back into the set on the next reconcile.
+    // guess. Its deferred claim must not run while that bad body still exists.
     assert.equal(await redis.exists(`${namespace}:room:ROTTEN`), 1);
+    assert.deepEqual(
+      (await store.deleteExpiredRooms(clock)).orphanedIndexCodes,
+      [],
+    );
     clock += 900_000;
     assert.equal(await store.countRooms({ includeExpired: true }), 1);
+
+    // Once an operator removes the corrupt body, the deferred claim becomes
+    // deliverable even though quarantine already removed the main index.
+    await redis.del(`${namespace}:room:ROTTEN`);
+    const released = await store.deleteExpiredRooms(clock);
+    assert.deepEqual(released.orphanedIndexCodes, ["ROTTEN"]);
+    await acknowledgeOrphanClaims(store, released);
   } finally {
     await redis.del(
       `${namespace}:room:STAYOK`,
       `${namespace}:room:ROTTEN`,
       roomsKey,
+      orphanKeys.hash,
+      orphanKeys.queue,
     );
     await redis.quit();
     await store.close();
@@ -1149,6 +1465,7 @@ test("redis room store isolates a room key of the wrong type", async (t) => {
 
   const namespace = uniqueNamespace("wrongtype");
   const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
   const redis = await connect();
 
@@ -1190,21 +1507,28 @@ test("redis room store isolates a room key of the wrong type", async (t) => {
     ]);
     assert.equal(await store.countRooms({ includeExpired: true }), 2);
     assert.equal(await redis.zscore(roomsKey, doomed.code), null);
+    assert.ok(await redis.hget(orphanKeys.hash, doomed.code));
 
     // The genuinely expired room is still collected.
-    assert.equal(
-      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
-      1,
-    );
+    const blocked = await store.deleteExpiredRooms(100);
+    assert.equal(blocked.deletedRoomCodes.length, 1);
+    assert.deepEqual(blocked.orphanedIndexCodes, []);
     assert.equal(await redis.exists(`${namespace}:room:EXPIRE`), 0);
     // The wrong-type key itself is left alone rather than destroyed.
     assert.equal(await redis.exists(`${namespace}:room:WRONGT`), 1);
+
+    await redis.del(`${namespace}:room:WRONGT`);
+    const released = await store.deleteExpiredRooms(100);
+    assert.deepEqual(released.orphanedIndexCodes, ["WRONGT"]);
+    await acknowledgeOrphanClaims(store, released);
   } finally {
     await redis.del(
       `${namespace}:room:OKROOM`,
       `${namespace}:room:WRONGT`,
       `${namespace}:room:EXPIRE`,
       roomsKey,
+      orphanKeys.hash,
+      orphanKeys.queue,
     );
     await redis.quit();
     await store.close();
@@ -1219,6 +1543,7 @@ test("redis room reaper survives a candidate whose key turns the wrong type", as
 
   const namespace = uniqueNamespace("reapwrong");
   const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
   const redis = await connect();
 
@@ -1247,25 +1572,32 @@ test("redis room reaper survives a candidate whose key turns the wrong type", as
     // Settle the reconcile first, then corrupt the key inside the cooldown
     // window: the member is still a reaper candidate, so the Lua script is
     // what has to survive the WRONGTYPE — nothing quarantined it beforehand.
-    await store.countRooms({ includeExpired: true });
+    await settleRoomIndexBootstrap(store);
     await redis.del(`${namespace}:room:${doomed.code}`);
     await redis.hset(`${namespace}:room:${doomed.code}`, "field", "value");
     assert.notEqual(await redis.zscore(roomsKey, doomed.code), null);
 
     // Without the guard the script raises on the first candidate and the room
     // ordered after it is never collected.
-    assert.equal(
-      (await store.deleteExpiredRooms(100)).deletedRoomCodes.length,
-      1,
-    );
+    const blocked = await store.deleteExpiredRooms(100);
+    assert.equal(blocked.deletedRoomCodes.length, 1);
+    assert.deepEqual(blocked.orphanedIndexCodes, []);
     assert.equal(await redis.exists(`${namespace}:room:REAPME`), 0);
     assert.equal(await redis.zscore(roomsKey, doomed.code), null);
     assert.equal(await redis.exists(`${namespace}:room:BADKEY`), 1);
+    assert.ok(await redis.hget(orphanKeys.hash, doomed.code));
+
+    await redis.del(`${namespace}:room:BADKEY`);
+    const released = await store.deleteExpiredRooms(100);
+    assert.deepEqual(released.orphanedIndexCodes, ["BADKEY"]);
+    await acknowledgeOrphanClaims(store, released);
   } finally {
     await redis.del(
       `${namespace}:room:BADKEY`,
       `${namespace}:room:REAPME`,
       roomsKey,
+      orphanKeys.hash,
+      orphanKeys.queue,
     );
     await redis.quit();
     await store.close();
@@ -1280,10 +1612,12 @@ test("redis room store reports codes whose index entry outlived the room body", 
 
   const namespace = uniqueNamespace("nobody");
   const roomsKey = `${namespace}:rooms-by-expiry`;
+  const orphanKeys = orphanClaimKeys(namespace);
   const store = await createRedisRoomStore(REDIS_URL, { namespace });
   const redis = await connect();
 
   try {
+    await settleRoomIndexBootstrap(store);
     const room = await store.createRoom({
       code: "NOBODY",
       joinToken: "join-token-123456",
@@ -1308,8 +1642,9 @@ test("redis room store reports codes whose index entry outlived the room body", 
     assert.deepEqual(swept.orphanedIndexCodes, ["NOBODY"]);
     assert.deepEqual(swept.deletedRoomCodes, []);
     assert.equal(await redis.zscore(roomsKey, "NOBODY"), null);
+    await acknowledgeOrphanClaims(store, swept);
   } finally {
-    await redis.del(roomsKey);
+    await redis.del(roomsKey, orphanKeys.hash, orphanKeys.queue);
     await redis.quit();
     await store.close();
   }

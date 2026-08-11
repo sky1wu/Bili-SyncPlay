@@ -158,6 +158,57 @@ test("instrumented room store reports a failed reconcile and rethrows", async ()
   );
 });
 
+test("instrumented room store preserves and measures orphan claim acknowledgement", async () => {
+  const recorder = createRecorder();
+  const acknowledged: Array<{ code: string; token: string }> = [];
+  const store = instrumentRoomStore(
+    {
+      ...createInMemoryRoomStore({ now: () => 0 }),
+      async acknowledgeOrphanedIndexClaims(claims) {
+        acknowledged.push(...claims);
+      },
+    },
+    recorder.collector,
+  );
+
+  const acknowledgeOrphanedIndexClaims = store.acknowledgeOrphanedIndexClaims;
+  assert.ok(acknowledgeOrphanedIndexClaims);
+  await acknowledgeOrphanedIndexClaims([{ code: "GHOST1", token: "claim-1" }]);
+
+  assert.deepEqual(acknowledged, [{ code: "GHOST1", token: "claim-1" }]);
+  assert.deepEqual(
+    recorder.durations.map((entry) => entry.operation),
+    ["acknowledge_orphaned_index_claims"],
+  );
+  assert.deepEqual(recorder.failures, []);
+});
+
+test("instrumented room store reports a failed orphan claim acknowledgement", async () => {
+  const recorder = createRecorder();
+  const store = instrumentRoomStore(
+    {
+      ...createInMemoryRoomStore({ now: () => 0 }),
+      async acknowledgeOrphanedIndexClaims() {
+        throw new Error("ack failed");
+      },
+    },
+    recorder.collector,
+  );
+
+  const acknowledgeOrphanedIndexClaims = store.acknowledgeOrphanedIndexClaims;
+  assert.ok(acknowledgeOrphanedIndexClaims);
+  await assert.rejects(
+    acknowledgeOrphanedIndexClaims([{ code: "GHOST1", token: "claim-1" }]),
+    /ack failed/,
+  );
+
+  assert.deepEqual(recorder.failures, ["acknowledge_orphaned_index_claims"]);
+  assert.deepEqual(
+    recorder.durations.map((entry) => entry.operation),
+    ["acknowledge_orphaned_index_claims"],
+  );
+});
+
 test("instrumented room store adds no reconcile hook when the underlying store has none", () => {
   const recorder = createRecorder();
   const store = instrumentRoomStore(

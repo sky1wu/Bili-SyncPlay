@@ -65,6 +65,26 @@ NODE_HEARTBEAT_ENABLED=true
 - `ADMIN_SESSION_TTL_MS`
 - `ADMIN_ROLE`
 
+### 房间索引孤儿清理交接
+
+项目支持 Redis 6.0 及以上版本。开启 ACL 时，每个 Room Node 与 Global Admin 都必须能
+读写 `bsp:rooms-by-expiry`，以及 `bsp:room-index-orphans`（带 token 的 claim）和
+`bsp:room-index-orphans-queue`（其有界轮转投递索引）。设置了
+`REDIS_NAMESPACE` 时请替换 `bsp`。已有的宽泛 `bsp:*` 授权会覆盖它们；较窄的房间键
+授权必须在上线前扩展。
+
+哈希与 sorted set 必须一起备份。用 `HLEN bsp:room-index-orphans` 监控哈希；持续增长表示
+Room Node 回收或运行时拆除没有完成。queue 初始化后通常多一个保留序列成员，因此 `ZCARD`
+与 `HLEN + 1` 长期不一致，说明 ACL、键类型或局部写入存在问题。
+
+首次上线这套交接机制时不能混跑新旧 room-store 持有者：必须先排空流量并停止全部旧版
+Room Node 与 Global Admin，再启动新版本。回滚时，关服前瞬时 `HLEN=0` 不是稳定屏障，
+因为关服流程先停 reaper、后停 reconciler。先停止全部本版本进程，并在它们都退出后复查。
+若仍有 claim，启动一台不接流量的本版本 Room Node，等待成功 reaper sweep 直至哈希为空，
+再将它完整停止并于退出后复查；复查仍非零就重复或中止回滚。不要删除任何一把交接键。
+若目标版本仍使用旧式房间索引，还要执行
+[多节点部署文档](../operations/multi-node.zh-CN.md)中的重建流程。
+
 ## 常用验证命令
 
 ```bash
@@ -177,6 +197,12 @@ redis-cli -u "$REDIS_URL" ping
 curl -fsS http://10.0.0.11:8787/readyz
 curl -fsS http://10.0.0.11:8787/metrics | grep bili_syncplay_redis_operation_failures_total
 sudo journalctl -u bili-syncplay-room-node-a --since "15 min ago" | grep -E "redis|Redis|node_heartbeat_failed"
+
+# 默认命名空间；如有配置请替换前缀
+redis-cli -u "$REDIS_URL" type bsp:room-index-orphans
+redis-cli -u "$REDIS_URL" type bsp:room-index-orphans-queue
+redis-cli -u "$REDIS_URL" hlen bsp:room-index-orphans
+redis-cli -u "$REDIS_URL" zcard bsp:room-index-orphans-queue
 ```
 
 同时检查 Global Admin 概览：
@@ -296,6 +322,7 @@ curl -fsS http://10.0.0.11:8788/readyz
 | WebSocket 连接数异常下降                       | `bili_syncplay_connections`                                                    | 入口层 upstream、Room Node `/readyz`、进程日志         | 恢复节点或从 LB 摘除异常节点                         |
 | 活跃房间数异常下降                             | `bili_syncplay_active_rooms`、`bili_syncplay_rooms_non_expired`                | Redis 连通性、房间过期配置、重启记录                   | 恢复 Redis，确认 `ROOM_STORE_PROVIDER` 未被改为内存  |
 | 过期房间不再被回收（reaper 停摆）              | `bili_syncplay_room_reaper_sweeps_total`                                       | 见 [reaper 还在扫吗？](#reaper-还在扫吗)               | 恢复 Redis；确认 `ROOM_CLEANUP_INTERVAL_MS` 未被调大 |
+| 孤儿清理 claim 哈希持续增长或与 queue 不一致   | `HLEN bsp:room-index-orphans`、`ZCARD bsp:room-index-orphans-queue`            | Room Reaper 结果、运行时拆除日志、ACL、两把键的 `TYPE` | 恢复 reaper/runtime store；重启前修正 ACL 或错误类型 |
 | Redis 操作失败                                 | `bili_syncplay_redis_operation_failures_total`                                 | Redis 进程、网络、ACL、密码、慢查询                    | 优先恢复 Redis；必要时执行应急降级                   |
 | 已完成的管理命令结果发布路径失败               | `bili_syncplay_admin_command_result_publish_failures_total`                    | 管理命令 publisher 饱和、Redis pub/sub、结果发布日志   | 恢复 Redis；确认关房扇出和命令总线容量健康           |
 | Redis runtime store 延迟升高                   | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                    | Redis CPU、内存、网络 RTT、命令排队                    | 扩容 Redis 或降低入口层流量                          |
