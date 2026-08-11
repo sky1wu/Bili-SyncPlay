@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { ReplyError } from "ioredis";
 import type { RoomListQuery } from "./admin/types.js";
 import {
@@ -8,6 +9,7 @@ import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 import { getRedisRoomStoreKeys } from "./redis-namespace.js";
 import {
   createPersistedRoom,
+  type OrphanedIndexClaim,
   type RoomStore,
   type RoomUpdateResult,
 } from "./room-store.js";
@@ -59,20 +61,79 @@ export type RedisRoomStoreClient = {
 // enumeration and reaping each read one key and nothing else. An earlier
 // design derived the same answers by subtracting one index from another, and
 // every scenario in which those two indexes could disagree turned into a
-// separate correctness hole.
+// separate correctness hole. `room-index-orphans` below is a cleanup-debt hash,
+// not a second room index: no room is enumerated or counted from it. Its field
+// is a room code and its value is a unique token for one orphan discovery.
+
+// The one atomic primitive for removing a room-index member that did not die
+// through the normal room deletion path. Every caller stages a tokened claim
+// before ZREM; a loser restores the claim it observed before trying. Keeping
+// this in one source block is the invariant — prune, quarantine, and reaper
+// candidate handling must not grow their own hand-written variants.
+const REMOVE_INDEX_WITH_ORPHAN_CLAIM_LUA = `
+local sequenceMember = "!sequence"
+
+local function rotateOrphanClaim(code)
+  local nextScore = redis.call(
+    "ZINCRBY", orphanedRoomsQueueKey, 1, sequenceMember
+  )
+  redis.call("ZADD", orphanedRoomsQueueKey, nextScore, code)
+end
+
+local function stageOrphanClaim(code, token)
+  redis.call("HSET", orphanedRoomsKey, code, token)
+  rotateOrphanClaim(code)
+end
+
+local function removeIndexWithOrphanClaim(code, token)
+  local previousToken = redis.call("HGET", orphanedRoomsKey, code)
+  local previousScore = redis.call("ZSCORE", orphanedRoomsQueueKey, code)
+  stageOrphanClaim(code, token)
+  if redis.call("ZREM", roomsKey, code) > 0 then
+    return 1
+  end
+
+  -- A concurrent remover already won. Preserve the token it may have handed
+  -- to a caller instead of replacing it with a token nobody owns.
+  if previousToken then
+    redis.call("HSET", orphanedRoomsKey, code, previousToken)
+  else
+    redis.call("HDEL", orphanedRoomsKey, code)
+  end
+  if previousScore then
+    redis.call("ZADD", orphanedRoomsQueueKey, previousScore, code)
+  else
+    redis.call("ZREM", orphanedRoomsQueueKey, code)
+  end
+  return 0
+end
+`;
 
 // Members whose room body is gone. Existence is re-checked inside the script
 // so a code that createRoom is reusing at this very moment cannot lose the
-// membership that create just wrote.
+// membership that create just wrote. Every removed code is added atomically to
+// a shared handoff hash so the next reaper sweep can still request its runtime
+// teardown. Shared matters because the standalone global-admin reconciles this
+// index but runs no room reaper of its own (#258).
 const PRUNE_ORPHANED_MEMBERS_LUA = `
 local roomsKey = KEYS[1]
+local orphanedRoomsKey = KEYS[2]
+local orphanedRoomsQueueKey = KEYS[3]
 local roomKeyPrefix = ARGV[1]
+local claimToken = ARGV[2]
 local removed = 0
 
-for index = 2, #ARGV do
+${REMOVE_INDEX_WITH_ORPHAN_CLAIM_LUA}
+
+for index = 3, #ARGV do
   local code = ARGV[index]
   if redis.call("EXISTS", roomKeyPrefix .. code) == 0 then
-    removed = removed + redis.call("ZREM", roomsKey, code)
+    -- Handoff first: a Lua runtime error does not roll earlier writes back. If
+    -- either handoff key is unavailable or has the wrong type, retaining the
+    -- index member lets a later pass retry instead of losing the only cleanup
+    -- trail. Restore the previous claim when another process already pruned
+    -- the member; it may still be working under that token.
+    removed = removed + removeIndexWithOrphanClaim(code, claimToken)
   end
 end
 
@@ -98,15 +159,24 @@ return 1
 // Drops the member of a body that exists but cannot be read. Enumeration
 // already skips such a room, so leaving it in the set made ZCARD count a row
 // listRooms would never return — the admin table reports a total larger than
-// the page it can render, and rooms_non_expired stays inflated. Guarded by the
-// bytes the caller read, so a body repaired in the meantime keeps its member.
+// the page it can render, and rooms_non_expired stays inflated. Before removal
+// it leaves a deferred cleanup claim: if an operator later deletes the bad
+// body, no index member would otherwise remain to name its runtime residue.
+// Guarded by the bytes the caller read, so a body repaired in the meantime
+// keeps its member.
 //
 // The body itself is deliberately left in place: it cannot be interpreted, so
 // deleting it would destroy data on a guess.
 const QUARANTINE_MEMBER_LUA = `
 local roomsKey = KEYS[1]
 local roomKey = KEYS[2]
+local orphanedRoomsKey = KEYS[3]
+local orphanedRoomsQueueKey = KEYS[4]
 local kind = redis.call("TYPE", roomKey)["ok"]
+local code = ARGV[2]
+local claimToken = ARGV[3]
+
+${REMOVE_INDEX_WITH_ORPHAN_CLAIM_LUA}
 
 if kind == "none" then
   -- No body at all; the orphan prune owns that case.
@@ -116,14 +186,14 @@ end
 if kind ~= "string" then
   -- GET would raise WRONGTYPE, so the caller could not have read bytes to
   -- compare. Such a key can never be enumerated, so its member has to go.
-  return redis.call("ZREM", roomsKey, ARGV[2])
+  return removeIndexWithOrphanClaim(code, claimToken)
 end
 
 if redis.call("GET", roomKey) ~= ARGV[1] then
   return 0
 end
 
-return redis.call("ZREM", roomsKey, ARGV[2])
+return removeIndexWithOrphanClaim(code, claimToken)
 `;
 
 // SET NX and the membership write must succeed or fail together, or a losing
@@ -239,11 +309,90 @@ return redis.call("DEL", KEYS[1])
 // a number in Lua and that is exactly how playback values got mangled before.
 const DELETE_EXPIRED_ROOMS_LUA = `
 local roomsKey = KEYS[1]
+local orphanedRoomsKey = KEYS[2]
+local orphanedRoomsQueueKey = KEYS[3]
 local roomKeyPrefix = ARGV[1]
 local now = tonumber(ARGV[2])
+local orphanLimit = tonumber(ARGV[3])
+local sweepClaimToken = ARGV[4]
 local candidates = redis.call("ZRANGEBYSCORE", roomsKey, "-inf", now)
 local deletedCodes = {}
-local orphanCodes = {}
+local orphanClaims = {}
+local orphanPositions = {}
+
+${REMOVE_INDEX_WITH_ORPHAN_CLAIM_LUA}
+
+local function roomBodyState(code)
+  local readable, rawRoom = pcall(function()
+    return redis.call("GET", roomKeyPrefix .. code)
+  end)
+  if not readable then
+    return "unusable"
+  end
+  if not rawRoom then
+    return "missing"
+  end
+
+  local ok, room = pcall(cjson.decode, rawRoom)
+  if not ok or type(room) ~= "table" then
+    return "unusable"
+  end
+  local expiresAt = room["expiresAt"]
+  if room["code"] ~= code
+    or type(room["version"]) ~= "number"
+    or type(room["createdAt"]) ~= "number"
+    or type(room["lastActiveAt"]) ~= "number"
+    or not (
+      expiresAt == cjson.null
+      or type(expiresAt) == "number"
+    ) then
+    return "unusable"
+  end
+  return "usable"
+end
+
+local function reportOrphan(code, token)
+  local position = orphanPositions[code]
+  if position then
+    orphanClaims[position + 1] = token
+  else
+    position = #orphanClaims + 1
+    orphanPositions[code] = position
+    orphanClaims[position] = code
+    orphanClaims[position + 1] = token
+  end
+end
+
+-- Reconcile/listing already removed these codes from the main index to keep
+-- counts accurate. Read, but do not consume, a bounded batch: only the caller
+-- can acknowledge a claim after runtime teardown has really settled. Rotating
+-- every delivered claim to the tail prevents one failing batch from starving
+-- newer debt, using commands available in the supported Redis 6.0 baseline.
+local stagedOrphanCodes = redis.call(
+  "ZRANGE", orphanedRoomsQueueKey, 0, orphanLimit - 1
+)
+for _, code in ipairs(stagedOrphanCodes) do
+  if code ~= sequenceMember then
+    local token = redis.call("HGET", orphanedRoomsKey, code)
+    if not token then
+      redis.call("ZREM", orphanedRoomsQueueKey, code)
+    else
+      local bodyState = roomBodyState(code)
+      if bodyState == "missing" then
+        reportOrphan(code, token)
+        rotateOrphanClaim(code)
+      elseif bodyState == "usable" then
+        redis.call("HDEL", orphanedRoomsKey, code)
+        redis.call("ZREM", orphanedRoomsQueueKey, code)
+      else
+        -- A wrong-type or malformed body is not proof that the room code was
+        -- reused. Keep the debt: if an operator later deletes that corrupt key,
+        -- this claim is the only remaining path to its runtime residue.
+        rotateOrphanClaim(code)
+      end
+    end
+  end
+end
 
 for _, code in ipairs(candidates) do
   local key = roomKeyPrefix .. code
@@ -255,7 +404,10 @@ for _, code in ipairs(candidates) do
   end)
 
   if not readable then
-    redis.call("ZREM", roomsKey, code)
+    -- The corrupt body is deliberately retained, but removing its index entry
+    -- still needs a durable trail in case an operator later deletes that body.
+    -- The staged path keeps this claim blocked while the bad key exists.
+    removeIndexWithOrphanClaim(code, sweepClaimToken)
   elseif not rawRoom then
     -- Index entry without a body: the room is already gone, so it still has to
     -- be reported — staying silent left its runtime state uncollected, and
@@ -264,8 +416,12 @@ for _, code in ipairs(candidates) do
     -- deletions though: no room died on this pass, and metering it as one would
     -- inflate reclamations with manual cleanups, older builds and corruption
     -- (#254 review).
-    redis.call("ZREM", roomsKey, code)
-    orphanCodes[#orphanCodes + 1] = code
+    -- Queue before removing the index member. The token replaces any older
+    -- claim for a previous incarnation, so a late acknowledgement of that
+    -- older claim cannot consume this new cleanup debt.
+    if removeIndexWithOrphanClaim(code, sweepClaimToken) > 0 then
+      reportOrphan(code, sweepClaimToken)
+    end
   else
     local ok, room = pcall(cjson.decode, rawRoom)
     -- cjson.decode("1") yields a truthy scalar; indexing it raises a Lua
@@ -284,7 +440,21 @@ for _, code in ipairs(candidates) do
   end
 end
 
-return { deletedCodes, orphanCodes }
+return { deletedCodes, orphanClaims }
+`;
+
+const ACKNOWLEDGE_ORPHANED_INDEX_CLAIMS_LUA = `
+local acknowledged = 0
+for index = 1, #ARGV, 2 do
+  local code = ARGV[index]
+  local token = ARGV[index + 1]
+  if redis.call("HGET", KEYS[1], code) == token then
+    redis.call("HDEL", KEYS[1], code)
+    redis.call("ZREM", KEYS[2], code)
+    acknowledged = acknowledged + 1
+  end
+end
+return acknowledged
 `;
 
 // Chunk the repair passes: a first run against a database that has never been
@@ -425,9 +595,12 @@ export async function createRedisRoomStore(
       boundedBy:
         "room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the request path",
     }) as RedisRoomStoreClient);
-  const { roomKeyPrefix, roomsByExpiryKey } = getRedisRoomStoreKeys(
-    options.namespace,
-  );
+  const {
+    orphanedRoomCodesKey,
+    orphanedRoomQueueKey,
+    roomKeyPrefix,
+    roomsByExpiryKey,
+  } = getRedisRoomStoreKeys(options.namespace);
   const now = options.now ?? Date.now;
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
@@ -534,13 +707,16 @@ export async function createRedisRoomStore(
         unreadable.map(async ({ code, raw }) =>
           redis.eval(
             QUARANTINE_MEMBER_LUA,
-            2,
+            4,
             roomsByExpiryKey,
             roomKey(code),
+            orphanedRoomCodesKey,
+            orphanedRoomQueueKey,
             // Empty when the read itself failed; the script's type check
             // decides that case without consulting these bytes.
             raw ?? "",
             code,
+            randomUUID(),
           ),
         ),
       );
@@ -567,9 +743,12 @@ export async function createRedisRoomStore(
 
       await redis.eval(
         PRUNE_ORPHANED_MEMBERS_LUA,
-        1,
+        3,
         roomsByExpiryKey,
+        orphanedRoomCodesKey,
+        orphanedRoomQueueKey,
         roomKeyPrefix,
+        randomUUID(),
         ...codes,
       );
     } while (cursor !== "0");
@@ -672,9 +851,12 @@ export async function createRedisRoomStore(
         try {
           await redis.eval(
             PRUNE_ORPHANED_MEMBERS_LUA,
-            1,
+            3,
             roomsByExpiryKey,
+            orphanedRoomCodesKey,
+            orphanedRoomQueueKey,
             roomKeyPrefix,
+            randomUUID(),
             ...orphanedCodes,
           );
         } catch {
@@ -692,11 +874,14 @@ export async function createRedisRoomStore(
             unreadable.map(async ({ code, raw }) =>
               redis.eval(
                 QUARANTINE_MEMBER_LUA,
-                2,
+                4,
                 roomsByExpiryKey,
                 roomKey(code),
+                orphanedRoomCodesKey,
+                orphanedRoomQueueKey,
                 raw as string,
                 code,
+                randomUUID(),
               ),
             ),
           );
@@ -829,19 +1014,44 @@ export async function createRedisRoomStore(
       // not survive the RESP conversion, only its array part does.
       const swept = await redis.eval(
         DELETE_EXPIRED_ROOMS_LUA,
-        1,
+        3,
         roomsByExpiryKey,
+        orphanedRoomCodesKey,
+        orphanedRoomQueueKey,
         roomKeyPrefix,
         String(currentTime),
+        REPAIR_CHUNK_SIZE,
+        randomUUID(),
       );
       const codesAt = (index: number): string[] => {
         const group = Array.isArray(swept) ? swept[index] : null;
         return Array.isArray(group) ? (group as string[]) : [];
       };
+      const orphanedClaimValues = codesAt(1);
+      const orphanedIndexClaims: OrphanedIndexClaim[] = [];
+      for (let index = 0; index + 1 < orphanedClaimValues.length; index += 2) {
+        orphanedIndexClaims.push({
+          code: orphanedClaimValues[index],
+          token: orphanedClaimValues[index + 1],
+        });
+      }
       return {
         deletedRoomCodes: codesAt(0),
-        orphanedIndexCodes: codesAt(1),
+        orphanedIndexCodes: orphanedIndexClaims.map(({ code }) => code),
+        orphanedIndexClaims,
       };
+    },
+    async acknowledgeOrphanedIndexClaims(claims) {
+      if (claims.length === 0) {
+        return;
+      }
+      await redis.eval(
+        ACKNOWLEDGE_ORPHANED_INDEX_CLAIMS_LUA,
+        2,
+        orphanedRoomCodesKey,
+        orphanedRoomQueueKey,
+        ...claims.flatMap(({ code, token }) => [code, token]),
+      );
     },
     async listRooms(
       query: Pick<

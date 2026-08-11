@@ -244,6 +244,19 @@
   `leaveCurrentRoom` 在自身持久化失败且 socket 仍开着时会把成员恢复回来，
   所以在服务端仍占着席位的情况下告诉客户端加入被拒，会让两边就此各说各话。
 
+- **剪掉孤儿房间索引项，仍然欠一次运行时拆除。** 定时对账与房间列表都会移除
+  body 已不存在的索引成员，以保持枚举与计数一致；但只做移除，会把 room reaper
+  原本能交给 `room-service` 的唯一房间码一并消费掉（#258）。因此每一条剪枝路径都
+  必须原子地把带 token 的 claim 写进共享 `room-index-orphans` 哈希及其
+  `room-index-orphans-queue` 投递索引。隔离不可读 body 时，删除其索引成员前同样要留下延后
+  claim：坏 body 存在期间阻止投递，修复后清 claim，删除后才使其可投递。这里必须共享：
+  独立的 global-admin 会做索引对账，却不运行
+  room reaper。`deleteExpiredRooms` 只用 Redis 6.0 命令，以有界、轮转批次读取且不消费 claim，
+  再次确认期间没有新 room body 占用该 code，并把仍是孤儿的 code 及 claim token 上报。
+  `room-service` 只有在既有代守卫保护的运行时拆除确实完成后才确认该 token；
+  因此进程中途退出时，其他 room node 仍能接手，而同一 code 被回收再度成为孤儿后，迟到的
+  旧确认也删不掉新的 claim。
+
 ## 一次性广播需要重试轨迹，重复发送的则不需要
 
 几乎每一条 `room_state_updated` 都会被下一次 `video:share` / `playback:update` / `profile:update` 重发，

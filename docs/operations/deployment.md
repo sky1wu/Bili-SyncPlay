@@ -147,6 +147,14 @@ Expected response:
 PONG
 ```
 
+Redis 6.0 or newer is supported. Connectivity alone is not enough when Redis
+ACLs are enabled: the room node and global-admin identities need read/write
+access to the room body/index keys and to both orphan-cleanup handoff keys. For
+the default namespace, include `bsp:rooms-by-expiry` and
+`bsp:room-index-orphans*` in addition to `bsp:room:*`. A missing handoff ACL can
+make bootstrap reconciliation, room listing, or expiry sweeps fail even on a
+single-node deployment.
+
 Expected startup log:
 
 ```text
@@ -475,6 +483,19 @@ If you know only `server/` changed and `packages/protocol` is unchanged, you can
 npm run build -w @bili-syncplay/server
 ```
 
+Before the first restart of a build that uses the room orphan-cleanup handoff:
+
+1. Grant both service identities read/write ACL access to
+   `bsp:room-index-orphans` and `bsp:room-index-orphans-queue` (replace `bsp`
+   with `REDIS_NAMESPACE`).
+2. Include both keys in the same Redis backup. The hash stores outstanding
+   tokened cleanup claims; the sorted set is their bounded rotating delivery
+   index.
+3. Monitor `HLEN bsp:room-index-orphans`. Once the queue is initialized,
+   `ZCARD bsp:room-index-orphans-queue` is normally that value plus one reserved
+   sequence member. Growth or persistent drift means cleanup, ACLs, or key
+   types need investigation.
+
 Single-node restart flow (the units created in step 3):
 
 ```bash
@@ -496,6 +517,24 @@ If you run multiple room nodes, prefer a rolling restart instead of restarting e
 2. verify `GET /readyz`, logs, and the global admin overview recover cleanly
 3. continue with the next room node
 4. restart `global-admin` last
+
+Exception: the first rollout of the orphan-cleanup handoff cannot mix old and
+new room-store holders. An old room node or global-admin can still prune an
+orphan without creating a claim. For that rollout, drain traffic and stop all
+old room nodes and global-admin before starting any new process. Later upgrades
+where both versions implement the handoff may use the rolling order above.
+
+If you must roll back to an older build, do not use one instantaneous
+`HLEN=0` as the drain barrier: shutdown stops the room reaper before the index
+reconciler, so a new claim can still appear while a process exits. Drain room
+traffic and stop every current room node and global-admin first. Only a zero
+observed after all processes exit is stable. If claims remain, start one current
+room node isolated from traffic, wait for successful reaper sweeps until the
+hash is zero, stop it cleanly, and check again after exit; repeat or abort if
+that post-stop check is nonzero. Preserve both handoff keys in backups; older
+builds ignore them, but deleting them loses pending runtime cleanup. A rollback
+to the legacy two-index room store also requires the rebuild procedure in the
+[multi-node deployment guide](./multi-node.md).
 
 ### Graceful shutdown
 
