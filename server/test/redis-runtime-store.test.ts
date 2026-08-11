@@ -196,7 +196,7 @@ test("redis runtime store bounds its pre-QUIT drain and counts every active Redi
   const store = await createRedisRuntimeStore("redis://unused", {
     redisClient: {
       ...createFakeRedisClient([neverAnswers]),
-      zadd: () => neverAnswers,
+      eval: () => neverAnswers,
       zremrangebyscore: () => neverAnswers,
       quit: () => neverAnswers,
       disconnect: () => {
@@ -218,9 +218,14 @@ test("redis runtime store bounds its pre-QUIT drain and counts every active Redi
     createSession("session-close"),
     "token-close",
   );
-  // This helper deliberately gives a live caller the command's real outcome;
-  // shutdown must bound its own wait without changing that API contract.
-  void store.blockMemberToken("ROOMCLOSE", "token-close", 60_000);
+  // This durable kick deliberately gives a live caller the command's real
+  // outcome; shutdown must bound its own wait without changing that contract.
+  void store.evictMemberToken(
+    "ROOMCLOSE",
+    "member-close",
+    "token-close",
+    60_000,
+  );
   // Direct reads can outlive an upstream shutdown step too. Since #277 this one
   // answers its caller at `pendingOperationTimeoutMs` — hence the catch — while
   // its command stays tracked, so the drain below still has to wait for it.
@@ -338,9 +343,14 @@ test("redis runtime store shares room sessions and member token state across ins
       "member-b",
     );
 
-    // `blockMemberToken` settles once the block is durable, so awaiting it is
-    // the barrier the sleep was standing in for.
-    await storeA.blockMemberToken("ROOM01", "token-a", currentTime + 500);
+    // The production kick operation settles once both the block and identity
+    // revocation are durable, so awaiting it is the cross-instance barrier.
+    await storeA.evictMemberToken(
+      "ROOM01",
+      "member-a",
+      "token-a",
+      currentTime + 500,
+    );
     assert.equal(await storeB.isMemberTokenBlocked("ROOM01", "token-a"), true);
 
     currentTime += 600;

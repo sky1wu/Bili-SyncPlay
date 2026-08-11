@@ -121,16 +121,6 @@ export type RuntimeStore = {
   ) => ActiveRoom;
   findMemberIdByToken: (code: string, memberToken: string) => string | null;
   /**
-   * Block a token until `expiresAt`. Like {@link RuntimeStore.revokeMemberToken},
-   * the returned promise settles once the block is durable and rejects if the
-   * write failed — the kick acts on it immediately.
-   */
-  blockMemberToken: (
-    code: string,
-    memberToken: string,
-    expiresAt: number,
-  ) => void | Promise<void>;
-  /**
    * Evict a member: block their token AND end their identity, as ONE commit.
    *
    * A kick is a single act, but it used to be two independent durable writes.
@@ -500,11 +490,6 @@ export function createInMemoryRuntimeStore(
         room.memberTokens.entries(),
         memberToken,
       );
-    },
-    blockMemberToken(code, memberToken, expiresAt) {
-      const activeEntries = pruneBlockedMemberTokens(code, now());
-      activeEntries.push({ memberToken, expiresAt });
-      blockedMemberTokensByRoom.set(code, activeEntries);
     },
     isMemberTokenBlocked(code, memberToken, currentTime = now()) {
       const activeEntries = pruneBlockedMemberTokens(code, currentTime);

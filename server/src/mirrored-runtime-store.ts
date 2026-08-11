@@ -139,10 +139,6 @@ export function createMirroredRuntimeStore(
       sharedRuntimeStore.addMember,
     ),
     findMemberIdByToken: readLocal(localRuntimeStore.findMemberIdByToken),
-    blockMemberToken: mirrorAwaitedWrite(
-      localRuntimeStore.blockMemberToken,
-      sharedRuntimeStore.blockMemberToken,
-    ),
     isMemberTokenBlocked: readLocal(localRuntimeStore.isMemberTokenBlocked),
     tryClaimMessageSlot: readShared(sharedRuntimeStore.tryClaimMessageSlot),
     releaseMessageSlot: readShared(sharedRuntimeStore.releaseMessageSlot),

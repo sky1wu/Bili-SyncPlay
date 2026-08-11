@@ -823,14 +823,16 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: the durable writes.** The runtime store's five
-  `trackAwaitedOperation` writes and the room store's four room-body writes stay
-  uncapped, because #237 settled that an answer which can be wrong is worse than
-  a slow one and their effects do not expire on their own. That is the whole of
-  the difference from `acquireRoomLock` and `tryClaimMessageSlot`, which ARE
-  capped: a `SET NX PX` that lands after its caller gave up releases itself at
-  its TTL, so "may have landed" costs one lock interval rather than a permanent
-  wrong answer.
+- **Still open, deliberately: eight durable writes.** Four runtime-store writes
+  through `trackAwaitedOperation` and four room-body writes stay uncapped,
+  because #237 settled that an answer which can be wrong is worse than a slow
+  one and their effects do not expire on their own. The standalone
+  `blockMemberToken` path had no production caller — kicks already use the
+  atomic `evictMemberToken` operation — so #277 removed it instead of preserving
+  a ninth unbounded write. The remaining eight differ from `acquireRoomLock`
+  and `tryClaimMessageSlot`, which ARE capped: a `SET NX PX` that lands after
+  its caller gave up releases itself at its TTL, so "may have landed" costs one
+  lock interval rather than a permanent wrong answer.
 - **An expiring claim still has an owner.** Claiming writes the token, slot TTL,
   and teardown-index score in one Lua operation, so an old tracking write cannot
   arrive after a newer owner and overwrite its score. Early cleanup uses a

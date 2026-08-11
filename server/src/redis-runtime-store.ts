@@ -246,7 +246,6 @@ const RUNTIME_STORE_METHOD_NAMES = [
   "addMember",
   "findMemberIdByToken",
   "isMemberTokenBlocked",
-  "blockMemberToken",
   "tryClaimMessageSlot",
   "releaseMessageSlot",
   "acquireRoomLock",
@@ -812,17 +811,18 @@ export async function createRedisRuntimeStore(
     // also why the bound has to be chosen per CALL, not per method:
     // `loadSession` is reached from the join path AND from the reaper.
     //
-    // What this does NOT resolve: the five durable writes through
-    // `trackAwaitedOperation` (`blockMemberToken`, `evictMemberToken`,
-    // `revokeMemberToken`, `markRoomGeneration`, `deleteRoom`). Capping those
+    // What this does NOT resolve: the four durable writes through
+    // `trackAwaitedOperation` (`evictMemberToken`, `revokeMemberToken`,
+    // `markRoomGeneration`, `deleteRoom`). Capping those
     // re-opens #237's trade that an answer which can be wrong is worse than a
     // slow one, and their side effects do not expire on their own the way a
-    // lock or a dedup slot does — so they are a derivation with its own
-    // review, not a line moved in this one.
+    // lock or a dedup slot does. The former standalone `blockMemberToken` path
+    // had no production caller and was removed in #277 rather than preserving
+    // another unbounded persistent write.
     createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's five durable writes",
+        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's four durable writes",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
@@ -964,10 +964,10 @@ export async function createRedisRuntimeStore(
    * `maxPendingOperations` is the one answer that carries no ambiguity at all —
    * the command was never issued.
    *
-   * Applied to reads, and to writes whose side effect expires on its own: an
+   * Applied to reads, and to writes whose side effect expires on its own. An
    * `acquireRoomLock` or `tryClaimMessageSlot` that secretly landed releases
    * itself at its TTL, so "may have landed" costs at most one lock interval.
-   * The five durable writes are not in that class; see the note on the client.
+   * The four durable writes are not in that class; see the note on the client.
    *
    * `async`, and that is load-bearing rather than style: two callers build a
    * `Promise.all([...])` literal out of two of these, and a SYNCHRONOUS throw
@@ -1811,23 +1811,6 @@ export async function createRedisRuntimeStore(
         Object.entries(memberTokens),
         memberToken,
       );
-    },
-    blockMemberToken(code: string, memberToken: string, expiresAt: number) {
-      ensurePendingCapacity("block_member_token");
-      // Durable-first, same as `revokeMemberToken`: the kick awaits this and
-      // then reports the member evicted, so an unconfirmed write would report an
-      // eviction that had not happened on any other node yet, and mirroring
-      // before it landed would leave this node blocking a token nobody else does.
-      return trackAwaitedOperation(
-        "block_member_token",
-        redis.zadd(
-          blockedTokensKey(keyPrefix, code),
-          String(expiresAt),
-          memberToken,
-        ),
-      ).then(() => {
-        localRuntimeStore.blockMemberToken(code, memberToken, expiresAt);
-      });
     },
     async isMemberTokenBlocked(
       code: string,

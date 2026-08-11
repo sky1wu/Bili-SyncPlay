@@ -9,7 +9,6 @@ export type ActiveRoomRegistry = {
   addMember: RuntimeStore["addMember"];
   listClusterSessionsByRoom: RuntimeStore["listClusterSessionsByRoom"];
   findMemberIdByToken: RuntimeStore["findMemberIdByToken"];
-  blockMemberToken: RuntimeStore["blockMemberToken"];
   isMemberTokenBlocked: RuntimeStore["isMemberTokenBlocked"];
   tryClaimMessageSlot: RuntimeStore["tryClaimMessageSlot"];
   releaseMessageSlot: RuntimeStore["releaseMessageSlot"];
@@ -36,7 +35,6 @@ export function createActiveRoomRegistry(
       return Array.from(store.getRoom(roomCode)?.members.values() ?? []);
     },
     findMemberIdByToken: store.findMemberIdByToken,
-    blockMemberToken: store.blockMemberToken,
     isMemberTokenBlocked: store.isMemberTokenBlocked,
     tryClaimMessageSlot: store.tryClaimMessageSlot,
     releaseMessageSlot: store.releaseMessageSlot,

@@ -199,8 +199,10 @@ before changing the code it describes.
   `stalled` unreachable. Per command, never per operation (`getRoom` reads one
   session per member). A request that merely joins a background pass bounds its
   own WAIT, absorbing the pass's rejection so it cannot end the process. Still
-  open on purpose: the nine durable writes, where #237's trade holds because
-  their effects — unlike a lock's or a dedup slot's — do not expire.
+  open on purpose: the eight durable writes, where #237's trade holds because
+  their effects — unlike a lock's or a dedup slot's — do not expire. The ninth,
+  standalone `blockMemberToken`, had no production caller and was removed rather
+  than kept as another unbounded path beside atomic eviction.
   Three more the review round added: **a refusal cap must never be reachable by
   ordinary fan-out** (every read that maps over a deployment-sized collection
   goes through a waiting limiter sized under admission, placed at the fan-out
