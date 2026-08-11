@@ -56,12 +56,12 @@
  *
  * ## What that leaves open, deliberately
  *
- * The five exempt connections still have command paths with no caller-side
- * bound: the room store's request path, the runtime store's
- * `trackAwaitedOperation` and its two plain reads. A stalled Redis still hangs
- * a join there. That gap is real and it is NOT closeable by this option — the
- * fix is a cap that keeps the call tracked, or a separate connection for the
- * paths that want a backstop, and both are derivations with their own review.
+ * #277 closed the request-path gap with a cap that keeps each command tracked.
+ * Eight persistent writes deliberately remain uncapped: four runtime-store
+ * writes through `trackAwaitedOperation` and four room-body writes. Their
+ * effects do not expire, so a timed-out answer could be contradicted by a late
+ * write. The unused standalone `blockMemberToken` path was removed in #277
+ * instead of keeping a ninth unbounded write alongside atomic eviction.
  *
  * ## What `commandTimeout` does NOT do
  *

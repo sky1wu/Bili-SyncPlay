@@ -1190,9 +1190,6 @@ test("room service flushes pending runtime store writes before exposing updated 
     findMemberIdByToken(code, memberToken) {
       return activeRooms.findMemberIdByToken(code, memberToken);
     },
-    blockMemberToken(code, memberToken, expiresAt) {
-      activeRooms.blockMemberToken(code, memberToken, expiresAt);
-    },
     isMemberTokenBlocked(code, memberToken, currentTime) {
       return activeRooms.isMemberTokenBlocked(code, memberToken, currentTime);
     },

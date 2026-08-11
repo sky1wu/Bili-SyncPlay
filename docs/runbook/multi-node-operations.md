@@ -735,12 +735,13 @@ on the background passes**, on purpose:
   `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`.
 
-Two paths remain uncapped by design: the runtime store's five durable writes
-through `trackAwaitedOperation` (kick / revoke / generation / delete) and the
-room store's four room-body writes. #237 settled that an answer which can be
-wrong is worse than a slow one, and unlike a lock or a dedup slot their effects
-do not expire on their own — so those commands are still where a request can
-wait without limit.
+Eight persistent writes remain uncapped by design: the runtime store's four
+writes through `trackAwaitedOperation` (evict / revoke / generation / delete)
+and the room store's four room-body writes. Their effects do not expire, so
+#237's rule still applies: an answer that may be wrong is worse than a slow one.
+The unused standalone `blockMemberToken` operation was removed in #277; kicks
+already use the atomic `evictMemberToken` write, so keeping a second blocking
+primitive would only preserve another unbounded path.
 
 Every client is built by `createBoundedRedisClient`, which takes a **required**
 declaration of which of the two it has — and a caller-side one has to NAME the
@@ -790,8 +791,8 @@ incident:
   store's shedding line, a 503 from the audit and event pages. Since #277 the
   request paths on the room and runtime stores are in that list too — they log
   `reason=timeout` and answer their caller. What still stays **silent** is the
-  durable writes named above; a kick or a room delete that never returns is what
-  that looks like from outside.
+  eight durable writes named above; a kick or a room-body write
+  that never returns is what that looks like from outside.
 
 ## Post-Change Regression Checklist
 

@@ -53,7 +53,7 @@ test("runtime store tracks room membership and kicked member tokens", async () =
   assert.equal(store.getActiveMemberCount(), 1);
   assert.equal(store.findMemberIdByToken("ROOM01", "token-1"), "member-1");
 
-  store.blockMemberToken("ROOM01", "token-1", currentTime + 500);
+  store.evictMemberToken("ROOM01", "member-1", "token-1", currentTime + 500);
   assert.equal(store.isMemberTokenBlocked("ROOM01", "token-1"), true);
 
   currentTime += 600;

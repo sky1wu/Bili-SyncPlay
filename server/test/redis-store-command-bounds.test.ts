@@ -226,13 +226,13 @@ const RUNTIME_CALLER_CHOSEN: Record<
 };
 
 /**
- * The five durable writes #237 argued must never be told they failed while
- * their write may still land. Their side effect does not expire on its own, so
- * bounding them re-opens that trade — deliberately still open (#277).
+ * The four remaining durable writes #237 argued must never be told they failed
+ * while their write may still land. Their side effect does not expire on its
+ * own, so bounding them re-opens that trade — deliberately still open (#277).
+ * The unused standalone token-block write was deleted instead of being kept as
+ * another unbounded path.
  */
 const RUNTIME_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
-  blockMemberToken:
-    "#237: an answer that can be wrong is worse than a slow one",
   evictMemberToken:
     "#237: an answer that can be wrong is worse than a slow one",
   revokeMemberToken:
