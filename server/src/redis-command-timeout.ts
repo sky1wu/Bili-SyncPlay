@@ -57,11 +57,12 @@
  * ## What that leaves open, deliberately
  *
  * #277 closed the request-path gap with a cap that keeps each command tracked.
- * Seven persistent writes deliberately remain uncapped: three runtime-store
- * writes through `trackAwaitedOperation` and four room-body writes. Their
+ * Six persistent writes deliberately remain uncapped: three runtime-store
+ * writes through `trackAwaitedOperation` and three room-body writes. Their
  * effects do not expire, so a timed-out answer could be contradicted by a late
- * write. The unused standalone `blockMemberToken` path was removed in #277;
- * atomic eviction instead bounds the executor's wait while keeping its real
+ * write. The unused standalone `blockMemberToken` path and unconditional
+ * room-store `saveRoom` write were removed in #277; atomic eviction instead
+ * bounds the executor's wait while keeping its real
  * effect alive, reports a typed unconfirmed outcome, and keeps its block
  * deadline monotonic so cross-node retries can land in either order.
  *

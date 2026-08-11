@@ -74,30 +74,23 @@ async function buildFixture() {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const runtimeStore = createInMemoryRuntimeStore(() => 1_000);
 
-  await roomStore.createRoom({
+  const roomA = await roomStore.createRoom({
     code: "ROOMAA",
     joinToken: "join-a",
     createdAt: 100,
     ownerMemberId: "owner-alice",
     ownerDisplayName: "Alice",
   });
-  await roomStore.saveRoom({
-    code: "ROOMAA",
-    joinToken: "join-a",
-    createdAt: 100,
-    ownerMemberId: "owner-alice",
-    ownerDisplayName: "Alice",
+  const updatedRoomA = await roomStore.updateRoom(roomA.code, roomA.version, {
     sharedVideo: {
       videoId: "BV1aa",
       url: "https://www.bilibili.com/video/BV1aa",
       title: "猫咪的日常 vlog",
       sharedByDisplayName: "Alice",
     },
-    playback: null,
-    version: 1,
     lastActiveAt: 200,
-    expiresAt: null,
   });
+  assert.equal(updatedRoomA.ok, true);
   runtimeStore.registerSession(
     makeSession({
       id: "session-alice",
@@ -117,30 +110,23 @@ async function buildFixture() {
   );
   runtimeStore.markSessionJoinedRoom("session-bob", "ROOMAA");
 
-  await roomStore.createRoom({
+  const roomB = await roomStore.createRoom({
     code: "ROOMBB",
     joinToken: "join-b",
     createdAt: 110,
     ownerMemberId: "owner-carol",
     ownerDisplayName: "Carol",
   });
-  await roomStore.saveRoom({
-    code: "ROOMBB",
-    joinToken: "join-b",
-    createdAt: 110,
-    ownerMemberId: "owner-carol",
-    ownerDisplayName: "Carol",
+  const updatedRoomB = await roomStore.updateRoom(roomB.code, roomB.version, {
     sharedVideo: {
       videoId: "BV1bb",
       url: "https://www.bilibili.com/video/BV1bb",
       title: "深度学习入门教程",
       sharedByDisplayName: "Carol",
     },
-    playback: null,
-    version: 1,
     lastActiveAt: 210,
-    expiresAt: null,
   });
+  assert.equal(updatedRoomB.ok, true);
   runtimeStore.registerSession(
     makeSession({
       id: "session-carol",
@@ -151,25 +137,17 @@ async function buildFixture() {
   );
   runtimeStore.markSessionJoinedRoom("session-carol", "ROOMBB");
 
-  await roomStore.createRoom({
+  const roomC = await roomStore.createRoom({
     code: "ROOMCC",
     joinToken: "join-c",
     createdAt: 120,
     ownerMemberId: null,
     ownerDisplayName: null,
   });
-  await roomStore.saveRoom({
-    code: "ROOMCC",
-    joinToken: "join-c",
-    createdAt: 120,
-    ownerMemberId: null,
-    ownerDisplayName: null,
-    sharedVideo: null,
-    playback: null,
-    version: 1,
+  const updatedRoomC = await roomStore.updateRoom(roomC.code, roomC.version, {
     lastActiveAt: 220,
-    expiresAt: null,
   });
+  assert.equal(updatedRoomC.ok, true);
 
   const service = createAdminRoomQueryService({
     instanceId: INSTANCE_ID,

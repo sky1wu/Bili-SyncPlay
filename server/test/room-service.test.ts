@@ -4402,19 +4402,16 @@ test("a failed generation stamp does not roll back a room that recycled the code
         // Concurrently: our memberless room is expired and reaped, and another
         // request takes the freed code. Only then does our stamp fail.
         await roomStore.deleteRoom("ROOMRC");
-        await roomStore.saveRoom({
+        const replacement = await roomStore.createRoom({
           code: "ROOMRC",
           joinToken: "replacement-token",
           ownerMemberId: "other-owner",
           ownerDisplayName: "Bob",
           createdAt: 2_000,
-          lastActiveAt: 2_000,
-          expiresAt: null,
-          version: 1,
-          sharedVideo: null,
-          playback: null,
         });
-        await roomStore.updateRoom("ROOMRC", 1, { lastActiveAt: 2_500 });
+        await roomStore.updateRoom("ROOMRC", replacement.version, {
+          lastActiveAt: 2_500,
+        });
         throw new Error("redis unavailable");
       },
     },

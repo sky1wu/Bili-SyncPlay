@@ -748,11 +748,12 @@ on the background passes**, on purpose:
   `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`.
 
-Seven persistent writes remain uncapped by design: the runtime store's three
+Six persistent writes remain uncapped by design: the runtime store's three
 writes through `trackAwaitedOperation` (revoke / generation / delete) and the
-room store's four room-body writes. Their effects do not expire, so #237's rule
+room store's three room-body writes. Their effects do not expire, so #237's rule
 still applies: an answer that may be wrong is worse than a slow one. The unused
-standalone `blockMemberToken` operation was removed in #277. The atomic
+standalone `blockMemberToken` operation and the unused unconditional room-store
+`saveRoom` write were removed in #277. The atomic
 `evictMemberToken` call now caps only the executor's wait: it returns
 `status=error, confirmation=unconfirmed, code=block_unconfirmed` at the
 deadline, while its original promise keeps the Redis write and local mirrors
@@ -818,7 +819,7 @@ incident:
   `status=error, confirmation=unconfirmed`; its complete kick effect remains
   outstanding. Retry is safe because the block deadline only moves later. What
   still stays **silent**
-  is the seven durable writes named above; a
+  is the six durable writes named above; a
   revoke, teardown write, or room-body write that never returns is what that
   looks like from outside.
 

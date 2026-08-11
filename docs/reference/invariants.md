@@ -823,11 +823,12 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: seven durable writes.** Three runtime-store writes
-  through `trackAwaitedOperation` and four room-body writes stay uncapped,
+- **Still open, deliberately: six durable writes.** Three runtime-store writes
+  through `trackAwaitedOperation` and three room-body writes stay uncapped,
   because #237 settled that an answer which can be wrong is worse than a slow
   one and their effects do not expire on their own. The standalone
-  `blockMemberToken` path had no production caller, so #277 removed it. Atomic
+  `blockMemberToken` path and the room store's unconditional `saveRoom` write
+  had no production callers, so #277 removed them. Atomic
   `evictMemberToken` is different: the admin executor caps only its own wait and
   reports `status=error, confirmation=unconfirmed, code=block_unconfirmed`,
   while the original promise keeps the Redis write and both local-mirror
@@ -854,7 +855,7 @@ do NOT compose, and that is the part that decides which connection gets which:
   owns. The gate matters because the Redis bus may already have captured a
   handler behind a promise boundary; such a handler answers `stale_target`
   instead of creating fresh work after the drain snapshot.
-  The remaining seven differ from
+  The remaining six differ from
   `acquireRoomLock` and `tryClaimMessageSlot`, which ARE capped at the store:
   a `SET NX PX` that lands after its caller gave up releases itself at its TTL,
   so "may have landed" costs one lock interval rather than a permanent wrong

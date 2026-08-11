@@ -209,10 +209,11 @@ before changing the code it describes.
   shut the dispatch gate before unsubscribe can wait, and drain accepted
   handlers plus late evictions inside one shared budget; report what remains
   instead of relying on a later store close to do it implicitly. Still
-  open on purpose: the seven durable writes, where #237's trade holds because
+  open on purpose: the six durable writes, where #237's trade holds because
   their effects — unlike a lock's or a dedup slot's — do not expire. The former
   standalone `blockMemberToken` had no production caller and was removed rather
-  than kept as another unbounded path beside atomic eviction.
+  than kept as another unbounded path beside atomic eviction; the room store's
+  unused unconditional `saveRoom` write was removed for the same reason.
   Three more the review round added: **a refusal cap must never be reachable by
   ordinary fan-out** (every read that maps over a deployment-sized collection
   goes through a waiting limiter sized under admission, placed at the fan-out
