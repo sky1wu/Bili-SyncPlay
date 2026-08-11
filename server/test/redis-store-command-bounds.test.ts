@@ -501,8 +501,6 @@ const ROOM_BOUNDED_ELSEWHERE: Record<string, string> = {
 const ROOM_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
   createRoom:
     "#237's trade: the write may land after the caller is told it did not",
-  saveRoom:
-    "#237's trade: the write may land after the caller is told it did not",
   updateRoom: "read half capped; the CAS is #237's trade",
   deleteRoom:
     "#237's trade: the write may land after the caller is told it did not",

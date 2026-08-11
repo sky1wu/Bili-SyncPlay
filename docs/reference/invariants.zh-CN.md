@@ -576,10 +576,11 @@
 - **Node 的 `requestTimeout` 不是慢 handler 的兜底。** 它约束的是**接收**请求，不是产出响应，
   所以一个在等僵死 Redis 的 HTTP handler 永远不会被答复——这是实测结论，而 #269 和 #277 的
   第一轮都曾在注释里倚靠它。任何"这条路径至少还有 HTTP 服务器兜底"的论证在这里都不成立。
-- **仍然刻意留着的：七个持久写。** 运行时存储经 `trackAwaitedOperation` 的三个写和房间
-  存储的四个房间体写维持无上限，因为 #237 已经判过"一个可能是错的答复比一个慢的答复更
-  糟"，而它们的副作用不会自己过期。独立的 `blockMemberToken` 路径没有生产调用方，所以
-  #277 直接删除它。原子的 `evictMemberToken` 不同：管理命令执行器只限制自己的等待并返回
+- **仍然刻意留着的：六个持久写。** 运行时存储经 `trackAwaitedOperation` 的三个写和房间
+  存储的三个房间体写维持无上限，因为 #237 已经判过"一个可能是错的答复比一个慢的答复更
+  糟"，而它们的副作用不会自己过期。独立的 `blockMemberToken` 路径和房间存储中无条件写入的
+  `saveRoom` 都没有生产调用方，所以 #277 直接删除了它们。原子的 `evictMemberToken` 不同：
+  管理命令执行器只限制自己的等待并返回
   `status=error, confirmation=unconfirmed, code=block_unconfirmed`，原始 Promise 继续承载
   Redis 写入和两层本地镜像更新，再断开套接字以触发正常离房清理。最终的
   `admin_command_executed` 日志归真实
@@ -595,7 +596,7 @@
   `admin_command_consumer_close_unfinished`，分别报告仍未结束的 handler 与驱逐，而不是依赖
   更晚的 runtime-store 关闭去排空一份本来属于 consumer 的效果。分发闸门不可省：Redis 总线
   可能已经在 Promise 边界后捕获了 handler；这类 handler 在关服后应答 `stale_target`，不能在
-  drain 快照之后再创建新工作。剩下七个与在
+  drain 快照之后再创建新工作。剩下六个与在
   store 内**已经**加了上限的
   `acquireRoomLock`、`tryClaimMessageSlot` 不同：一条 `SET NX PX` 即使在调用方放弃之后
   才落地，也会在 TTL 到期时自行释放，"可能已经落地"的代价是一个锁周期，而不是一个永久

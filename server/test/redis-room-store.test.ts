@@ -187,7 +187,14 @@ test("redis room store scores non-expiring rooms at +inf and expiring ones at th
     assert.equal(revived.ok, true);
     assert.equal(await redis.zscore(roomsKey, room.code), "inf");
 
-    await store.saveRoom({ ...room, expiresAt: 1_500, lastActiveAt: 900 });
+    if (!revived.ok) {
+      throw new Error("Expected revive to succeed.");
+    }
+    const reexpired = await store.updateRoom(room.code, revived.room.version, {
+      expiresAt: 1_500,
+      lastActiveAt: 900,
+    });
+    assert.equal(reexpired.ok, true);
     assert.equal(await redis.zscore(roomsKey, room.code), "1500");
   } finally {
     await store.deleteRoom("SCORE1");
@@ -1090,54 +1097,6 @@ test("redis room count answers every filter from the sorted set alone", async (t
     await store.deleteRoom("GONEBB");
     await store.deleteRoom("LATERC");
     await redis.del(`${namespace}:rooms-by-expiry`);
-    await redis.quit();
-    await store.close();
-  }
-});
-
-test("redis room save rolls the room body back when indexing fails", async (t) => {
-  if (!REDIS_URL) {
-    t.skip("REDIS_URL is not configured.");
-    return;
-  }
-
-  const namespace = uniqueNamespace("saveroll");
-  const roomsKey = `${namespace}:rooms-by-expiry`;
-  const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = await connect();
-
-  try {
-    const room = await store.createRoom({
-      code: "SAVERB",
-      joinToken: "join-token-123456",
-      createdAt: 1,
-    });
-    const before = await store.getRoom(room.code);
-    assert.ok(before);
-
-    // Wrong type for the set key: the body is written first and the ZADD then
-    // fails. Reporting the failure is not enough — the caller believes nothing
-    // was saved, so the body must still hold its previous state, or the index
-    // would carry a score for a room state that never took effect.
-    await redis.del(roomsKey);
-    await redis.set(roomsKey, "not-a-sorted-set");
-
-    await assert.rejects(() =>
-      store.saveRoom({ ...before, expiresAt: 500, lastActiveAt: 400 }),
-    );
-    assert.deepEqual(await store.getRoom(room.code), before);
-
-    // A save that would have created the body must leave none behind.
-    await assert.rejects(() =>
-      store.saveRoom({ ...before, code: "SAVENW", expiresAt: 600 }),
-    );
-    assert.equal(await redis.exists(`${namespace}:room:SAVENW`), 0);
-  } finally {
-    await redis.del(
-      `${namespace}:room:SAVERB`,
-      `${namespace}:room:SAVENW`,
-      roomsKey,
-    );
     await redis.quit();
     await store.close();
   }

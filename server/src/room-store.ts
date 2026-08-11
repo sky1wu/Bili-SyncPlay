@@ -54,7 +54,6 @@ export type ExpiredRoomSweep = {
 export type RoomStore = {
   createRoom: (input: CreatePersistedRoomInput) => Promise<PersistedRoom>;
   getRoom: (code: string) => Promise<PersistedRoom | null>;
-  saveRoom: (room: PersistedRoom) => Promise<PersistedRoom>;
   updateRoom: (
     code: string,
     expectedVersion: number,
@@ -191,11 +190,6 @@ export function createInMemoryRoomStore(
     async getRoom(code): Promise<PersistedRoom | null> {
       const room = rooms.get(code);
       return room ? cloneRoom(room) : null;
-    },
-    async saveRoom(room): Promise<PersistedRoom> {
-      const storedRoom = cloneRoom(room);
-      rooms.set(room.code, storedRoom);
-      return cloneRoom(storedRoom);
     },
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
       const currentRoom = rooms.get(code);

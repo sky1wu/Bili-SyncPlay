@@ -5,10 +5,7 @@ import {
   getDefaultPersistenceConfig,
   getDefaultSecurityConfig,
 } from "../src/app.js";
-import {
-  createPersistedRoom,
-  createInMemoryRoomStore,
-} from "../src/room-store.js";
+import { createInMemoryRoomStore } from "../src/room-store.js";
 import { createRoomService } from "../src/room-service.js";
 import type { RuntimeStore } from "../src/runtime-store.js";
 import type { LogEvent, Session } from "../src/types.js";
@@ -45,12 +42,11 @@ function createSession(
 
 test("room state query uses cluster sessions instead of only local active members", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
-  const room = createPersistedRoom({
+  await roomStore.createRoom({
     code: "ROOM01",
     joinToken: "join-token-1",
     createdAt: 1_000,
   });
-  await roomStore.saveRoom(room);
 
   const localOwner = createSession("owner", "ROOM01", "Alice");
   const remoteJoiner = createSession("joiner", "ROOM01", "Bob");

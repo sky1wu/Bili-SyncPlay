@@ -672,10 +672,11 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
   僵住，靠的正是这份沉默。它们的信号还是调用方的那些：`room_reaper_sweep_timeout` →
   `room_reaper_sweep_stalled`、`node_heartbeat_failed`。
 
-仍有七个持久写按设计不设上限：运行时存储经 `trackAwaitedOperation` 的三个（吊销 /
-generation / 删房），以及房间存储的四个房间体写。它们的副作用不会自行过期，所以 #237 的
-规则仍适用：一个可能是错的答复比一个慢的答复更糟。独立的 `blockMemberToken` 操作在 #277
-中被删除。原子的 `evictMemberToken` 现在只限制执行节点的等待：到期返回
+仍有六个持久写按设计不设上限：运行时存储经 `trackAwaitedOperation` 的三个（吊销 /
+generation / 删房），以及房间存储的三个房间体写。它们的副作用不会自行过期，所以 #237 的
+规则仍适用：一个可能是错的答复比一个慢的答复更糟。独立的 `blockMemberToken` 操作和房间存储
+中未被使用的无条件 `saveRoom` 写都在 #277 中被删除。原子的 `evictMemberToken` 现在只限制执行
+节点的等待：到期返回
 `status=error, confirmation=unconfirmed, code=block_unconfirmed`，原始 Promise 仍会在迟到
 成功后继续收敛 Redis 写入与本地镜像，再断开套接字以触发正常离房清理。真实效果独立于这道
 等待拥有自己的最终成功 / 失败日志。命令总线在发布后的等待超时时也返回同一个附加的类型化
@@ -724,7 +725,7 @@ generation / 删房），以及房间存储的四个房间体写。它们的副�
   之后房间存储与运行时存储的**请求路径也在这份名单里**——它们会打 `reason=timeout` 并答复
   调用方。僵住的踢人会返回 `status=error, confirmation=unconfirmed`，其完整踢出效果仍在
   进行中；封禁截止时间只会向后推进，所以可以安全重试。
-  仍然**保持沉默**的是上面点名的七个持久写；从外面看，就是一次永远不返回的吊销、teardown
+  仍然**保持沉默**的是上面点名的六个持久写；从外面看，就是一次永远不返回的吊销、teardown
   写或房间体写。
 
 ## 变更后回归清单

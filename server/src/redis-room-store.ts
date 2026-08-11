@@ -311,34 +311,6 @@ end
 return "ok"
 `;
 
-// Unconditional write, so the previous body is read inside the script rather
-// than by the caller: there is nothing to compare against, and taking it here
-// means no extra round trip and no window between the read and the write.
-//
-// The membership write is guarded and the body restored if it fails. Without
-// that the caller is told the save failed while the body has in fact already
-// changed, leaving the index carrying a score for a room state that no longer
-// exists — the same partial commit create and update already guard against.
-const SAVE_ROOM_LUA = `
-local previous = redis.call("GET", KEYS[1])
-redis.call("SET", KEYS[1], ARGV[1])
-
-local indexed = pcall(function()
-  redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
-end)
-
-if not indexed then
-  if previous then
-    redis.call("SET", KEYS[1], previous)
-  else
-    redis.call("DEL", KEYS[1])
-  end
-  return "index_failed"
-end
-
-return "ok"
-`;
-
 // Membership goes first: a Lua error does not roll back, and a body left
 // without membership is repaired by the next reconcile, whereas a membership
 // left without a body would keep the room in every count until the orphan
@@ -801,14 +773,14 @@ export async function createRedisRoomStore(
     // reading the silence they derive their bounds from (#277). That is why the
     // choice is per CALL — the two passes reach the very same helpers.
     //
-    // What this does NOT resolve: the four durable writes (`createRoom`,
-    // `saveRoom`, `updateRoom`, `deleteRoom`). Capping a write whose effect
+    // What this does NOT resolve: the three durable writes (`createRoom`,
+    // `updateRoom`, `deleteRoom`). Capping a write whose effect
     // does not expire on its own tells a caller it failed while the write may
     // still land, which is #237's trade and needs its own derivation.
     (createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the four durable writes",
+        "boundCommand's cap on the request path, plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the three durable writes",
     }) as RedisRoomStoreClient);
   const {
     orphanedRoomCodesKey,
@@ -1304,27 +1276,10 @@ export async function createRedisRoomStore(
         code,
       );
     },
-    async saveRoom(room) {
-      const saved = await redis.eval(
-        SAVE_ROOM_LUA,
-        2,
-        roomKey(room.code),
-        roomsByExpiryKey,
-        serializeRoom(room),
-        expiryScore(room),
-        room.code,
-      );
-      if (saved !== "ok") {
-        throw new Error(
-          `Room ${room.code} could not be indexed; the save was rolled back.`,
-        );
-      }
-      return room;
-    },
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
       const key = roomKey(code);
       // The read half is capped like any other read; the CAS below is one of
-      // the four durable writes this change leaves for its own derivation.
+      // the three durable writes this change leaves for its own derivation.
       const rawRoom = await boundCommand("update_room", () => redis.get(key));
       if (rawRoom === null) {
         return { ok: false, reason: "not_found" };
