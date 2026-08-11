@@ -4128,10 +4128,33 @@ test("request waiters reuse one confirmation cap for the same runtime teardown e
   assert.equal(deleteCalls, 1);
 });
 
-test("a stale teardown effect does not hide cleanup for a reused room generation", async () => {
+async function assertStaleTeardownWaiterCannotRetakeDebt(
+  settleOldEffectBeforeWaiter: boolean,
+): Promise<void> {
   let currentTime = 1_000;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });
   const runtime = createInMemoryRuntimeStore(() => currentTime, 5_000);
+  let holdNextMissingRoomRead = false;
+  let markStaleRoomReadStarted!: () => void;
+  const staleRoomReadStarted = new Promise<void>((resolve) => {
+    markStaleRoomReadStarted = resolve;
+  });
+  let releaseStaleRoomRead!: () => void;
+  const staleRoomReadGate = new Promise<void>((resolve) => {
+    releaseStaleRoomRead = resolve;
+  });
+  const serviceRoomStore: typeof roomStore = {
+    ...roomStore,
+    async getRoom(code, caller) {
+      const snapshot = await roomStore.getRoom(code, caller);
+      if (holdNextMissingRoomRead && snapshot === null) {
+        holdNextMissingRoomRead = false;
+        markStaleRoomReadStarted();
+        await staleRoomReadGate;
+      }
+      return snapshot;
+    },
+  };
   let releaseFirstDelete!: () => void;
   const firstDeleteGate = new Promise<void>((resolve) => {
     releaseFirstDelete = resolve;
@@ -4144,7 +4167,7 @@ test("a stale teardown effect does not hide cleanup for a reused room generation
       ...getDefaultPersistenceConfig(),
       emptyRoomTtlMs: 1_000,
     },
-    roomStore,
+    roomStore: serviceRoomStore,
     activeRooms: {
       ...runtime,
       deleteRoom(code, expectedGeneration) {
@@ -4176,6 +4199,12 @@ test("a stale teardown effect does not hide cleanup for a reused room generation
   assert.equal(await service.getRoomStateByCode(firstRoom.room.code), null);
   assert.equal(deleteGenerations.length, 1);
 
+  // This waiter pins the old generation and captures the absent room, then
+  // pauses across the room-read await while a new generation takes the code.
+  holdNextMissingRoomRead = true;
+  const staleWaiter = service.teardownRoomRuntime(firstRoom.room.code);
+  await staleRoomReadStarted;
+
   // The old identity ages out, so allocation may reuse the code even though
   // its guarded teardown command is still unanswered.
   currentTime += 5_001;
@@ -4192,15 +4221,37 @@ test("a stale teardown effect does not hide cleanup for a reused room generation
   assert.notEqual(deleteGenerations[0], deleteGenerations[1]);
   assert.equal(runtime.getRoom(secondRoom.room.code), null);
 
-  releaseFirstDelete();
-  assert.ok(firstDeleteEffect);
-  await firstDeleteEffect;
+  if (settleOldEffectBeforeWaiter) {
+    // Once the old effect is gone, the stale waiter must not create a new copy
+    // of it and take the newer generation's already-satisfied debt.
+    releaseFirstDelete();
+    assert.ok(firstDeleteEffect);
+    await firstDeleteEffect;
+    releaseStaleRoomRead();
+    await staleWaiter;
+  } else {
+    // While the old effect remains, the stale waiter may reuse its promise but
+    // must not transfer the retry debt back from the newer generation.
+    releaseStaleRoomRead();
+    await staleWaiter;
+    releaseFirstDelete();
+    assert.ok(firstDeleteEffect);
+    await firstDeleteEffect;
+  }
 
   // The new generation's successful effect owned and satisfied the retry
   // debt. The older generation now settles as skipped; it must not retain that
   // debt merely because it happened to finish last.
   await service.deleteExpiredRooms();
   assert.equal(deleteGenerations.length, 2);
+}
+
+test("a stale waiter cannot retake debt by reusing an old generation effect", async () => {
+  await assertStaleTeardownWaiterCannotRetakeDebt(false);
+});
+
+test("a stale waiter cannot retake debt by recreating an old generation effect", async () => {
+  await assertStaleTeardownWaiterCannotRetakeDebt(true);
 });
 
 test("a late runtime teardown failure stays on the retry trail", async () => {

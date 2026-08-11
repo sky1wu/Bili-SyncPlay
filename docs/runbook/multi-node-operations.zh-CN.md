@@ -728,10 +728,11 @@ generation），以及房间存储的三个房间体写。它们的副作用不�
   仍然**保持沉默**的是上面点名的五个持久写；从外面看，就是一次永远不返回的吊销、
   generation 写或房间体写。运行时删房不同：generation 守卫为必填，请求等待到期会记录
   `room_runtime_cleanup_unconfirmed`，每个房间 generation 唯一一条真实效果继续完成本地镜像
-  收敛；同一效果的等待者共用一条独立于 Redis liveness 常量的确认期限。重试债归属于最新
-  的精确 generation 效果，所以新 generation 成功或观察到仍存在的持久房间后，旧效果迟到的
-  跳过 / 失败不能继续占着或复活这笔债。由 maintenance 驱动的删房则刻意保持沉默，让 reaper
-  仍能报告 `timed_out`，下一轮再报告 `stalled`。
+  收敛；同一效果的等待者共用一条独立于 Redis liveness 常量的确认期限。重试债只在创建最新
+  的精确 generation 效果时授予 owner，复用效果的等待者不能转移它，并且在房间读取 `await`
+  之后必须再次确认读取前 pin 的 generation；所以新 generation 成功或观察到仍存在的持久
+  房间后，旧效果迟到的跳过 / 失败不能继续占着或复活这笔债。由 maintenance 驱动的删房则
+  刻意保持沉默，让 reaper 仍能报告 `timed_out`，下一轮再报告 `stalled`。
 
 ## 变更后回归清单
 

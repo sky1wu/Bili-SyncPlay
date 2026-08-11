@@ -587,7 +587,10 @@ export function createRoomService(options: {
     let effectsByGeneration = runtimeTeardownEffects.get(code);
     const existing = effectsByGeneration?.get(expectedGeneration);
     if (existing) {
-      pendingRuntimeTeardowns.set(code, existing);
+      // Ownership is assigned when an effect is CREATED, never when it is
+      // reused. A waiter may carry this generation across the room-read await;
+      // letting it reassign here would allow an old snapshot to take the debt
+      // back from a newer generation effect that started in the meantime.
       return existing;
     }
 
@@ -707,6 +710,9 @@ export function createRoomService(options: {
       // teardown is about. Reading it after the absence check below left a
       // second window: a code recycled between the two reads handed us the NEW
       // room's generation, which then matched and wiped it (#237 review).
+      // It is re-read after the room lookup as a CONFIRMATION: otherwise a
+      // waiter carrying this old pin across that await can retake retry-debt
+      // ownership from a newer generation effect (#277 review).
       let expectedGeneration: string | null;
       try {
         expectedGeneration = await runtimeStore.getRoomGeneration(code, caller);
@@ -728,6 +734,23 @@ export function createRoomService(options: {
       if (currentRoom) {
         pendingRuntimeTeardowns.delete(code);
         settledCodes.add(code);
+        continue;
+      }
+
+      let confirmedGeneration: string | null;
+      try {
+        confirmedGeneration = await runtimeStore.getRoomGeneration(
+          code,
+          caller,
+        );
+      } catch {
+        rememberRuntimeTeardownDebt(code);
+        continue;
+      }
+      if (confirmedGeneration !== expectedGeneration) {
+        // This invocation's absence snapshot and generation pin no longer name
+        // one room instance. A current/newer effect owns any cleanup debt; this
+        // stale waiter must not create, reuse, or take ownership of an effect.
         continue;
       }
       try {

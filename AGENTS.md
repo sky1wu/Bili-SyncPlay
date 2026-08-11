@@ -215,9 +215,12 @@ before changing the code it describes.
   exact effect shares one confirmation cap. Maintenance callers keep awaiting
   the real effect so `stalled` remains observable; the request deadline is its
   own constant rather than the Redis connection's liveness backstop. Retry debt
-  is owned by the latest exact effect (or by no effect while awaiting a fresh
-  attempt), so a newer generation's success or a live persisted room supersedes
-  older effects whose late skip/failure must not retain or resurrect the debt.
+  is assigned only when the latest exact effect is created (or has no owner
+  while awaiting a fresh attempt); a waiter reusing an effect never transfers
+  ownership. The generation pinned before the room read is confirmed again
+  after that await before any effect can be created or reused. Thus a newer
+  generation's success or a live persisted room supersedes older effects whose
+  late skip/failure must not retain or resurrect the debt.
   Still open on purpose: the five durable writes, where
   #237's trade holds because their effects — unlike a lock's or a dedup slot's
   — do not expire. The former
