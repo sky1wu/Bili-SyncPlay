@@ -4,6 +4,10 @@ import { AdminSessionStoreUnavailableError } from "../redis-admin-session-store.
 import { AuditStoreUnavailableError } from "./redis-audit-store.js";
 import { EventStoreUnavailableError } from "./redis-event-store.js";
 import {
+  redisStoreUnavailableMessage,
+  RedisStoreUnavailableError,
+} from "../redis-store-unavailable.js";
+import {
   requireAdminWriteOrigin,
   setAdminCorsResponseHeaders,
 } from "./csrf.js";
@@ -192,6 +196,20 @@ export function createAdminRouter(options: AdminRouterOptions) {
           // path on that connection is not answering, and retrying once Redis
           // recovers is exactly right (#267).
           sendError(response, 503, "audit_store_unavailable", error.message);
+          return true;
+        }
+        if (error instanceof RedisStoreUnavailableError) {
+          // The room and shared-runtime stores use caller-side caps and refuse
+          // new commands once their non-cancelling caps fill the admission
+          // budget. Both outcomes are transient dependency failures, not
+          // application bugs: name the failed store and tell the console that
+          // retrying is meaningful without exposing operation details.
+          sendError(
+            response,
+            503,
+            `${error.store}_store_unavailable`,
+            redisStoreUnavailableMessage(error.store),
+          );
           return true;
         }
         if (error instanceof AdminActionError) {

@@ -32,7 +32,7 @@ import {
   createRedisRoomStore,
   type RedisRoomStoreClient,
 } from "../src/redis-room-store.js";
-import { RedisCommandAdmissionError } from "../src/redis-command-timeout.js";
+import { RedisStoreUnavailableError } from "../src/redis-store-unavailable.js";
 import type { RuntimeReadCaller } from "../src/runtime-store.js";
 import { settleWithin } from "../src/retry-pacer.js";
 
@@ -167,9 +167,13 @@ const RUNTIME_REQUEST_PATH: Record<
   getRoomGeneration: (store) =>
     Promise.resolve(store.getRoomGeneration("ROOM01")),
   tryClaimMessageSlot: (store) =>
-    Promise.resolve(store.tryClaimMessageSlot("ROOM01", "share:1", 60_000)),
+    Promise.resolve(
+      store.tryClaimMessageSlot("ROOM01", "share:1", "claim-token", 60_000),
+    ),
   releaseMessageSlot: (store) =>
-    Promise.resolve(store.releaseMessageSlot("ROOM01", "share:1")),
+    Promise.resolve(
+      store.releaseMessageSlot("ROOM01", "share:1", "claim-token"),
+    ),
   acquireRoomLock: (store) =>
     Promise.resolve(store.acquireRoomLock("ROOM01", "join", "tok", 60_000)),
   releaseRoomLock: (store) =>
@@ -349,6 +353,42 @@ test("the same runtime read DOES answer when an HTTP request is the caller", asy
         );
       });
     }
+  }
+});
+
+test("runtime command timeouts and admission refusals are retryable store errors", async () => {
+  const commands = createProbeCommands(0);
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: createRuntimeProbeClient(commands),
+    pendingOperationTimeoutMs: BUDGET_MS,
+    closeQuitTimeoutMs: BUDGET_MS,
+    maxPendingOperations: 1,
+    onPendingOperationError() {},
+    onCloseUnfinished() {},
+  });
+  try {
+    await assert.rejects(
+      Promise.resolve(store.getRoomGeneration("ROOM01")),
+      (error: unknown) =>
+        error instanceof RedisStoreUnavailableError &&
+        error.store === "runtime" &&
+        error.reason === "timeout",
+    );
+    const issuedAfterTimeout = commands.issuedCount();
+    await assert.rejects(
+      Promise.resolve(store.getRoomGeneration("ROOM02")),
+      (error: unknown) =>
+        error instanceof RedisStoreUnavailableError &&
+        error.store === "runtime" &&
+        error.reason === "admission",
+    );
+    assert.equal(
+      commands.issuedCount(),
+      issuedAfterTimeout,
+      "runtime admission refusal must not issue another command",
+    );
+  } finally {
+    await store.close();
   }
 });
 
@@ -628,7 +668,10 @@ test("room store admission refuses a command instead of issuing it", async () =>
 
       await assert.rejects(
         store.getRoom("ROOM02"),
-        (error: unknown) => error instanceof RedisCommandAdmissionError,
+        (error: unknown) =>
+          error instanceof RedisStoreUnavailableError &&
+          error.store === "room" &&
+          error.reason === "admission",
       );
       assert.equal(
         commands.issuedCount(),
@@ -637,6 +680,28 @@ test("room store admission refuses a command instead of issuing it", async () =>
       );
     },
     { maxPendingCommands: 1, settleBootstrap: true },
+  );
+});
+
+test("room command timeouts are retryable store errors", async () => {
+  const bootstrapCommands = await withRoomStore(
+    null,
+    async (_store, commands) => commands.issuedCount(),
+    { settleBootstrap: true },
+  );
+
+  await withRoomStore(
+    bootstrapCommands,
+    async (store) => {
+      await assert.rejects(
+        store.getRoom("ROOM01"),
+        (error: unknown) =>
+          error instanceof RedisStoreUnavailableError &&
+          error.store === "room" &&
+          error.reason === "timeout",
+      );
+    },
+    { settleBootstrap: true },
   );
 });
 
@@ -657,66 +722,6 @@ test("a room store command that is merely slow is not judged dead", async () => 
     assert.equal(await store.getRoom("ROOM01"), null);
   } finally {
     await store.close();
-  }
-});
-
-test("an admission refusal never abandons a sibling command that was already issued", async () => {
-  // `tryClaimMessageSlot` and `releaseMessageSlot` each build a
-  // `Promise.all([...])` literal out of two bounded commands. A SYNCHRONOUS
-  // throw from the second abandons the argument list with the first already
-  // issued and nobody left to handle it; its cap then fires into an unhandled
-  // rejection, which on Node 22 is a process exit rather than a warning.
-  //
-  // `maxPendingOperations: 1` makes the second call refuse deterministically,
-  // and the first command never answers so its cap really does fire.
-  for (const method of ["tryClaimMessageSlot", "releaseMessageSlot"] as const) {
-    const unhandled: unknown[] = [];
-    const onUnhandled = (reason: unknown) => {
-      unhandled.push(reason);
-    };
-    process.on("unhandledRejection", onUnhandled);
-    try {
-      const commands = createProbeCommands(null);
-      const store = await createRedisRuntimeStore("redis://unused", {
-        redisClient: {
-          ...createRuntimeProbeClient(commands),
-          // The pair that runs under one `Promise.all`; neither ever answers,
-          // so both would outlive their caller.
-          zadd: () => new Promise(() => undefined),
-          zremrangebyscore: () => new Promise(() => undefined),
-          del: () => new Promise(() => undefined),
-          zrem: () => new Promise(() => undefined),
-        },
-        pendingOperationTimeoutMs: BUDGET_MS,
-        closeQuitTimeoutMs: BUDGET_MS,
-        maxPendingOperations: 1,
-        onPendingOperationError() {},
-        onCloseUnfinished() {},
-      });
-      try {
-        await (
-          method === "tryClaimMessageSlot"
-            ? Promise.resolve(
-                store.tryClaimMessageSlot("ROOM01", "share:1", 60_000),
-              )
-            : Promise.resolve(store.releaseMessageSlot("ROOM01", "share:1"))
-        ).catch(() => undefined);
-        // Long enough for the abandoned command's cap to fire and for Node to
-        // decide the rejection had no handler.
-        await settleWithin(new Promise(() => undefined), BUDGET_MS * 6);
-      } finally {
-        await store.close();
-      }
-      assert.deepEqual(
-        unhandled.map((reason) =>
-          reason instanceof Error ? reason.message : String(reason),
-        ),
-        [],
-        `${method} left a command rejecting with no handler`,
-      );
-    } finally {
-      process.off("unhandledRejection", onUnhandled);
-    }
   }
 });
 
@@ -810,6 +815,56 @@ test("a room with more sessions than the admission limit still lists them", asyn
   try {
     const sessions = await store.listClusterSessionsByRoom?.("ROOM01");
     assert.equal(sessions?.length, sessionCount);
+  } finally {
+    await store.close();
+  }
+});
+
+test("a deployment with more nodes than the admission limit still lists them", async () => {
+  const nodeCount = 20;
+  const instanceIds = Array.from(
+    { length: nodeCount },
+    (_, index) => `node-${index}`,
+  );
+  let liveReads = 0;
+  let peakConcurrentReads = 0;
+  const commands = createProbeCommands(null);
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: {
+      ...createRuntimeProbeClient(commands),
+      smembers: async () => instanceIds,
+      hgetall: async (key: string): Promise<Record<string, string>> => {
+        const instanceId = key.slice(key.lastIndexOf(":") + 1);
+        liveReads += 1;
+        peakConcurrentReads = Math.max(peakConcurrentReads, liveReads);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        liveReads -= 1;
+        return {
+          instanceId,
+          version: "test",
+          startedAt: "1",
+          lastHeartbeatAt: "1",
+          staleAt: "2000",
+          expiresAt: "3000",
+          connectionCount: "1",
+          activeRoomCount: "1",
+          activeMemberCount: "1",
+        };
+      },
+    },
+    pendingOperationTimeoutMs: BUDGET_MS,
+    closeQuitTimeoutMs: BUDGET_MS,
+    maxPendingOperations: 8,
+    onPendingOperationError() {},
+    onCloseUnfinished() {},
+  });
+  try {
+    const statuses = await store.listNodeStatuses("request", 1_000);
+    assert.equal(statuses.length, nodeCount);
+    assert.ok(
+      peakConcurrentReads <= 4,
+      `node fan-out reached ${peakConcurrentReads}, which admission would refuse`,
+    );
   } finally {
     await store.close();
   }

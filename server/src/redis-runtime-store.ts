@@ -20,6 +20,7 @@ import {
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 import { createConcurrencyLimiter } from "./concurrency-limiter.js";
 import { createRetryPacer, settleWithin } from "./retry-pacer.js";
+import { RedisStoreUnavailableError } from "./redis-store-unavailable.js";
 import {
   createDurableWriteQueue,
   NonRetryableWriteError,
@@ -327,9 +328,38 @@ function roomLockKey(prefix: string, roomCode: string, key: string): string {
   return `${prefix}room:${roomCode}:lock:${key}`;
 }
 
+// Claim and index one generation atomically. A capped command can execute after
+// another node has already claimed the same logical key; keeping SET and ZADD
+// in one script means the old generation cannot overwrite the new owner's
+// tracking score after its SET NX loses (#278 review).
+const MESSAGE_SLOT_CLAIM_LUA = `
+local claimed = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2])
+if not claimed then
+  return 0
+end
+local redisTime = redis.call('TIME')
+local currentTimeMs = redisTime[1] * 1000 + math.floor(redisTime[2] / 1000)
+redis.call('ZADD', KEYS[2], currentTimeMs + tonumber(ARGV[2]), KEYS[1])
+redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, currentTimeMs - 1)
+return 1
+`;
+
 const ROOM_LOCK_RELEASE_LUA = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
+
+// Delete the slot and its teardown index as one ownership-checked operation.
+// A capped release can land after its TTL and after another node has claimed
+// the same logical key; an unconditional DEL/ZREM would erase that newer
+// generation and admit a duplicate message (#278 review).
+const MESSAGE_SLOT_RELEASE_LUA = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('DEL', KEYS[1])
+  redis.call('ZREM', KEYS[2], KEYS[1])
+  return 1
 end
 return 0
 `;
@@ -527,16 +557,20 @@ return 1
 /**
  * Any key still present means the code is not free to hand out.
  *
- * The two score-indexed sets are trimmed by the current time first. Redis does
- * not drop zset members when their score passes, and the lazy sweeps that
- * normally do it (`isMemberTokenBlocked`, `tryClaimMessageSlot`) are only
- * reached through a room that no longer exists — so a long-lapsed block or a
- * dedup slot whose TTL ran out years ago would keep the code reserved forever
+ * The two score-indexed sets are trimmed by their own clocks first: member
+ * retention uses the application's clock, while dedup TTLs and scores use
+ * Redis's. Redis does not drop zset members when their score passes, and the
+ * lazy sweeps that normally do it (`isMemberTokenBlocked`,
+ * `tryClaimMessageSlot`) are only reached through a room that no longer exists
+ * — so a long-lapsed block or dedup slot whose TTL ran out years ago would keep
+ * the code reserved forever
  * (#237 review).
  */
 const ROOM_RESIDUE_LUA = `
 redis.call("ZREMRANGEBYSCORE", KEYS[4], "-inf", ARGV[1])
-redis.call("ZREMRANGEBYSCORE", KEYS[6], "-inf", ARGV[1])
+local redisTime = redis.call("TIME")
+local redisTimeMs = redisTime[1] * 1000 + math.floor(redisTime[2] / 1000)
+redis.call("ZREMRANGEBYSCORE", KEYS[6], "-inf", redisTimeMs)
 for index = 1, #KEYS do
   if redis.call("EXISTS", KEYS[index]) == 1 then
     return 1
@@ -898,7 +932,10 @@ export async function createRedisRuntimeStore(
     ) {
       return;
     }
-    const error = new Error(
+    const error = new RedisStoreUnavailableError(
+      "runtime",
+      operationName,
+      "admission",
       `Redis runtime store backpressure for ${operationName}.`,
     );
     logPendingOperationError(
@@ -950,7 +987,10 @@ export async function createRedisRuntimeStore(
       issue(),
       pendingOperationTimeoutMs,
       () => {
-        const error = new Error(
+        const error = new RedisStoreUnavailableError(
+          "runtime",
+          operationName,
+          "timeout",
           `Redis runtime store operation timed out: ${operationName}.`,
         );
         // Bounded still owes a report, and the counter is the half that answers
@@ -979,20 +1019,21 @@ export async function createRedisRuntimeStore(
   }
 
   /**
-   * A waiting budget for the per-session fan-outs, kept clear of the admission
-   * limit above it.
+   * A shared waiting budget for collection read fan-outs, kept clear of the
+   * admission limit above it.
    *
-   * `listClusterSessionsByRoom` and `listClusterSessions` issue one `HGETALL`
-   * per session, all at once. Admission is a refusal-style safety boundary, so
-   * a room with more sessions than the limit — or an admin read spanning that
-   * many — would fail on a completely healthy Redis (#277 review). Half the
-   * limit, so one fan-out can never refuse a join's own commands.
+   * Session listings issue one `HGETALL` per session, and the node overview
+   * issues one per instance. Admission is a refusal-style safety boundary, so
+   * a room or deployment larger than the limit would fail on a completely
+   * healthy Redis without this scheduler (#277 review). The limiter is shared
+   * across both families: two independent half-limit pools could together fill
+   * the whole admission budget. Half the limit leaves unrelated commands room.
    *
    * It bounds work already accepted; it never sits in front of a caller's FIRST
    * command, which is what keeps a stalled Redis from growing a queue of
    * waiters here instead of in ioredis.
    */
-  const sessionFanOut = createConcurrencyLimiter(
+  const collectionReadFanOut = createConcurrencyLimiter(
     Math.max(1, Math.floor(maxPendingOperations / 2)),
   );
 
@@ -1815,6 +1856,7 @@ export async function createRedisRuntimeStore(
     async tryClaimMessageSlot(
       roomCode: string,
       key: string,
+      token: string,
       expiresAt: number,
     ) {
       const currentTime = now();
@@ -1845,44 +1887,33 @@ export async function createRedisRuntimeStore(
       } else {
         ttlMs = requestedTtlMs;
       }
-      const effectiveExpiresAt = Math.max(expiresAt, currentTime + ttlMs);
       const slotKey = dedupSlotKey(keyPrefix, roomCode, key);
+      const trackingKey = dedupTrackingZsetKey(keyPrefix, roomCode);
       // Capped, and safe to cap because the side effect expires: a `SET NX PX`
       // that lands after this caller gave up holds the slot for at most `ttlMs`,
       // so the worst case is one deduplicated message rather than a permanent
-      // wrong answer. Without a cap the message handler waits forever.
+      // wrong answer. Claim and tracking are one command so neither generation
+      // can write the other's index after a timeout. Without a cap the message
+      // handler waits forever.
       const result = await boundCommand("try_claim_message_slot", () =>
-        redis.set(slotKey, "1", "NX", "PX", ttlMs),
+        redis.eval(
+          MESSAGE_SLOT_CLAIM_LUA,
+          2,
+          slotKey,
+          trackingKey,
+          token,
+          ttlMs,
+        ),
       );
-      if (result !== null) {
-        const trackingKey = dedupTrackingZsetKey(keyPrefix, roomCode);
-        try {
-          // Await so deleteRoom's ZRANGE always sees this entry.
-          // If tracking fails, the slot still expires via its TTL.
-          await Promise.all([
-            boundCommand("try_claim_message_slot", () =>
-              redis.zadd(trackingKey, String(effectiveExpiresAt), slotKey),
-            ),
-            boundCommand("try_claim_message_slot", () =>
-              redis.zremrangebyscore(trackingKey, 0, now() - 1),
-            ),
-          ]);
-        } catch {
-          // Tracking write failed; deleteRoom may miss this slot in ZRANGE,
-          // but the slot will expire on its own within the TTL window.
-        }
-      }
-      return result !== null;
+      return Number(result) === 1;
     },
-    async releaseMessageSlot(roomCode: string, key: string) {
+    async releaseMessageSlot(roomCode: string, key: string, token: string) {
       const slotKey = dedupSlotKey(keyPrefix, roomCode, key);
       const trackingKey = dedupTrackingZsetKey(keyPrefix, roomCode);
-      await Promise.all([
-        boundCommand("release_message_slot", () => redis.del(slotKey)),
-        boundCommand("release_message_slot", () =>
-          redis.zrem(trackingKey, slotKey),
-        ),
-      ]);
+      const result = await boundCommand("release_message_slot", () =>
+        redis.eval(MESSAGE_SLOT_RELEASE_LUA, 2, slotKey, trackingKey, token),
+      );
+      return result === 1;
     },
     async acquireRoomLock(
       roomCode: string,
@@ -2196,35 +2227,37 @@ export async function createRedisRuntimeStore(
         redis.smembers(nodesKey(keyPrefix)),
       );
       const statuses = await Promise.all(
-        instanceIds.map(async (instanceId) => {
-          const fields = await bound("list_node_statuses", () =>
-            redis.hgetall(nodeStatusKey(keyPrefix, instanceId)),
-          );
-          if (Object.keys(fields).length === 0) {
-            return null;
-          }
+        instanceIds.map((instanceId) =>
+          collectionReadFanOut.run(async () => {
+            const fields = await bound("list_node_statuses", () =>
+              redis.hgetall(nodeStatusKey(keyPrefix, instanceId)),
+            );
+            if (Object.keys(fields).length === 0) {
+              return null;
+            }
 
-          const status: ClusterNodeStatus = {
-            instanceId: fields.instanceId || instanceId,
-            version: fields.version || "unknown",
-            startedAt: Number(fields.startedAt ?? "0"),
-            lastHeartbeatAt: Number(fields.lastHeartbeatAt ?? "0"),
-            staleAt: Number(fields.staleAt ?? "0"),
-            expiresAt: Number(fields.expiresAt ?? "0"),
-            connectionCount: Number(fields.connectionCount ?? "0"),
-            activeRoomCount: Number(fields.activeRoomCount ?? "0"),
-            activeMemberCount: Number(fields.activeMemberCount ?? "0"),
-            health: "ok",
-          };
+            const status: ClusterNodeStatus = {
+              instanceId: fields.instanceId || instanceId,
+              version: fields.version || "unknown",
+              startedAt: Number(fields.startedAt ?? "0"),
+              lastHeartbeatAt: Number(fields.lastHeartbeatAt ?? "0"),
+              staleAt: Number(fields.staleAt ?? "0"),
+              expiresAt: Number(fields.expiresAt ?? "0"),
+              connectionCount: Number(fields.connectionCount ?? "0"),
+              activeRoomCount: Number(fields.activeRoomCount ?? "0"),
+              activeMemberCount: Number(fields.activeMemberCount ?? "0"),
+              health: "ok",
+            };
 
-          status.health =
-            currentTime > status.expiresAt
-              ? "offline"
-              : currentTime > status.staleAt
-                ? "stale"
-                : "ok";
-          return status;
-        }),
+            status.health =
+              currentTime > status.expiresAt
+                ? "offline"
+                : currentTime > status.staleAt
+                  ? "stale"
+                  : "ok";
+            return status;
+          }),
+        ),
       );
 
       return statuses
@@ -2258,7 +2291,7 @@ export async function createRedisRuntimeStore(
       );
       const sessions = await Promise.all(
         sessionIds.map((sessionId) =>
-          sessionFanOut.run(() =>
+          collectionReadFanOut.run(() =>
             loadSession(redis, keyPrefix, sessionId, boundCommand),
           ),
         ),
@@ -2279,7 +2312,7 @@ export async function createRedisRuntimeStore(
       );
       const sessions = await Promise.all(
         sessionIds.map((sessionId) =>
-          sessionFanOut.run(() =>
+          collectionReadFanOut.run(() =>
             loadSession(redis, keyPrefix, sessionId, bound),
           ),
         ),

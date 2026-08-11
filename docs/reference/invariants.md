@@ -778,14 +778,16 @@ do NOT compose, and that is the part that decides which connection gets which:
 - **A cap that can be reached must never be reached by ordinary fan-out.**
   Admission is a refusal-style safety boundary; it is not a scheduler. Every
   read that maps over a collection sized by the deployment — a room listing's
-  `REPAIR_CHUNK_SIZE` batch, one `HGETALL` per session, an admin service asking
-  about every room — runs straight into it and fails on a completely healthy
-  Redis (257 rooms was enough). Each of those fan-outs goes through a waiting
-  `concurrency-limiter` sized under the admission limit, and the limiter sits at
-  the FAN-OUT rather than inside the bound: a limiter in front of every command
-  would grow its own unbounded queue of waiters during a stall, which is the
-  defect it exists to prevent. `ADMIN_ROOM_FANOUT_LIMIT` is per service, not per
-  call, because concurrent calls multiply a per-call batch.
+  `REPAIR_CHUNK_SIZE` batch, one `HGETALL` per session or node, an admin service
+  asking about every room — runs straight into it and fails on a completely
+  healthy Redis (257 rooms was enough). Each of those fan-outs goes through a
+  waiting `concurrency-limiter` sized under the admission limit, and the limiter
+  sits at the FAN-OUT rather than inside the bound: a limiter in front of every
+  command would grow its own unbounded queue of waiters during a stall, which is
+  the defect it exists to prevent. `ADMIN_ROOM_FANOUT_LIMIT` is per service, not
+  per call, because concurrent calls multiply a per-call batch. The runtime store's
+  node and session readers share one limiter for the same reason: two separate
+  half-limit pools can jointly consume the whole admission budget.
 - **A bound must not be able to leave its function synchronously.** Two callers
   build a `Promise.all([...])` literal out of two bounded commands. A
   synchronous throw from the second abandons the argument list with the first
@@ -805,6 +807,18 @@ do NOT compose, and that is the part that decides which connection gets which:
   capped: a `SET NX PX` that lands after its caller gave up releases itself at
   its TTL, so "may have landed" costs one lock interval rather than a permanent
   wrong answer.
+- **An expiring claim still has an owner.** Claiming writes the token, slot TTL,
+  and teardown-index score in one Lua operation, so an old tracking write cannot
+  arrive after a newer owner and overwrite its score. Early cleanup uses a
+  second Lua operation to check that token before deleting both the slot and its
+  teardown index. A capped release may land after the old TTL and after another
+  node has claimed the same logical key; an unconditional `DEL`/`ZREM` would
+  erase the new generation. Cleanup is also
+  subordinate to the business outcome already chosen: its timeout is logged and
+  absorbed rather than replacing a validation, persistence, or version error.
+  The score and its residue-prune cutoff both use Redis `TIME`, matching the
+  clock that advances the slot TTL; blocked-token scores remain on the
+  application clock and are pruned separately.
 - **An exemption covers commands, not the handshake.** `connect()` runs before
   the store exists and resolves on `ready`; ioredis's `connectTimeout` bounds
   the TCP connect and not the `INFO` after it. Without either bound, bootstrap
@@ -876,14 +890,17 @@ do NOT compose, and that is the part that decides which connection gets which:
 - **Bounded still owes a report.** A connection whose commands now fail owes the
   caller a diagnosis, not just an error: a stalled session store answers 503
   `admin_session_store_unavailable` — never 401, which would read as a logout —
-  and logs `admin_session_store_command_failed` with the Redis detail the
-  response withholds from an unauthenticated caller. Requests refused while the
-  guard waits for `ready` go through the same reporting path. An executor result
-  refused by publisher admission never became a Redis operation, so it must not
-  inflate the Redis-failure counter; the terminal result-publish callback instead
-  increments `bili_syncplay_admin_command_result_publish_failures_total`
-  unconditionally, before its diagnostic log is throttled. This says the executor
-  could not complete the publish path, not that delivery was certainly lost: a
+  while room/runtime timeout and admission failures answer 503
+  `room_store_unavailable` / `runtime_store_unavailable`, not the catch-all 500.
+  The session path logs `admin_session_store_command_failed` with the Redis
+  detail the response withholds from an unauthenticated caller. Requests refused
+  while the guard waits for `ready` go through the same reporting path. An
+  executor result refused by publisher admission never became a Redis
+  operation, so it must not inflate the Redis-failure counter; the terminal
+  result-publish callback instead increments
+  `bili_syncplay_admin_command_result_publish_failures_total`
+  unconditionally, before its diagnostic log is throttled. This says the
+  executor could not complete the publish path, not that delivery was certainly lost: a
   timed-out Redis `PUBLISH` remains queued and Pub/Sub provides no requester
   receipt.
 - **Cleanup on the same connection is not the answer.** Where a request brackets
@@ -891,7 +908,9 @@ do NOT compose, and that is the part that decides which connection gets which:
   not replace the result: the admin command bus's `finally` `UNSUBSCRIBE` would
   otherwise throw over the `command_timeout` result the stall exists to produce.
   It still cannot be forgotten: a failed cleanup marks the subscriber for reset,
-  protects replies already in flight, then restores the durable registry.
+  protects replies already in flight, then restores the durable registry. A
+  message-slot rollback follows the same ordering rule: report the cleanup
+  failure, but preserve the business error that triggered it.
 
 ## Test fixtures must not cast past the checker
 

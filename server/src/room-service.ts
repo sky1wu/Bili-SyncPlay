@@ -254,6 +254,31 @@ export function createRoomService(options: {
       ));
   const roomJoinLocks = new Map<string, Promise<void>>();
 
+  async function releaseMessageSlotBestEffort(
+    roomCode: string,
+    key: string,
+    token: string,
+    slotKind: "share" | "playback",
+  ): Promise<void> {
+    try {
+      await runtimeStore.releaseMessageSlot(roomCode, key, token);
+    } catch (error) {
+      // This is rollback after the request's business outcome is already
+      // known. A Redis timeout here must not replace a useful validation,
+      // persistence, or version error with cleanup noise (#278 review).
+      try {
+        logEvent("message_slot_release_failed", {
+          roomCode,
+          slotKind,
+          result: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } catch {
+        // Logging is diagnostic; it cannot become a second cleanup failure.
+      }
+    }
+  }
+
   async function acquireDistributedJoinLock(
     roomCode: string,
   ): Promise<JoinAdmissionLock | null> {
@@ -1503,10 +1528,12 @@ export function createRoomService(options: {
       const currentTime = now();
       const actorId = session.memberId ?? session.id;
       const shareDedupKey = `share:${actorId}:${video.url}:${playback?.seq ?? 0}`;
+      const shareDedupToken = randomUUID();
       if (
         !(await runtimeStore.tryClaimMessageSlot(
           access.persistedRoom.code,
           shareDedupKey,
+          shareDedupToken,
           currentTime + 5_000,
         ))
       ) {
@@ -1568,17 +1595,21 @@ export function createRoomService(options: {
           },
         );
       } catch (error) {
-        await runtimeStore.releaseMessageSlot(
+        await releaseMessageSlotBestEffort(
           access.persistedRoom.code,
           shareDedupKey,
+          shareDedupToken,
+          "share",
         );
         throw error;
       }
 
       if (!room) {
-        await runtimeStore.releaseMessageSlot(
+        await releaseMessageSlotBestEffort(
           access.persistedRoom.code,
           shareDedupKey,
+          shareDedupToken,
+          "share",
         );
         logEvent("room_persist_failed", {
           roomCode: access.persistedRoom.code,
@@ -1618,11 +1649,13 @@ export function createRoomService(options: {
       );
       const playbackActorId = session.memberId ?? session.id;
       const playbackDedupKey = `playback:${playbackActorId}:${session.id}:${playback.seq}`;
+      const playbackDedupToken = randomUUID();
       const playbackCurrentTime = now();
       if (
         !(await runtimeStore.tryClaimMessageSlot(
           access.persistedRoom.code,
           playbackDedupKey,
+          playbackDedupToken,
           playbackCurrentTime + 10_000,
         ))
       ) {
@@ -1635,9 +1668,11 @@ export function createRoomService(options: {
         return { room: null, ignored: true };
       }
       if (!access.persistedRoom.sharedVideo) {
-        await runtimeStore.releaseMessageSlot(
+        await releaseMessageSlotBestEffort(
           access.persistedRoom.code,
           playbackDedupKey,
+          playbackDedupToken,
+          "playback",
         );
         throw new RoomServiceError(
           "invalid_message",
@@ -1651,9 +1686,11 @@ export function createRoomService(options: {
       );
       const playbackUrl = normalizeBilibiliUrl(playback.url);
       if (!sharedUrl || !playbackUrl || sharedUrl !== playbackUrl) {
-        await runtimeStore.releaseMessageSlot(
+        await releaseMessageSlotBestEffort(
           access.persistedRoom.code,
           playbackDedupKey,
+          playbackDedupToken,
+          "playback",
         );
         throw new RoomServiceError(
           "invalid_message",
@@ -1714,9 +1751,11 @@ export function createRoomService(options: {
           },
         );
       } catch (error) {
-        await runtimeStore.releaseMessageSlot(
+        await releaseMessageSlotBestEffort(
           access.persistedRoom.code,
           playbackDedupKey,
+          playbackDedupToken,
+          "playback",
         );
         throw error;
       }
@@ -1730,9 +1769,11 @@ export function createRoomService(options: {
           });
           return { room: null, ignored: true };
         }
-        await runtimeStore.releaseMessageSlot(
+        await releaseMessageSlotBestEffort(
           access.persistedRoom.code,
           playbackDedupKey,
+          playbackDedupToken,
+          "playback",
         );
         throw new RoomServiceError(
           "room_not_found",

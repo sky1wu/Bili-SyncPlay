@@ -11,6 +11,7 @@ import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 import { createConcurrencyLimiter } from "./concurrency-limiter.js";
 import { createRetryPacer, settleWithin } from "./retry-pacer.js";
 import { getRedisRoomStoreKeys } from "./redis-namespace.js";
+import { RedisStoreUnavailableError } from "./redis-store-unavailable.js";
 import {
   createPersistedRoom,
   type RoomStore,
@@ -39,12 +40,15 @@ type CommandBound = <T>(
   issue: () => Promise<T>,
 ) => Promise<T>;
 
-export class RedisRoomStoreCommandTimeoutError extends Error {
+export class RedisRoomStoreCommandTimeoutError extends RedisStoreUnavailableError {
   constructor(
     readonly operationName: string,
     readonly budgetMs: number,
   ) {
     super(
+      "room",
+      operationName,
+      "timeout",
       `Redis room store command "${operationName}" went unanswered for ${budgetMs}ms.`,
     );
     this.name = "RedisRoomStoreCommandTimeoutError";
@@ -530,7 +534,14 @@ export async function createRedisRoomStore(
     issue: () => Promise<T>,
   ): Promise<T> {
     if (commandPacer.trackedCount() >= maxPendingCommands) {
-      throw new RedisCommandAdmissionError(maxPendingCommands);
+      const cause = new RedisCommandAdmissionError(maxPendingCommands);
+      throw new RedisStoreUnavailableError(
+        "room",
+        operationName,
+        "admission",
+        cause.message,
+        { cause },
+      );
     }
     return await commandPacer.capAttempt(
       issue(),

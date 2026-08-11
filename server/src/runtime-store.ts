@@ -253,9 +253,14 @@ export type RuntimeStore = {
   tryClaimMessageSlot: (
     roomCode: string,
     key: string,
+    token: string,
     expiresAt: number,
   ) => Promise<boolean>;
-  releaseMessageSlot: (roomCode: string, key: string) => Promise<void>;
+  releaseMessageSlot: (
+    roomCode: string,
+    key: string,
+    token: string,
+  ) => Promise<boolean>;
   acquireRoomLock: (
     roomCode: string,
     key: string,
@@ -292,7 +297,10 @@ export function createInMemoryRuntimeStore(
   const lifetimeEventCounts: Record<string, number> = {};
   const rooms = new Map<string, ActiveRoom>();
   const blockedMemberTokensByRoom = new Map<string, KickedMemberBlock[]>();
-  const claimedSlotsByRoom = new Map<string, Map<string, number>>();
+  const claimedSlotsByRoom = new Map<
+    string,
+    Map<string, { token: string; expiresAt: number }>
+  >();
   const ownedRoomLocks = new Map<
     string,
     Map<string, { token: string; expiresAt: number }>
@@ -502,23 +510,28 @@ export function createInMemoryRuntimeStore(
       const activeEntries = pruneBlockedMemberTokens(code, currentTime);
       return activeEntries.some((entry) => entry.memberToken === memberToken);
     },
-    tryClaimMessageSlot(roomCode, key, expiresAt) {
+    tryClaimMessageSlot(roomCode, key, token, expiresAt) {
       const currentTime = now();
       const roomSlots =
-        claimedSlotsByRoom.get(roomCode) ?? new Map<string, number>();
-      for (const [k, exp] of roomSlots) {
-        if (exp <= currentTime) roomSlots.delete(k);
+        claimedSlotsByRoom.get(roomCode) ??
+        new Map<string, { token: string; expiresAt: number }>();
+      for (const [k, slot] of roomSlots) {
+        if (slot.expiresAt <= currentTime) roomSlots.delete(k);
       }
       if (roomSlots.has(key)) {
         return Promise.resolve(false);
       }
-      roomSlots.set(key, expiresAt);
+      roomSlots.set(key, { token, expiresAt });
       claimedSlotsByRoom.set(roomCode, roomSlots);
       return Promise.resolve(true);
     },
-    releaseMessageSlot(roomCode, key) {
-      claimedSlotsByRoom.get(roomCode)?.delete(key);
-      return Promise.resolve();
+    releaseMessageSlot(roomCode, key, token) {
+      const roomSlots = claimedSlotsByRoom.get(roomCode);
+      if (roomSlots?.get(key)?.token !== token) {
+        return Promise.resolve(false);
+      }
+      roomSlots.delete(key);
+      return Promise.resolve(true);
     },
     acquireRoomLock(roomCode, key, token, expiresAt) {
       const currentTime = now();
