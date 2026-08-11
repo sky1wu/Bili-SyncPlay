@@ -827,9 +827,11 @@ incident:
   one confirmation deadline, independent of the Redis liveness constant. The
   retry debt is assigned only when the latest exact effect is created; waiters
   reusing an effect never transfer it, and confirm their pre-read generation
-  again after the room-read await before reaching an effect. A newer
-  generation's success or a live persisted room therefore supersedes any older
-  late skip/failure. A
+  again after the room-read await before reaching an effect. Maintenance backlog
+  candidates also snapshot the unique debt record and re-check it after their
+  preconditions, so already-settled debt is never recreated. A newer generation's
+  success or a live persisted room therefore supersedes any older late
+  skip/failure. A
   maintenance-driven teardown deliberately stays silent so the reaper can
   report `timed_out` and then `stalled`.
 

@@ -606,8 +606,10 @@
   创建最新 generation 效果时授予 owner（等待新尝试时则没有 owner）；复用效果的等待者可能
   带着跨过房间读取 `await` 的旧 generation，因此绝不能转移 owner；房间读取前 pin 的
   generation 还必须在该 `await` 后再次确认，确认一致才可创建或复用效果。owner 迟到成功会
-  清债，owner 迟到失败会留债，两者都有最终日志。新 generation 成功或观察到仍存在的持久
-  房间会取代旧 owner，因此旧效果迟到的跳过或失败不能继续占着、也不能复活这笔债。
+  清债，owner 迟到失败会留债，两者都有最终日志。每笔 pending debt 还是一个唯一记录；
+  maintenance 候选会捕获该记录的身份，并在前置等待后复核，因此 owner 在这些 `await` 中成功
+  清掉的债不能被候选重新创建。新 generation 成功或观察到仍存在的持久房间会取代旧 owner，
+  因此旧效果迟到的跳过或失败不能继续占着、也不能复活这笔债。
   剩下五个与在
   store 内**已经**加了上限的
   `acquireRoomLock`、`tryClaimMessageSlot` 不同：一条 `SET NX PX` 即使在调用方放弃之后

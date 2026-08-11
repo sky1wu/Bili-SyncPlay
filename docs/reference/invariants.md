@@ -869,7 +869,10 @@ do NOT compose, and that is the part that decides which connection gets which:
   effect is created (or has no owner while awaiting a fresh attempt); a waiter
   reusing an effect never transfers ownership, because its generation may have
   crossed the room-read await. The generation pinned before that read is
-  confirmed again afterwards before an effect may be created or reused. A newer
+  confirmed again afterwards before an effect may be created or reused. Every
+  pending debt is a unique record; a maintenance candidate snapshots that
+  identity and re-checks it after the preconditions, so an owner success during
+  those awaits cannot be followed by a new effect for the settled debt. A newer
   generation's success or a live persisted room supersedes older effects, so
   their late skip or failure cannot retain or resurrect the debt. An owning late
   success clears the debt, an owning late failure leaves it queued, and each

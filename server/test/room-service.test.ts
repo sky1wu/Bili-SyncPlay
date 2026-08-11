@@ -4072,6 +4072,89 @@ test("a request stops waiting for runtime teardown while its one real effect sti
   assert.equal(deleteCalls, 1);
 });
 
+test("a maintenance backlog snapshot cannot recreate a teardown debt settled during its reads", async () => {
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const created = await roomStore.createRoom({
+    code: "ROOMUB",
+    joinToken: "join-token-123456",
+    createdAt: 1,
+  });
+  await roomStore.updateRoom(created.code, created.version, {
+    expiresAt: currentTime,
+  });
+
+  const activeRooms = createActiveRoomRegistry();
+  const ghost = createSession("runtime-teardown-backlog-ghost");
+  ghost.memberId = "member-runtime-teardown-backlog-ghost";
+  ghost.memberToken = "token-runtime-teardown-backlog-ghost";
+  activeRooms.addMember(created.code, ghost.memberId, ghost, ghost.memberToken);
+
+  let holdMaintenanceGenerationRead = false;
+  let markMaintenanceReadStarted!: () => void;
+  const maintenanceReadStarted = new Promise<void>((resolve) => {
+    markMaintenanceReadStarted = resolve;
+  });
+  let releaseMaintenanceRead!: () => void;
+  const maintenanceReadGate = new Promise<void>((resolve) => {
+    releaseMaintenanceRead = resolve;
+  });
+  let releaseDelete!: () => void;
+  const deleteGate = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  let deleteCalls = 0;
+  let realEffect: Promise<boolean> | null = null;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      async getRoomGeneration(code, caller) {
+        if (holdMaintenanceGenerationRead && caller === "maintenance_pass") {
+          holdMaintenanceGenerationRead = false;
+          markMaintenanceReadStarted();
+          await maintenanceReadGate;
+        }
+        return activeRooms.getRoomGeneration(code, caller);
+      },
+      deleteRoom(code, expectedGeneration) {
+        deleteCalls += 1;
+        realEffect = deleteGate.then(() =>
+          activeRooms.deleteRoom(code, expectedGeneration),
+        );
+        return realEffect;
+      },
+    },
+    generateToken: () => "generated-token-123456",
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    runtimeTeardownConfirmationTimeoutMs: 10,
+  });
+
+  assert.equal(await service.getRoomStateByCode(created.code), null);
+  assert.equal(deleteCalls, 1);
+
+  // The reaper snapshots the pending debt, then blocks before reading the
+  // generation. The original effect settles and retires that exact debt while
+  // the maintenance candidate is still carrying its identity.
+  holdMaintenanceGenerationRead = true;
+  const reaping = service.deleteExpiredRooms();
+  await maintenanceReadStarted;
+  releaseDelete();
+  assert.ok(realEffect);
+  await realEffect;
+  await Promise.resolve();
+  releaseMaintenanceRead();
+
+  assert.deepEqual(await reaping, {
+    deletedRooms: 0,
+    orphanedIndexEntries: 0,
+  });
+  assert.equal(deleteCalls, 1);
+});
+
 test("request waiters reuse one confirmation cap for the same runtime teardown effect", async () => {
   const currentTime = 1_000;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });

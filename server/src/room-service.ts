@@ -519,22 +519,27 @@ export function createRoomService(options: {
     confirmationTimedOut: boolean;
   };
 
+  type RuntimeTeardownDebt = {
+    /** The effect currently responsible for settling this debt, if any. */
+    owner: RuntimeTeardownEffect | null;
+  };
+
   /**
    * Room codes whose runtime teardown is unfinished, and the exact effect that
-   * most recently took responsibility for each debt. `null` means the debt is
-   * waiting for a fresh attempt after an unreadable precondition or a terminal
-   * skip/failure. A newer generation effect, or observing a live persisted
-   * room, supersedes an older owner; that older effect may still settle and log
-   * its own outcome, but cannot resurrect or retain someone else's debt.
+   * most recently took responsibility for each debt. Every debt is its own
+   * identity so a reaper candidate can prove, after its precondition awaits,
+   * that the debt it captured still exists. A null owner means that exact debt
+   * is waiting for a fresh attempt after an unreadable precondition or a
+   * terminal skip/failure. A newer generation effect, or observing a live
+   * persisted room, supersedes the whole debt record; an older effect may still
+   * settle and log its own outcome, but cannot resurrect or retain someone
+   * else's debt.
    *
    * Kept because a failed teardown is otherwise unrecoverable: the persisted
    * room and its expiry index are already gone, so nothing else will ever
    * produce this code again (#237 review, #277).
    */
-  const pendingRuntimeTeardowns = new Map<
-    string,
-    RuntimeTeardownEffect | null
-  >();
+  const pendingRuntimeTeardowns = new Map<string, RuntimeTeardownDebt>();
   const runtimeTeardownEffects = new Map<
     string,
     Map<string | null, RuntimeTeardownEffect>
@@ -544,7 +549,7 @@ export function createRoomService(options: {
     if (!pendingRuntimeTeardowns.has(code)) {
       // Do not replace an in-flight owner merely because a sibling precondition
       // read was inconclusive. Its terminal result still answers this debt.
-      pendingRuntimeTeardowns.set(code, null);
+      pendingRuntimeTeardowns.set(code, { owner: null });
     }
   }
 
@@ -613,16 +618,17 @@ export function createRoomService(options: {
       runtimeTeardownEffects.set(code, effectsByGeneration);
     }
     effectsByGeneration.set(expectedGeneration, entry);
-    pendingRuntimeTeardowns.set(code, entry);
+    pendingRuntimeTeardowns.set(code, { owner: entry });
 
     void effect.then(
       (applied) => {
         removeRuntimeTeardownEffect(code, entry);
-        if (pendingRuntimeTeardowns.get(code) === entry) {
+        const debt = pendingRuntimeTeardowns.get(code);
+        if (debt?.owner === entry) {
           if (applied) {
             pendingRuntimeTeardowns.delete(code);
           } else {
-            pendingRuntimeTeardowns.set(code, null);
+            debt.owner = null;
           }
         }
         if (entry.confirmationTimedOut) {
@@ -635,8 +641,9 @@ export function createRoomService(options: {
       },
       (error: unknown) => {
         removeRuntimeTeardownEffect(code, entry);
-        if (pendingRuntimeTeardowns.get(code) === entry) {
-          pendingRuntimeTeardowns.set(code, null);
+        const debt = pendingRuntimeTeardowns.get(code);
+        if (debt?.owner === entry) {
+          debt.owner = null;
         }
         if (entry.confirmationTimedOut) {
           logRuntimeTeardownTerminal("room_runtime_cleanup_late_failed", code, {
@@ -692,11 +699,22 @@ export function createRoomService(options: {
   }
 
   async function collectRuntimeStateForDeletedRooms(
-    codes: Iterable<string>,
+    pendingCandidates: Iterable<readonly [string, RuntimeTeardownDebt]>,
+    freshCodes: Iterable<string>,
     caller: RoomReadCaller,
   ): Promise<Set<string>> {
     const settledCodes = new Set<string>();
-    for (const code of new Set(codes)) {
+    const candidates = new Map<string, RuntimeTeardownDebt | undefined>();
+    for (const [code, debt] of pendingCandidates) {
+      candidates.set(code, debt);
+    }
+    // A fresh persisted-room deletion or explicit admin teardown supersedes a
+    // backlog snapshot for the same code and owns a new cleanup decision.
+    for (const code of freshCodes) {
+      candidates.set(code, undefined);
+    }
+
+    for (const [code, expectedDebt] of candidates) {
       // Defence in depth behind the allocation-time check: a teardown queued
       // for retry could otherwise fire after its code came back into use — the
       // residue it was queued for may have expired on its own in the meantime,
@@ -753,6 +771,14 @@ export function createRoomService(options: {
         // stale waiter must not create, reuse, or take ownership of an effect.
         continue;
       }
+      if (
+        expectedDebt !== undefined &&
+        pendingRuntimeTeardowns.get(code) !== expectedDebt
+      ) {
+        // This backlog item was settled or superseded while its preconditions
+        // were in flight. It no longer licenses another teardown effect.
+        continue;
+      }
       try {
         // The delete only applies while that generation still holds. Both
         // guards around it are check-then-act; no arrangement of them makes the
@@ -788,7 +814,7 @@ export function createRoomService(options: {
       }
       // Same helper as the reaper: it refuses to tear down a code that has
       // already been recycled, and queues a failed teardown for retry.
-      await collectRuntimeStateForDeletedRooms([code], "request");
+      await collectRuntimeStateForDeletedRooms([], [code], "request");
       return null;
     }
     return room;
@@ -1520,7 +1546,8 @@ export function createRoomService(options: {
       // reaper — an admin close/expire whose teardown failed there would have
       // queued a retry nothing ever performed (#237 review).
       await collectRuntimeStateForDeletedRooms(
-        [...pendingRuntimeTeardowns.keys(), code],
+        pendingRuntimeTeardowns,
+        [code],
         "request",
       );
     },
@@ -2195,11 +2222,8 @@ export function createRoomService(options: {
       // #234), and once the persisted room is gone nothing will ever name that
       // code again.
       const settledCodes = await collectRuntimeStateForDeletedRooms(
-        [
-          ...pendingRuntimeTeardowns.keys(),
-          ...swept.deletedRoomCodes,
-          ...swept.orphanedIndexCodes,
-        ],
+        pendingRuntimeTeardowns,
+        [...swept.deletedRoomCodes, ...swept.orphanedIndexCodes],
         "maintenance_pass",
       );
       const settledClaims = (swept.orphanedIndexClaims ?? []).filter(
