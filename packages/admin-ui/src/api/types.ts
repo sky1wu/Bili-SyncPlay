@@ -221,6 +221,7 @@ export type AuditLogRecord = {
   executorInstanceId?: string;
   commandRequestId?: string;
   commandStatus?: "ok" | "not_found" | "stale_target" | "error";
+  commandConfirmation?: "unconfirmed";
   commandCode?: string;
 };
 

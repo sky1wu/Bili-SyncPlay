@@ -68,6 +68,17 @@ test("runtime store tracks room membership and kicked member tokens", async () =
   assert.equal(store.getActiveRoomCount(), 0);
 });
 
+test("runtime store never shortens an existing member-token block", () => {
+  let currentTime = 1_000;
+  const store = createInMemoryRuntimeStore(() => currentTime);
+
+  store.evictMemberToken("ROOMMX", "member-1", "token-1", 2_000);
+  store.evictMemberToken("ROOMMX", "member-1", "token-1", 1_500);
+
+  currentTime = 1_750;
+  assert.equal(store.isMemberTokenBlocked("ROOMMX", "token-1"), true);
+});
+
 test("runtime store tracks node heartbeat state and derives health", async () => {
   let currentTime = 1_000;
   const store = createInMemoryRuntimeStore(() => currentTime);

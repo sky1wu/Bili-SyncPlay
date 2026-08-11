@@ -1,5 +1,6 @@
 import {
   DEFAULT_ADMIN_COMMAND_MAX_ACTIVE_REQUESTS,
+  DEFAULT_ADMIN_COMMAND_REPLY_TIMEOUT_MS,
   type AdminCommand,
   type AdminCommandBus,
   type AdminCommandResult,
@@ -121,15 +122,24 @@ function parseResult(payload: string): AdminCommandResult | null {
       typeof parsed.code === "string" &&
       typeof parsed.message === "string"
     ) {
-      return {
+      if (
+        parsed.confirmation !== undefined &&
+        (parsed.status !== "error" || parsed.confirmation !== "unconfirmed")
+      ) {
+        return null;
+      }
+      const base = {
         requestId: parsed.requestId,
         targetInstanceId: parsed.targetInstanceId,
         executorInstanceId: parsed.executorInstanceId,
-        status: parsed.status,
         code: parsed.code,
         message: parsed.message,
         completedAt: parsed.completedAt,
       };
+      if (parsed.confirmation === "unconfirmed") {
+        return { ...base, status: "error", confirmation: parsed.confirmation };
+      }
+      return { ...base, status: parsed.status };
     }
 
     return null;
@@ -145,7 +155,7 @@ export async function createRedisAdminCommandBus(
     resultChannelPrefix?: string;
     onInvalidMessage?: (kind: "command" | "result", payload: string) => void;
     /**
-     * Neither the result nor the fallback result could be published.
+     * Neither attempt to publish the executor's result succeeded.
      *
      * The executor ran the command; only the answer was lost. Reporting it is
      * all that is left to do, and it is what keeps this from being a bounded
@@ -454,6 +464,65 @@ export async function createRedisAdminCommandBus(
     };
   }
 
+  function commandUnconfirmed(
+    command: AdminCommand,
+    code: string,
+    message: string,
+  ): AdminCommandResult {
+    return {
+      requestId: command.requestId,
+      targetInstanceId: command.targetInstanceId,
+      executorInstanceId: command.targetInstanceId,
+      status: "error",
+      confirmation: "unconfirmed",
+      code,
+      message,
+      completedAt: Date.now(),
+    };
+  }
+
+  function commandExecutionFailed(
+    command: AdminCommand,
+    executorInstanceId: string,
+    error: unknown,
+  ): AdminCommandResult {
+    return {
+      requestId: command.requestId,
+      targetInstanceId: command.targetInstanceId,
+      executorInstanceId,
+      status: "error",
+      code: "command_execution_failed",
+      message: error instanceof Error ? error.message : String(error),
+      completedAt: Date.now(),
+    };
+  }
+
+  function publishCommandResult(
+    command: AdminCommand,
+    result: AdminCommandResult,
+  ): Promise<unknown> {
+    return runBusCommand("publish_result", () =>
+      publishClient.publish(
+        resultChannel(resultChannelPrefix, command.requestId),
+        JSON.stringify(result),
+      ),
+    );
+  }
+
+  async function publishCommandResultWithRetry(
+    command: AdminCommand,
+    result: AdminCommandResult,
+  ): Promise<void> {
+    try {
+      await publishCommandResult(command, result);
+    } catch {
+      // A publish failure says nothing about command execution. Retry the exact
+      // executor result so transport failure cannot rewrite a confirmed result
+      // or erase a typed unconfirmed effect.
+      await publishCommandResult(command, result);
+    }
+  }
+
   await Promise.all([publishClient.connect(), subscribeClient.connect()]);
 
   subscribeClient.on("message", (channel, payload) => {
@@ -474,48 +543,28 @@ export async function createRedisAdminCommandBus(
       return;
     }
 
-    void handler(command)
-      .then(async (result) => {
-        await runBusCommand("publish_result", () =>
-          publishClient.publish(
-            resultChannel(resultChannelPrefix, command.requestId),
-            JSON.stringify(result),
-          ),
-        );
-      })
-      .catch(async (error) => {
-        const fallback: AdminCommandResult = {
-          requestId: command.requestId,
-          targetInstanceId: command.targetInstanceId,
-          executorInstanceId: instanceId,
-          status: "error",
-          code: "command_execution_failed",
-          message: error instanceof Error ? error.message : String(error),
-          completedAt: Date.now(),
-        };
-        await runBusCommand("publish_result", () =>
-          publishClient.publish(
-            resultChannel(resultChannelPrefix, command.requestId),
-            JSON.stringify(fallback),
-          ),
-        );
-      })
-      // The fallback publish runs on the connection whose failure it is
-      // reporting, so it is the likeliest of the three to fail — and a
-      // rejection out of a `.catch()` handler has nowhere left to go. `void`
-      // does not attach a handler, so under Node's default that is an
-      // `unhandledRejection` and the process exits: a Redis outage escalated
-      // into a crash. Reachable since #271 gave this client a `commandTimeout`;
-      // before that the publish hung here instead, which is not the better
-      // failure (#271 review). The requester is not stranded either way — its
-      // own reply timer answers with `command_timeout`.
+    // Start the handler behind a promise boundary so an implementation that
+    // throws synchronously cannot escape the message listener. Execution and
+    // transport are then separate: only a handler failure creates an execution
+    // result, while a result-publish failure retries the same wire value.
+    void Promise.resolve()
+      .then(() => handler(command))
+      .catch((error: unknown) =>
+        commandExecutionFailed(command, instanceId, error),
+      )
+      .then((result) => publishCommandResultWithRetry(command, result))
+      // The retry runs on the same connection whose failure it is reporting,
+      // so it can fail too. A rejection out of a `void`-ed chain would otherwise
+      // be an `unhandledRejection` and exit the process under Node's default.
+      // The requester is not stranded either way — its own reply timer answers
+      // with `command_timeout`.
       .catch((error: unknown) => {
         options.onResultPublishFailed?.(command, error);
       });
   });
 
   return {
-    async request(command, timeoutMs = 5_000) {
+    async request(command, timeoutMs = DEFAULT_ADMIN_COMMAND_REPLY_TIMEOUT_MS) {
       if (closing) {
         return {
           requestId: command.requestId,
@@ -564,6 +613,7 @@ export async function createRedisAdminCommandBus(
       const requestSubscriberGeneration = subscriberGeneration;
       let stopWaitingForReply: (() => void) | undefined;
       let replySubscriptionMayExist = false;
+      let commandPublishAttempted = false;
       try {
         // INSIDE the try, so the `finally` below covers it. A `SUBSCRIBE` that
         // outlives its `commandTimeout` still reaches Redis and can succeed
@@ -603,15 +653,13 @@ export async function createRedisAdminCommandBus(
             resolve(result);
           };
           const timeout = setTimeout(() => {
-            finish({
-              requestId: command.requestId,
-              targetInstanceId: command.targetInstanceId,
-              executorInstanceId: command.targetInstanceId,
-              status: "stale_target",
-              code: "command_timeout",
-              message: "Timed out waiting for the target instance.",
-              completedAt: Date.now(),
-            });
+            finish(
+              commandUnconfirmed(
+                command,
+                "command_timeout",
+                "Timed out waiting for the target instance.",
+              ),
+            );
           }, timeoutMs);
 
           const onReply = (channel: string, payload: string) => {
@@ -637,25 +685,47 @@ export async function createRedisAdminCommandBus(
           subscribeClient.on("message", onReply);
         });
 
-        await runBusCommand("publish", () =>
-          publishClient.publish(
+        const recipientCount = await runBusCommand("publish", () => {
+          // Set only after publisher admission grants a slot. From here a
+          // rejection cannot prove whether Redis delivered the command, so it
+          // is an unconfirmed effect rather than generic bus unavailability.
+          commandPublishAttempted = true;
+          return publishClient.publish(
             commandChannel(commandChannelPrefix, command.targetInstanceId),
             JSON.stringify(command),
-          ),
-        );
+          );
+        });
+        if (typeof recipientCount === "number" && recipientCount === 0) {
+          return {
+            requestId: command.requestId,
+            targetInstanceId: command.targetInstanceId,
+            executorInstanceId: command.targetInstanceId,
+            status: "stale_target",
+            code: "stale_target",
+            message: "Target instance is unavailable.",
+            completedAt: Date.now(),
+          };
+        }
 
         return await responsePromise;
       } catch (error) {
-        // A `status: "error"` result, not a rejection: `action-service` maps it
-        // to a retryable 503 with this code and message, so an operator sees
-        // "the bus could not reach Redis" instead of `internal_error` (#271
-        // review).
-        return busUnavailable(command, error);
+        // Before the publish callback runs, this is ordinary bus
+        // unavailability. Afterwards the same rejection cannot prove whether
+        // Redis delivered the command, so the result explicitly carries an
+        // unconfirmed effect instead of asking action-service to infer it from
+        // an error code.
+        return commandPublishAttempted
+          ? commandUnconfirmed(
+              command,
+              "command_publish_unconfirmed",
+              "The admin command publish was not confirmed.",
+            )
+          : busUnavailable(command, error);
       } finally {
         // A publish failure happens after the reply listener is installed. It
-        // answers immediately with `command_bus_unavailable`, so leaving this
-        // timer and closure alive until `timeoutMs` would let sequential retries
-        // bypass the active-request cap.
+        // answers immediately, so leaving this timer and closure alive until
+        // `timeoutMs` would let sequential retries bypass the active-request
+        // cap.
         stopWaitingForReply?.();
         // Remove the channel from desired state before attempting the fallible
         // Redis cleanup. If UNSUBSCRIBE fails, the generation is marked for

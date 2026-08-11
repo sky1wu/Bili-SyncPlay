@@ -823,16 +823,42 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: eight durable writes.** Four runtime-store writes
+- **Still open, deliberately: seven durable writes.** Three runtime-store writes
   through `trackAwaitedOperation` and four room-body writes stay uncapped,
   because #237 settled that an answer which can be wrong is worse than a slow
   one and their effects do not expire on their own. The standalone
-  `blockMemberToken` path had no production caller — kicks already use the
-  atomic `evictMemberToken` operation — so #277 removed it instead of preserving
-  a ninth unbounded write. The remaining eight differ from `acquireRoomLock`
-  and `tryClaimMessageSlot`, which ARE capped: a `SET NX PX` that lands after
-  its caller gave up releases itself at its TTL, so "may have landed" costs one
-  lock interval rather than a permanent wrong answer.
+  `blockMemberToken` path had no production caller, so #277 removed it. Atomic
+  `evictMemberToken` is different: the admin executor caps only its own wait and
+  reports `status=error, confirmation=unconfirmed, code=block_unconfirmed`,
+  while the original promise keeps the Redis write and both local-mirror
+  updates alive, then
+  disconnects the socket so normal leave cleanup still runs. Terminal
+  `admin_command_executed` reporting belongs to that real promise, not to the
+  bounded waiter, so late success and late failure both remain observable. The
+  command bus uses the same additive confirmation marker after an admitted
+  publish can no longer prove whether the target executed it; the established
+  failure status stays `error`, so an older parser can still consume the result
+  during a rolling upgrade. A Redis `PUBLISH` result of zero is instead a
+  confirmed `stale_target`. The admin action layer therefore audits the typed
+  confirmation rather than maintaining a list of codes, at the last layer that
+  still knows the actor. Result transport retries the exact executor result:
+  failure to publish an answer is not evidence that execution failed and must
+  never erase its confirmation state. Retrying is safe across nodes because the
+  eviction script keeps the maximum block deadline: two attempts commute even
+  when the older one lands last. That ownership extends through shutdown: the
+  consumer closes its dispatch gate before unsubscribe can wait, then gives the
+  subscription, every accepted handler, and every eviction that outlived its
+  handler one shared close budget. Exhausting it records
+  `admin_command_consumer_close_unfinished` with separate pending counts rather
+  than relying on a later runtime-store close to drain an effect the consumer
+  owns. The gate matters because the Redis bus may already have captured a
+  handler behind a promise boundary; such a handler answers `stale_target`
+  instead of creating fresh work after the drain snapshot.
+  The remaining seven differ from
+  `acquireRoomLock` and `tryClaimMessageSlot`, which ARE capped at the store:
+  a `SET NX PX` that lands after its caller gave up releases itself at its TTL,
+  so "may have landed" costs one lock interval rather than a permanent wrong
+  answer.
 - **An expiring claim still has an owner.** Claiming writes the token, slot TTL,
   and teardown-index score in one Lua operation, so an old tracking write cannot
   arrive after a newer owner and overwrite its score. Early cleanup uses a

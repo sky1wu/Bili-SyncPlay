@@ -635,6 +635,19 @@ admin request into a 503:
   The admin API has no general request-rate limit, which is why the log needs
   its own throttle.
 
+The room node also owns the lifetime of admin command effects that were already
+accepted when shutdown began:
+
+- `admin_command_consumer_close_unfinished` — the consumer's shared 4s budget
+  expired before its subscription, accepted handlers, and late member evictions
+  all settled. `pendingHandlers` counts command handlers still producing a
+  result; `pendingMemberEvictions` counts durable kick effects that outlived the
+  confirmation returned to their handler; `unsubscribePending` says the command
+  channel itself has not acknowledged removal. The consumer closes its dispatch
+  gate before taking these snapshots, so none of the counts can be replenished
+  by a command the Redis listener had already captured. This event is hidden
+  from the default admin feed as shutdown plumbing.
+
 The other Redis-backed shutdown steps use the same bounded-close rule (#270):
 
 - `room_store_close_unfinished` — `close_room_store` could not finish `QUIT`.
@@ -735,13 +748,24 @@ on the background passes**, on purpose:
   `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`.
 
-Eight persistent writes remain uncapped by design: the runtime store's four
-writes through `trackAwaitedOperation` (evict / revoke / generation / delete)
-and the room store's four room-body writes. Their effects do not expire, so
-#237's rule still applies: an answer that may be wrong is worse than a slow one.
-The unused standalone `blockMemberToken` operation was removed in #277; kicks
-already use the atomic `evictMemberToken` write, so keeping a second blocking
-primitive would only preserve another unbounded path.
+Seven persistent writes remain uncapped by design: the runtime store's three
+writes through `trackAwaitedOperation` (revoke / generation / delete) and the
+room store's four room-body writes. Their effects do not expire, so #237's rule
+still applies: an answer that may be wrong is worse than a slow one. The unused
+standalone `blockMemberToken` operation was removed in #277. The atomic
+`evictMemberToken` call now caps only the executor's wait: it returns
+`status=error, confirmation=unconfirmed, code=block_unconfirmed` at the
+deadline, while its original promise keeps the Redis write and local mirrors
+converging after a late success, then disconnects the socket so normal leave
+cleanup still runs. The real effect owns its terminal success/failure log
+independently of that wait. A command-bus timeout after publish uses the same
+additive typed confirmation, so the established status remains readable by an
+older parser and the informed admin action layer can queue an audit with its
+actor and command details without guessing from error codes. A failed result
+publish retries the exact executor result; transport failure never rewrites its
+execution or confirmation semantics. Retried evictions keep the maximum block
+deadline, making their Redis writes safe when different nodes land them out of
+order.
 
 Every client is built by `createBoundedRedisClient`, which takes a **required**
 declaration of which of the two it has — and a caller-side one has to NAME the
@@ -790,9 +814,13 @@ incident:
   `node_heartbeat_failed`, `redis_runtime_store_operation_failed`, the event
   store's shedding line, a 503 from the audit and event pages. Since #277 the
   request paths on the room and runtime stores are in that list too — they log
-  `reason=timeout` and answer their caller. What still stays **silent** is the
-  eight durable writes named above; a kick or a room-body write
-  that never returns is what that looks like from outside.
+  `reason=timeout` and answer their caller. A stalled kick returns
+  `status=error, confirmation=unconfirmed`; its complete kick effect remains
+  outstanding. Retry is safe because the block deadline only moves later. What
+  still stays **silent**
+  is the seven durable writes named above; a
+  revoke, teardown write, or room-body write that never returns is what that
+  looks like from outside.
 
 ## Post-Change Regression Checklist
 

@@ -204,6 +204,9 @@ function parseAuditRecord(
     commandStatus: normalizeNullable(
       fields.commandStatus,
     ) as AuditLogRecord["commandStatus"],
+    commandConfirmation: normalizeNullable(
+      fields.commandConfirmation,
+    ) as AuditLogRecord["commandConfirmation"],
     commandCode: normalizeNullable(fields.commandCode),
   };
 }
@@ -324,6 +327,8 @@ export async function createRedisAuditStore(
       encodeNullable(input.commandRequestId),
       "commandStatus",
       encodeNullable(input.commandStatus),
+      "commandConfirmation",
+      encodeNullable(input.commandConfirmation),
       "commandCode",
       encodeNullable(input.commandCode),
     );
@@ -349,6 +354,7 @@ export async function createRedisAuditStore(
       executorInstanceId: input.executorInstanceId,
       commandRequestId: input.commandRequestId,
       commandStatus: input.commandStatus,
+      commandConfirmation: input.commandConfirmation,
       commandCode: input.commandCode,
     } satisfies AuditLogRecord;
   }

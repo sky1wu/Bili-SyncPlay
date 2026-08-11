@@ -132,6 +132,10 @@ export function createAdminActionService(options: {
           executorInstanceId: commandDetails?.commandResult?.executorInstanceId,
           commandRequestId: commandDetails?.commandResult?.requestId,
           commandStatus: commandDetails?.commandResult?.status,
+          commandConfirmation:
+            commandDetails?.commandResult?.status === "ok"
+              ? undefined
+              : commandDetails?.commandResult?.confirmation,
           commandCode:
             commandDetails?.commandResult?.status === "ok"
               ? undefined
@@ -167,9 +171,46 @@ export function createAdminActionService(options: {
     if (result.status === "stale_target") {
       return 409;
     }
+    if (result.confirmation === "unconfirmed") {
+      return 409;
+    }
     // An executor error is a bad upstream result; failure to reach the command
     // bus is this service's Redis dependency being unavailable and is retryable.
     return result.code === "command_bus_unavailable" ? 503 : 502;
+  }
+
+  function recordUnconfirmedCommand(
+    actor: AdminSession,
+    action: "kick_member" | "disconnect_session",
+    targetType: "member" | "session",
+    targetId: string,
+    request: Record<string, unknown>,
+    targetInstanceId: string,
+    commandResult: Exclude<AdminCommandResult, { status: "ok" }> & {
+      confirmation: "unconfirmed";
+    },
+  ): void {
+    options.logEvent("admin_command_unconfirmed", {
+      commandType: action,
+      targetType,
+      targetId,
+      targetInstanceId,
+      executorInstanceId: commandResult.executorInstanceId,
+      commandRequestId: commandResult.requestId,
+      result: "rejected",
+      confirmation: "unconfirmed",
+      actor: actor.username,
+    });
+    writeAudit(
+      actor,
+      action,
+      targetType,
+      targetId,
+      request,
+      "rejected",
+      commandResult.code,
+      { targetInstanceId, commandResult },
+    );
   }
 
   return {
@@ -213,6 +254,7 @@ export function createAdminActionService(options: {
             memberId: session.memberId,
             targetInstanceId,
             commandStatus: result.status,
+            commandConfirmation: result.confirmation,
             commandCode: result.code,
             message: result.message,
           }),
@@ -366,6 +408,21 @@ export function createAdminActionService(options: {
         requestedAt: now(),
       });
       if (commandResult.status !== "ok") {
+        if (commandResult.confirmation === "unconfirmed") {
+          // The result type, rather than an open-ended list of error codes,
+          // carries the fact that this permission change can still land after
+          // the response. The consumer has no actor identity; this layer is
+          // the last place that can attach one.
+          recordUnconfirmedCommand(
+            actor,
+            "kick_member",
+            "member",
+            memberId,
+            { roomCode, reason },
+            targetInstanceId,
+            commandResult,
+          );
+        }
         throwCommandFailure(commandResult);
       }
 
@@ -419,6 +476,17 @@ export function createAdminActionService(options: {
         requestedAt: now(),
       });
       if (commandResult.status !== "ok") {
+        if (commandResult.confirmation === "unconfirmed") {
+          recordUnconfirmedCommand(
+            actor,
+            "disconnect_session",
+            "session",
+            sessionId,
+            { reason },
+            targetInstanceId,
+            commandResult,
+          );
+        }
         throwCommandFailure(commandResult);
       }
 

@@ -20,6 +20,7 @@ const HIDDEN_SYSTEM_EVENTS = new Set([
   "admin_command_bus_close_unfinished",
   "admin_command_bus_command_failed",
   "admin_command_bus_connection_reset",
+  "admin_command_consumer_close_unfinished",
   "admin_command_result_publish_failed",
   "admin_session_store_close_unfinished",
   "admin_session_store_command_failed",

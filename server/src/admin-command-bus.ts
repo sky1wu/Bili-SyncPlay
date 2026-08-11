@@ -32,6 +32,34 @@ type _EnsureAllAdminCommandKindsCovered =
 const _adminCommandKindsAreExhaustive: _EnsureAllAdminCommandKindsCovered = true;
 void _adminCommandKindsAreExhaustive;
 
+type AdminCommandFailureBase = {
+  requestId: string;
+  targetInstanceId: string;
+  executorInstanceId: string;
+  code: string;
+  message: string;
+  completedAt: number;
+};
+
+export type AdminCommandFailureResult = AdminCommandFailureBase &
+  (
+    | {
+        status: "not_found" | "stale_target" | "error";
+        confirmation?: never;
+      }
+    | {
+        /**
+         * The caller stopped waiting, but the command effect may still land.
+         *
+         * Kept orthogonal to `status` so the Redis result remains readable by
+         * older processes during a rolling upgrade: they see the established
+         * `error` status and ignore this additive field.
+         */
+        status: "error";
+        confirmation: "unconfirmed";
+      }
+  );
+
 export type AdminCommandResult =
   | {
       requestId: string;
@@ -43,15 +71,7 @@ export type AdminCommandResult =
       sessionId?: string;
       completedAt: number;
     }
-  | {
-      requestId: string;
-      targetInstanceId: string;
-      executorInstanceId: string;
-      status: "not_found" | "stale_target" | "error";
-      code: string;
-      message: string;
-      completedAt: number;
-    };
+  | AdminCommandFailureResult;
 
 /**
  * Process-wide cap for requests that own a Redis reply subscription.
@@ -60,6 +80,9 @@ export type AdminCommandResult =
  * capacity instead of deterministically refusing the tail of a valid batch.
  */
 export const DEFAULT_ADMIN_COMMAND_MAX_ACTIVE_REQUESTS = 256;
+
+/** Default wait for a command reply once its reply subscription is ready. */
+export const DEFAULT_ADMIN_COMMAND_REPLY_TIMEOUT_MS = 5_000;
 
 export type AdminCommandBus = {
   request: (

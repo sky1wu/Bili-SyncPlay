@@ -198,10 +198,20 @@ before changing the code it describes.
   pass-driven callers pass `boundedByOuterCaller`; capping those would make
   `stalled` unreachable. Per command, never per operation (`getRoom` reads one
   session per member). A request that merely joins a background pass bounds its
-  own WAIT, absorbing the pass's rejection so it cannot end the process. Still
-  open on purpose: the eight durable writes, where #237's trade holds because
-  their effects — unlike a lock's or a dedup slot's — do not expire. The ninth,
-  standalone `blockMemberToken`, had no production caller and was removed rather
+  own WAIT, absorbing the pass's rejection so it cannot end the process. A
+  command whose effect may still land keeps the established `error` status and
+  reports the additive typed `confirmation=unconfirmed` marker; callers never
+  infer that fact from an open-ended list of error codes, and result-publish
+  retries resend the exact executor result rather than rewriting transport
+  failure as execution failure. Atomic member eviction owns its terminal
+  logging independently of that wait, and its block deadline is a monotonic
+  maximum so cross-node retries commute. That effect ownership includes close:
+  shut the dispatch gate before unsubscribe can wait, and drain accepted
+  handlers plus late evictions inside one shared budget; report what remains
+  instead of relying on a later store close to do it implicitly. Still
+  open on purpose: the seven durable writes, where #237's trade holds because
+  their effects — unlike a lock's or a dedup slot's — do not expire. The former
+  standalone `blockMemberToken` had no production caller and was removed rather
   than kept as another unbounded path beside atomic eviction.
   Three more the review round added: **a refusal cap must never be reachable by
   ordinary fan-out** (every read that maps over a deployment-sized collection

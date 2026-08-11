@@ -1594,6 +1594,50 @@ test("redis runtime store commits the block and the revoke of a kick together", 
   }
 });
 
+test("redis runtime store keeps the longest block when eviction retries land out of order", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  let currentTime = 1_000;
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+  });
+  const observer = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+    now: () => currentTime,
+  });
+
+  try {
+    // The retry's later deadline lands first. The original attempt then arrives
+    // from another connection with its earlier absolute deadline.
+    await store.evictMemberToken(
+      "ROOMMX",
+      "member-max",
+      "token-max",
+      currentTime + 60_000,
+    );
+    await observer.evictMemberToken(
+      "ROOMMX",
+      "member-max",
+      "token-max",
+      currentTime + 30_000,
+    );
+
+    currentTime += 45_000;
+    assert.equal(
+      await observer.isMemberTokenBlocked("ROOMMX", "token-max", currentTime),
+      true,
+    );
+  } finally {
+    await store.close();
+    await observer.close();
+  }
+});
+
 test("redis runtime store leaves a kick entirely unapplied when it fails", async () => {
   const fakeRedis = {
     ...createFakeRedisClient([]),

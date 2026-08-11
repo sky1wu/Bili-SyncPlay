@@ -32,6 +32,7 @@ export function createAuditLogService(capacity = 1_000): AuditLogService {
         executorInstanceId: input.executorInstanceId,
         commandRequestId: input.commandRequestId,
         commandStatus: input.commandStatus,
+        commandConfirmation: input.commandConfirmation,
         commandCode: input.commandCode,
       };
 

@@ -13,6 +13,7 @@ export type GlobalAuditAppendInput = {
   executorInstanceId?: string;
   commandRequestId?: string;
   commandStatus?: AuditLogRecord["commandStatus"];
+  commandConfirmation?: AuditLogRecord["commandConfirmation"];
   commandCode?: string;
 };
 

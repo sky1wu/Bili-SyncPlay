@@ -584,6 +584,15 @@ sum(rate(bili_syncplay_events_total{event="admin_audit_log_append_failed"}[<wind
   `operation` 节流为每分钟至多一行。后台 API 没有通用请求限流，这正是日志必须自带节流的
   原因。
 
+房间节点也必须拥有关服开始时已经接受的管理命令效果的完整生命周期：
+
+- `admin_command_consumer_close_unfinished`——consumer 共享的 4s 预算耗尽时，订阅、已接受
+  handler 与迟到的成员驱逐里仍有至少一项没有结束。`pendingHandlers` 是仍在产出结果的命令
+  handler 数，`pendingMemberEvictions` 是活得比 handler 返回的确认更久的持久踢人效果数，
+  `unsubscribePending` 表示命令频道还没有确认移除。consumer 会先关闭分发闸门再取这些快照，
+  所以 Redis listener 已捕获的命令也不能在关服后补充这些计数。该事件属于关服基础设施，
+  默认从管理事件列表隐藏。
+
 另外四个 Redis 关服步骤也采用同一条有界关闭规则（#270）：
 
 - `room_store_close_unfinished`——`close_room_store` 没能完成 `QUIT`。
@@ -663,10 +672,16 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
   僵住，靠的正是这份沉默。它们的信号还是调用方的那些：`room_reaper_sweep_timeout` →
   `room_reaper_sweep_stalled`、`node_heartbeat_failed`。
 
-仍有八个持久写按设计不设上限：运行时存储经 `trackAwaitedOperation` 的四个（踢人 / 吊销 /
+仍有七个持久写按设计不设上限：运行时存储经 `trackAwaitedOperation` 的三个（吊销 /
 generation / 删房），以及房间存储的四个房间体写。它们的副作用不会自行过期，所以 #237 的
 规则仍适用：一个可能是错的答复比一个慢的答复更糟。独立的 `blockMemberToken` 操作在 #277
-中被删除；踢人已经使用原子的 `evictMemberToken` 写，保留第二套封禁原语只会多留一个无界路径。
+中被删除。原子的 `evictMemberToken` 现在只限制执行节点的等待：到期返回
+`status=error, confirmation=unconfirmed, code=block_unconfirmed`，原始 Promise 仍会在迟到
+成功后继续收敛 Redis 写入与本地镜像，再断开套接字以触发正常离房清理。真实效果独立于这道
+等待拥有自己的最终成功 / 失败日志。命令总线在发布后的等待超时时也返回同一个附加的类型化
+确认标记，既有状态因此仍可被旧解析器读取；掌握操作者身份的管理动作层无需猜错误码，就能在
+返回前排队审计。结果发布失败时原样重发执行器结果，传输失败不会改写执行或确认语义。重试驱逐
+只会把封禁截止时间向后推进，所以不同节点的写乱序落地也是安全的。
 
 所有客户端都由 `createBoundedRedisClient` 构造，它**强制**要求声明采用了两层中的哪
 一层——而且调用方一侧那一层必须**点名**那道期限，因为"这条已经有界了"这句话在运行时
@@ -707,8 +722,10 @@ generation / 删房），以及房间存储的四个房间体写。它们的副�
   `room_reaper_sweep_stalled`、`node_heartbeat_failed`、
   `redis_runtime_store_operation_failed`、事件存储的丢弃日志、审计与事件页的 503。#277
   之后房间存储与运行时存储的**请求路径也在这份名单里**——它们会打 `reason=timeout` 并答复
-  调用方。仍然**保持沉默**的是上面点名的八个持久写；从外面看，就是一次永远不返回的踢人或
-  房间体写。
+  调用方。僵住的踢人会返回 `status=error, confirmation=unconfirmed`，其完整踢出效果仍在
+  进行中；封禁截止时间只会向后推进，所以可以安全重试。
+  仍然**保持沉默**的是上面点名的七个持久写；从外面看，就是一次永远不返回的吊销、teardown
+  写或房间体写。
 
 ## 变更后回归清单
 

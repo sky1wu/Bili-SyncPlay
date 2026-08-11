@@ -576,13 +576,30 @@
 - **Node 的 `requestTimeout` 不是慢 handler 的兜底。** 它约束的是**接收**请求，不是产出响应，
   所以一个在等僵死 Redis 的 HTTP handler 永远不会被答复——这是实测结论，而 #269 和 #277 的
   第一轮都曾在注释里倚靠它。任何"这条路径至少还有 HTTP 服务器兜底"的论证在这里都不成立。
-- **仍然刻意留着的：八个持久写。** 运行时存储经 `trackAwaitedOperation` 的四个写和房间
+- **仍然刻意留着的：七个持久写。** 运行时存储经 `trackAwaitedOperation` 的三个写和房间
   存储的四个房间体写维持无上限，因为 #237 已经判过"一个可能是错的答复比一个慢的答复更
-  糟"，而它们的副作用不会自己过期。独立的 `blockMemberToken` 路径没有生产调用方——踢人
-  已经使用原子的 `evictMemberToken` 操作——所以 #277 直接删除它，而不是保留第九个无界写。
-  剩下八个与**已经**加了上限的 `acquireRoomLock`、`tryClaimMessageSlot` 不同：一条
-  `SET NX PX` 即使在调用方放弃之后才落地，也会在 TTL 到期时自行释放，"可能已经落地"的
-  代价是一个锁周期，而不是一个永久的错误答案。
+  糟"，而它们的副作用不会自己过期。独立的 `blockMemberToken` 路径没有生产调用方，所以
+  #277 直接删除它。原子的 `evictMemberToken` 不同：管理命令执行器只限制自己的等待并返回
+  `status=error, confirmation=unconfirmed, code=block_unconfirmed`，原始 Promise 继续承载
+  Redis 写入和两层本地镜像更新，再断开套接字以触发正常离房清理。最终的
+  `admin_command_executed` 日志归真实
+  Promise 所有，而不是归受界等待者所有，所以迟到成功与迟到失败都仍可观察。管理命令总线在
+  一次已获准的发布无法再证明目标是否执行时也返回同一个附加确认标记；既有失败状态仍为
+  `error`，因此滚动升级期间旧解析器仍能消费结果。Redis `PUBLISH` 明确返回零接收者时才是
+  已确认的 `stale_target`。管理动作层因此审计这个有类型的确认标记，而不维护一张错误码名单；
+  这是最后一个仍知道操作者身份的层。结果传输重试必须原样重发执行器结果：发布答复失败不等于
+  执行失败，也绝不能抹掉其确认状态。跨节点重试之所以安全，是因为驱逐脚本保留最长封禁期限：
+  即使旧尝试最后落地，两次尝试也可交换。这份所有权一直延伸到关服：consumer 会在
+  unsubscribe 可能开始等待之前先关掉分发闸门，再让订阅、所有已接受的 handler，以及所有
+  活得比 handler 更久的驱逐效果共享同一份关闭预算。预算耗尽时记录
+  `admin_command_consumer_close_unfinished`，分别报告仍未结束的 handler 与驱逐，而不是依赖
+  更晚的 runtime-store 关闭去排空一份本来属于 consumer 的效果。分发闸门不可省：Redis 总线
+  可能已经在 Promise 边界后捕获了 handler；这类 handler 在关服后应答 `stale_target`，不能在
+  drain 快照之后再创建新工作。剩下七个与在
+  store 内**已经**加了上限的
+  `acquireRoomLock`、`tryClaimMessageSlot` 不同：一条 `SET NX PX` 即使在调用方放弃之后
+  才落地，也会在 TTL 到期时自行释放，"可能已经落地"的代价是一个锁周期，而不是一个永久
+  的错误答案。
 - **会过期的声明仍然有所有者。** claim 用一条 Lua 同时写入令牌、槽 TTL 与 teardown 索引分数，
   旧 tracking 写入就不能在新 owner 之后到达并覆盖它的分数。提前清理再用另一条 Lua 先校验
   令牌，同时删除槽与 teardown 索引。受界的 release 可能拖到旧 TTL 之后、且另一个节点已经

@@ -50,12 +50,15 @@ test("redis audit store appends, trims, and queries records across store instanc
       targetType: "member",
       targetId: "member-2",
       request: { roomCode: "ROOM01" },
-      result: "ok",
+      result: "rejected",
+      reason: "command_timeout",
       instanceId: "instance-b",
       targetInstanceId: "instance-a",
       executorInstanceId: "instance-a",
       commandRequestId: "req-2",
-      commandStatus: "ok",
+      commandStatus: "error",
+      commandConfirmation: "unconfirmed",
+      commandCode: "command_timeout",
     });
     await storeA.append({
       actor: ACTOR,
@@ -78,7 +81,9 @@ test("redis audit store appends, trims, and queries records across store instanc
     assert.equal(filtered.items[0]?.targetInstanceId, "instance-a");
     assert.equal(filtered.items[0]?.executorInstanceId, "instance-a");
     assert.equal(filtered.items[0]?.commandRequestId, "req-2");
-    assert.equal(filtered.items[0]?.commandStatus, "ok");
+    assert.equal(filtered.items[0]?.commandStatus, "error");
+    assert.equal(filtered.items[0]?.commandConfirmation, "unconfirmed");
+    assert.equal(filtered.items[0]?.commandCode, "command_timeout");
 
     const trimmed = await storeB.query({
       page: 1,
