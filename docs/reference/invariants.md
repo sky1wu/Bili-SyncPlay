@@ -341,6 +341,30 @@ decides something has to know which of the two questions it is asking (#242):
   fails, the socket is dropped: `leaveCurrentRoom` restores the member when its
   own persistence fails and the socket is open, so reporting the join refused
   while the server still holds the seat leaves the two disagreeing.
+- **Pruning an orphaned room-index member still owes runtime teardown.** Both
+  the periodic reconcile and room listing remove a member whose room body is
+  gone so enumeration and counts agree, but removal alone used to consume the
+  only code the room reaper could hand to `room-service` (#258). Every prune
+  therefore atomically adds a tokened claim to the shared
+  `room-index-orphans` hash and its `room-index-orphans-queue` delivery index.
+  Quarantining an unreadable body owes the same deferred claim before its index
+  member is removed: the bad body blocks delivery while it exists, then repair
+  clears the claim or deletion makes it deliverable.
+  Shared is essential: the standalone global-admin reconciles the index but
+  runs no room reaper. `deleteExpiredRooms` reads that handoff in bounded
+  rotating batches using Redis 6.0 commands, without consuming a claim,
+  re-checks that no room body took the code meanwhile, and reports the
+  survivors as `orphanedIndexCodes` plus their claim tokens. `room-service`
+  acknowledges a token only after its existing
+  generation-guarded runtime teardown settles. Every script validates both
+  handoff key types before any irreversible write, because a Redis Lua runtime
+  error does not roll back earlier writes in that script. The point room read
+  and sweep both validate the complete persisted-room shape (including nested
+  share/playback state) and the expected code: corruption is unknown, not proof
+  of code reuse, and cannot consume the claim. A process
+  crash therefore leaves the claim for another room node, while a late
+  acknowledgement cannot erase a newer claim created after the same room code
+  was recycled.
 
 ## One-shot broadcasts need a retry trail; repeated ones do not
 
@@ -892,6 +916,9 @@ do NOT compose, and that is the part that decides which connection gets which:
   `admin_session_store_unavailable` — never 401, which would read as a logout —
   while room/runtime timeout and admission failures answer 503
   `room_store_unavailable` / `runtime_store_unavailable`, not the catch-all 500.
+  That translation is one shared HTTP-boundary policy: both the admin router
+  and the dedicated metrics server use it, so moving `/metrics` to its own port
+  cannot turn the same dependency outage back into an undiagnosed 500.
   The session path logs `admin_session_store_command_failed` with the Redis
   detail the response withholds from an unauthenticated caller. Requests refused
   while the guard waits for `ready` go through the same reporting path. An

@@ -191,11 +191,12 @@ node server/dist/global-admin-index.js
 多节点控制面当前使用的 Redis 键族：
 
 - `bsp:room:*`、`bsp:rooms-by-expiry`：房间基础持久化。`bsp:rooms-by-expiry` 收录全部房间、分值为其过期时间(不过期的房间为 `+inf`),是列举、计数与回收的唯一来源。
+- `bsp:room-index-orphans`、`bsp:room-index-orphans-queue`：前者记录“索引仍在、room body 已不存在”的带 token 运行时清理 claim，后者是其有界轮转投递索引。Room Node 与 Global Admin 都必须拥有两把键的读写 ACL，备份也必须同时覆盖。监控 `HLEN bsp:room-index-orphans`；若只增不减，说明 Room Node 回收或运行时拆除未能完成。初始化后，queue 的 `ZCARD` 通常等于哈希长度加一个保留的序列成员；持续不一致说明出现了局部写入、错误键类型或 ACL 问题。
 - `bsp:room-index`、`bsp:room-expiry`：已不再写入也不再读取,原样保留。
 
   **回滚**到仍读取它们的版本前需要先做一步:旧版本会在启动时从房间体重建 `bsp:room-index`,却没有针对 `bsp:room-expiry` 的等价修复,因此在本版本期间被设为过期的房间将永远不会被回收。顺序是:**先停掉本版本的全部节点**,再执行 `REDIS_URL=... node server/scripts/rebuild-legacy-room-expiry.mjs`(加 `DRY_RUN=1` 可先预览),最后启动旧版本。该扫描是分批读取而非一致快照,仍在处理请求的节点可能在脚本读过之后修改房间的过期时间。脚本已随运行镜像发布。由于此时全部节点都已停止,**不能用 `docker exec`**(没有正在运行的容器可供进入),请以一次性容器执行:
 
-  ````bash
+  ```bash
   docker run --rm --network <你的网络> \
     -e REDIS_URL=redis://<redis 主机>:6379 \
     -e REDIS_NAMESPACE=<你的命名空间> \
@@ -205,9 +206,9 @@ node server/dist/global-admin-index.js
 
   脚本幂等,既不改动房间体,也不触碰 `bsp:rooms-by-expiry`。
 
-  Redis ACL、备份与监控请覆盖 `bsp:rooms-by-expiry`;仅放行旧两个键的部署会导致房间写入失败。
+  上线本版本前，必须给每个 Room Node 与 Global Admin 同时授予 `bsp:rooms-by-expiry` 和 `bsp:room-index-orphans*` 的读写权限；否则启动对账、房间列表修复与过期回收都可能失败。**首次上线孤儿交接机制时不能按普通滚动升级处理**：旧版 room-store 持有者仍可能剪掉 code 却不创建 claim。必须先排空流量并停止全部旧版 Room Node 与 Global Admin，再启动任一新版本；以后两个版本都已实现交接机制时才可正常滚动。
 
-  ````
+  关服前看到 `HLEN=0` 同样**不是**安全的回滚屏障：关服流程先停 reaper、后停 reconciler。应先排空流量并停止全部本版本 Room Node 与 Global Admin，再检查哈希；只有所有进程退出后观察到的零才稳定。若仍有 claim，启动一台不接流量的本版本 Room Node，等待成功 reaper sweep 直至哈希归零，再将它完整停止并于退出后复查；若复查仍非零就重复或中止回滚。随后执行上面的旧索引重建并启动旧版本。旧版本会忽略两把交接键；请保留其备份，删除会丢失尚未完成的清理 claim。
 
 - `bsp:runtime:*`：共享 session、房间成员、被踢 token 与节点心跳
 - `bsp:admin:session:*`：共享管理员 Bearer 会话

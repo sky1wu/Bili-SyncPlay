@@ -5146,6 +5146,8 @@ test("room service tears down orphaned index codes without metering them as recl
   const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
   const reclaimed: number[] = [];
   const tornDown: string[] = [];
+  const acknowledgedClaims: string[] = [];
+  const cleanupOrder: string[] = [];
   const runtime = createInMemoryRuntimeStore(() => currentTime);
   const roomStore = {
     ...baseRoomStore,
@@ -5156,7 +5158,12 @@ test("room service tears down orphaned index codes without metering them as recl
       return {
         deletedRoomCodes: ["REALRM"],
         orphanedIndexCodes: ["ORPHAN"],
+        orphanedIndexClaims: [{ code: "ORPHAN", token: "claim-1" }],
       };
+    },
+    async acknowledgeOrphanedIndexClaims(claims: readonly { code: string }[]) {
+      cleanupOrder.push("acknowledge");
+      acknowledgedClaims.push(...claims.map(({ code }) => code));
     },
   };
   const service = createRoomService({
@@ -5166,6 +5173,7 @@ test("room service tears down orphaned index codes without metering them as recl
     activeRooms: {
       ...runtime,
       deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+        cleanupOrder.push(`teardown:${code}`);
         tornDown.push(code);
         return runtime.deleteRoom(code, expectedGeneration);
       },
@@ -5187,8 +5195,76 @@ test("room service tears down orphaned index codes without metering them as recl
   // The orphan owes runtime teardown exactly like a real deletion — its code
   // stays unallocatable until that state is gone (#237 review) …
   assert.deepEqual(tornDown.sort(), ["ORPHAN", "REALRM"]);
+  assert.deepEqual(acknowledgedClaims, ["ORPHAN"]);
+  assert.ok(
+    cleanupOrder.indexOf("teardown:ORPHAN") <
+      cleanupOrder.indexOf("acknowledge"),
+  );
   // … but no room died under it, so metering it would put this counter back
   // out of step with room creations (#254 review).
   assert.deepEqual(reclaimed, [1]);
   assert.deepEqual(swept, { deletedRooms: 1, orphanedIndexEntries: 1 });
+});
+
+test("room service keeps an orphan claim until runtime teardown succeeds", async () => {
+  const currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const claim = { code: "ORPHAN", token: "claim-1" };
+  const acknowledged: string[] = [];
+  let roomReadFails = true;
+  const roomStore = {
+    ...baseRoomStore,
+    async getRoom(code: string) {
+      if (roomReadFails) {
+        throw new Error("invalid persisted room body");
+      }
+      return baseRoomStore.getRoom(code);
+    },
+    async deleteExpiredRooms() {
+      return {
+        deletedRoomCodes: [],
+        orphanedIndexCodes: [claim.code],
+        orphanedIndexClaims: [claim],
+      };
+    },
+    async acknowledgeOrphanedIndexClaims(claims: readonly (typeof claim)[]) {
+      acknowledged.push(...claims.map(({ token }) => token));
+    },
+  };
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  let teardownFails = true;
+  let teardownAttempts = 0;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      deleteRoom: async (code: string, expectedGeneration?: string | null) => {
+        teardownAttempts += 1;
+        if (teardownFails) {
+          throw new Error("redis unavailable");
+        }
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: () => "token-1234567890",
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  await service.deleteExpiredRooms();
+  assert.deepEqual(acknowledged, []);
+  assert.equal(teardownAttempts, 0);
+
+  roomReadFails = false;
+  await service.deleteExpiredRooms();
+  assert.deepEqual(acknowledged, []);
+  assert.equal(teardownAttempts, 1);
+
+  teardownFails = false;
+  await service.deleteExpiredRooms();
+  assert.deepEqual(acknowledged, [claim.token]);
+  assert.equal(teardownAttempts, 2);
 });

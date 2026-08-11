@@ -147,6 +147,12 @@ redis-cli -u redis://127.0.0.1:6379 ping
 PONG
 ```
 
+项目支持 Redis 6.0 及以上版本。开启 Redis ACL 时，仅能连通还不够：Room Node 与
+Global Admin 使用的身份还要能读写房间 body/索引，以及两把孤儿清理交接键。默认命名空间
+下，除 `bsp:room:*` 外还要授权 `bsp:rooms-by-expiry` 与
+`bsp:room-index-orphans*`。即便是单节点部署，漏掉交接键 ACL 也会使启动对账、房间列表或
+过期回收失败。
+
 预期启动日志：
 
 ```text
@@ -475,6 +481,17 @@ npm run build
 npm run build -w @bili-syncplay/server
 ```
 
+首次重启使用房间孤儿清理交接机制的版本前：
+
+1. 给两个服务身份授予 `bsp:room-index-orphans` 与
+   `bsp:room-index-orphans-queue` 的读写 ACL（设置了 `REDIS_NAMESPACE` 时替换
+   `bsp`）。
+2. 在同一份 Redis 备份中同时包含两把键。哈希保存带 token 的未完成清理 claim，
+   sorted set 是其有界轮转投递索引。
+3. 监控 `HLEN bsp:room-index-orphans`。queue 初始化后，
+   `ZCARD bsp:room-index-orphans-queue` 通常应等于前者加一个保留序列成员；持续增长或
+   长期不一致说明清理、ACL 或键类型需要排查。
+
 单机部署重启方式（即第 3 步创建的两个单元）：
 
 ```bash
@@ -496,6 +513,19 @@ sudo systemctl restart bili-syncplay-global-admin
 2. 观察 `GET /readyz`、日志和全局管理面是否恢复正常
 3. 再继续重启下一个 Room Node
 4. 最后重启 `global-admin`
+
+例外：首次上线孤儿清理交接机制时，不能混跑新旧 room-store 持有者。旧版 Room Node 或
+Global Admin 仍可能剪掉孤儿却不创建 claim。因此本次必须先排空流量并停止全部旧版 Room
+Node 与 Global Admin，再启动任一新版本进程。以后两个版本都已实现交接机制时，才可使用
+上面的滚动顺序。
+
+如果必须回滚到旧版本，不要把某一次瞬时 `HLEN=0` 当成排空屏障：关服流程先停 Room
+Reaper、后停索引 Reconciler，进程退出途中仍可能出现新 claim。先排空房间流量并停止全部
+本版本 Room Node 与 Global Admin；只有所有进程退出后看到的零才稳定。若仍有 claim，启动
+一台不接流量的本版本 Room Node，等待成功 reaper sweep 直至哈希归零，再将它完整停止并于
+退出后复查；复查仍非零就重复或中止回滚。备份中要保留两把交接键；旧版本虽会忽略它们，
+删除却会丢失待完成的运行时清理。若回滚目标仍使用旧式双索引 room store，还必须按
+[多节点部署文档](./multi-node.zh-CN.md)执行重建流程。
 
 ### 优雅退出
 

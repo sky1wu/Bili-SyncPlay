@@ -35,7 +35,7 @@
 
 当前会使用这些键族：
 
-- `bsp:room:*`、`bsp:rooms-by-expiry`(`bsp:room-index` 与 `bsp:room-expiry` 已不再写入或读取;回滚注意事项见 `multi-node.zh-CN.md`)
+- `bsp:room:*`、`bsp:rooms-by-expiry`、`bsp:room-index-orphans`、`bsp:room-index-orphans-queue`（`bsp:room-index` 与 `bsp:room-expiry` 已不再写入或读取；Room Node 与 Global Admin 都要有两把孤儿交接键的读写 ACL，备份、监控与回滚注意事项见 `multi-node.zh-CN.md`）
 - `bsp:runtime:*`
 - `bsp:admin:session:*`
 - `bsp:events`
@@ -47,10 +47,16 @@
 上线前至少确认：
 
 1. 每个节点都能连通 Redis。
-2. Redis 持久化与淘汰策略符合你的保留预期。
-3. 每个 `INSTANCE_ID` 唯一。
+2. 每个 Room Node 与 Global Admin 都能读写 `bsp:room-index-orphans*`，备份已覆盖两把键，且监控已跟踪 `HLEN bsp:room-index-orphans`。
+3. Redis 持久化与淘汰策略符合你的保留预期。
+4. 每个 `INSTANCE_ID` 唯一。
 
 ## 推荐上线顺序
+
+首次引入 `room-index-orphans*` 的版本有一项一次性兼容要求：只要仍有旧版 Room Node 或
+Global Admin 持有 room store，就不能使用下面的分阶段/滚动顺序。旧进程可能剪掉孤儿却不
+创建清理 claim。应先排空房间流量并停止全部旧版 Room Node 与 Global Admin，再启动新
+进程并继续以下阶段。以后两个版本都已实现交接机制时才可正常滚动。
 
 ### 阶段 1：共享控制面
 

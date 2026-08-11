@@ -62,10 +62,19 @@ export function instrumentRoomStore(
     isReady: measure("is_ready", () => roomStore.isReady()),
   };
 
-  // Both hooks must survive wrapping: losing close() would leak the Redis
-  // connection, and losing reconcileRoomIndex() would silently stop the index
-  // from ever converging again — a rolling upgrade's rooms would go unreaped
-  // with nothing failing.
+  if (typeof roomStore.acknowledgeOrphanedIndexClaims === "function") {
+    instrumented.acknowledgeOrphanedIndexClaims = measure(
+      "acknowledge_orphaned_index_claims",
+      roomStore.acknowledgeOrphanedIndexClaims.bind(roomStore),
+    );
+  }
+
+  // Both implementation hooks must survive wrapping: losing close() would
+  // leak the Redis connection, and losing reconcileRoomIndex() would silently
+  // stop the index from ever converging again — a rolling upgrade's rooms
+  // would go unreaped with nothing failing. The optional RoomStore operation
+  // above is deliberately part of `instrumented` instead: production room
+  // services call through this wrapper and must both retain and measure it.
   const hooks: Pick<MaintainableRoomStore, "close" | "reconcileRoomIndex"> = {};
   if (typeof roomStore.close === "function") {
     hooks.close = roomStore.close.bind(roomStore);

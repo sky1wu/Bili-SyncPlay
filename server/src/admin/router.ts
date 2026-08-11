@@ -3,10 +3,7 @@ import { AdminActionError } from "./action-service.js";
 import { AdminSessionStoreUnavailableError } from "../redis-admin-session-store.js";
 import { AuditStoreUnavailableError } from "./redis-audit-store.js";
 import { EventStoreUnavailableError } from "./redis-event-store.js";
-import {
-  redisStoreUnavailableMessage,
-  RedisStoreUnavailableError,
-} from "../redis-store-unavailable.js";
+import { toRedisStoreUnavailableHttpError } from "../redis-store-unavailable.js";
 import {
   requireAdminWriteOrigin,
   setAdminCorsResponseHeaders,
@@ -198,17 +195,19 @@ export function createAdminRouter(options: AdminRouterOptions) {
           sendError(response, 503, "audit_store_unavailable", error.message);
           return true;
         }
-        if (error instanceof RedisStoreUnavailableError) {
+        const redisStoreUnavailable = toRedisStoreUnavailableHttpError(error);
+        if (redisStoreUnavailable) {
           // The room and shared-runtime stores use caller-side caps and refuse
           // new commands once their non-cancelling caps fill the admission
           // budget. Both outcomes are transient dependency failures, not
-          // application bugs: name the failed store and tell the console that
-          // retrying is meaningful without exposing operation details.
+          // application bugs. The shared translation is also used by the
+          // dedicated metrics server, so every HTTP boundary names the same
+          // retryable failure without exposing operation details.
           sendError(
             response,
-            503,
-            `${error.store}_store_unavailable`,
-            redisStoreUnavailableMessage(error.store),
+            redisStoreUnavailable.statusCode,
+            redisStoreUnavailable.code,
+            redisStoreUnavailable.message,
           );
           return true;
         }

@@ -191,11 +191,12 @@ If the edge machine also carries `room-node-a`, `global-admin`, and `redis`, it 
 Redis key families used by the multi-node control plane:
 
 - `bsp:room:*`, `bsp:rooms-by-expiry`: persisted room base state. `bsp:rooms-by-expiry` holds every room scored by its expiry (`+inf` when the room does not expire) and is the single source for listing, counting and reaping.
+- `bsp:room-index-orphans`, `bsp:room-index-orphans-queue`: durable, tokened runtime-cleanup claims for room-index entries whose room body is already gone, plus their bounded rotating delivery index. Both room nodes and global-admin must have read/write ACL access to both keys. Back them up together. Monitor `HLEN bsp:room-index-orphans`; a value that only grows means room-node reaping or runtime teardown is not settling. Once initialized, the queue's `ZCARD` is normally the hash length plus one reserved sequence member; persistent drift identifies a partial write, wrong key type, or ACL problem.
 - `bsp:room-index`, `bsp:room-expiry`: no longer written or read. They are left in place untouched.
 
   **Rolling back** to a build that still reads them needs one step first: that build rebuilds `bsp:room-index` from room bodies on startup, but has no equivalent repair for `bsp:room-expiry`, so rooms whose expiry was set while this build was live would never be reaped. The order is: **stop every node on this build**, run `REDIS_URL=... node server/scripts/rebuild-legacy-room-expiry.mjs` (`DRY_RUN=1` to preview), then start the old build. The scan is a batched read rather than a snapshot, so a node still serving requests could change a room's expiry after the script read it. The script ships in the runtime image. Because every node must already be stopped, run it as a one-off container rather than `docker exec` — there is no running container left to exec into:
 
-  ````bash
+  ```bash
   docker run --rm --network <your-network> \
     -e REDIS_URL=redis://<redis-host>:6379 \
     -e REDIS_NAMESPACE=<your-namespace> \
@@ -205,9 +206,9 @@ Redis key families used by the multi-node control plane:
 
   It is idempotent and touches neither room bodies nor `bsp:rooms-by-expiry`.
 
-  Grant ACLs, backups and monitoring on `bsp:rooms-by-expiry`; a deployment that only allows the old two keys will fail room writes.
+  Before rolling out this build, grant every room node and global-admin read/write access to `bsp:rooms-by-expiry` and `bsp:room-index-orphans*`; otherwise bootstrap reconciliation, room listing repair, and expiry sweeps can fail. The **first rollout of the orphan handoff is not a normal rolling upgrade**: an old room-store holder can still prune a code without creating a claim. Drain traffic and stop every old room node and global-admin before starting any new one; later upgrades in which both versions already implement the handoff may roll normally.
 
-  ````
+  A pre-shutdown `HLEN=0` is also **not** a safe rollback barrier: shutdown stops the reaper before the reconciler. Drain traffic and stop every current room node and global-admin, then check the hash. Only a zero observed after all processes have exited is stable. If claims remain, start one current room node isolated from traffic, wait for successful reaper sweeps until the hash reaches zero, stop it cleanly, and check again after exit; repeat or abort the rollback if the post-stop check is nonzero. Then run the legacy rebuild above and start the old build. Older builds ignore both handoff keys; retain them in backups because deleting them discards any outstanding cleanup claim.
 
 - `bsp:runtime:*`: shared sessions, room members, blocked member tokens, and node heartbeats
 - `bsp:admin:session:*`: shared admin bearer sessions

@@ -59,6 +59,33 @@ Production should also set these explicitly and keep them aligned:
 - `ADMIN_SESSION_TTL_MS`
 - `ADMIN_ROLE`
 
+### Room-index orphan cleanup handoff
+
+Redis 6.0 or newer is supported. With ACLs enabled, every room node and
+global-admin must have read/write access to `bsp:rooms-by-expiry` and both
+`bsp:room-index-orphans` (tokened claims) and
+`bsp:room-index-orphans-queue` (their bounded rotating delivery index). Replace
+`bsp` with the configured `REDIS_NAMESPACE`. A broad existing `bsp:*` grant
+already covers them; narrower room-key grants must be extended before rollout.
+
+Back up the hash and sorted set together. Monitor the hash with
+`HLEN bsp:room-index-orphans`; sustained growth means room-node reaping or
+runtime teardown is not settling. Once initialized, the queue normally has one
+extra reserved sequence member, so persistent divergence between `ZCARD` and
+`HLEN + 1` points to an ACL, key-type, or partial-write problem.
+
+The first rollout of this handoff must not mix old and new room-store holders:
+drain traffic and stop every old room node and global-admin before starting the
+new build. For a rollback, an instantaneous pre-shutdown `HLEN=0` is not a
+stable barrier because shutdown stops the reaper before the reconciler. Stop
+every current process first and check after all have exited. If claims remain,
+start one current room node isolated from traffic, wait for successful reaper
+sweeps until the hash is empty, stop it cleanly, and check again after exit;
+repeat or abort if that post-stop check is nonzero. Do not delete either
+handoff key. If the target build uses the legacy room indexes, also follow the
+rebuild procedure in the
+[multi-node deployment guide](../operations/multi-node.md).
+
 ## Common Verification Commands
 
 ```bash
@@ -169,6 +196,12 @@ redis-cli -u "$REDIS_URL" ping
 curl -fsS http://10.0.0.11:8787/readyz
 curl -fsS http://10.0.0.11:8787/metrics | grep bili_syncplay_redis_operation_failures_total
 sudo journalctl -u bili-syncplay-room-node-a --since "15 min ago" | grep -E "redis|Redis|node_heartbeat_failed"
+
+# Default namespace; substitute your configured prefix
+redis-cli -u "$REDIS_URL" type bsp:room-index-orphans
+redis-cli -u "$REDIS_URL" type bsp:room-index-orphans-queue
+redis-cli -u "$REDIS_URL" hlen bsp:room-index-orphans
+redis-cli -u "$REDIS_URL" zcard bsp:room-index-orphans-queue
 ```
 
 Also check the global admin overview:
@@ -286,6 +319,7 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 | Abnormal drop in WebSocket connections                            | `bili_syncplay_connections`                                                            | Edge upstreams, room node `/readyz`, process logs                            | Restore the node or remove the unhealthy node from the LB                      |
 | Abnormal drop in active rooms                                     | `bili_syncplay_active_rooms`, `bili_syncplay_rooms_non_expired`                        | Redis connectivity, room expiry settings, restart history                    | Restore Redis; confirm `ROOM_STORE_PROVIDER` was not switched to memory        |
 | Expired rooms stop being reclaimed (reaper stalled)               | `bili_syncplay_room_reaper_sweeps_total`                                               | See [Is the room reaper still sweeping?](#is-the-room-reaper-still-sweeping) | Restore Redis; confirm `ROOM_CLEANUP_INTERVAL_MS` was not raised               |
+| Orphan-cleanup claim hash grows or diverges from its queue        | `HLEN bsp:room-index-orphans`, `ZCARD bsp:room-index-orphans-queue`                    | Room reaper outcomes, runtime teardown logs, ACLs, `TYPE` for both keys      | Restore the reaper/runtime store; repair ACL or wrong-type keys before restart |
 | Redis operation failures                                          | `bili_syncplay_redis_operation_failures_total`                                         | Redis process, network, ACLs, password, slow queries                         | Restore Redis first; downgrade to in-memory only if necessary                  |
 | Completed admin command result publish paths fail                 | `bili_syncplay_admin_command_result_publish_failures_total`                            | Admin command bus publisher saturation, Redis pub/sub, result publish logs   | Restore Redis; confirm close-room fan-out and command-bus capacity are healthy |
 | Elevated Redis runtime store latency                              | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                            | Redis CPU, memory, network RTT, command queueing                             | Scale Redis or reduce edge-layer traffic                                       |

@@ -28,6 +28,12 @@ export type RoomUpdateResult =
   | { ok: true; room: PersistedRoom }
   | { ok: false; reason: "not_found" | "version_conflict" };
 
+/** A durable handoff naming one discovery of an orphaned room-index entry. */
+export type OrphanedIndexClaim = {
+  code: string;
+  token: string;
+};
+
 /** What one expiry sweep removed, split by whether a room was actually there. */
 export type ExpiredRoomSweep = {
   /** Rooms whose body this pass deleted. */
@@ -37,6 +43,12 @@ export type ExpiredRoomSweep = {
    * still owe runtime teardown, but no room died here.
    */
   orphanedIndexCodes: string[];
+  /**
+   * Durable claims corresponding to {@link orphanedIndexCodes}. A Redis-backed
+   * store keeps each claim until the caller confirms that runtime teardown has
+   * settled, so another process can retry after a crash.
+   */
+  orphanedIndexClaims?: OrphanedIndexClaim[];
 };
 
 export type RoomStore = {
@@ -69,6 +81,14 @@ export type RoomStore = {
    * of step with room creations (#254 review).
    */
   deleteExpiredRooms: (now: number) => Promise<ExpiredRoomSweep>;
+  /**
+   * Acknowledge orphan claims only after their runtime teardown has settled.
+   * Tokens make a late acknowledgement harmless when the room code was reused
+   * and became orphaned again in the meantime.
+   */
+  acknowledgeOrphanedIndexClaims?: (
+    claims: readonly OrphanedIndexClaim[],
+  ) => Promise<void>;
   listRooms: (
     query: Pick<
       RoomListQuery,

@@ -32,7 +32,7 @@ Recommended role split:
 
 Key families used by the rollout:
 
-- `bsp:room:*`, `bsp:rooms-by-expiry` (`bsp:room-index` and `bsp:room-expiry` are no longer written or read; see the rollback note in `multi-node.md`)
+- `bsp:room:*`, `bsp:rooms-by-expiry`, `bsp:room-index-orphans`, `bsp:room-index-orphans-queue` (`bsp:room-index` and `bsp:room-expiry` are no longer written or read; grant room nodes and global-admin read/write ACL access to both orphan handoff keys, and see the backup, monitoring, and rollback note in `multi-node.md`)
 - `bsp:runtime:*`
 - `bsp:admin:session:*`
 - `bsp:events`
@@ -44,10 +44,19 @@ Key families used by the rollout:
 Before rollout:
 
 1. Confirm Redis connectivity from every node.
-2. Confirm Redis persistence and eviction policy are compatible with your retention expectations.
-3. Confirm `INSTANCE_ID` values are unique.
+2. Confirm every room node and global-admin can read and write `bsp:room-index-orphans*`, backups include both keys, and monitoring tracks `HLEN bsp:room-index-orphans`.
+3. Confirm Redis persistence and eviction policy are compatible with your retention expectations.
+4. Confirm `INSTANCE_ID` values are unique.
 
 ## Rollout Order
+
+One-time compatibility note for the release that first introduces
+`room-index-orphans*`: do not use the phased/rolling order below while an older
+room node or global-admin still holds the room store. An old process can prune
+an orphan without creating a cleanup claim. Drain room traffic, stop every old
+room node and global-admin, then start the new processes and continue the
+phases. Later upgrades where both versions implement the handoff may roll
+normally.
 
 ### Phase 1: Shared Control Plane
 

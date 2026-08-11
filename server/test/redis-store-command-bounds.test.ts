@@ -491,6 +491,8 @@ const ROOM_REQUEST_PATH: Record<
 
 const ROOM_BOUNDED_ELSEWHERE: Record<string, string> = {
   deleteExpiredRooms: "maintenance-pass: room-reaper's per-tick sweep cap",
+  acknowledgeOrphanedIndexClaims:
+    "maintenance-pass: room-reaper's per-tick sweep cap",
   reconcileRoomIndex: "maintenance-pass: room-index-reconciler's per-tick cap",
   close: "quitWithin, inside the shutdown step's budget",
 };
@@ -634,6 +636,30 @@ test("the room reaper's sweep is left unanswered, so its pass can report stalled
   );
 });
 
+test("the room reaper's orphan acknowledgement is left unanswered too", async () => {
+  const bootstrapCommands = await withRoomStore(
+    null,
+    async (_store, commands) => commands.issuedCount(),
+    { settleBootstrap: true },
+  );
+
+  await withRoomStore(
+    bootstrapCommands,
+    async (store) => {
+      const acknowledge = store.acknowledgeOrphanedIndexClaims;
+      assert.ok(acknowledge);
+      const answered = await settleWithin(
+        acknowledge([{ code: "ROOM01", token: "claim-1" }]).catch(
+          () => undefined,
+        ),
+        OBSERVATION_MS,
+      );
+      assert.equal(answered, false);
+    },
+    { settleBootstrap: true },
+  );
+});
+
 test("the reaper's wait on the migration pass is left unanswered too", async () => {
   // The other half of the same claim, and the polarity a listing gets the
   // opposite answer to: the reaper waits for the first reconcile before it can
@@ -740,8 +766,13 @@ test("a listing reads more rooms than the admission limit without being refused"
       code,
       JSON.stringify({
         code,
+        joinToken: "join-token-123456",
         version: 1,
         createdAt: 1,
+        ownerMemberId: null,
+        ownerDisplayName: null,
+        sharedVideo: null,
+        playback: null,
         lastActiveAt: 1,
         expiresAt: null,
       }),

@@ -8,6 +8,7 @@ import {
 } from "../src/app.js";
 import { createMetricsRequestHandler } from "../src/bootstrap/metrics-handler.js";
 import { isMetricsRequestAuthorized } from "../src/metrics-auth.js";
+import { RedisStoreUnavailableError } from "../src/redis-store-unavailable.js";
 
 const ALLOWED_ORIGIN = "chrome-extension://allowed-extension";
 
@@ -101,6 +102,35 @@ test("dedicated metrics port handler enforces the configured token", async () =>
   );
   assert.equal(authorized.state.statusCode, 200);
   assert.equal(authorized.state.body, "metric_line 1\n");
+});
+
+test("dedicated metrics port reports room store outages as retryable 503s", async () => {
+  const handler = createMetricsRequestHandler({
+    getMetrics: () => {
+      throw new RedisStoreUnavailableError(
+        "room",
+        "count_rooms",
+        "timeout",
+        "Redis room store command count_rooms exposed sensitive details.",
+      );
+    },
+  });
+  const result = createFakeResponse();
+
+  await handler(
+    { url: "/metrics", method: "GET", headers: {} } as IncomingMessage,
+    result.response,
+  );
+
+  assert.equal(result.state.statusCode, 503);
+  assert.deepEqual(JSON.parse(result.state.body), {
+    ok: false,
+    error: {
+      code: "room_store_unavailable",
+      message: "Room store is unavailable.",
+    },
+  });
+  assert.doesNotMatch(result.state.body, /count_rooms|sensitive details/);
 });
 
 test("main-port /metrics enforces the token while health probes stay open", async () => {
