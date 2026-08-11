@@ -500,10 +500,15 @@ return 1
  *
  * Two independent writes could not be made consistent by ordering alone — once
  * the block landed there was nothing to roll it back with if the revoke then
- * failed (#237 review). One script either does both or neither.
+ * failed (#237 review). One script either does both or neither. The deadline is
+ * monotonic because an unconfirmed command can be retried from another node;
+ * an older attempt that lands last must not shorten the newer block.
  */
 const EVICT_MEMBER_LUA = `
-redis.call("ZADD", KEYS[1], ARGV[3], ARGV[2])
+local blockedUntil = redis.call("ZSCORE", KEYS[1], ARGV[2])
+if not blockedUntil or tonumber(ARGV[3]) > tonumber(blockedUntil) then
+  redis.call("ZADD", KEYS[1], ARGV[3], ARGV[2])
+end
 redis.call("HDEL", KEYS[2], ARGV[1])
 redis.call("ZREM", KEYS[3], ARGV[1])
 return 1
@@ -811,9 +816,9 @@ export async function createRedisRuntimeStore(
     // also why the bound has to be chosen per CALL, not per method:
     // `loadSession` is reached from the join path AND from the reaper.
     //
-    // What this does NOT resolve: the four durable writes through
-    // `trackAwaitedOperation` (`evictMemberToken`, `revokeMemberToken`,
-    // `markRoomGeneration`, `deleteRoom`). Capping those
+    // What this does NOT resolve: the three durable writes through
+    // `trackAwaitedOperation` (`revokeMemberToken`, `markRoomGeneration`,
+    // `deleteRoom`). Capping those
     // re-opens #237's trade that an answer which can be wrong is worse than a
     // slow one, and their side effects do not expire on their own the way a
     // lock or a dedup slot does. The former standalone `blockMemberToken` path
@@ -822,7 +827,7 @@ export async function createRedisRuntimeStore(
     createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's four durable writes",
+        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's three durable writes",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
@@ -967,7 +972,9 @@ export async function createRedisRuntimeStore(
    * Applied to reads, and to writes whose side effect expires on its own. An
    * `acquireRoomLock` or `tryClaimMessageSlot` that secretly landed releases
    * itself at its TTL, so "may have landed" costs at most one lock interval.
-   * The four durable writes are not in that class; see the note on the client.
+   * The three remaining durable writes are not in that class; see the note on
+   * the client. Eviction is bounded at its informed caller so its complete
+   * mirrored effect, rather than only this Redis command, remains alive.
    *
    * `async`, and that is load-bearing rather than style: two callers build a
    * `Promise.all([...])` literal out of two of these, and a SYNCHRONOUS throw

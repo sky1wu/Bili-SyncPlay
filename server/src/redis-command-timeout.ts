@@ -57,11 +57,13 @@
  * ## What that leaves open, deliberately
  *
  * #277 closed the request-path gap with a cap that keeps each command tracked.
- * Eight persistent writes deliberately remain uncapped: four runtime-store
+ * Seven persistent writes deliberately remain uncapped: three runtime-store
  * writes through `trackAwaitedOperation` and four room-body writes. Their
  * effects do not expire, so a timed-out answer could be contradicted by a late
- * write. The unused standalone `blockMemberToken` path was removed in #277
- * instead of keeping a ninth unbounded write alongside atomic eviction.
+ * write. The unused standalone `blockMemberToken` path was removed in #277;
+ * atomic eviction instead bounds the executor's wait while keeping its real
+ * effect alive, reports a typed unconfirmed outcome, and keeps its block
+ * deadline monotonic so cross-node retries can land in either order.
  *
  * ## What `commandTimeout` does NOT do
  *

@@ -21,6 +21,8 @@ export const EVENT_LABELS: Record<string, string> = {
   admin_room_expired: "管理端提前过期",
   admin_room_video_cleared: "管理端清空视频",
   admin_member_kicked: "管理端踢出成员",
+  admin_command_unconfirmed: "管理命令效果未确认",
+  admin_command_confirmation_timed_out: "管理命令确认超时",
   admin_session_disconnected: "管理端断开会话",
 };
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { RedisCommandAdmissionError } from "../src/redis-command-timeout.js";
 import { createRedisAdminCommandBus } from "../src/redis-admin-command-bus.js";
+import { settleWithin } from "../src/retry-pacer.js";
 import { createFakeRedisPubSubClient } from "./redis-pubsub-test-helpers.js";
 
 const REDIS_URL = process.env.REDIS_URL;
@@ -104,7 +105,7 @@ test("redis admin command bus routes commands to the target instance and returns
   }
 });
 
-test("redis admin command bus reports stale target when no subscriber responds", async (t) => {
+test("redis admin command bus reports stale target when publish reaches no subscriber", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
@@ -129,7 +130,7 @@ test("redis admin command bus reports stale target when no subscriber responds",
     );
 
     assert.equal(result.status, "stale_target");
-    assert.equal(result.code, "command_timeout");
+    assert.equal(result.code, "stale_target");
   } finally {
     await bus.close();
   }
@@ -169,20 +170,240 @@ test("a failing cleanup UNSUBSCRIBE does not replace the request's answer", asyn
       20,
     );
 
-    assert.equal(result.status, "stale_target");
+    assert.equal(result.status, "error");
+    assert.equal(result.confirmation, "unconfirmed");
+    assert.equal(result.code, "command_timeout");
+  } finally {
+    await bus.close();
+  }
+});
+
+test("a publish failure after admission reports an unconfirmed command effect", async () => {
+  const publisher = createFakeRedisPubSubClient(async () => "OK", {
+    publish: async () => {
+      throw new Error("Command timed out");
+    },
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => "OK");
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    const result = await bus.request({
+      kind: "kick_member",
+      requestId: "request-publish-unknown",
+      targetInstanceId: "instance-1",
+      roomCode: "ABC123",
+      memberId: "member-1",
+      requestedAt: 1,
+    });
+
+    assert.equal(result.status, "error");
+    assert.equal(result.confirmation, "unconfirmed");
+    assert.equal(result.code, "command_publish_unconfirmed");
+  } finally {
+    await bus.close();
+  }
+});
+
+test("redis admin command bus parses an additive unconfirmed executor result", async () => {
+  const publisher = createFakeRedisPubSubClient(async () => 1);
+  const subscriber = createFakeRedisPubSubClient(async () => "OK");
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    resultChannelPrefix: "result:",
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    const request = bus.request({
+      kind: "kick_member",
+      requestId: "request-unconfirmed-result",
+      targetInstanceId: "instance-1",
+      roomCode: "ABC123",
+      memberId: "member-1",
+      requestedAt: 1,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    subscriber.emitMessage(
+      "result:request-unconfirmed-result",
+      JSON.stringify({
+        requestId: "request-unconfirmed-result",
+        targetInstanceId: "instance-1",
+        executorInstanceId: "instance-1",
+        status: "error",
+        confirmation: "unconfirmed",
+        code: "block_unconfirmed",
+        message: "Member eviction was not confirmed before the deadline.",
+        completedAt: 2,
+      }),
+    );
+
+    const result = await request;
+    assert.equal(result.status, "error");
+    assert.equal(result.confirmation, "unconfirmed");
+    assert.equal(result.code, "block_unconfirmed");
+  } finally {
+    await bus.close();
+  }
+});
+
+test("an unconfirmed executor result keeps a legacy-compatible status on the wire", async () => {
+  let resolvePublished!: (payload: string) => void;
+  const published = new Promise<string>((resolve) => {
+    resolvePublished = resolve;
+  });
+  const publisher = createFakeRedisPubSubClient(async () => "OK", {
+    publish: async (channel, payload) => {
+      if (channel === "result:request-wire-compatible") {
+        resolvePublished(payload);
+      }
+      return 1;
+    },
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => "OK");
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    commandChannelPrefix: "cmd:",
+    resultChannelPrefix: "result:",
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    await bus.subscribe("instance-1", async (command) => ({
+      requestId: command.requestId,
+      targetInstanceId: command.targetInstanceId,
+      executorInstanceId: "instance-1",
+      status: "error",
+      confirmation: "unconfirmed",
+      code: "block_unconfirmed",
+      message: "Member eviction was not confirmed before the deadline.",
+      completedAt: 2,
+    }));
+
+    subscriber.emitMessage(
+      "cmd:instance-1",
+      JSON.stringify({
+        kind: "kick_member",
+        requestId: "request-wire-compatible",
+        targetInstanceId: "instance-1",
+        roomCode: "ABC123",
+        memberId: "member-1",
+        requestedAt: 1,
+      }),
+    );
+
     assert.equal(
-      result.status === "stale_target" ? result.code : null,
-      "command_timeout",
+      await settleWithin(published, 200),
+      true,
+      "the executor result must be published",
+    );
+    const wireResult = JSON.parse(await published) as {
+      status?: unknown;
+      confirmation?: unknown;
+    };
+    assert.equal(wireResult.status, "error");
+    assert.equal(wireResult.confirmation, "unconfirmed");
+    assert.ok(
+      ["not_found", "stale_target", "error"].includes(
+        String(wireResult.status),
+      ),
+      "the status must remain inside the previous parser's accepted enum",
     );
   } finally {
     await bus.close();
   }
 });
 
-test("a fallback result that cannot be published is reported, not thrown at the process", async () => {
-  // Three publishes can fail on this path and the third has nowhere to go: the
-  // handler's result publish rejects, its `.catch()` publishes a fallback on
-  // the SAME stalled connection, and that rejection escapes a `void`-ed chain.
+test("a result publish retry preserves the executor's unconfirmed result", async () => {
+  const publishedResults: string[] = [];
+  let resultPublishCalls = 0;
+  let resolveRetriedPublish!: () => void;
+  const retriedPublish = new Promise<void>((resolve) => {
+    resolveRetriedPublish = resolve;
+  });
+  const publisher = createFakeRedisPubSubClient(async () => "OK", {
+    publish: async (channel, payload) => {
+      if (channel === "result:request-preserve-unconfirmed") {
+        resultPublishCalls += 1;
+        publishedResults.push(payload);
+        if (resultPublishCalls === 1) {
+          throw new Error("transient result publish failure");
+        }
+        resolveRetriedPublish();
+      }
+      return 1;
+    },
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => "OK");
+  const bus = await createRedisAdminCommandBus("redis://unused", {
+    commandChannelPrefix: "cmd:",
+    resultChannelPrefix: "result:",
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  try {
+    await bus.subscribe("instance-1", async (command) => ({
+      requestId: command.requestId,
+      targetInstanceId: command.targetInstanceId,
+      executorInstanceId: "instance-1",
+      status: "error",
+      confirmation: "unconfirmed",
+      code: "block_unconfirmed",
+      message: "Member eviction was not confirmed before the deadline.",
+      completedAt: 2,
+    }));
+
+    subscriber.emitMessage(
+      "cmd:instance-1",
+      JSON.stringify({
+        kind: "kick_member",
+        requestId: "request-preserve-unconfirmed",
+        targetInstanceId: "instance-1",
+        roomCode: "ABC123",
+        memberId: "member-1",
+        requestedAt: 1,
+      }),
+    );
+
+    assert.equal(
+      await settleWithin(retriedPublish, 200),
+      true,
+      "the original result must receive a second publish attempt",
+    );
+    assert.equal(publishedResults.length, 2);
+    assert.deepEqual(
+      JSON.parse(publishedResults[1] ?? "null"),
+      JSON.parse(publishedResults[0] ?? "null"),
+      "transport retry must not rewrite execution semantics",
+    );
+    const retriedResult = JSON.parse(publishedResults[1] ?? "null") as {
+      status?: unknown;
+      confirmation?: unknown;
+      code?: unknown;
+    };
+    assert.equal(retriedResult.status, "error");
+    assert.equal(retriedResult.confirmation, "unconfirmed");
+    assert.equal(retriedResult.code, "block_unconfirmed");
+  } finally {
+    await bus.close();
+  }
+});
+
+test("a result that cannot be published after retry is reported, not thrown at the process", async () => {
+  // Both attempts run on the SAME stalled connection, and the retry rejection
+  // has nowhere to go unless the `void`-ed chain ends with its own handler.
   // Under Node's default that is an `unhandledRejection` and the process exits,
   // so a Redis outage would take the server down with it. Reachable since #271
   // gave this client a `commandTimeout`; before that the publish hung instead
@@ -233,7 +454,7 @@ test("a fallback result that cannot be published is reported, not thrown at the 
       }),
     );
 
-    // Let the handler chain settle: result publish → fallback publish → report.
+    // Let the handler chain settle: result publish → exact retry → report.
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
@@ -1009,6 +1230,8 @@ test("a failed publish cancels its reply listener before releasing admission", a
         1_000,
       );
       assert.equal(result.status, "error");
+      assert.equal(result.confirmation, "unconfirmed");
+      assert.equal(result.code, "command_publish_unconfirmed");
       assert.equal(subscriber.messageListenerCount(), 1);
     }
   } finally {

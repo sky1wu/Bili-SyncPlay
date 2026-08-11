@@ -563,7 +563,17 @@ export function createInMemoryRuntimeStore(
     },
     evictMemberToken(code, memberId, memberToken, blockedUntil) {
       const activeEntries = pruneBlockedMemberTokens(code, now());
-      activeEntries.push({ memberToken, expiresAt: blockedUntil });
+      const existingBlock = activeEntries.find(
+        (entry) => entry.memberToken === memberToken,
+      );
+      if (existingBlock) {
+        existingBlock.expiresAt = Math.max(
+          existingBlock.expiresAt,
+          blockedUntil,
+        );
+      } else {
+        activeEntries.push({ memberToken, expiresAt: blockedUntil });
+      }
       blockedMemberTokensByRoom.set(code, activeEntries);
       // Not `this.revokeMemberToken`: every consumer takes these off the object
       // as bare references (`active-room-registry`, the mirrored store), so

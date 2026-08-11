@@ -514,6 +514,11 @@ sudo systemctl restart bili-syncplay-global-admin
 3. 再继续重启下一个 Room Node
 4. 最后重启 `global-admin`
 
+兼容性例外：首次上线 #277 引入的管理命令附加 `confirmation` 字段时，先重启
+`global-admin` 并验证管理写操作，再滚动重启 Room Node。线上状态仍保持为 `error`，所以旧解析器
+也能消费新结果；但先升级掌握操作者身份的审计写入方，才能在整个滚动窗口保留
+`unconfirmed` 标记与操作者归属。后续版本可恢复上面的常规顺序。
+
 例外：首次上线孤儿清理交接机制时，不能混跑新旧 room-store 持有者。旧版 Room Node 或
 Global Admin 仍可能剪掉孤儿却不创建 claim。因此本次必须先排空流量并停止全部旧版 Room
 Node 与 Global Admin，再启动任一新版本进程。以后两个版本都已实现交接机制时，才可使用

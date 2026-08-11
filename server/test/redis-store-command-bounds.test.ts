@@ -205,6 +205,8 @@ const RUNTIME_BOUNDED_ELSEWHERE: Record<string, string> = {
   close: "settleWithin and quitWithin, both inside the shutdown step's budget",
   heartbeatNode: "maintenance-pass: node-heartbeat's per-tick cap",
   purgeNodeStatus: "maintenance-pass: runtime-index-reaper's per-tick cap",
+  evictMemberToken:
+    "admin-command-consumer: typed member-eviction confirmation deadline; the real effect stays tracked and retry deadlines are monotonic",
 };
 
 /**
@@ -226,15 +228,14 @@ const RUNTIME_CALLER_CHOSEN: Record<
 };
 
 /**
- * The four remaining durable writes #237 argued must never be told they failed
+ * The three remaining durable writes #237 argued must never be told they failed
  * while their write may still land. Their side effect does not expire on its
  * own, so bounding them re-opens that trade — deliberately still open (#277).
- * The unused standalone token-block write was deleted instead of being kept as
- * another unbounded path.
+ * The unused standalone token-block write was deleted, and the production
+ * eviction call now reports an unconfirmed deadline while its real effect
+ * continues, instead of misreporting a late success as failure.
  */
 const RUNTIME_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
-  evictMemberToken:
-    "#237: an answer that can be wrong is worse than a slow one",
   revokeMemberToken:
     "#237: an answer that can be wrong is worse than a slow one",
   markRoomGeneration:

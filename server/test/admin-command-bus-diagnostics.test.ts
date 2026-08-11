@@ -23,7 +23,7 @@ test("a terminal admin result publish failure is counted independently of Redis 
   });
   const error = new Error("Command timed out");
 
-  // The normal result publish and the fallback publish are two failed Redis
+  // The result publish and its exact retry are two failed Redis
   // operations. The terminal callback says the publish path ended in failure;
   // it is not a third Redis operation, but every such terminal failure gets its
   // own count even when the diagnostic log for that command kind is throttled.

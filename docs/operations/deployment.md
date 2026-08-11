@@ -518,6 +518,13 @@ If you run multiple room nodes, prefer a rolling restart instead of restarting e
 3. continue with the next room node
 4. restart `global-admin` last
 
+Compatibility exception for the first rollout of the additive admin-command
+`confirmation` field introduced by #277: restart `global-admin` first, verify
+admin write actions, then roll the room nodes. The wire status remains `error`
+so old parsers can still consume new results, but upgrading the informed audit
+writer first is what preserves the `unconfirmed` marker and actor attribution
+throughout the rollout. Later releases may return to the normal order above.
+
 Exception: the first rollout of the orphan-cleanup handoff cannot mix old and
 new room-store holders. An old room node or global-admin can still prune an
 orphan without creating a claim. For that rollout, drain traffic and stop all

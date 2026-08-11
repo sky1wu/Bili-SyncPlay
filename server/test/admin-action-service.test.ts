@@ -173,6 +173,140 @@ test("admin action service maps stale_target command results to 409", async () =
   );
 });
 
+test("admin action service audits an unconfirmed kick that may still land", async () => {
+  const session = createSession();
+  const auditLogService = createAuditLogService();
+  const service = createService({
+    sessionsByRoom: [session],
+    auditLogService,
+    requestAdminCommand: async () => ({
+      requestId: "req-unconfirmed-kick",
+      targetInstanceId: "node-a",
+      executorInstanceId: "node-a",
+      status: "error",
+      confirmation: "unconfirmed",
+      code: "block_unconfirmed",
+      message: "Member eviction was not confirmed before the deadline.",
+      completedAt: 10_002,
+    }),
+  });
+
+  await assert.rejects(
+    () => service.kickMember(ACTOR, "ROOM01", "member-1", "remove"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.code, "block_unconfirmed");
+      return true;
+    },
+  );
+
+  const auditLogs = await auditLogService.query({
+    action: "kick_member",
+    page: 1,
+    pageSize: 10,
+  });
+  assert.equal(auditLogs.total, 1);
+  assert.equal(auditLogs.items[0]?.actor.adminId, ACTOR.adminId);
+  assert.equal(auditLogs.items[0]?.result, "rejected");
+  assert.equal(auditLogs.items[0]?.reason, "block_unconfirmed");
+  assert.equal(auditLogs.items[0]?.commandRequestId, "req-unconfirmed-kick");
+  assert.equal(auditLogs.items[0]?.commandStatus, "error");
+  assert.equal(auditLogs.items[0]?.commandConfirmation, "unconfirmed");
+  assert.equal(auditLogs.items[0]?.commandCode, "block_unconfirmed");
+});
+
+test("admin action service audits any typed unconfirmed kick result", async () => {
+  const session = createSession();
+  const auditLogService = createAuditLogService();
+  const service = createService({
+    sessionsByRoom: [session],
+    auditLogService,
+    requestAdminCommand: async () => ({
+      requestId: "req-publish-unconfirmed-kick",
+      targetInstanceId: "node-a",
+      executorInstanceId: "node-a",
+      status: "error",
+      confirmation: "unconfirmed",
+      code: "command_publish_unconfirmed",
+      message: "The admin command publish was not confirmed.",
+      completedAt: 10_002,
+    }),
+  });
+
+  await assert.rejects(
+    () => service.kickMember(ACTOR, "ROOM01", "member-1", "remove"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.code, "command_publish_unconfirmed");
+      return true;
+    },
+  );
+
+  const auditLogs = await auditLogService.query({
+    action: "kick_member",
+    page: 1,
+    pageSize: 10,
+  });
+  assert.equal(auditLogs.total, 1);
+  assert.equal(auditLogs.items[0]?.actor.adminId, ACTOR.adminId);
+  assert.equal(auditLogs.items[0]?.result, "rejected");
+  assert.equal(auditLogs.items[0]?.reason, "command_publish_unconfirmed");
+  assert.equal(
+    auditLogs.items[0]?.commandRequestId,
+    "req-publish-unconfirmed-kick",
+  );
+  assert.equal(auditLogs.items[0]?.commandStatus, "error");
+  assert.equal(auditLogs.items[0]?.commandConfirmation, "unconfirmed");
+  assert.equal(auditLogs.items[0]?.commandCode, "command_publish_unconfirmed");
+});
+
+test("admin action service audits an unconfirmed direct disconnect", async () => {
+  const session = createSession();
+  const auditLogService = createAuditLogService();
+  const service = createService({
+    session,
+    auditLogService,
+    requestAdminCommand: async () => ({
+      requestId: "req-unconfirmed-disconnect",
+      targetInstanceId: "node-a",
+      executorInstanceId: "node-a",
+      status: "error",
+      confirmation: "unconfirmed",
+      code: "command_timeout",
+      message: "Timed out waiting for the target instance.",
+      completedAt: 10_002,
+    }),
+  });
+
+  await assert.rejects(
+    () => service.disconnectSession(ACTOR, session.id, "cleanup"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.code, "command_timeout");
+      return true;
+    },
+  );
+
+  const auditLogs = await auditLogService.query({
+    action: "disconnect_session",
+    page: 1,
+    pageSize: 10,
+  });
+  assert.equal(auditLogs.total, 1);
+  assert.equal(auditLogs.items[0]?.actor.adminId, ACTOR.adminId);
+  assert.equal(auditLogs.items[0]?.result, "rejected");
+  assert.equal(auditLogs.items[0]?.reason, "command_timeout");
+  assert.equal(
+    auditLogs.items[0]?.commandRequestId,
+    "req-unconfirmed-disconnect",
+  );
+  assert.equal(auditLogs.items[0]?.commandStatus, "error");
+  assert.equal(auditLogs.items[0]?.commandConfirmation, "unconfirmed");
+});
+
 test("admin action service maps error command results to 502", async () => {
   const session = createSession();
   const service = createService({

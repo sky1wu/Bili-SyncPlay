@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createInMemoryAdminCommandBus } from "../src/admin-command-bus.js";
 import { createAdminCommandConsumer } from "../src/admin-command-consumer.js";
+import { createMirroredRuntimeStore } from "../src/mirrored-runtime-store.js";
+import {
+  createInMemoryRuntimeStore,
+  type RuntimeStore,
+} from "../src/runtime-store.js";
+import { settleWithin } from "../src/retry-pacer.js";
 import type { AttachedSession, Session } from "../src/types.js";
 
 function createSession(
@@ -247,6 +253,191 @@ test("admin command consumer fails the kick when revoking the token does not lan
     assert.notEqual(result.status, "ok");
     assert.equal(disconnected, false);
   } finally {
+    await consumer.close();
+  }
+});
+
+test("admin command consumer reports an unconfirmed kick while its late effect still converges", async () => {
+  const currentTime = 7_000;
+  const bus = createInMemoryAdminCommandBus(() => currentTime);
+  const session = createSession("session-f", "ROOM06", "member-f");
+  const local = createInMemoryRuntimeStore(() => currentTime);
+  const sharedState = createInMemoryRuntimeStore(() => currentTime);
+  let releaseSharedEviction!: () => void;
+  const sharedEvictionGate = new Promise<void>((resolve) => {
+    releaseSharedEviction = resolve;
+  });
+  const delayedShared: RuntimeStore = {
+    ...sharedState,
+    async evictMemberToken(...args) {
+      await sharedEvictionGate;
+      sharedState.evictMemberToken(...args);
+    },
+  };
+  const mirrored = createMirroredRuntimeStore(local, delayedShared);
+  mirrored.addMember("ROOM06", "member-f", session, "token-member-f");
+  let realEviction: Promise<void> | undefined;
+  let disconnected = false;
+  let signalDisconnected!: () => void;
+  const disconnectedSignal = new Promise<void>((resolve) => {
+    signalDisconnected = resolve;
+  });
+  const terminalResults: unknown[] = [];
+
+  const consumer = await createAdminCommandConsumer({
+    instanceId: "node-a",
+    adminCommandBus: bus,
+    getLocalSession() {
+      return null;
+    },
+    listLocalSessionsByRoom(roomCode) {
+      return roomCode === "ROOM06" ? [session] : [];
+    },
+    evictMemberToken(...args) {
+      realEviction = Promise.resolve(mirrored.evictMemberToken(...args));
+      return realEviction;
+    },
+    disconnectSessionSocket() {
+      disconnected = true;
+      signalDisconnected();
+    },
+    memberEvictionConfirmTimeoutMs: 20,
+    now: () => currentTime,
+    logEvent(event, data) {
+      if (event === "admin_command_executed") {
+        terminalResults.push(data.result);
+      }
+    },
+  });
+
+  try {
+    const request = bus.request({
+      kind: "kick_member",
+      requestId: "req-6",
+      targetInstanceId: "node-a",
+      roomCode: "ROOM06",
+      memberId: "member-f",
+      requestedAt: currentTime - 1_000,
+    });
+
+    assert.equal(
+      await settleWithin(request, 200),
+      true,
+      "the executor must stop waiting before the durable effect settles",
+    );
+    const result = await request;
+    assert.equal(result.status, "error");
+    assert.equal(result.confirmation, "unconfirmed");
+    assert.equal(result.code, "block_unconfirmed");
+    assert.equal(disconnected, false);
+    assert.deepEqual(terminalResults, []);
+    assert.equal(
+      local.findMemberIdByToken("ROOM06", "token-member-f"),
+      "member-f",
+    );
+    assert.equal(
+      sharedState.findMemberIdByToken("ROOM06", "token-member-f"),
+      "member-f",
+    );
+
+    releaseSharedEviction();
+    await realEviction;
+    assert.equal(
+      await settleWithin(disconnectedSignal, 200),
+      true,
+      "the late eviction must still disconnect the socket and trigger cleanup",
+    );
+
+    assert.equal(
+      local.isMemberTokenBlocked("ROOM06", "token-member-f", currentTime),
+      true,
+    );
+    assert.equal(
+      sharedState.isMemberTokenBlocked("ROOM06", "token-member-f", currentTime),
+      true,
+    );
+    assert.equal(local.findMemberIdByToken("ROOM06", "token-member-f"), null);
+    assert.equal(
+      sharedState.findMemberIdByToken("ROOM06", "token-member-f"),
+      null,
+    );
+    assert.equal(disconnected, true);
+    assert.deepEqual(terminalResults, ["ok"]);
+  } finally {
+    releaseSharedEviction();
+    await realEviction?.catch(() => undefined);
+    await consumer.close();
+  }
+});
+
+test("admin command consumer reports a disconnect that fails after an unconfirmed eviction", async () => {
+  const currentTime = 8_000;
+  const bus = createInMemoryAdminCommandBus(() => currentTime);
+  const session = createSession("session-g", "ROOM07", "member-g");
+  let releaseEviction!: () => void;
+  const evictionGate = new Promise<void>((resolve) => {
+    releaseEviction = resolve;
+  });
+  let signalLateDisconnectFailure!: () => void;
+  const lateDisconnectFailure = new Promise<void>((resolve) => {
+    signalLateDisconnectFailure = resolve;
+  });
+  const loggedFailures: Record<string, unknown>[] = [];
+
+  const consumer = await createAdminCommandConsumer({
+    instanceId: "node-a",
+    adminCommandBus: bus,
+    getLocalSession() {
+      return null;
+    },
+    listLocalSessionsByRoom(roomCode) {
+      return roomCode === "ROOM07" ? [session] : [];
+    },
+    async evictMemberToken() {
+      await evictionGate;
+    },
+    disconnectSessionSocket() {
+      throw new Error("late disconnect failed");
+    },
+    memberEvictionConfirmTimeoutMs: 20,
+    now: () => currentTime,
+    logEvent(event, data) {
+      if (
+        event === "admin_command_executed" &&
+        data.code === "disconnect_failed"
+      ) {
+        loggedFailures.push(data);
+        signalLateDisconnectFailure();
+      }
+    },
+  });
+
+  try {
+    const result = await bus.request({
+      kind: "kick_member",
+      requestId: "req-7",
+      targetInstanceId: "node-a",
+      roomCode: "ROOM07",
+      memberId: "member-g",
+      requestedAt: currentTime - 1_000,
+    });
+
+    assert.equal(result.status, "error");
+    assert.equal(result.confirmation, "unconfirmed");
+    assert.equal(result.code, "block_unconfirmed");
+
+    releaseEviction();
+    assert.equal(
+      await settleWithin(lateDisconnectFailure, 200),
+      true,
+      "a disconnect failure after the cap must remain observable",
+    );
+    assert.equal(loggedFailures.length, 1);
+    assert.equal(loggedFailures[0]?.commandRequestId, "req-7");
+    assert.equal(loggedFailures[0]?.blockApplied, true);
+    assert.equal(loggedFailures[0]?.error, "late disconnect failed");
+  } finally {
+    releaseEviction();
     await consumer.close();
   }
 });
