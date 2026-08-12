@@ -63,6 +63,23 @@ export type LocalPlaybackEventSource =
   | "timeupdate"
   | "manual";
 
+/**
+ * Why a broadcast is being sent, for the cases the DOM event source cannot
+ * express. Both members describe a `paused` the extension itself produced on a
+ * long timer, long after every echo-suppression window has closed, so peers
+ * need the reason on the wire to tell it apart from a user pressing pause.
+ *
+ * Passed as one object rather than trailing booleans: the adapter in
+ * `index.ts` forwards it opaquely, so adding a member never silently drops it
+ * at a call site written against the old arity.
+ */
+export interface LocalPlaybackBroadcastCause {
+  /** The sharer's video reached its natural end (see `PlaybackState.naturalEnd`). */
+  naturalEnd?: boolean;
+  /** A load/stall pause outlived its buffering classification (see `PlaybackState.bufferUpgrade`). */
+  bufferUpgrade?: boolean;
+}
+
 export type ExplicitUserActionKind = "play" | "pause" | "seek" | "ratechange";
 
 export interface ExplicitUserAction {

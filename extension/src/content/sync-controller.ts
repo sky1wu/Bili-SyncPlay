@@ -44,6 +44,7 @@ import {
 } from "./runtime-state";
 import type {
   ContentRuntimeState,
+  LocalPlaybackBroadcastCause,
   LocalPlaybackEventSource,
   ProgrammaticApplyScope,
 } from "./runtime-state";
@@ -68,7 +69,7 @@ export interface SyncController {
   broadcastPlayback(
     video: HTMLVideoElement,
     eventSource?: LocalPlaybackEventSource,
-    naturalEnd?: boolean,
+    cause?: LocalPlaybackBroadcastCause,
   ): Promise<void>;
   applyRoomState(
     state: RoomState,
@@ -892,8 +893,9 @@ export function createSyncController(args: {
   async function broadcastPlayback(
     video: HTMLVideoElement,
     eventSource: LocalPlaybackEventSource = "manual",
-    naturalEnd?: boolean,
+    cause?: LocalPlaybackBroadcastCause,
   ): Promise<void> {
+    const naturalEnd = cause?.naturalEnd;
     const playbackContextGeneration =
       args.runtimeState.playbackContextGeneration;
     let now = monotonicNow();

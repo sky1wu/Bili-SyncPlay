@@ -11,6 +11,7 @@ import {
 import type {
   ContentRuntimeState,
   ExplicitUserActionKind,
+  LocalPlaybackBroadcastCause,
   LocalPlaybackEventSource,
 } from "./runtime-state";
 import {
@@ -58,7 +59,7 @@ export function createPlaybackBindingController(args: {
   broadcastPlayback: (
     video: HTMLVideoElement,
     eventSource?: LocalPlaybackEventSource,
-    naturalEnd?: boolean,
+    cause?: LocalPlaybackBroadcastCause,
   ) => Promise<void>;
   cancelActiveSoftApply: (
     video: HTMLVideoElement | null,
@@ -649,7 +650,7 @@ export function createPlaybackBindingController(args: {
     // without surfacing a misleading "paused" / "jumped to <end>" toast. This
     // also covers the slow-handoff case where the autoplay-next eventually
     // lands after the flush window (e.g. a recommend-autoplay countdown).
-    void args.broadcastPlayback(video, "pause", true);
+    void args.broadcastPlayback(video, "pause", { naturalEnd: true });
   }
 
   function shouldReapplyHoldAfterSharedVideoEnd(
