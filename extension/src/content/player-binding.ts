@@ -419,9 +419,17 @@ export function applyPendingPlaybackApplication(args: {
     args.hasActiveCorrectionSession ?? false,
   );
   args.onPlaybackAdjusted?.(appliedSignature, playback);
+  // A `bufferUpgrade` paused reports that the SENDER never got playing — it is
+  // a load/stall it is telling the room about, not a request for anybody to
+  // stop. That is the same situation `buffering` describes; the flag exists
+  // only because the sender's buffering classification expired before its
+  // player recovered. So it applies exactly like `buffering` here: align
+  // position and rate, leave this element's play/pause alone.
+  const appliesAsPause =
+    playback.playState === "paused" && playback.bufferUpgrade !== true;
   const needsPlayStateChange =
     (playback.playState === "playing" && wasPaused) ||
-    (playback.playState === "paused" && !wasPaused);
+    (appliesAsPause && !wasPaused);
   const didChange = appliedSignature.didChange || needsPlayStateChange;
   const signature = createProgrammaticPlaybackSignature({
     ...playback,
@@ -444,7 +452,7 @@ export function applyPendingPlaybackApplication(args: {
     };
   }
 
-  if (playback.playState === "buffering") {
+  if (!appliesAsPause) {
     return {
       applied: true,
       didChange,

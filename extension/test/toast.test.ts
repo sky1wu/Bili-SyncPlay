@@ -504,3 +504,114 @@ test("reports a seek that lands together with a pause", () => {
 
   assert.deepEqual(messages, ["Alice 暂停了视频", "Alice 跳转到 1:40"]);
 });
+
+test("suppresses the paused toast for a buffer-upgrade paused state", () => {
+  setLocaleForTests("zh-CN");
+  // #286. A peer that opened the shared video but never got playing: the
+  // extension held it paused, its load pause outlived the buffering
+  // classification, and the upgrade re-broadcast the real `paused`. Nobody
+  // pressed pause, so "Alice 暂停了视频" names an action that never happened.
+  const previousState = createRoomState({
+    members: [
+      { id: "self", name: "Me" },
+      { id: "remote", name: "Alice" },
+    ],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=1",
+    playback: {
+      url: "https://www.bilibili.com/video/BV1?p=1",
+      currentTime: 0,
+      playState: "buffering",
+      playbackRate: 1,
+      updatedAt: 1,
+      serverTime: 1000,
+      actorId: "remote",
+      seq: 1,
+    },
+  });
+  const nextState = createRoomState({
+    members: [
+      { id: "self", name: "Me" },
+      { id: "remote", name: "Alice" },
+    ],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=1",
+    playback: {
+      url: "https://www.bilibili.com/video/BV1?p=1",
+      currentTime: 0,
+      playState: "paused",
+      bufferUpgrade: true,
+      playbackRate: 1,
+      updatedAt: 2,
+      serverTime: 2500,
+      actorId: "remote",
+      seq: 2,
+    },
+  });
+
+  const result = getRoomStateToastMessages({
+    previousState,
+    nextState,
+    localMemberId: "self",
+    pendingRoomStateHydration: false,
+    isCurrentPageShowingSharedVideo: true,
+    now: 1000,
+    elapsedSincePreviousStateMs: 1500,
+    lastSeekToastByActor: new Map(),
+  });
+
+  assert.deepEqual(result.messages, []);
+});
+
+test("still shows the paused toast for an untagged buffering-to-paused transition", () => {
+  setLocaleForTests("zh-CN");
+  // Discriminating control for the test above: the SAME buffering→paused shape
+  // without the tag is a peer who really did press pause while buffering. If
+  // the suppression keyed on the transition instead of the tag, this toast
+  // would disappear too and the room would stop reporting real pauses.
+  const previousState = createRoomState({
+    members: [
+      { id: "self", name: "Me" },
+      { id: "remote", name: "Alice" },
+    ],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=1",
+    playback: {
+      url: "https://www.bilibili.com/video/BV1?p=1",
+      currentTime: 0,
+      playState: "buffering",
+      playbackRate: 1,
+      updatedAt: 1,
+      serverTime: 1000,
+      actorId: "remote",
+      seq: 1,
+    },
+  });
+  const nextState = createRoomState({
+    members: [
+      { id: "self", name: "Me" },
+      { id: "remote", name: "Alice" },
+    ],
+    sharedUrl: "https://www.bilibili.com/video/BV1?p=1",
+    playback: {
+      url: "https://www.bilibili.com/video/BV1?p=1",
+      currentTime: 0,
+      playState: "paused",
+      playbackRate: 1,
+      updatedAt: 2,
+      serverTime: 2500,
+      actorId: "remote",
+      seq: 2,
+    },
+  });
+
+  const result = getRoomStateToastMessages({
+    previousState,
+    nextState,
+    localMemberId: "self",
+    pendingRoomStateHydration: false,
+    isCurrentPageShowingSharedVideo: true,
+    now: 1000,
+    elapsedSincePreviousStateMs: 1500,
+    lastSeekToastByActor: new Map(),
+  });
+
+  assert.deepEqual(result.messages, ["Alice 暂停了视频"]);
+});

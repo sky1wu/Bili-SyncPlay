@@ -76,6 +76,8 @@ export function isPlaybackState(value: unknown): value is PlaybackState {
     (value.userInitiated === undefined ||
       typeof value.userInitiated === "boolean") &&
     (value.naturalEnd === undefined || typeof value.naturalEnd === "boolean") &&
+    (value.bufferUpgrade === undefined ||
+      typeof value.bufferUpgrade === "boolean") &&
     isFiniteNumber(value.playbackRate) &&
     isFiniteNumber(value.updatedAt) &&
     isFiniteNumber(value.serverTime) &&

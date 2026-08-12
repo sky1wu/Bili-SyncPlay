@@ -1884,3 +1884,125 @@ test("a WRONGTYPE reply is still one unreadable key, not a dependency outage", a
     await store.close();
   }
 });
+
+test("redis room point reads type-check the optional playback flags", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // #286 added `bufferUpgrade` to the playback validator in BOTH the Lua body
+  // check and its TypeScript twin. The validator ignores unknown fields, so a
+  // missing clause does not reject the write — it silently accepts a wrong
+  // TYPE. That is what this asserts, and it is why the check has to run against
+  // real Redis: the fake never executes the Lua.
+  const namespace = uniqueNamespace("playbackflags");
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+  const key = `${namespace}:room:FLAGS1`;
+
+  const playback = (overrides: Record<string, unknown>) => ({
+    url: "https://www.bilibili.com/video/BV1xx411c7mD",
+    currentTime: 12,
+    playState: "paused",
+    playbackRate: 1,
+    updatedAt: 1,
+    serverTime: 2,
+    actorId: "member-1",
+    seq: 3,
+    ...overrides,
+  });
+
+  try {
+    await settleRoomIndexBootstrap(store);
+
+    // Accepted: the flag is a boolean, and it survives the round trip intact.
+    await redis.set(
+      key,
+      legacyRoomBody("FLAGS1", { playback: playback({ bufferUpgrade: true }) }),
+    );
+    const room = await store.getRoom("FLAGS1");
+    assert.equal(room?.playback?.bufferUpgrade, true);
+
+    // Rejected: right field, wrong type.
+    await redis.set(
+      key,
+      legacyRoomBody("FLAGS1", {
+        playback: playback({ bufferUpgrade: "yes" }),
+      }),
+    );
+    await assert.rejects(
+      store.getRoom("FLAGS1"),
+      /Room FLAGS1 contains an invalid room body/,
+    );
+
+    // Omitted entirely: still a valid body (the field is optional/additive, so
+    // every pre-#286 sender must keep working).
+    await redis.set(key, legacyRoomBody("FLAGS1", { playback: playback({}) }));
+    const legacy = await store.getRoom("FLAGS1");
+    assert.equal(legacy?.playback?.bufferUpgrade, undefined);
+  } finally {
+    await redis.del(key);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("redis room reaper type-checks the optional playback flags in Lua", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // The other half of the validator. `getRoom` is a point read served by the
+  // TypeScript twin; the Lua `isPlayback` only ever runs inside the reaper's
+  // script, so a clause missing THERE is invisible to the point-read test —
+  // verified by reverting each clause separately. A body whose flag has the
+  // wrong type is corruption: the sweep must keep rotating its cleanup debt
+  // rather than treat it as a complete room and release the claim.
+  const namespace = uniqueNamespace("playbackflagslua");
+  const orphanKeys = orphanClaimKeys(namespace);
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    await settleRoomIndexBootstrap(store);
+    await seedOrphanClaims(redis, namespace, [
+      { code: "BADFLG", token: "claim-bad-flag" },
+      { code: "OKFLAG", token: "claim-ok-flag" },
+    ]);
+
+    const playback = (bufferUpgrade: unknown) => ({
+      url: "https://www.bilibili.com/video/BV1xx411c7mD",
+      currentTime: 12,
+      playState: "paused",
+      playbackRate: 1,
+      updatedAt: 1,
+      serverTime: 2,
+      actorId: "member-1",
+      seq: 3,
+      bufferUpgrade,
+    });
+
+    await redis.set(
+      `${namespace}:room:BADFLG`,
+      legacyRoomBody("BADFLG", { playback: playback("yes") }),
+    );
+    await redis.set(
+      `${namespace}:room:OKFLAG`,
+      legacyRoomBody("OKFLAG", { playback: playback(true) }),
+    );
+
+    const swept = await store.deleteExpiredRooms(0);
+    // The corrupt body is not a usable room, so its debt stays claimed.
+    assert.equal(swept.orphanedIndexCodes.includes("BADFLG"), false);
+    assert.equal(await redis.hget(orphanKeys.hash, "BADFLG"), "claim-bad-flag");
+    // Discriminating control: the same body with a correctly typed flag IS a
+    // usable room, so the sweep resolves it and releases the claim.
+    assert.equal(await redis.hget(orphanKeys.hash, "OKFLAG"), null);
+  } finally {
+    await redis.del(`${namespace}:room:BADFLG`, `${namespace}:room:OKFLAG`);
+    await redis.quit();
+    await store.close();
+  }
+});

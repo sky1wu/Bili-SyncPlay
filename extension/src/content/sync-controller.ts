@@ -171,6 +171,7 @@ export function createSyncController(args: {
     syncIntent: PlaybackState["syncIntent"] | undefined;
     userInitiated: boolean;
     naturalEnd: boolean;
+    bufferUpgrade: boolean;
     currentTime: number;
     playbackRate: number;
     at: number;
@@ -896,6 +897,7 @@ export function createSyncController(args: {
     cause?: LocalPlaybackBroadcastCause,
   ): Promise<void> {
     const naturalEnd = cause?.naturalEnd;
+    const bufferUpgrade = cause?.bufferUpgrade;
     const playbackContextGeneration =
       args.runtimeState.playbackContextGeneration;
     let now = monotonicNow();
@@ -1586,6 +1588,7 @@ export function createSyncController(args: {
       duplicate.syncIntent === syncIntent &&
       duplicate.userInitiated === userInitiated &&
       duplicate.naturalEnd === (naturalEnd === true) &&
+      duplicate.bufferUpgrade === (bufferUpgrade === true) &&
       Math.abs(duplicate.currentTime - video.currentTime) <=
         DUPLICATE_BROADCAST_TIME_EPSILON_SECONDS &&
       Math.abs(duplicate.playbackRate - broadcastPlaybackRate) <= 0.01 &&
@@ -1625,6 +1628,7 @@ export function createSyncController(args: {
       playState,
       syncIntent,
       naturalEnd,
+      bufferUpgrade,
       userInitiated,
       playbackRate: broadcastPlaybackRate,
       actorId: args.runtimeState.localMemberId ?? "local",
@@ -1757,6 +1761,7 @@ export function createSyncController(args: {
         syncIntent: playback.syncIntent,
         userInitiated: playback.userInitiated === true,
         naturalEnd: playback.naturalEnd === true,
+        bufferUpgrade: playback.bufferUpgrade === true,
         currentTime: playback.currentTime,
         playbackRate: playback.playbackRate,
         at: monotonicNow(),

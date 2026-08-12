@@ -53,6 +53,22 @@ export interface PlaybackState {
    * receivers ignore the unknown field and keep their prior toast behaviour.
    */
   naturalEnd?: boolean;
+  /**
+   * Hint that this paused state is the correction of a load/stall pause, not a
+   * pause anybody performed: the sender classified a pause as `buffering`, and
+   * once that classification's window elapsed the element was still paused, so
+   * it re-broadcast the real `paused` to stop the room sitting on a stale
+   * `buffering`.
+   *
+   * It is produced on a timer far longer than every echo-suppression window, so
+   * a receiver cannot recover the fact locally — by the time it arrives, the
+   * windows that would have identified it as an echo have closed. Receivers
+   * must apply the state (it is true — the sender really is paused) but must
+   * neither surface a "<name> paused the video" toast for it nor let it pause a
+   * peer that is playing. Additive and optional: legacy senders omit it; legacy
+   * receivers ignore the unknown field and keep their prior behaviour.
+   */
+  bufferUpgrade?: boolean;
   playbackRate: number;
   updatedAt: number;
   serverTime: number;

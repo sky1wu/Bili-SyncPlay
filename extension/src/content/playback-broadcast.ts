@@ -67,6 +67,7 @@ export function createPlaybackBroadcastPayload(args: {
   syncIntent?: PlaybackState["syncIntent"];
   userInitiated?: boolean;
   naturalEnd?: boolean;
+  bufferUpgrade?: boolean;
   playbackRate: number;
   actorId: string;
   seq: number;
@@ -90,6 +91,9 @@ export function createPlaybackBroadcastPayload(args: {
   }
   if (args.naturalEnd) {
     payload.naturalEnd = true;
+  }
+  if (args.bufferUpgrade) {
+    payload.bufferUpgrade = true;
   }
   return payload;
 }

@@ -397,3 +397,84 @@ test("a real soft-apply's elevated rate survives a lagging buffering snapshot", 
   assert.equal(applied.didWritePlaybackRate, false);
   assert.equal(applied.reason, "buffering-not-authoritative");
 });
+
+test("a buffer-upgrade paused does not force-pause an already playing video", () => {
+  // #286. Structurally identical to the `buffering` case above, because it IS
+  // that case: the sender classified its load pause as buffering, the
+  // classification's window expired while the element was still stuck, and the
+  // upgrade re-broadcast it as the real `paused`. The sender is reporting that
+  // it never got playing — not asking this peer to stop.
+  let pauseCalls = 0;
+  const video = createVideo({
+    paused: false,
+    currentTime: 12,
+    playbackRate: 1,
+    pause() {
+      pauseCalls += 1;
+    },
+  });
+  const signatures: ProgrammaticPlaybackSignature[] = [];
+
+  const applied = applyPendingPlaybackApplication({
+    video,
+    pendingPlaybackApplication: {
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 12,
+      playState: "paused",
+      bufferUpgrade: true,
+      playbackRate: 1,
+      updatedAt: 1,
+      serverTime: 1,
+      actorId: "remote-member",
+      seq: 5,
+    },
+    clearPendingPlaybackApplication: () => {},
+    markProgrammaticApply: (signature) => {
+      signatures.push(signature);
+    },
+    debugLog: () => {},
+  });
+
+  assert.equal(applied.applied, true);
+  assert.equal(pauseCalls, 0);
+  // No pause was performed, so nothing programmatic happened: marking one here
+  // would arm the programmatic-echo guard against a DOM event that never comes
+  // and swallow the next genuine local pause broadcast.
+  assert.equal(applied.didChange, false);
+  assert.equal(signatures.length, 0);
+});
+
+test("an untagged remote paused still force-pauses a playing video", () => {
+  // Discriminating control: the same shape without the tag is a peer that
+  // really did pause. Keying the exemption on `playState === "paused"` alone
+  // would break every remote pause in the product.
+  let pauseCalls = 0;
+  const video = createVideo({
+    paused: false,
+    currentTime: 12,
+    playbackRate: 1,
+    pause() {
+      pauseCalls += 1;
+    },
+  });
+
+  const applied = applyPendingPlaybackApplication({
+    video,
+    pendingPlaybackApplication: {
+      url: "https://www.bilibili.com/video/BV1xx411c7mD?p=1",
+      currentTime: 12,
+      playState: "paused",
+      playbackRate: 1,
+      updatedAt: 1,
+      serverTime: 1,
+      actorId: "remote-member",
+      seq: 5,
+    },
+    clearPendingPlaybackApplication: () => {},
+    debugLog: () => {},
+  });
+
+  assert.equal(applied.applied, true);
+  assert.equal(pauseCalls, 1);
+  assert.equal(applied.didChange, true);
+});

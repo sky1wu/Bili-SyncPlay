@@ -8,8 +8,8 @@
 
 | 常量                       | 位置                                    | 当前值 | 含义                                              |
 | -------------------------- | --------------------------------------- | ------ | ------------------------------------------------- |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
-| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `4`    | 服务端当前使用的版本                              |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
+| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`    | 服务端当前使用的版本                              |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`    | 服务端仍接受的最老客户端版本                      |
 
 客户端在 `room:create` / `room:join` 的 payload 中携带 `protocolVersion`；低于 `MIN_PROTOCOL_VERSION` 的客户端会被以 `unsupported_protocol_version` 错误码拒绝。未携带 `protocolVersion` 的旧客户端按 `server/src/messages.ts` 中的兼容策略处理。
@@ -37,19 +37,20 @@
 
 ### `PlaybackState`
 
-| 字段            | 类型                                        | 说明                                                                                               |
-| --------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `url`           | `string`                                    | 该状态对应的 URL；与 `SharedVideo.url` 一样，比较前必须归一化                                      |
-| `currentTime`   | `number`                                    | 播放位置（秒）                                                                                     |
-| `playState`     | `"playing" \| "paused" \| "buffering"`      | `PlaybackPlayState`                                                                                |
-| `syncIntent`    | `"explicit-seek" \| "explicit-ratechange"?` | 标记由显式 seek / 倍速操作产生的状态（`PlaybackSyncIntent`）                                       |
-| `userInitiated` | `boolean?`                                  | 提示该状态变化来自显式用户手势，而非缓冲卡顿或远端状态回放；接收方可跳过防闪烁防抖。可选、向后兼容 |
-| `naturalEnd`    | `boolean?`                                  | 提示该 paused 状态来自共享视频自然播完；接收方应用状态但不弹出误导性的"已暂停"提示。可选、向后兼容 |
-| `playbackRate`  | `number`                                    | 播放速率                                                                                           |
-| `updatedAt`     | `number`                                    | 发送方时间戳（毫秒）                                                                               |
-| `serverTime`    | `number`                                    | 服务端转发时盖的时间戳（毫秒）                                                                     |
-| `actorId`       | `string`                                    | 产生该状态的成员                                                                                   |
-| `seq`           | `number`                                    | 用于排序的单调递增序号                                                                             |
+| 字段            | 类型                                        | 说明                                                                                                                                          |
+| --------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `url`           | `string`                                    | 该状态对应的 URL；与 `SharedVideo.url` 一样，比较前必须归一化                                                                                 |
+| `currentTime`   | `number`                                    | 播放位置（秒）                                                                                                                                |
+| `playState`     | `"playing" \| "paused" \| "buffering"`      | `PlaybackPlayState`                                                                                                                           |
+| `syncIntent`    | `"explicit-seek" \| "explicit-ratechange"?` | 标记由显式 seek / 倍速操作产生的状态（`PlaybackSyncIntent`）                                                                                  |
+| `userInitiated` | `boolean?`                                  | 提示该状态变化来自显式用户手势，而非缓冲卡顿或远端状态回放；接收方可跳过防闪烁防抖。可选、向后兼容                                            |
+| `naturalEnd`    | `boolean?`                                  | 提示该 paused 状态来自共享视频自然播完；接收方应用状态但不弹出误导性的"已暂停"提示。可选、向后兼容                                            |
+| `bufferUpgrade` | `boolean?`                                  | 提示该 paused 状态是发送方加载/卡顿暂停的纠正，并非任何人执行的暂停；接收方应用状态，但既不弹提示，也不据此暂停正在播放的一端。可选、向后兼容 |
+| `playbackRate`  | `number`                                    | 播放速率                                                                                                                                      |
+| `updatedAt`     | `number`                                    | 发送方时间戳（毫秒）                                                                                                                          |
+| `serverTime`    | `number`                                    | 服务端转发时盖的时间戳（毫秒）                                                                                                                |
+| `actorId`       | `string`                                    | 产生该状态的成员                                                                                                                              |
+| `seq`           | `number`                                    | 用于排序的单调递增序号                                                                                                                        |
 
 ### `RoomState` 与 `RoomMember`
 

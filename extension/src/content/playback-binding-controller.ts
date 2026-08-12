@@ -178,7 +178,13 @@ export function createPlaybackBindingController(args: {
       args.debugLog(
         `Buffer-pause upgraded to paused after ${args.bufferPauseUpgradeMs}ms, re-broadcasting`,
       );
-      void args.broadcastPlayback(video, "pause");
+      // Tagged: this pause is the extension's own — a load/stall the room must
+      // learn about, NOT somebody pressing pause. The timer is longer than every
+      // echo-suppression window (`REMOTE_ECHO_SUPPRESSION_MS`, `pauseHoldUntil`),
+      // so by the time it fires no receiver can still tell the two apart
+      // locally, and an untagged one arrived at peers as "<name> paused the
+      // video" — and paused whoever was playing.
+      void args.broadcastPlayback(video, "pause", { bufferUpgrade: true });
     }, args.bufferPauseUpgradeMs);
   };
   // A bare freshness check is safe here only because "never" is
