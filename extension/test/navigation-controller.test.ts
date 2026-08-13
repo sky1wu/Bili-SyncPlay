@@ -116,6 +116,7 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
   let currentUrl = "https://www.bilibili.com/video/BV1DbiMBwEry";
   let hydrateCalls = 0;
   let pauseCalls = 0;
+  let now = 10_000;
 
   const controller = createNavigationController({
     runtimeState,
@@ -127,7 +128,14 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
     normalizeVideoPageUrl: normalizeTestVideoPageUrl,
     isSupportedVideoPage: (url) => url.includes("/video/"),
     clearFestivalSnapshot: () => {},
-    attachPlaybackListeners: () => {},
+    attachPlaybackListeners: () => {
+      // A SPA navigation can bind its replacement element before the controller
+      // reaches the pause below. That rebind is newer buffer evidence, so the
+      // forced-pause marker must be sampled at the actual pause, not from the
+      // navigation's earlier `now` snapshot.
+      now = 10_001;
+      runtimeState.lastVideoElementBoundAt = now;
+    },
     getVideoElement: () =>
       ({
         paused: false,
@@ -141,6 +149,7 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
     },
     activatePauseHold: () => {},
     debugLog: () => {},
+    getMonotonicNow: () => now,
   });
 
   try {
@@ -152,6 +161,11 @@ test("navigation controller hydrates and suppresses autoplay when switching to a
     assert.equal(pauseCalls, 1);
     assert.equal(runtimeState.pendingRoomStateHydration, true);
     assert.equal(runtimeState.intendedPlayState, "paused");
+    assert.equal(runtimeState.lastForcedPauseAt, 10_001);
+    assert.equal(
+      runtimeState.lastForcedPauseAt >= runtimeState.lastVideoElementBoundAt,
+      true,
+    );
   } finally {
     windowHarness.restore();
   }

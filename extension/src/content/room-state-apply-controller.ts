@@ -11,9 +11,9 @@ import { decidePlaybackApplication } from "./playback-apply";
 import {
   canApplyPlaybackImmediately,
   createProgrammaticPlaybackSignature,
-  pauseVideo,
+  forcePauseVideo,
 } from "./player-binding";
-import type { ContentRuntimeState } from "./runtime-state";
+import { setRoomMembership, type ContentRuntimeState } from "./runtime-state";
 
 /**
  * Ceiling for the exponential hydration-retry backoff.
@@ -292,9 +292,12 @@ export function createRoomStateApplyController(args: {
     args.activatePauseHold(args.initialRoomStatePauseHoldMs);
     const video = args.getVideoElement();
     if (video && !video.paused) {
-      args.runtimeState.lastForcedPauseAt = monotonicNow();
       args.debugLog(`${input.logReason} for ${input.roomCode}`);
-      pauseVideo(video);
+      forcePauseVideo({
+        runtimeState: args.runtimeState,
+        video,
+        getMonotonicNow: monotonicNow,
+      });
     }
   };
 
@@ -331,7 +334,11 @@ export function createRoomStateApplyController(args: {
         args.userGestureGraceMs
     ) {
       args.debugLog(`Suppressed autoplay for empty room ${roomCode}`);
-      pauseVideo(video);
+      forcePauseVideo({
+        runtimeState: args.runtimeState,
+        video,
+        getMonotonicNow: monotonicNow,
+      });
     }
   }
 
@@ -708,8 +715,11 @@ export function createRoomStateApplyController(args: {
           args.debugLog(
             `Suppressed autoplay during unstable shared url hydration for ${state.roomCode}`,
           );
-          args.runtimeState.lastForcedPauseAt = monotonicNow();
-          pauseVideo(video);
+          forcePauseVideo({
+            runtimeState: args.runtimeState,
+            video,
+            getMonotonicNow: monotonicNow,
+          });
         }
       }
       if (
@@ -965,9 +975,11 @@ export function createRoomStateApplyController(args: {
       if (!destroyed) args.runtimeState.hydrationReady = true;
       return;
     }
-    args.runtimeState.localMemberId = response?.memberId ?? null;
-    args.runtimeState.activeRoomCode =
-      response?.roomCode ?? args.runtimeState.activeRoomCode;
+    setRoomMembership(
+      args.runtimeState,
+      response?.roomCode ?? args.runtimeState.activeRoomCode,
+      response?.memberId ?? null,
+    );
 
     if (response?.ok && response.roomState) {
       args.debugLog(
@@ -1007,11 +1019,14 @@ export function createRoomStateApplyController(args: {
           args.userGestureGraceMs
       ) {
         args.runtimeState.intendedPlayState = playback.playState;
-        args.runtimeState.lastForcedPauseAt = monotonicNow();
         args.debugLog(
           `Suppressed autoplay during hydrate for ${response.roomState.roomCode}`,
         );
-        pauseVideo(video);
+        forcePauseVideo({
+          runtimeState: args.runtimeState,
+          video,
+          getMonotonicNow: monotonicNow,
+        });
       }
       await applyRoomState(response.roomState as RoomState);
       args.runtimeState.hydrationReady = true;

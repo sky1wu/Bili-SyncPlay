@@ -3,10 +3,21 @@ import {
   decidePlaybackReconcileMode,
   shouldTreatAsExplicitSeek,
 } from "./playback-reconcile";
-import type { ProgrammaticPlaybackSignature } from "./runtime-state";
+import type {
+  ContentRuntimeState,
+  ProgrammaticPlaybackSignature,
+} from "./runtime-state";
 
 const SOFT_APPLY_STEP_SECONDS = 0.22;
 const SOFT_APPLY_MAX_STEP_SECONDS = 0.4;
+const extensionPauseByVideo = new WeakMap<
+  HTMLVideoElement,
+  {
+    runtimeState: object;
+    startedAt: number;
+    playerSessionGeneration: number;
+  }
+>();
 // Peak rate offset a catch-up may apply at base 1x (i.e. up to 1.16x). The
 // remote head advances at the base rate, so this offset *is* the relative
 // closing speed: at 0.16 a drift takes drift / 0.16 seconds to absorb. Kept
@@ -40,6 +51,63 @@ export function getVideoElement(): HTMLVideoElement | null {
 
 export function pauseVideo(video: HTMLVideoElement): void {
   video.pause();
+}
+
+/**
+ * Pause on behalf of the extension and establish the active pause record at the
+ * instant the command is issued. Keeping both ownership and classification with
+ * the effect prevents a queued pause or a navigation-time video rebind from
+ * inserting newer buffer evidence between an early marker and the eventual
+ * `pause()` call. It also covers players that never dispatch that `pause` event:
+ * later transport events then observe an existing non-buffer pause instead of
+ * inventing a buffer pause for the extension-owned effect.
+ */
+export function forcePauseVideo(args: {
+  runtimeState: Pick<
+    ContentRuntimeState,
+    | "lastForcedPauseAt"
+    | "pauseStartedAt"
+    | "pauseClassifiedAsBuffer"
+    | "playerSessionGeneration"
+  >;
+  video: HTMLVideoElement;
+  getMonotonicNow: () => number;
+  pause?: (video: HTMLVideoElement) => void;
+}): void {
+  const now = args.getMonotonicNow();
+  extensionPauseByVideo.set(args.video, {
+    runtimeState: args.runtimeState,
+    startedAt: now,
+    playerSessionGeneration: args.runtimeState.playerSessionGeneration,
+  });
+  args.runtimeState.lastForcedPauseAt = now;
+  args.runtimeState.pauseStartedAt = now;
+  args.runtimeState.pauseClassifiedAsBuffer = false;
+  (args.pause ?? pauseVideo)(args.video);
+}
+
+/** Whether this exact element is still in the pause established by us. */
+export function isExtensionOwnedActivePause(args: {
+  runtimeState: Pick<
+    ContentRuntimeState,
+    "pauseStartedAt" | "playerSessionGeneration"
+  >;
+  video: HTMLVideoElement;
+}): boolean {
+  const ownedPause = extensionPauseByVideo.get(args.video);
+  return Boolean(
+    ownedPause &&
+    ownedPause.runtimeState === args.runtimeState &&
+    args.runtimeState.pauseStartedAt > 0 &&
+    ownedPause.startedAt === args.runtimeState.pauseStartedAt &&
+    ownedPause.playerSessionGeneration ===
+      args.runtimeState.playerSessionGeneration,
+  );
+}
+
+/** Consume element-local ownership once playback is observed to resume. */
+export function clearExtensionPauseOwnership(video: HTMLVideoElement): void {
+  extensionPauseByVideo.delete(video);
 }
 
 /**
@@ -464,6 +532,7 @@ export function applyPendingPlaybackApplication(args: {
 
 export function bindVideoElement(args: {
   video: HTMLVideoElement;
+  isCurrent: () => boolean;
   onPlay: () => void;
   onPause: () => void;
   onWaiting: () => void;
@@ -485,17 +554,24 @@ export function bindVideoElement(args: {
   }
 
   boundVideo.__biliSyncBound = true;
-  args.video.addEventListener("play", args.onPlay);
-  args.video.addEventListener("pause", args.onPause);
-  args.video.addEventListener("waiting", args.onWaiting);
-  args.video.addEventListener("stalled", args.onStalled);
-  args.video.addEventListener("loadedmetadata", args.onLoadedMetadata);
-  args.video.addEventListener("canplay", args.onCanPlay);
-  args.video.addEventListener("playing", args.onPlaying);
-  args.video.addEventListener("seeking", args.onSeeking);
-  args.video.addEventListener("seeked", args.onSeeked);
-  args.video.addEventListener("ratechange", args.onRateChange);
-  args.video.addEventListener("timeupdate", args.onTimeUpdate);
-  args.video.addEventListener("ended", args.onEnded);
+  const addCurrentListener = (type: string, listener: () => void): void => {
+    args.video.addEventListener(type, () => {
+      if (args.isCurrent()) {
+        listener();
+      }
+    });
+  };
+  addCurrentListener("play", args.onPlay);
+  addCurrentListener("pause", args.onPause);
+  addCurrentListener("waiting", args.onWaiting);
+  addCurrentListener("stalled", args.onStalled);
+  addCurrentListener("loadedmetadata", args.onLoadedMetadata);
+  addCurrentListener("canplay", args.onCanPlay);
+  addCurrentListener("playing", args.onPlaying);
+  addCurrentListener("seeking", args.onSeeking);
+  addCurrentListener("seeked", args.onSeeked);
+  addCurrentListener("ratechange", args.onRateChange);
+  addCurrentListener("timeupdate", args.onTimeUpdate);
+  addCurrentListener("ended", args.onEnded);
   return true;
 }

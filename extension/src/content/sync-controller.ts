@@ -18,8 +18,8 @@ import {
 import {
   applyPendingPlaybackApplication as applyPendingPlaybackApplicationWithBinding,
   createProgrammaticPlaybackSignature,
+  forcePauseVideo,
   getReportedPlayState,
-  pauseVideo,
 } from "./player-binding";
 import {
   decidePlaybackReconcileMode,
@@ -1461,7 +1461,6 @@ export function createSyncController(args: {
         })}`,
       );
       args.runtimeState.intendedPlayState = "paused";
-      args.runtimeState.lastForcedPauseAt = now;
       const remoteStopRoomCode = args.runtimeState.activeRoomCode;
       const remoteStopGestureAt = args.runtimeState.lastUserGestureAt;
       window.setTimeout(() => {
@@ -1479,7 +1478,11 @@ export function createSyncController(args: {
         ) {
           return;
         }
-        pauseVideo(video);
+        forcePauseVideo({
+          runtimeState: args.runtimeState,
+          video,
+          getMonotonicNow: monotonicNow,
+        });
       }, 0);
       logBroadcastTrace(
         "remote-stop-hold",

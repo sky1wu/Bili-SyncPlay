@@ -7,6 +7,7 @@ import {
   isAddressBarOpaqueVideoUrl,
   isUnstableSharedVideoUrl,
 } from "./video-identity";
+import { forcePauseVideo } from "./player-binding";
 
 export interface NavigationController {
   start(): void;
@@ -597,11 +598,15 @@ export function createNavigationController(args: {
         args.activatePauseHold(args.initialRoomStatePauseHoldMs);
         const video = args.getVideoElement();
         if (video && !video.paused) {
-          args.runtimeState.lastForcedPauseAt = now;
           args.debugLog(
             `Suppressed autoplay to non-shared video ${nextPageUrl}`,
           );
-          args.pauseVideo(video);
+          forcePauseVideo({
+            runtimeState: args.runtimeState,
+            video,
+            getMonotonicNow: monotonicNow,
+            pause: args.pauseVideo,
+          });
         }
       }
       // For the local-sharer auto-share and the unclassified case, clear any pause
@@ -651,7 +656,12 @@ export function createNavigationController(args: {
       args.debugLog(
         `Suppressed autoplay immediately after in-room navigation to ${nextPageUrl}`,
       );
-      args.pauseVideo(video);
+      forcePauseVideo({
+        runtimeState: args.runtimeState,
+        video,
+        getMonotonicNow: monotonicNow,
+        pause: args.pauseVideo,
+      });
     }
     void args.hydrateRoomState();
   }

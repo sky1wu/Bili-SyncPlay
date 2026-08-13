@@ -321,18 +321,20 @@ export interface ContentRuntimeState {
    */
   lastVideoElementBoundAt: number;
   /**
-   * Timestamp when the local video most recently transitioned to `paused`.
+   * Timestamp when the current local pause began. A DOM `pause` event normally
+   * records it; an extension-owned pause records it with the `pause()` command
+   * so the active pause remains identified even if the player drops that event.
    * Reset to 0 once playback resumes. Together with
    * [[pauseClassifiedAsBuffer]] this powers the "buffer-pause → buffering"
    * remote broadcast classification and its upgrade-to-`paused` timeout.
    */
   pauseStartedAt: number;
   /**
-   * Whether the active pause is currently classified as buffer-induced. Set
-   * on the `pause` event when a `waiting`/`stalled` signal occurred very
-   * recently and no fresh user gesture preceded the pause; cleared on
-   * resume. The broadcast layer reports `buffering` instead of `paused`
-   * while this flag is on and within the upgrade threshold.
+   * Whether the active pause is currently classified as buffer-induced. A pause
+   * observer sets it when recent buffer evidence is newer than any extension
+   * pause command; that command instead establishes the active record with this
+   * flag false. Cleared on resume. The broadcast layer reports `buffering`
+   * instead of `paused` while this flag is on and within the upgrade threshold.
    */
   pauseClassifiedAsBuffer: boolean;
   /**
@@ -397,6 +399,20 @@ export function invalidatePlayerSession(state: ContentRuntimeState): void {
   state.lastBufferSignalAt = 0;
   state.pauseStartedAt = 0;
   state.pauseClassifiedAsBuffer = false;
+}
+
+/** Update the membership identity and end element-local work on every change. */
+export function setRoomMembership(
+  state: ContentRuntimeState,
+  roomCode: string | null,
+  memberId: string | null,
+): void {
+  const roomChanged = state.activeRoomCode !== roomCode;
+  state.activeRoomCode = roomCode;
+  state.localMemberId = memberId;
+  if (roomChanged) {
+    invalidatePlayerSession(state);
+  }
 }
 
 export function createContentRuntimeState(): ContentRuntimeState {
