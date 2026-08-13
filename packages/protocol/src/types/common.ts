@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 4;
 
 export type RoomCode = string;
 export type PlaybackPlayState = "playing" | "paused" | "buffering";

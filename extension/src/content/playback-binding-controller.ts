@@ -1,8 +1,8 @@
 import type { SharedVideo } from "@bili-syncplay/protocol";
 import {
   bindVideoElement,
+  forcePauseVideo,
   getVideoElement,
-  pauseVideo,
 } from "./player-binding";
 import {
   evaluateNonSharedPageGuard,
@@ -11,7 +11,6 @@ import {
 import type {
   ContentRuntimeState,
   ExplicitUserActionKind,
-  LocalPlaybackBroadcastCause,
   LocalPlaybackEventSource,
 } from "./runtime-state";
 import {
@@ -59,7 +58,7 @@ export function createPlaybackBindingController(args: {
   broadcastPlayback: (
     video: HTMLVideoElement,
     eventSource?: LocalPlaybackEventSource,
-    cause?: LocalPlaybackBroadcastCause,
+    naturalEnd?: boolean,
   ) => Promise<void>;
   cancelActiveSoftApply: (
     video: HTMLVideoElement | null,
@@ -133,7 +132,11 @@ export function createPlaybackBindingController(args: {
       ) {
         return;
       }
-      pauseVideo(video);
+      forcePauseVideo({
+        runtimeState: args.runtimeState,
+        video,
+        getMonotonicNow: monotonicNow,
+      });
     }, 0);
   };
   const clearActivePauseClassification = () => {
@@ -178,13 +181,7 @@ export function createPlaybackBindingController(args: {
       args.debugLog(
         `Buffer-pause upgraded to paused after ${args.bufferPauseUpgradeMs}ms, re-broadcasting`,
       );
-      // Tagged: this pause is the extension's own — a load/stall the room must
-      // learn about, NOT somebody pressing pause. The timer is longer than every
-      // echo-suppression window (`REMOTE_ECHO_SUPPRESSION_MS`, `pauseHoldUntil`),
-      // so by the time it fires no receiver can still tell the two apart
-      // locally, and an untagged one arrived at peers as "<name> paused the
-      // video" — and paused whoever was playing.
-      void args.broadcastPlayback(video, "pause", { bufferUpgrade: true });
+      void args.broadcastPlayback(video, "pause");
     }, args.bufferPauseUpgradeMs);
   };
   // A bare freshness check is safe here only because "never" is
@@ -541,7 +538,6 @@ export function createPlaybackBindingController(args: {
     }
 
     args.runtimeState.intendedPlayState = "paused";
-    args.runtimeState.lastForcedPauseAt = monotonicNow();
     args.runtimeState.suppressedLocalEndPauseUrl =
       args.runtimeState.activeSharedUrl;
     args.runtimeState.suppressedLocalEndPauseUntil =
@@ -550,7 +546,11 @@ export function createPlaybackBindingController(args: {
     args.debugLog(
       `Held non-sharer at shared video natural end to block local autoplay-next`,
     );
-    pauseVideo(video);
+    forcePauseVideo({
+      runtimeState: args.runtimeState,
+      video,
+      getMonotonicNow: monotonicNow,
+    });
     return true;
   }
 
@@ -656,7 +656,7 @@ export function createPlaybackBindingController(args: {
     // without surfacing a misleading "paused" / "jumped to <end>" toast. This
     // also covers the slow-handoff case where the autoplay-next eventually
     // lands after the flush window (e.g. a recommend-autoplay countdown).
-    void args.broadcastPlayback(video, "pause", { naturalEnd: true });
+    void args.broadcastPlayback(video, "pause", true);
   }
 
   function shouldReapplyHoldAfterSharedVideoEnd(
@@ -802,7 +802,6 @@ export function createPlaybackBindingController(args: {
     args.runtimeState.intendedPlayState = "paused";
     args.runtimeState.nonSharerAutoplayHoldUrl = normalizedCurrentUrl;
     args.activatePauseHold(args.initialRoomStatePauseHoldMs);
-    args.runtimeState.lastForcedPauseAt = monotonicNow();
     args.debugLog(
       "Forced pause for non-shared video autoplay (in room, load paused)",
     );
@@ -841,7 +840,11 @@ export function createPlaybackBindingController(args: {
         );
         return;
       }
-      pauseVideo(video);
+      forcePauseVideo({
+        runtimeState: args.runtimeState,
+        video,
+        getMonotonicNow: monotonicNow,
+      });
     }, 0);
     return true;
   }
@@ -868,7 +871,6 @@ export function createPlaybackBindingController(args: {
       `Suppressed page autoplay while waiting for initial room state of ${args.runtimeState.activeRoomCode}`,
     );
     args.runtimeState.intendedPlayState = "paused";
-    args.runtimeState.lastForcedPauseAt = monotonicNow();
     const roomCode = args.runtimeState.activeRoomCode;
     queuePauseIfCurrent(video, () => {
       const latestCurrentVideo = args.getSharedVideo();
@@ -1015,7 +1017,6 @@ export function createPlaybackBindingController(args: {
         args.runtimeState.lastExplicitUserAction = null;
         args.runtimeState.explicitSeekOriginPlayState = null;
         args.runtimeState.lastExplicitPlaybackAction = null;
-        args.runtimeState.lastForcedPauseAt = monotonicNow();
         const blockedUrl = args.normalizeUrl(currentVideo?.url);
         const gestureAtWhenBlocked = args.runtimeState.lastUserGestureAt;
         queuePauseIfCurrent(video, () => {
@@ -1040,7 +1041,6 @@ export function createPlaybackBindingController(args: {
         args.debugLog(
           `Re-paused non-sharer multi-part autoplay after shared video natural end`,
         );
-        args.runtimeState.lastForcedPauseAt = monotonicNow();
         queuePauseIfCurrent(video, () =>
           shouldReapplyHoldAfterSharedVideoEnd(video, args.getSharedVideo()),
         );
@@ -1058,7 +1058,6 @@ export function createPlaybackBindingController(args: {
         args.debugLog(
           `Forced pause hold reapplied after unexpected resume intended=${args.runtimeState.intendedPlayState}`,
         );
-        args.runtimeState.lastForcedPauseAt = monotonicNow();
         const remoteStopUrl = args.normalizeUrl(currentVideo.url);
         const gestureAtWhenBlocked = args.runtimeState.lastUserGestureAt;
         queuePauseIfCurrent(video, () => {
@@ -1081,7 +1080,6 @@ export function createPlaybackBindingController(args: {
         );
         args.runtimeState.explicitNonSharedPlaybackUrl = null;
         args.runtimeState.lastNonSharedGuardUrl = null;
-        args.runtimeState.lastForcedPauseAt = monotonicNow();
         queuePauseIfCurrent(video, () =>
           shouldReapplyPauseHoldForUnconfirmedSharedVideo(
             args.getSharedVideo(),
@@ -1177,6 +1175,19 @@ export function createPlaybackBindingController(args: {
           args.runtimeState.lastVideoElementBoundAt > 0 &&
           now - args.runtimeState.lastVideoElementBoundAt <
             args.videoRebindBufferSignalMs;
+        const latestBufferEvidenceAt = Math.max(
+          recentBufferSignal ? args.runtimeState.lastBufferSignalAt : 0,
+          recentVideoRebind ? args.runtimeState.lastVideoElementBoundAt : 0,
+        );
+        // A waiting/rebind signal only explains this pause when it is newer than
+        // the extension's own pause command. Every extension-owned pause goes
+        // through `forcePauseVideo`, which stamps `lastForcedPauseAt` with the
+        // effect itself; treating older buffer evidence as the cause turns that
+        // owned pause into `buffering`, then the 1.5s correction leaks out as a
+        // user-like stop.
+        const forcedPauseOwnsTransition =
+          args.runtimeState.lastForcedPauseAt > 0 &&
+          args.runtimeState.lastForcedPauseAt >= latestBufferEvidenceAt;
         // When applying a remote `paused`, we hard-seek then call `video.pause()`.
         // The seek trips a `waiting` event milliseconds before the `pause`, so the
         // buffer-signal window will look "fresh" even though no real stall occurred.
@@ -1189,6 +1200,7 @@ export function createPlaybackBindingController(args: {
         const bufferInduced =
           !isInsideProgrammaticPausedWindow(now) &&
           (recentBufferSignal || recentVideoRebind) &&
+          !forcedPauseOwnsTransition &&
           !userInitiatedPause;
         args.runtimeState.pauseStartedAt = now;
         args.runtimeState.pauseClassifiedAsBuffer = bufferInduced;

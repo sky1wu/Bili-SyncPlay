@@ -3,7 +3,10 @@ import {
   decidePlaybackReconcileMode,
   shouldTreatAsExplicitSeek,
 } from "./playback-reconcile";
-import type { ProgrammaticPlaybackSignature } from "./runtime-state";
+import type {
+  ContentRuntimeState,
+  ProgrammaticPlaybackSignature,
+} from "./runtime-state";
 
 const SOFT_APPLY_STEP_SECONDS = 0.22;
 const SOFT_APPLY_MAX_STEP_SECONDS = 0.4;
@@ -40,6 +43,22 @@ export function getVideoElement(): HTMLVideoElement | null {
 
 export function pauseVideo(video: HTMLVideoElement): void {
   video.pause();
+}
+
+/**
+ * Pause on behalf of the extension and record ownership at the instant the
+ * command is issued. Keeping the marker with the effect prevents a queued pause
+ * or a navigation-time video rebind from inserting newer buffer evidence between
+ * an early marker and the eventual `pause()` call.
+ */
+export function forcePauseVideo(args: {
+  runtimeState: Pick<ContentRuntimeState, "lastForcedPauseAt">;
+  video: HTMLVideoElement;
+  getMonotonicNow: () => number;
+  pause?: (video: HTMLVideoElement) => void;
+}): void {
+  args.runtimeState.lastForcedPauseAt = args.getMonotonicNow();
+  (args.pause ?? pauseVideo)(args.video);
 }
 
 /**
@@ -419,17 +438,9 @@ export function applyPendingPlaybackApplication(args: {
     args.hasActiveCorrectionSession ?? false,
   );
   args.onPlaybackAdjusted?.(appliedSignature, playback);
-  // A `bufferUpgrade` paused reports that the SENDER never got playing — it is
-  // a load/stall it is telling the room about, not a request for anybody to
-  // stop. That is the same situation `buffering` describes; the flag exists
-  // only because the sender's buffering classification expired before its
-  // player recovered. So it applies exactly like `buffering` here: align
-  // position and rate, leave this element's play/pause alone.
-  const appliesAsPause =
-    playback.playState === "paused" && playback.bufferUpgrade !== true;
   const needsPlayStateChange =
     (playback.playState === "playing" && wasPaused) ||
-    (appliesAsPause && !wasPaused);
+    (playback.playState === "paused" && !wasPaused);
   const didChange = appliedSignature.didChange || needsPlayStateChange;
   const signature = createProgrammaticPlaybackSignature({
     ...playback,
@@ -452,7 +463,7 @@ export function applyPendingPlaybackApplication(args: {
     };
   }
 
-  if (!appliesAsPause) {
+  if (playback.playState === "buffering") {
     return {
       applied: true,
       didChange,

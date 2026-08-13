@@ -18,8 +18,8 @@ import {
 import {
   applyPendingPlaybackApplication as applyPendingPlaybackApplicationWithBinding,
   createProgrammaticPlaybackSignature,
+  forcePauseVideo,
   getReportedPlayState,
-  pauseVideo,
 } from "./player-binding";
 import {
   decidePlaybackReconcileMode,
@@ -44,7 +44,6 @@ import {
 } from "./runtime-state";
 import type {
   ContentRuntimeState,
-  LocalPlaybackBroadcastCause,
   LocalPlaybackEventSource,
   ProgrammaticApplyScope,
 } from "./runtime-state";
@@ -69,7 +68,7 @@ export interface SyncController {
   broadcastPlayback(
     video: HTMLVideoElement,
     eventSource?: LocalPlaybackEventSource,
-    cause?: LocalPlaybackBroadcastCause,
+    naturalEnd?: boolean,
   ): Promise<void>;
   applyRoomState(
     state: RoomState,
@@ -171,7 +170,6 @@ export function createSyncController(args: {
     syncIntent: PlaybackState["syncIntent"] | undefined;
     userInitiated: boolean;
     naturalEnd: boolean;
-    bufferUpgrade: boolean;
     currentTime: number;
     playbackRate: number;
     at: number;
@@ -894,10 +892,8 @@ export function createSyncController(args: {
   async function broadcastPlayback(
     video: HTMLVideoElement,
     eventSource: LocalPlaybackEventSource = "manual",
-    cause?: LocalPlaybackBroadcastCause,
+    naturalEnd?: boolean,
   ): Promise<void> {
-    const naturalEnd = cause?.naturalEnd;
-    const bufferUpgrade = cause?.bufferUpgrade;
     const playbackContextGeneration =
       args.runtimeState.playbackContextGeneration;
     let now = monotonicNow();
@@ -1465,7 +1461,6 @@ export function createSyncController(args: {
         })}`,
       );
       args.runtimeState.intendedPlayState = "paused";
-      args.runtimeState.lastForcedPauseAt = now;
       const remoteStopRoomCode = args.runtimeState.activeRoomCode;
       const remoteStopGestureAt = args.runtimeState.lastUserGestureAt;
       window.setTimeout(() => {
@@ -1483,7 +1478,11 @@ export function createSyncController(args: {
         ) {
           return;
         }
-        pauseVideo(video);
+        forcePauseVideo({
+          runtimeState: args.runtimeState,
+          video,
+          getMonotonicNow: monotonicNow,
+        });
       }, 0);
       logBroadcastTrace(
         "remote-stop-hold",
@@ -1588,7 +1587,6 @@ export function createSyncController(args: {
       duplicate.syncIntent === syncIntent &&
       duplicate.userInitiated === userInitiated &&
       duplicate.naturalEnd === (naturalEnd === true) &&
-      duplicate.bufferUpgrade === (bufferUpgrade === true) &&
       Math.abs(duplicate.currentTime - video.currentTime) <=
         DUPLICATE_BROADCAST_TIME_EPSILON_SECONDS &&
       Math.abs(duplicate.playbackRate - broadcastPlaybackRate) <= 0.01 &&
@@ -1628,7 +1626,6 @@ export function createSyncController(args: {
       playState,
       syncIntent,
       naturalEnd,
-      bufferUpgrade,
       userInitiated,
       playbackRate: broadcastPlaybackRate,
       actorId: args.runtimeState.localMemberId ?? "local",
@@ -1761,7 +1758,6 @@ export function createSyncController(args: {
         syncIntent: playback.syncIntent,
         userInitiated: playback.userInitiated === true,
         naturalEnd: playback.naturalEnd === true,
-        bufferUpgrade: playback.bufferUpgrade === true,
         currentTime: playback.currentTime,
         playbackRate: playback.playbackRate,
         at: monotonicNow(),

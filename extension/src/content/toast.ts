@@ -256,13 +256,7 @@ export function getRoomStateToastMessages(args: {
     // paused state must be applied silently — surfacing a "paused" / "jumped to
     // <end>" toast here is misleading (the video ended on its own) and noisy
     // moments before the autoplay-next share lands.
-    args.nextState.playback?.naturalEnd === true ||
-    // A load/stall pause that outlived its buffering classification. The peer
-    // did not pause anything — its player never started — so "<name> paused the
-    // video" names an action nobody performed. Same treatment as a natural end:
-    // apply the state, say nothing. Member join/leave messages already pushed
-    // above still ship; only the playback-action toasts are skipped.
-    args.nextState.playback?.bufferUpgrade === true
+    args.nextState.playback?.naturalEnd === true
   ) {
     return { messages, nextSeekToastByActor };
   }

@@ -8,8 +8,8 @@
 
 | Constant                   | Location                                | Value | Meaning                                                      |
 | -------------------------- | --------------------------------------- | ----- | ------------------------------------------------------------ |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`   | Version sent by the extension in `room:create` / `room:join` |
-| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`   | Version the server currently speaks                          |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`   | Version sent by the extension in `room:create` / `room:join` |
+| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `4`   | Version the server currently speaks                          |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`   | Oldest client version the server still accepts               |
 
 Clients send `protocolVersion` inside the `room:create` / `room:join` payload; the server rejects clients below `MIN_PROTOCOL_VERSION` with the `unsupported_protocol_version` error code. Legacy clients that omit `protocolVersion` are treated according to the server's compatibility policy in `server/src/messages.ts`.
@@ -40,20 +40,19 @@ and leave its cached `sharedVideo` untouched.
 
 ### `PlaybackState`
 
-| Field           | Type                                        | Notes                                                                                                                                                                                                                                   |
-| --------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `url`           | `string`                                    | URL the state applies to; like `SharedVideo.url`, normalize before comparing                                                                                                                                                            |
-| `currentTime`   | `number`                                    | Playback position in seconds                                                                                                                                                                                                            |
-| `playState`     | `"playing" \| "paused" \| "buffering"`      | `PlaybackPlayState`                                                                                                                                                                                                                     |
-| `syncIntent`    | `"explicit-seek" \| "explicit-ratechange"?` | Marks a state produced by an explicit seek / rate change (`PlaybackSyncIntent`)                                                                                                                                                         |
-| `userInitiated` | `boolean?`                                  | Hint that the transition came from an explicit user gesture rather than a buffer stall or remote-state application; receivers may skip flicker-defence debounces. Optional and additive                                                 |
-| `naturalEnd`    | `boolean?`                                  | Hint that this paused state came from the shared video reaching its natural end; receivers apply it but suppress the misleading "paused" toast. Optional and additive                                                                   |
-| `bufferUpgrade` | `boolean?`                                  | Hint that this paused state is the correction of a load/stall pause the sender never recovered from, not a pause anybody performed; receivers apply it but must neither toast it nor let it pause a playing peer. Optional and additive |
-| `playbackRate`  | `number`                                    | Playback rate                                                                                                                                                                                                                           |
-| `updatedAt`     | `number`                                    | Sender timestamp (ms)                                                                                                                                                                                                                   |
-| `serverTime`    | `number`                                    | Server timestamp stamped on relay (ms)                                                                                                                                                                                                  |
-| `actorId`       | `string`                                    | Member who produced the state                                                                                                                                                                                                           |
-| `seq`           | `number`                                    | Monotonic sequence number for ordering                                                                                                                                                                                                  |
+| Field           | Type                                        | Notes                                                                                                                                                                                   |
+| --------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `url`           | `string`                                    | URL the state applies to; like `SharedVideo.url`, normalize before comparing                                                                                                            |
+| `currentTime`   | `number`                                    | Playback position in seconds                                                                                                                                                            |
+| `playState`     | `"playing" \| "paused" \| "buffering"`      | `PlaybackPlayState`                                                                                                                                                                     |
+| `syncIntent`    | `"explicit-seek" \| "explicit-ratechange"?` | Marks a state produced by an explicit seek / rate change (`PlaybackSyncIntent`)                                                                                                         |
+| `userInitiated` | `boolean?`                                  | Hint that the transition came from an explicit user gesture rather than a buffer stall or remote-state application; receivers may skip flicker-defence debounces. Optional and additive |
+| `naturalEnd`    | `boolean?`                                  | Hint that this paused state came from the shared video reaching its natural end; receivers apply it but suppress the misleading "paused" toast. Optional and additive                   |
+| `playbackRate`  | `number`                                    | Playback rate                                                                                                                                                                           |
+| `updatedAt`     | `number`                                    | Sender timestamp (ms)                                                                                                                                                                   |
+| `serverTime`    | `number`                                    | Server timestamp stamped on relay (ms)                                                                                                                                                  |
+| `actorId`       | `string`                                    | Member who produced the state                                                                                                                                                           |
+| `seq`           | `number`                                    | Monotonic sequence number for ordering                                                                                                                                                  |
 
 ### `RoomState` and `RoomMember`
 

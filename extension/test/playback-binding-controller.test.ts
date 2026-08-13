@@ -7,7 +7,6 @@ import {
   invalidatePlayerSession,
   resetUserGestureState,
 } from "../src/content/runtime-state";
-import type { LocalPlaybackBroadcastCause } from "../src/content/runtime-state";
 import { installClockStubs } from "./clock-stubs";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
 import { derivePlaybackSyncIntent } from "../src/content/playback-broadcast";
@@ -567,6 +566,8 @@ test("playback binding controller keeps hydration pause guard when shared url is
   runtimeState.activeSharedUrl = null;
   runtimeState.lastUserGestureAt = 1_000;
   let pausedByGuard = 0;
+  let now = 1_100;
+  let queuedPause: (() => void) | null = null;
   const originalSetTimeout = globalThis.window.setTimeout;
   const originalPause = dom.video.pause;
 
@@ -592,17 +593,18 @@ test("playback binding controller keeps hydration pause guard when shared url is
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getMonotonicNow: () => 1_100,
+    getMonotonicNow: () => now,
   });
 
   dom.video.pause = () => {
     pausedByGuard += 1;
     dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
     return Promise.resolve();
   };
   globalThis.window.setTimeout = ((callback: TimerHandler) => {
     if (typeof callback === "function") {
-      callback();
+      queuedPause = callback as () => void;
     }
     return 1;
   }) as typeof globalThis.window.setTimeout;
@@ -611,9 +613,20 @@ test("playback binding controller keeps hydration pause guard when shared url is
     controller.attachPlaybackListeners();
     dom.video.paused = false;
     dom.listeners.get("play")?.(new Event("play"));
+    assert.ok(queuedPause, "the hydration hold queues its pause");
+
+    // Buffer evidence can arrive while the zero-delay pause is waiting. The
+    // ownership marker belongs to the actual pause effect, so it must be newer.
+    now = 1_150;
+    dom.listeners.get("waiting")?.(new Event("waiting"));
+    now = 1_160;
+    const pauseTask = queuedPause as () => void;
+    pauseTask();
 
     assert.equal(pausedByGuard, 1);
     assert.equal(runtimeState.explicitNonSharedPlaybackUrl, null);
+    assert.equal(runtimeState.lastForcedPauseAt, 1_160);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;
@@ -4980,83 +4993,6 @@ test("playback binding controller drops a queued load-pause after navigation cle
   } finally {
     globalThis.window.setTimeout = originalSetTimeout;
     dom.video.pause = originalPause;
-    dom.restore();
-  }
-});
-
-test("playback binding controller tags a buffer-pause upgrade as not user-initiated", async () => {
-  // #286. The upgrade timer is longer than every echo-suppression window
-  // (`REMOTE_ECHO_SUPPRESSION_MS` 700ms, `pauseHoldUntil`), so by the time it
-  // fires no receiver can still recognise this pause as the extension's own.
-  // Untagged, peers rendered it as "<name> paused the video" and paused whoever
-  // was playing. The tag is the only thing carrying that fact across.
-  const dom = installDomStub();
-  const runtimeState = createContentRuntimeState();
-  runtimeState.lastUserGestureAt = 0;
-  let now = 5_000;
-  const broadcasts: Array<{
-    eventSource: string;
-    cause: LocalPlaybackBroadcastCause | undefined;
-  }> = [];
-  const originalSetTimeout = globalThis.window.setTimeout;
-  const scheduledTimers: Array<{ cb: () => void; ms: number }> = [];
-  globalThis.window.setTimeout = ((callback: TimerHandler, ms?: number) => {
-    if (typeof callback === "function") {
-      scheduledTimers.push({ cb: callback as () => void, ms: ms ?? 0 });
-    }
-    return scheduledTimers.length;
-  }) as typeof globalThis.window.setTimeout;
-
-  const controller = createPlaybackBindingController({
-    runtimeState,
-    videoBindIntervalMs: 250,
-    userGestureGraceMs: 1_200,
-    initialRoomStatePauseHoldMs: 3_000,
-    bufferSignalWindowMs: 300,
-    bufferPauseUpgradeMs: 1_500,
-    videoRebindBufferSignalMs: 1_000,
-    getSharedVideo: () => null,
-    hasRecentRemoteStopIntent: () => false,
-    normalizeUrl: (url) => url ?? null,
-    getLastBroadcastAt: () => 0,
-    broadcastPlayback: async (_video, eventSource, cause) => {
-      broadcasts.push({ eventSource: eventSource ?? "manual", cause });
-    },
-    cancelActiveSoftApply: () => {},
-    maintainActiveSoftApply: () => {},
-    applyPendingPlaybackApplication: () => {},
-    activatePauseHold: () => {},
-    debugLog: () => {},
-    getMonotonicNow: () => now,
-  });
-
-  try {
-    controller.attachPlaybackListeners();
-    dom.listeners.get("waiting")?.(new Event("waiting"));
-    now = 5_100;
-    dom.video.paused = true;
-    dom.listeners.get("pause")?.(new Event("pause"));
-    await Promise.resolve();
-
-    // Discriminating half: the ORDINARY pause broadcast that starts this
-    // sequence must NOT be tagged. If the tag leaked onto every pause, a real
-    // user pause would stop notifying the room and stop pausing peers.
-    const ordinary = broadcasts.find((b) => b.eventSource === "pause");
-    assert.notEqual(ordinary, undefined);
-    assert.notEqual(ordinary?.cause?.bufferUpgrade, true);
-
-    const upgradeTimer = scheduledTimers.find((t) => t.ms === 1_500);
-    assert.notEqual(upgradeTimer, undefined);
-    now = 6_600;
-    broadcasts.length = 0;
-    upgradeTimer?.cb();
-    await Promise.resolve();
-
-    assert.equal(broadcasts.length, 1);
-    assert.equal(broadcasts[0].eventSource, "pause");
-    assert.equal(broadcasts[0].cause?.bufferUpgrade, true);
-  } finally {
-    globalThis.window.setTimeout = originalSetTimeout;
     dom.restore();
   }
 });

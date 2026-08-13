@@ -143,6 +143,7 @@ test("suppresses autoplay for empty room when intendedPlayState is paused", asyn
   assert.equal(harness.pauseHoldActivated, true);
   assert.equal(harness.acceptedHydration, true);
   assert.equal(video.paused, true);
+  assert.equal(harness.runtimeState.lastForcedPauseAt, 10_000);
 });
 
 test("does not suppress playback for empty room when intendedPlayState is playing", async () => {

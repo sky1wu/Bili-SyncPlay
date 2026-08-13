@@ -11,7 +11,7 @@ import { decidePlaybackApplication } from "./playback-apply";
 import {
   canApplyPlaybackImmediately,
   createProgrammaticPlaybackSignature,
-  pauseVideo,
+  forcePauseVideo,
 } from "./player-binding";
 import type { ContentRuntimeState } from "./runtime-state";
 
@@ -292,9 +292,12 @@ export function createRoomStateApplyController(args: {
     args.activatePauseHold(args.initialRoomStatePauseHoldMs);
     const video = args.getVideoElement();
     if (video && !video.paused) {
-      args.runtimeState.lastForcedPauseAt = monotonicNow();
       args.debugLog(`${input.logReason} for ${input.roomCode}`);
-      pauseVideo(video);
+      forcePauseVideo({
+        runtimeState: args.runtimeState,
+        video,
+        getMonotonicNow: monotonicNow,
+      });
     }
   };
 
@@ -331,7 +334,11 @@ export function createRoomStateApplyController(args: {
         args.userGestureGraceMs
     ) {
       args.debugLog(`Suppressed autoplay for empty room ${roomCode}`);
-      pauseVideo(video);
+      forcePauseVideo({
+        runtimeState: args.runtimeState,
+        video,
+        getMonotonicNow: monotonicNow,
+      });
     }
   }
 
@@ -708,8 +715,11 @@ export function createRoomStateApplyController(args: {
           args.debugLog(
             `Suppressed autoplay during unstable shared url hydration for ${state.roomCode}`,
           );
-          args.runtimeState.lastForcedPauseAt = monotonicNow();
-          pauseVideo(video);
+          forcePauseVideo({
+            runtimeState: args.runtimeState,
+            video,
+            getMonotonicNow: monotonicNow,
+          });
         }
       }
       if (
@@ -1007,11 +1017,14 @@ export function createRoomStateApplyController(args: {
           args.userGestureGraceMs
       ) {
         args.runtimeState.intendedPlayState = playback.playState;
-        args.runtimeState.lastForcedPauseAt = monotonicNow();
         args.debugLog(
           `Suppressed autoplay during hydrate for ${response.roomState.roomCode}`,
         );
-        pauseVideo(video);
+        forcePauseVideo({
+          runtimeState: args.runtimeState,
+          video,
+          getMonotonicNow: monotonicNow,
+        });
       }
       await applyRoomState(response.roomState as RoomState);
       args.runtimeState.hydrationReady = true;

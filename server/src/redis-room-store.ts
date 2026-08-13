@@ -393,8 +393,6 @@ local function isPlayback(value)
       or type(value["userInitiated"]) == "boolean")
     and (value["naturalEnd"] == nil
       or type(value["naturalEnd"]) == "boolean")
-    and (value["bufferUpgrade"] == nil
-      or type(value["bufferUpgrade"]) == "boolean")
     and isFiniteNumber(value["playbackRate"])
     and isFiniteNumber(value["updatedAt"])
     and isFiniteNumber(value["serverTime"])
@@ -631,8 +629,6 @@ function isUsablePlayback(
     (value.userInitiated === undefined ||
       typeof value.userInitiated === "boolean") &&
     (value.naturalEnd === undefined || typeof value.naturalEnd === "boolean") &&
-    (value.bufferUpgrade === undefined ||
-      typeof value.bufferUpgrade === "boolean") &&
     isFiniteNumber(value.playbackRate) &&
     isFiniteNumber(value.updatedAt) &&
     isFiniteNumber(value.serverTime) &&
