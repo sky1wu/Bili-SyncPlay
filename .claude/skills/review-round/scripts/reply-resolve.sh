@@ -27,17 +27,21 @@ else
   die "回复第 1 行必须是 [Change-Unit: <kebab-case>]"
 fi
 if [[ ${BODY_LINES[1]:-} =~ ^\[Root-ID:\ ([a-z0-9][a-z0-9-]{0,62}[a-z0-9])\]$ ]]; then
+  ID_KIND=Root
+  ROOT_ID=${BASH_REMATCH[1]}
+elif [[ ${BODY_LINES[1]:-} =~ ^\[Decision-ID:\ ([a-z0-9][a-z0-9-]{0,62}[a-z0-9])\]$ ]]; then
+  ID_KIND=Decision
   ROOT_ID=${BASH_REMATCH[1]}
 else
-  die "回复第 2 行必须是 [Root-ID: <kebab-case>]"
+  die "回复第 2 行必须是 [Root-ID: <kebab-case>] 或 [Decision-ID: <kebab-case>]"
 fi
 case ${BODY_LINES[2]:-} in
 '[Resolution: first-fix]' | '[Resolution: structural-redesign]' | '[Resolution: rejected]') ;;
 *) die "回复第 3 行必须记录 first-fix、structural-redesign 或 rejected" ;;
 esac
 [ -n "${BODY_LINES[3]:-}" ] || die "决策元数据后必须说明处理与验证结果"
-case "$CHANGE_UNIT:$ROOT_ID" in
-*--*) die "Change Unit 与 Root ID 不得包含连续连字符" ;;
+case "$CHANGE_UNIT:$ID_KIND:$ROOT_ID" in
+*--*) die "Change Unit 与 Root/Decision ID 不得包含连续连字符" ;;
 esac
 
 ME=$(gh api user --jq .login) || die "无法确定当前登录用户"

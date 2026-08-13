@@ -19,6 +19,7 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 | ------------------------- | -------------------------------------------------- |
 | `verify-branch.sh <PR>`   | 校验本地分支名 **和** SHA 与 PR head 一致；拒 fork |
 | `list-unresolved.sh <PR>` | 翻页列出未解决线程；`--history` 包含已解决历史     |
+| `review-attempt.sh`       | 恢复预算；启动第二次独立检视前追加持久 marker      |
 | `has-changes.sh`          | 判断本轮有无改动（含未跟踪文件）                   |
 | `reply-resolve.sh`        | 重读线程 → 回复 → 确认 → resolve                   |
 | `round-signal.sh <PR>`    | 无未解决线程时区分「通过」与「没触发」             |
@@ -48,6 +49,7 @@ PR=$(gh pr view --json number --jq .number)  # 否则取当前分支对应的 PR
 ```bash
 .claude/skills/review-round/scripts/list-unresolved.sh "$PR" --history
 .claude/skills/review-round/scripts/list-unresolved.sh "$PR"
+.claude/skills/review-round/scripts/review-attempt.sh "$PR" <change-unit>
 ```
 
 **不要用 reaction 判断有没有意见。** 本仓库实测：意见最多的 PR221（11 条）和 PR222
@@ -56,7 +58,8 @@ PR=$(gh pr view --json number --jq .number)  # 否则取当前分支对应的 PR
 解决状态，第 2 轮会把上一轮已 resolve 的意见重新摆上清单。
 
 `--history` 输出 open/resolved 状态和已取回的回复，用其中的 `Change-Unit`、`Root-ID` 与
-`Resolution` 恢复既往决策；不得只凭当前聊天记录判断是否同根。脚本会翻页取全 thread
+`Decision-ID` / `Resolution` 恢复既往决策；不得只凭当前聊天记录判断是否同根。
+`review-attempt.sh` 输出该 Change Unit 已占用 `1/2` 还是 `2/2` 次检视。脚本会翻页取全 thread
 并标注评论所属 commit；若警告单个 thread 仍有未取回评论，则历史不完整，执行 `STOP`。
 API 或解析失败时以非零退出——**「没读到」绝不能被当成「没有」**。
 
@@ -181,7 +184,7 @@ git push origin "HEAD:$(gh pr view "$PR" --json headRefName --jq .headRefName)"
 ```bash
 BODY=$(cat <<'EOF'
 [Change-Unit: <kebab-case>]
-[Root-ID: <kebab-case>]
+[Root-ID: <kebab-case>] # 纯新功能/设计决策改用 [Decision-ID: <kebab-case>]
 [Resolution: first-fix|structural-redesign|rejected]
 <改在哪里、如何验证；不采纳则说明理由>
 EOF
@@ -191,8 +194,8 @@ EOF
 
 脚本会先重读线程：若评论数与第 1 步不一致，说明扫描之后评审者又补了内容，此时**拒绝
 resolve** 并打出最新一条，让你先把它纳入根因分析。确认回复拿到 comment id 之后才
-resolve；它也会拒绝缺少三行决策元数据的回复，确保下一轮能恢复 Root ID。只跑
-`resolveReviewThread` 会把线程静默关掉，评审者看不到改在哪。
+resolve；它也会拒绝缺少三行决策元数据的回复，确保下一轮能恢复 Root ID 或 Decision ID。
+只跑 `resolveReviewThread` 会把线程静默关掉，评审者看不到改在哪。
 
 收尾用 `.claude/skills/review-round/scripts/list-unresolved.sh "$PR" --count` 确认归零。
 
@@ -202,8 +205,14 @@ resolve；它也会拒绝缺少三行决策元数据的回复，确保下一轮�
 .claude/skills/review-round/scripts/round-signal.sh "$PR"
 ```
 
-只有该 `Change Unit` 仍有独立语义检视预算时才运行；第二次检视结束后跳过，不得换 reviewer
-或换一种工具开启第三轮。
+只有该 `Change Unit` 仍有独立语义检视预算时才运行。启动第二次独立检视前，先执行：
+
+```bash
+.claude/skills/review-round/scripts/review-attempt.sh "$PR" <change-unit> --record-second
+```
+
+marker 写入失败就停止，不得先启动 reviewer。第二次检视结束后跳过，不得换 reviewer 或换
+一种工具开启第三轮。
 
 输出 `PASSED` / `REVIEWING` / `NOT-TRIGGERED`。
 

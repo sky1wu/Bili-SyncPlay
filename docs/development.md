@@ -220,10 +220,11 @@ When making follow-up changes, keep the current structure stable:
 Agent-assisted feature, fix, and review workflows follow the single source of
 truth in
 [review-convergence.md](../.claude/skills/shared/review-convergence.md). It keeps
-one ownership boundary per Change Unit, records Root IDs in review-thread
-history, and requires work to stop instead of accumulating patches when a root
-cause survives its one allowed structural redesign. This policy does not replace
-the contribution rules or repository checks below.
+one ownership boundary per Change Unit, records the second review attempt plus
+Root or Decision IDs in PR history, and requires work to stop instead of
+accumulating patches when a root cause survives its one allowed structural
+redesign. This policy does not replace the contribution rules or repository
+checks below.
 
 Recommended pre-commit checklist:
 

@@ -234,6 +234,17 @@ case $BAD_RESOLUTION_OUT in
   *"必须记录 first-fix、structural-redesign 或 rejected"*) ok "未知 Resolution 被拒绝" ;;
   *) no "未知 Resolution 未被拒绝" ;;
 esac
+DECISION_BODY=$(printf '%s\n' \
+  '[Change-Unit: review-convergence]' \
+  '[Decision-ID: review-budget]' \
+  '[Resolution: first-fix]' \
+  '说明')
+DECISION_OUT=$("$HERE/reply-resolve.sh" PRRT_fake "$DECISION_BODY" 1 2>&1 || true)
+case $DECISION_OUT in
+  *"回复第 2 行必须"*) no "合法 Decision ID 被元数据边界拒绝" ;;
+  *ERROR*) ok "合法 Decision ID 通过输入边界并进入只读线程查询" ;;
+  *) no "Decision ID 验证路径结果不明确" ;;
+esac
 
 echo "== 17. history 模式必须包含 resolved 与 open 线程 =="
 BAD_MODE_OUT=$("$HERE/list-unresolved.sh" 1 --unknown 2>&1 || true)
@@ -270,6 +281,69 @@ else
   no "fixture 未证明 history 覆盖已解决根因（history=$HISTORY_COUNT open=$OPEN_COUNT）"
 fi
 rm -rf "$TMP4"
+
+echo "== 18. review attempt 预算必须跨会话可恢复且只能追加一次 =="
+TMP5=$(mktemp -d)
+cat >"$TMP5/gh" <<'SH'
+#!/usr/bin/env bash
+case "$1:$2" in
+repo:view)
+  echo "fixture/repo"
+  ;;
+pr:view)
+  printf '%040d\n' 0 | tr 0 b
+  ;;
+pr:comment)
+  : >"$ATTEMPT_STATE_FILE"
+  echo "https://example.invalid/comment"
+  ;;
+api:graphql)
+  after_first=false
+  case " $* " in
+  *" after=cursor-1 "*) after_first=true ;;
+  esac
+  marker='[Review-Attempt: 2/2]\n[Change-Unit: review-convergence]\n[Reviewed-Head: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]'
+  if [ "${ATTEMPT_FIXTURE:-}" = "page2" ] && [ "$after_first" = false ]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"},"nodes":[]}}}}}'
+  elif [ "${ATTEMPT_FIXTURE:-}" = "duplicate" ]; then
+    printf '{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"body":"%s"},{"body":"%s"}]}}}}}\n' "$marker" "$marker"
+  elif [ "${ATTEMPT_FIXTURE:-}" = "second" ] ||
+    [ "${ATTEMPT_FIXTURE:-}" = "page2" ] ||
+    [ -e "${ATTEMPT_STATE_FILE:-/nonexistent}" ]; then
+    printf '{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"body":"%s"}]}}}}}\n' "$marker"
+  else
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}'
+  fi
+  ;;
+*) exit 2 ;;
+esac
+SH
+chmod +x "$TMP5/gh"
+ATTEMPT_STATE_FILE="$TMP5/state"
+FIRST=$(ATTEMPT_FIXTURE=none ATTEMPT_STATE_FILE="$ATTEMPT_STATE_FILE" PATH="$TMP5:$PATH" \
+  "$HERE/review-attempt.sh" 1 review-convergence 2>/dev/null)
+PAGE2=$(ATTEMPT_FIXTURE=page2 ATTEMPT_STATE_FILE="$ATTEMPT_STATE_FILE" PATH="$TMP5:$PATH" \
+  "$HERE/review-attempt.sh" 1 review-convergence 2>/dev/null)
+DUPLICATE=$(ATTEMPT_FIXTURE=duplicate ATTEMPT_STATE_FILE="$ATTEMPT_STATE_FILE" PATH="$TMP5:$PATH" \
+  "$HERE/review-attempt.sh" 1 review-convergence 2>&1 || true)
+if printf '%s\n' "$FIRST" | grep -q 'attempts=1/2' &&
+  printf '%s\n' "$PAGE2" | grep -q 'attempts=2/2' &&
+  printf '%s\n' "$DUPLICATE" | grep -q '历史不唯一，执行 STOP'; then
+  ok "首轮隐式恢复、分页 second marker 与重复 marker STOP 均成立"
+else
+  no "review attempt 状态恢复不完整"
+fi
+RECORDED=$(ATTEMPT_FIXTURE=record ATTEMPT_STATE_FILE="$ATTEMPT_STATE_FILE" PATH="$TMP5:$PATH" \
+  "$HERE/review-attempt.sh" 1 review-convergence --record-second 2>/dev/null)
+REPLAY=$(ATTEMPT_FIXTURE=record ATTEMPT_STATE_FILE="$ATTEMPT_STATE_FILE" PATH="$TMP5:$PATH" \
+  "$HERE/review-attempt.sh" 1 review-convergence --record-second 2>/dev/null)
+if printf '%s\n' "$RECORDED" | grep -q '（已记录）' &&
+  printf '%s\n' "$REPLAY" | grep -q '（marker 已存在）'; then
+  ok "second marker 写后重读确认，重跑保持幂等"
+else
+  no "second marker 写入或幂等重试失败"
+fi
+rm -rf "$TMP5"
 
 echo
 echo "通过 $PASS 条，失败 $FAIL 条"

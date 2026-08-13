@@ -21,13 +21,25 @@
 
 ## 从 PR 历史恢复根因
 
-处理评审前读取当前 PR 的全部 review threads，包括已解决线程。若读取工具警告某线程仍有
-未取回的评论，历史不完整，执行 `STOP`。线程回复必须以三行元数据开头，使下一次会话无需
-依赖聊天记录也能恢复历史：
+处理评审前读取当前 PR 的全部 review threads，包括已解决线程，并读取该 Change Unit 的
+评审尝试状态。若读取工具警告历史不完整，执行 `STOP`。
+
+PR 创建隐式占用第一次独立语义检视；无 finding 的首轮也因此可恢复。启动任何后续独立
+检视前，必须用 `review-attempt.sh` 追加一条第二次尝试 marker；marker 已存在就表示预算耗尽，
+不得启动第三次：
+
+```text
+[Review-Attempt: 2/2]
+[Change-Unit: <kebab-case>]
+[Reviewed-Head: <40-char SHA>]
+```
+
+追加式 PR 评论是评审预算的唯一持久记录，不维护可覆盖的 PR body 账本。线程回复必须以
+三行元数据开头，使下一次会话能把 finding 归回同一 Change Unit：
 
 ```text
 [Change-Unit: <kebab-case>]
-[Root-ID: <kebab-case>]
+[Root-ID: <kebab-case>] 或 [Decision-ID: <kebab-case>]
 [Resolution: first-fix|structural-redesign|rejected]
 ```
 
@@ -50,7 +62,8 @@
 明确选择新的范围或处置方式。
 
 同一 Change Unit 最多进行两次独立语义检视。Codex review、reviewer 子代理和独立人工复核
-共享预算；主代理按既定出口清单做实现核对不算新检视。预算用尽后不换 reviewer 开第三轮。
+共享预算；skill 行为前向测试和主代理按既定出口清单做实现核对不算产品语义检视。第二次
+marker 必须在 reviewer 启动前写入；预算用尽后不换 reviewer 开第三轮。
 
 ## 验证边界
 

@@ -219,9 +219,9 @@ Redis 集成测试说明：
 
 Agent 辅助的 feature、fix 和 review 工作流以
 [review-convergence.md](../.claude/skills/shared/review-convergence.md) 为唯一可信来源。它要求
-每个 Change Unit 只包含一个所有权边界，在评审线程历史中记录 Root ID，并在根因经历唯一
-一次结构性重做后仍然存在时停止，而不是继续累积补丁。本策略不替代下方的贡献规则和仓库
-检查。
+每个 Change Unit 只包含一个所有权边界，在 PR 历史中记录第二次评审尝试及 Root/Decision
+ID，并在根因经历唯一一次结构性重做后仍然存在时停止，而不是继续累积补丁。本策略不替代
+下方的贡献规则和仓库检查。
 
 建议提交前自检：
 
