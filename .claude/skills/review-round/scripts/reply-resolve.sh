@@ -36,8 +36,8 @@ else
   die "回复第 2 行必须是 [Root-ID: <kebab-case>] 或 [Decision-ID: <kebab-case>]"
 fi
 case ${BODY_LINES[2]:-} in
-'[Resolution: first-fix]' | '[Resolution: structural-redesign]' | '[Resolution: rejected]') ;;
-*) die "回复第 3 行必须记录 first-fix、structural-redesign 或 rejected" ;;
+'[Resolution: first-fix]' | '[Resolution: structural-redesign]' | '[Resolution: rejected]' | '[Resolution: follow-up]') ;;
+*) die "回复第 3 行必须记录 first-fix、structural-redesign、rejected 或 follow-up" ;;
 esac
 [ -n "${BODY_LINES[3]:-}" ] || die "决策元数据后必须说明处理与验证结果"
 case "$CHANGE_UNIT:$ID_KIND:$ROOT_ID" in
@@ -78,7 +78,9 @@ case $TOTAL in
 esac
 
 if [ "$RESOLVED" = "true" ]; then
-  echo "线程 ${THREAD_ID:0:20} 已是 resolved，跳过"
+  [ "$MINE" = "true" ] ||
+    die "线程 ${THREAD_ID:0:20} 已由外部 resolved，但缺少本用户的同一条决策元数据回复；执行 STOP，不得把缺失历史当作成功"
+  echo "线程 ${THREAD_ID:0:20} 已 resolved，且决策元数据回复已持久化"
   exit 0
 fi
 

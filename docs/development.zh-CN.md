@@ -42,7 +42,7 @@ npm run audit
 
 - 保持入口文件轻量化，并且让共享规则维持单一来源。
 - 本地检查前先执行 `npm install` 安装依赖；CI 中统一先执行 `npm ci`，再跑同一套校验流程。
-- 提交前执行 `npm run lint`、`npm run format:check`、`npm run typecheck`、`npm run build`、`npm test`。
+- 每次提交和推送前都依次执行 `npm run format:check`、`npm run lint`、`npm run typecheck`、`npm run build`、`npm test`、`npm run audit`。
 - 完整贡献约束见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 
 ## 依赖审计门禁
@@ -219,9 +219,9 @@ Redis 集成测试说明：
 
 Agent 辅助的 feature、fix 和 review 工作流以
 [review-convergence.md](../.claude/skills/shared/review-convergence.md) 为唯一可信来源。它要求
-每个 Change Unit 只包含一个所有权边界，在 PR 历史中记录第二次评审尝试及 Root/Decision
-ID，并在根因经历唯一一次结构性重做后仍然存在时停止，而不是继续累积补丁。本策略不替代
-下方的贡献规则和仓库检查。
+每个 Change Unit 只包含一个所有权边界，在 PR 历史中持久化不可改名的 Review Unit 及
+Root/Decision ID，并将每个设计尝试限制为最多两批修复。失败的设计停止累积补丁，但父问题
+保持开放，等待有证据的新设计。本策略不替代下方的贡献规则和仓库检查。
 
 建议提交前自检：
 

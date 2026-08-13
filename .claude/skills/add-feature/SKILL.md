@@ -79,15 +79,33 @@ fi
 
 复杂度高时先和用户同步设计再动手。
 
+把设计结论固定为后续脚本使用的三个值；替代失败 PR 时沿用原 `PROBLEM_ID` 并填写父 PR：
+
+```bash
+if [ -n "${ISSUE_NUM:-}" ]; then
+  PROBLEM_ID="issue-$ISSUE_NUM"
+else
+  PROBLEM_ID="feature-$BRANCH_SLUG"
+fi
+CHANGE_UNIT="<本次单一所有权边界的 kebab-case>"
+PARENT_PR=none # 替代 PR 改为父 PR 编号
+if [ "$PARENT_PR" = "none" ]; then
+  BRANCH_NAME="feat/$BRANCH_SLUG"
+else
+  BRANCH_NAME="feat/$BRANCH_SLUG-after-pr-$PARENT_PR"
+fi
+```
+
 ## 3. 创建 feature 分支（严禁在 main 上工作）
 
 ```bash
 git switch main && git pull --ff-only
-git switch -c "feat/$BRANCH_SLUG"
+git switch -c "$BRANCH_NAME"
 ```
 
 - 开工前确认当前分支；如在 `main`/`master`，**立即**切到 feature 分支。
-- 分支名一律使用第 0 步确认过的 `$BRANCH_SLUG`，绑定 issue 时形如 `feat/issue-123`，自由文本时形如 `feat/room-invite-expiry`。
+- 初始分支使用 `feat/$BRANCH_SLUG`；替代失败设计时使用
+  `feat/$BRANCH_SLUG-after-pr-$PARENT_PR`，避免与仍保留的父 PR 分支冲突。
 - 创建后 `git rev-parse --abbrev-ref HEAD` 再确认一次。
 
 ## 4. 实现 + 测试
@@ -120,8 +138,9 @@ npm run format:check && npm run lint && npm run typecheck && npm run build && np
 git add <具体文件>
 # commit message：绑定 issue 时带 "(#$ISSUE_NUM)"，自由文本时不带编号
 git commit -m "feat: <简明的'为什么/带来什么价值'>"
-git push -u origin "feat/$BRANCH_SLUG"
-gh pr create --title "feat: ..." --body "$(cat <<'EOF'
+npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
+git push -u origin "$BRANCH_NAME"
+PR_URL=$(gh pr create --title "feat: ..." --body "$(cat <<'EOF'
 ## Summary
 - 新增/变更点 1
 - 新增/变更点 2
@@ -133,7 +152,10 @@ gh pr create --title "feat: ..." --body "$(cat <<'EOF'
 - [ ] 手动验证（golden path）
 - [ ] 手动验证（边界情况）
 EOF
-)"
+)")
+PR=$(gh pr view "$PR_URL" --json number --jq .number)
+.claude/skills/review-round/scripts/review-cycle.sh "$PR" --initialize \
+  "$PROBLEM_ID" "$CHANGE_UNIT" "$PARENT_PR"
 ```
 
 - Conventional Commits：新能力用 `feat:`；行为不变的结构改动用 `refactor:`，不要藏在 `feat:` 里。
@@ -142,10 +164,10 @@ EOF
 
 ## 7. 按收敛契约处理评审
 
-- 每轮反馈交给 `review-round`，先从全部历史线程恢复 `Root ID`，再决定首次修正、结构性重做
-  或停止；不要按评论逐条叠补丁。
-- 同一 `Change Unit` 最多两次独立语义检视。达到 `STOP` / `STOP_AND_SPLIT` 时保留线程，
-  向用户报告并等待明确处置；普通的“继续”不覆盖停止状态。
+- 每轮反馈交给 `review-round`，先从 Review Unit、父 PR 和全部历史线程恢复 `Root ID`，再决定
+  首次修正、结构性重做或停止；不要按评论逐条叠补丁。
+- 同一 Design Attempt 最多两批代码修复。终局评审仍有阻塞问题时执行 `STOP_FAILED`：停止
+  当前 PR，但保持 Problem 开放，并只在新根因假设获批后建立替代设计。
 - 只对仍在锁定范围内的修正重跑第 5 步并推送。不得以“等到通过”为理由开启无上限循环。
 
 ## 8. 合并并清理
