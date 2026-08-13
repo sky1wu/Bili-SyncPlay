@@ -29,6 +29,7 @@
 避免覆盖并发编辑。读取时按 GitHub 评论时间排序：
 
 ```bash
+set -e
 PR=<编号>
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" \
@@ -36,8 +37,9 @@ gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" \
         | sort_by(.created_at)[] | [.created_at, .body] | @tsv'
 ```
 
-一次完成的评审产生一条评论；评论头记录 `Head`、`Mode: pre-push|auto|manual|legacy`、
-`Result: findings|passed|unknown` 和唯一 `Signal`，随后每个独立根因一行：
+一次完成的评审按 reviewed head 分组，每组产生一条评论；评论头记录 `Head`、
+`Mode: pre-push|auto|manual|legacy`、`Result: findings|passed|unknown` 和唯一 `Signal`，
+随后每个独立根因一行：
 
 | Root ID | Class | Layers | New states | Uncovered exits | Decision |
 | ------- | ----- | -----: | ---------: | --------------: | -------- |
@@ -45,17 +47,18 @@ gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" \
 
 - `Class` 是 `new` 或 `same-root`；同一因果问题始终沿用同一 `Root ID`。
 - 三项数字均针对 PR merge base 到该 `Head` 的最终产品；`Uncovered exits` 目标为 `0`。
-- `Signal` 对 findings 使用本轮线程 id 的排序集合，对 passed 使用 `round-signal.sh` 输出的
-  reaction 时间，manual 使用 `manual:<Head>`，pre-push 使用 `pre-push:<Head>`。写入前发现
-  同一 `(Head, Mode, Signal)` 已存在就跳过，避免重跑 skill 重复计轮。
+- `Signal` 对 findings 使用本轮 `thread-id@当前评论总数` 的排序集合；新增回复会改变信号，
+  不会被旧快照去重。passed 使用 `round-signal.sh` 输出的 reaction 时间，manual 使用
+  `manual:<Head>`，pre-push 使用 `pre-push:<Head>`。写入前发现同一 `(Head, Mode, Signal)`
+  已存在就跳过，避免重跑 skill 重复计轮。
 - 旧 PR 无历史时追加一条 `Mode: legacy`、`Result: unknown`、`Signal: unknown` 的说明评论；它没有根因行，
   不参与连续轮次计算，不能伪造历史数据。
 - `NOT-TRIGGERED`、仍在进行的评审和 API 读取失败不算一轮，也不写完成评论。
 - 同一 Head 的自动评审以新 Signal 重新完成一次，算新一轮；自动评审明确不可用时，对
-  同一 Head 完成一次手工复审并记 `Mode: manual`，也只算一轮，之后同一 Head 的自动通过
-  信号不得再重复计轮。
-- 本地 push 前复审不是远端轮次；其根因先记在当前任务工作记录中，PR 建立后在首条评论
-  的 `Pre-push findings` 段回填，且同样受下面的停止条件约束。
+  同一 Head 完成一次手工复审并记 `Mode: manual`，也只算一轮。该 Head 已有任意完成的
+  manual 记录后，之后的自动通过信号不得再重复计轮。
+- 本地 push 前复审不是远端轮次；其根因先记在当前任务工作记录中，PR 能接收评论后在该
+  最终 Head 的 `Mode: pre-push` 根因行回填，且同样受下面的停止条件约束。
 
 发布评论前先重新读取现有标记评论，再用 `gh pr comment "$PR" --body "..."` 追加；禁止
 用 `gh pr edit --body` 维护账本。
@@ -79,10 +82,16 @@ test -z "$(git status --porcelain=v1 -uall)" || {
 不得先切分支再检查，也不得携带、stash、提交或覆盖用户已有改动。需要独立 worktree 时，
 任务分支只在新 worktree 中创建；后续所有命令都在那里执行。
 
+每个 fenced 命令块都按新的 shell 处理：块内重新赋值所需变量，多步门禁用 `set -e` 或
+`&&` 传播失败。需要先由代理读取和判断输出的命令（尤其 `codex review`）必须独占一步，
+确认结果后才能在新的命令块执行 push，不能用进程退出码猜测“无意见”。
+
 本地复审只针对已经 commit、完整门禁通过且工作树干净的实际 HEAD。用精确 merge base
 排除 base 分支后来前进的提交，同时覆盖 HEAD 上整个 PR 产品，而不是只看最后一笔补丁：
+执行前把下列 `<base>` 全部替换为实际 base 分支名。
 
 ```bash
+set -e
 BASE_REF=origin/<base>
 git fetch origin <base>
 test -z "$(git status --porcelain=v1 -uall)" || exit 1
@@ -90,6 +99,8 @@ BASE_COMMIT=$(git merge-base HEAD "$BASE_REF")
 codex review --base "$BASE_COMMIT"
 ```
 
-复审有意见就禁止 push，按第 1～2 节重新分析；修正后重新 commit、跑完整门禁并复审。
-Codex 明确额度耗尽或不可用时，记录没有自动结果，并人工检查
-`git diff "$BASE_COMMIT" HEAD` 的同一最终产品。“没有未解决线程”不能替代复审通过。
+复审有意见就禁止 push，按第 1 节重新分析，并按第 2 节的 pre-push 规则暂记在任务记录；
+不要把它发布成 auto 轮次。修正后重新 commit、跑完整门禁并复审。
+Codex 明确额度耗尽或不可用时，记录没有自动结果，并在独立 shell 中人工检查
+`git diff "$(git merge-base HEAD origin/<base>)" HEAD` 的同一最终产品。“没有未解决线程”
+不能替代复审通过。

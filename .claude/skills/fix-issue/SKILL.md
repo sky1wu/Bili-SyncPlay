@@ -21,6 +21,7 @@ ISSUE_NUM="$1"   # 后续命令一律使用此变量，不要直接拼 $1
 ## 1. 了解 issue
 
 ```bash
+ISSUE_NUM=<第0步确认的实际数字>
 gh issue view "$ISSUE_NUM"
 ```
 
@@ -31,6 +32,8 @@ gh issue view "$ISSUE_NUM"
 ## 2. 创建 feature 分支（严禁在 main 上工作）
 
 ```bash
+set -e
+ISSUE_NUM=<第0步确认的实际数字>
 test -z "$(git status --porcelain=v1 -uall)" || {
   echo "工作树或索引不干净；停止切分支，在独立干净 worktree 中重新开始" >&2
   exit 1
@@ -75,21 +78,38 @@ npm run format:check && npm run lint && npm run typecheck && npm run build && np
 ## 5. 提交、推送、开 PR
 
 ```bash
+set -e
+ISSUE_NUM=<第0步确认的实际数字>
 git add <具体文件>
 git commit -m "fix: <简明的'为什么'，而不是'做了什么'> (#$ISSUE_NUM)"
 npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
+```
+
+门禁通过后，在独立命令中复审实际提交：
+
+```bash
+set -e
 git fetch origin main
 test -z "$(git status --porcelain=v1 -uall)" || exit 1
 BASE_COMMIT=$(git merge-base HEAD origin/main)
 codex review --base "$BASE_COMMIT"
+```
+
+完整读取复审输出。命令失败或输出含任何 finding 时停止，记录为 pre-push 意见并回到
+第 2.5～4 步；不要执行下面的 push。只有明确无意见后，才另开命令执行：
+
+```bash
+set -e
+ISSUE_NUM=<第0步确认的实际数字>
+test -z "$(git status --porcelain=v1 -uall)" || exit 1
 git push -u origin "fix/issue-$ISSUE_NUM"
 PR_BODY=$(printf '## Root cause\n- 错误事实首次产生于：...\n- 被破坏的不变量：...\n\n## Why this boundary\n- 正确决策所需信息及拥有它的层：...\n- 明确未修改的层：...\n\n## Summary\n- 变更点 1\n- 变更点 2\n\nFixes #%s\n\n## Regression proof\n- [ ] 只回退核心修复后，目标断言失败\n- [ ] 反向对照在回退后仍通过\n\n## Test plan\n- [ ] 单元测试\n- [ ] 手动验证（如适用）\n' "$ISSUE_NUM")
 gh pr create --title "fix: ..." --body "$PR_BODY"
 ```
 
-本地 `codex review` 必须无意见才可 push；有意见就回到第 2.5～4 步按同一根因重做设计、
-提交、门禁和最终产品复审。Codex 明确额度耗尽时，手工复审
-`git diff "$BASE_COMMIT" HEAD` 的同一对象，并记录没有自动结果。
+本地 `codex review` 有意见时只进入 pre-push 路径，不创建 `Mode: auto` 记录。Codex 明确
+额度耗尽时，手工复审
+`git diff "$(git merge-base HEAD origin/main)" HEAD` 的同一对象，并记录没有自动结果。
 
 PR 创建后，按共享文件第 2 节重新读取已有标记评论，追加一条 `Mode: pre-push` 记录，
 写入真实 `Head`、本地复审发现过的 `Root ID` 和最终三项指标。即使本地复审一次通过也要
@@ -110,6 +130,7 @@ PR 创建后，按共享文件第 2 节重新读取已有标记评论，追加�
 ## 7. 合并并清理
 
 ```bash
+set -e
 gh pr merge --squash --delete-branch
 git switch main && git pull --ff-only
 ```

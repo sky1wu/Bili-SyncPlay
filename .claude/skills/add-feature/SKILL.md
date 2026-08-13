@@ -34,6 +34,7 @@ description: 端到端的 GitHub feature 开发工作流。接受 feature 简述
 在进入第 3 步之前，用以下 bash 校验 `BRANCH_SLUG`。**不满足条件必须停住**，让用户改，或你自己改写后重新走第 0.1 步：
 
 ```bash
+BRANCH_SLUG=<第0.1步确认的实际slug>
 # 规则：全小写、首尾是字母或数字、中间允许 [a-z0-9-]、总长 2-40、不含连续 '-'、不含 '..' 或 '/'
 if ! printf '%s' "$BRANCH_SLUG" | grep -Eq '^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$'; then
   echo "rejected: slug must match ^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$ — got: $BRANCH_SLUG" >&2
@@ -57,7 +58,7 @@ fi
 
 ## 1. 澄清需求与边界
 
-- 如果 `$1` 是 issue 编号：`gh issue view "$ISSUE_NUM"` 读完正文和全部评论。
+- 如果 `$1` 是 issue 编号：用实际数字执行 `gh issue view <issue编号>`，读完正文和全部评论。
 - 如果 `$1` 是自由文本描述：先复述你对需求的理解，把以下问题问清楚再动手：
   - **用户故事**：谁在什么场景下要用？替代的现状是什么？
   - **验收标准**：golden path 和边界情况各是什么？如何判定"完成"？
@@ -83,6 +84,8 @@ fi
 ## 3. 创建 feature 分支（严禁在 main 上工作）
 
 ```bash
+set -e
+BRANCH_SLUG=<第0步确认的实际slug>
 test -z "$(git status --porcelain=v1 -uall)" || {
   echo "工作树或索引不干净；停止切分支，在独立干净 worktree 中重新开始" >&2
   exit 1
@@ -122,14 +125,30 @@ npm run format:check && npm run lint && npm run typecheck && npm run build && np
 ## 6. 提交、推送、开 PR
 
 ```bash
+set -e
 git add <具体文件>
-# commit message：绑定 issue 时带 "(#$ISSUE_NUM)"，自由文本时不带编号
-git commit -m "feat: <简明的'为什么/带来什么价值'>"
+# 最终消息：绑定 issue 时直接写 "(#NNN)"，自由文本时不带编号
+git commit -m "<第0～2步确定的最终提交消息>"
 npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
+```
+
+门禁通过后，在独立命令中复审实际提交：
+
+```bash
+set -e
 git fetch origin main
 test -z "$(git status --porcelain=v1 -uall)" || exit 1
 BASE_COMMIT=$(git merge-base HEAD origin/main)
 codex review --base "$BASE_COMMIT"
+```
+
+完整读取复审输出。命令失败或输出含任何 finding 时停止，记录为 pre-push 意见并回到
+第 2～5 步；不要执行下面的 push。只有明确无意见后，才另开命令执行：
+
+```bash
+set -e
+BRANCH_SLUG=<第0步确认的实际slug>
+test -z "$(git status --porcelain=v1 -uall)" || exit 1
 git push -u origin "feat/$BRANCH_SLUG"
 gh pr create --title "feat: ..." --body "$(cat <<'EOF'
 ## Summary
@@ -151,9 +170,9 @@ EOF
 )"
 ```
 
-本地 `codex review` 必须无意见才可 push；有意见就回到第 2～5 步按同一根因重做设计、
-提交、门禁和最终产品复审。Codex 明确额度耗尽时，手工复审
-`git diff "$BASE_COMMIT" HEAD` 的同一对象，并记录没有自动结果。
+本地 `codex review` 有意见时只进入 pre-push 路径，不创建 `Mode: auto` 记录。Codex 明确
+额度耗尽时，手工复审
+`git diff "$(git merge-base HEAD origin/main)" HEAD` 的同一对象，并记录没有自动结果。
 
 PR 创建后，按共享文件第 2 节重新读取已有标记评论，追加一条 `Mode: pre-push` 记录，
 写入真实 `Head`、本地复审发现过的 `Root ID` 和最终三项指标。即使本地复审一次通过也要
@@ -177,6 +196,7 @@ PR 创建后，按共享文件第 2 节重新读取已有标记评论，追加�
 ## 8. 合并并清理
 
 ```bash
+set -e
 gh pr merge --squash --delete-branch
 git switch main && git pull --ff-only
 ```

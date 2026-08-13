@@ -25,21 +25,18 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 ## 0. 在切分支前拒绝脏工作树，再定位 PR
 
 ```bash
+set -e
 test -z "$(git status --porcelain=v1 -uall)" || {
   echo "工作树或索引不干净；停止切分支，在独立干净 worktree 中重新开始" >&2
   exit 1
 }
 
-PR=${PR:-}                                   # 用户指定时保留已有值
-if [ -z "$PR" ]; then
-  PR=$(gh pr view --json number --jq .number) # 否则取当前分支对应的 PR
-fi
+PR=<已从用户输入或当前分支确认的实际数字>
 [ -n "$PR" ] || { echo "无法确定 PR 编号"; exit 1; }
 .claude/skills/review-round/scripts/verify-branch.sh "$PR" --switch
-
-BASE_REF=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
-git fetch origin "$BASE_REF"
 ```
+
+不要原样执行尖括号占位符；每个后续命令块都重新写入这个实际数字，不依赖上一 shell 的变量。
 
 检查必须发生在 `verify-branch --switch` 之前；Git 会把不冲突的脏改动带过分支，切完再查
 已经晚了。若被拒绝，不 stash、不替用户提交，改在目标 SHA 的独立干净 worktree 中执行。
@@ -51,6 +48,7 @@ git fetch origin "$BASE_REF"
 ## 1. 读取全部未解决线程
 
 ```bash
+PR=<第0步确认的实际数字>
 .claude/skills/review-round/scripts/list-unresolved.sh "$PR"
 ```
 
@@ -67,15 +65,17 @@ git rev-parse --short HEAD
 ```
 
 逐线程比较评论的 `@sha`。旧 SHA 的意见先在当前产品上确认是否仍成立，不能按全局 review
-列表猜测。记录本次真正被评审的完整 SHA，后续收敛评论的 `Head` 必须使用它。
+列表猜测。按线程首条评审评论的 commit/head 分组（短 SHA 用 `git rev-parse` 还原）；一个
+reviewed head 生成一条收敛评论，不把多个 SHA 塞进同一条 `Head` 记录。来源不能确认时停止
+记账并重新读取上下文。
 
 ## 3. 先归因和记账，再编辑
 
 先列出全部 P1/P2 意见，不边看边改。每个问题按共享文件第 1 节完成可证伪的根因记录，
 沿用或分配稳定 `Root ID`，再根据历史标记评论归类 `same-root` / `new`。
 
-基于 reviewed head 相对 merge base 的**最终产品**计算 `Layers`、`New states` 和
-`Uncovered exits`。编辑前重新读取标记评论，然后追加一条：
+基于每个 reviewed head 相对 merge base 的**最终产品**分别计算 `Layers`、`New states` 和
+`Uncovered exits`。编辑前重新读取标记评论，然后每组追加一条：
 
 ```markdown
 <!-- review-convergence:v1 -->
@@ -83,7 +83,7 @@ git rev-parse --short HEAD
 Head: <reviewed-full-sha>
 Mode: auto
 Result: findings
-Signal: threads:<排序后的本轮线程id，以逗号分隔>
+Signal: threads:<排序后的 thread-id@当前评论总数，以逗号分隔>
 
 | Root ID | Class  | Layers | New states | Uncovered exits | Decision |
 | ------- | ------ | -----: | ---------: | --------------: | -------- |
@@ -134,43 +134,66 @@ npm run format:check && npm run lint && npm run typecheck && npm run build && np
 ## 6. 提交、本地最终产品复审、推送
 
 ```bash
+set -e
 git add <本轮实际改动的具体文件>   # 严禁 git add -A / git add .
 git diff --cached
 git commit -m "fix: ..."
 npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
+```
 
+门禁通过后，在独立命令中复审实际提交。每个命令块都重新解析自己的变量：
+
+```bash
+set -e
+PR=<第0步确认的实际数字>
+BASE_REF=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
+git fetch origin "$BASE_REF"
 test -z "$(git status --porcelain=v1 -uall)" || exit 1
 BASE_COMMIT=$(git merge-base HEAD "origin/$BASE_REF")
 codex review --base "$BASE_COMMIT"
+```
 
+完整读取复审输出。命令失败或输出含任何 finding 时停止，只记入任务的 pre-push 意见，
+回到根因/设计步骤；不要发布 `Mode: auto` 记录，也不要执行下面的 push。只有明确无意见后，
+才另开命令执行：
+
+```bash
+set -e
+PR=<第0步确认的实际数字>
 .claude/skills/review-round/scripts/verify-branch.sh "$PR" --allow-ahead
 git push origin "HEAD:$(gh pr view "$PR" --json headRefName --jq .headRefName)"
 ```
 
-本地复审审查 HEAD 上完整 PR 产品。有意见就禁止 push，回到第 3 步按同一 `Root ID` 处理，
-新建正常修正提交并重跑门禁/复审，不改写已发布历史。Codex 明确额度耗尽时，记录没有
-自动结果并手工复审 `git diff "$BASE_COMMIT" HEAD` 的同一对象。
+本地复审审查 HEAD 上完整 PR 产品。有意见就新建正常修正提交并重跑门禁/复审，不改写
+已发布历史；最终通过并 push 后，将任务记录中的本地根因写成一条 `Mode: pre-push` 评论。
+Codex 明确额度耗尽时，记录没有自动结果并手工复审同一最终产品。
 
 ## 7. 回复并 resolve
 
 ```bash
+set -e
+PR=<第0步确认的实际数字>
 .claude/skills/review-round/scripts/reply-resolve.sh \
   <线程id> "已修。<改在哪、怎么验证；不采纳则写理由>" <第1步看到的评论数>
+.claude/skills/review-round/scripts/list-unresolved.sh "$PR" --count
 ```
 
-脚本会先重读线程；扫描后新增评论时拒绝 resolve。收尾运行
-`.claude/skills/review-round/scripts/list-unresolved.sh "$PR" --count` 确认归零。
+脚本会先重读线程；扫描后新增评论时拒绝 resolve。最后一行必须输出 `0` 才算归零。
 
 ## 8. 识别完成信号并记录通过轮次
 
 ```bash
 signal_code=0
+PR=<第0步确认的实际数字>
 SIGNAL=$(.claude/skills/review-round/scripts/round-signal.sh "$PR") || signal_code=$?
 printf '%s\n' "$SIGNAL"
+if [ "$signal_code" -ne 0 ]; then
+  exit "$signal_code"
+fi
 ```
 
 - `PASSED`：使用输出中的 reaction 时间作为 `Signal`，重新读取标记评论；若同一
-  `(Head, Mode: auto, Signal)` 尚不存在，且同一 Head 没有替代本轮的 manual 通过记录，
+  `(Head, Mode: auto, Signal)` 尚不存在，且同一 Head 没有任意完成的 manual 记录，
   追加一条无根因行的通过评论，然后成功结束。
 - `REVIEWING`：不写完成评论，继续等待。
 - `NOT-TRIGGERED`：不算轮次、不写评论，评论 `@codex review` 触发后再检查，并保留非零状态。
