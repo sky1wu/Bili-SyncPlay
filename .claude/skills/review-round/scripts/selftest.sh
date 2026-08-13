@@ -6,6 +6,10 @@
 
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
+ISOLATION_HELPER=$(cd "$HERE/../../shared" && pwd)/isolated-worktree.sh
+ADD_FEATURE_SKILL="$HERE/../../add-feature/SKILL.md"
+FIX_ISSUE_SKILL="$HERE/../../fix-issue/SKILL.md"
+REVIEW_ROUND_SKILL="$HERE/../SKILL.md"
 PASS=0
 FAIL=0
 
@@ -218,14 +222,12 @@ else
   echo "  – 跳过（用法: selftest.sh <PR编号> 可启用）"
 fi
 
-echo "== 16. 隔离契约必须先 fetch、使用当前 verifier，并直接创建开发分支 =="
+echo "== 16. 真实隔离 helper 必须完成 fetch、校验、建分支与清理 =="
 TMP4=$(mktemp -d)
 (
   REMOTE="$TMP4/remote.git"
   SOURCE="$TMP4/source"
   WORK="$TMP4/work"
-  ISOLATED="$TMP4/isolated"
-  FEATURE="$TMP4/feature"
   FAKEBIN="$TMP4/bin"
 
   git init -q --bare "$REMOTE" || exit 9
@@ -253,12 +255,6 @@ TMP4=$(mktemp -d)
   HEAD_OID=$(git -C "$SOURCE" rev-parse HEAD) || exit 9
 
   git -C "$WORK" cat-file -e "$HEAD_OID^{commit}" >/dev/null 2>&1 && exit 1
-  git -C "$WORK" fetch -q origin review-head || exit 2
-  git -C "$WORK" cat-file -e "$HEAD_OID^{commit}" || exit 2
-  git -C "$WORK" worktree add -q --detach "$ISOLATED" "$HEAD_OID" || exit 3
-
-  # 目标 PR 树故意不包含 review-round；只有隔离外的当前 verifier 可用。
-  [ ! -e "$ISOLATED/.claude/skills/review-round/scripts/verify-branch.sh" ] || exit 4
   mkdir -p "$FAKEBIN"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
@@ -268,6 +264,16 @@ TMP4=$(mktemp -d)
     '*) exit 1 ;;' \
     'esac' >"$FAKEBIN/gh"
   chmod +x "$FAKEBIN/gh"
+
+  REVIEW_OUT=$(cd "$WORK" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
+    "$ISOLATION_HELPER" create-review 1 "$HERE/verify-branch.sh") || exit 2
+  ISOLATED=$(printf '%s\n' "$REVIEW_OUT" | sed -n 's/^ISOLATED_WORKTREE=//p')
+  ISOLATION_ROOT=$(printf '%s\n' "$REVIEW_OUT" | sed -n 's/^ISOLATION_ROOT=//p')
+  [ -n "$ISOLATED" ] && [ -d "$ISOLATED" ] || exit 3
+  git -C "$WORK" cat-file -e "$HEAD_OID^{commit}" || exit 2
+
+  # 目标 PR 树故意不包含 review-round；create-review 已用隔离外的当前 verifier 校验。
+  [ ! -e "$ISOLATED/.claude/skills/review-round/scripts/verify-branch.sh" ] || exit 4
 
   # 对照：未明确声明 detached 时必须拒绝，不能让任意 SHA 绕过分支校验。
   if (cd "$ISOLATED" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
@@ -287,27 +293,79 @@ TMP4=$(mktemp -d)
   (cd "$ISOLATED" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
     "$HERE/verify-branch.sh" 1 --detached --allow-ahead >/dev/null 2>&1) || exit 7
 
-  git -C "$WORK" worktree remove "$ISOLATED" || exit 9
-  git -C "$WORK" fetch -q origin main || exit 9
-  git -C "$WORK" worktree add -q -b feat/test "$FEATURE" origin/main || exit 8
+  (cd "$WORK" && "$ISOLATION_HELPER" cleanup "$ISOLATED") || exit 8
+  [ ! -e "$ISOLATED" ] && [ ! -e "$ISOLATION_ROOT" ] || exit 8
+
+  FEATURE_OUT=$(cd "$WORK" && "$ISOLATION_HELPER" create-branch feat/test) || exit 9
+  FEATURE=$(printf '%s\n' "$FEATURE_OUT" | sed -n 's/^ISOLATED_WORKTREE=//p')
+  FEATURE_ROOT=$(printf '%s\n' "$FEATURE_OUT" | sed -n 's/^ISOLATION_ROOT=//p')
+  [ -n "$FEATURE" ] && [ -d "$FEATURE" ] || exit 9
   [ "$(git -C "$FEATURE" branch --show-current)" = "feat/test" ] || exit 8
-  git -C "$WORK" worktree remove "$FEATURE" || exit 9
+  (cd "$WORK" && "$ISOLATION_HELPER" cleanup "$FEATURE") || exit 8
+  [ ! -e "$FEATURE" ] && [ ! -e "$FEATURE_ROOT" ] || exit 8
+  git -C "$WORK" branch -D feat/test >/dev/null || exit 9
   grep -q dirty "$WORK/tracked.txt" || exit 10
 )
 case $? in
-0) ok "未取回对象的 PR 与被占用的脏 main 都能走完隔离契约" ;;
+0) ok "真实 helper 在脏 main 上完成 review/branch 两条创建与清理路径" ;;
 1) no "对照失效：clone 竟预先包含了尚未创建的 PR 对象" ;;
-2) no "未在 worktree add 前取回并校验精确 PR 对象" ;;
-3) no "取回对象后仍无法建立 detached worktree" ;;
+2) no "真实 create-review 未取回、校验或验证精确 PR 对象" ;;
+3) no "真实 create-review 未返回可用的 detached worktree" ;;
 4) no "目标旧 PR 树意外带有新 verifier，未证明隔离外 helper" ;;
 5) no "未声明 --detached 却放行了 detached HEAD" ;;
 6) no "隔离外的当前 verifier 无法校验旧 PR 树" ;;
 7) no "detached worktree 提交后无法执行推送前复验" ;;
-8) no "未在 worktree add 时从 origin/main 直接创建开发分支" ;;
+8) no "真实 helper 未正确创建或清理隔离 worktree" ;;
+9) no "真实 create-branch 未从 origin/main 直接建立目标分支" ;;
 10) no "隔离流程改写了原脏 main worktree" ;;
-*) no "detached worktree 自测环境异常" ;;
+*) no "隔离 helper 自测环境异常" ;;
 esac
 rm -rf "$TMP4"
+
+echo "== 17. 三个 Skill 必须调用真实 helper，且信号先于所有轮次清理 =="
+if grep -Fq "'<ISOLATED_WORKTREE_HELPER>' create-branch \"feat/\$BRANCH_SLUG\"" "$ADD_FEATURE_SKILL" &&
+  grep -Fq "'<ISOLATED_WORKTREE_HELPER>' create-branch \"fix/issue-\$ISSUE_NUM\"" "$FIX_ISSUE_SKILL" &&
+  grep -Fq "'<ISOLATED_WORKTREE_HELPER>' create-review \"\$PR\"" "$REVIEW_ROUND_SKILL"; then
+  ok "add-feature、fix-issue、review-round 都调用真实隔离入口"
+else
+  no "仍有 Skill 没有调用真实隔离入口"
+fi
+
+if grep -Eq 'git worktree (add|remove)' "$ADD_FEATURE_SKILL" "$FIX_ISSUE_SKILL" "$REVIEW_ROUND_SKILL"; then
+  no "Skill 又手写了 git worktree 生命周期"
+else
+  ok "三个 Skill 不再复制 git worktree add/remove"
+fi
+
+if node - "$REVIEW_ROUND_SKILL" <<'NODE'
+const fs = require("fs");
+const text = fs.readFileSync(process.argv[2], "utf8");
+const signalHeading = text.indexOf("### 8.1 ");
+const cleanupHeading = text.indexOf("### 8.2 ");
+const signalSection = text.slice(signalHeading, cleanupHeading);
+const cleanupSection = text.slice(cleanupHeading);
+const signalOnlyBeforeCleanup =
+  signalHeading >= 0 &&
+  cleanupHeading > signalHeading &&
+  signalSection.includes("'<REVIEW_ROUND_HOME>/scripts/round-signal.sh'") &&
+  !signalSection.includes("'<ISOLATED_WORKTREE_HELPER>' cleanup") &&
+  cleanupSection.includes("'<ISOLATED_WORKTREE_HELPER>' cleanup") &&
+  !cleanupSection.includes("'<REVIEW_ROUND_HOME>/scripts/round-signal.sh'");
+const secondRound = signalSection.includes("只跳过 8.1") && signalSection.includes("都继续执行 8.2");
+process.exit(signalOnlyBeforeCleanup && secondRound ? 0 : 1);
+NODE
+then
+  ok "评审信号在隔离清理前运行，第二轮只跳过信号"
+else
+  no "评审信号与所有轮次清理的顺序契约不成立"
+fi
+
+if grep -Fq "git push origin --delete 'feat/<BRANCH_SLUG>'" "$ADD_FEATURE_SKILL" &&
+  grep -Fq "git push origin --delete 'fix/issue-<ISSUE_NUM>'" "$FIX_ISSUE_SKILL"; then
+  ok "两条隔离合并路径都删除仍存在的远端分支"
+else
+  no "feature/fix 的隔离合并路径仍会遗留远端分支"
+fi
 
 echo
 echo "通过 $PASS 条，失败 $FAIL 条"

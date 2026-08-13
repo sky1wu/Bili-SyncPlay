@@ -56,10 +56,10 @@
 ## 4. 命令与验证边界
 
 - 切分支或编辑前拒绝脏工作树；需要时建独立干净 worktree，不携带、stash、提交或覆盖用户已有
-  改动。隔离路径只有一份执行契约：先 fetch 并校验目标对象；开发任务在 `git worktree add` 时直接创建
-  目标分支，不在隔离目录再切 `main`；把原 worktree、隔离 worktree 和当前 skill helper 的绝对路径作为具体
-  值记在任务上下文；后续每次工具调用都显式把 `workdir` 设为该隔离目录，不依赖 shell 的 `cd` 或变量持久化；
-  收尾时从原 worktree 移除隔离 worktree，不切换或改写原脏分支。
+  改动。隔离创建与移除只有一个执行入口：当前 skill 旁的 `shared/isolated-worktree.sh`；三个 Skill
+  不得再手写 `git worktree add/remove`。把 helper 输出的原 worktree、隔离 worktree 和当前 skill helper
+  绝对路径记为任务上下文的具体值；后续每次工具调用都显式把 `workdir` 设为隔离目录，不依赖 shell
+  的 `cd` 或变量持久化；收尾时从原 worktree 调用同一 helper 清理，不切换或改写原脏分支。
 - 未经白名单验证的用户输入永远不能插入 shell 源码。编号先验证为纯数字；slug 先在 shell
   外派生并确认只含 `[a-z0-9-]`，再作为数据传入命令。
 - 每个 fenced 命令块按新 shell 处理；块内重新取得所需值，多步命令用 `set -e` 或 `&&`。

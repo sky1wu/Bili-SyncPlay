@@ -27,6 +27,9 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 `REVIEW_ROUND_HOME`。后续代码块里的 `<REVIEW_ROUND_HOME>` 都必须在调用工具前替换为这个
 具体绝对路径；不得改为目标 PR checkout 里的相对路径。
 
+同时把其同级 `shared/isolated-worktree.sh` 的绝对路径记为 `ISOLATED_WORKTREE_HELPER`。
+下文的 `<ISOLATED_WORKTREE_HELPER>` 同样必须替换为这个具体路径。
+
 改动这些脚本后必须跑 `<REVIEW_ROUND_HOME>/scripts/selftest.sh <PR编号>`。
 
 ## 0. 确定 PR 编号，切到它的 head 分支并校验
@@ -49,36 +52,20 @@ PR=123 # 替换为已验证的实际数字
 你会基于旧代码处理反馈、把针对当前提交的意见误判成过时，直到 push 被非快进拒绝才
 暴露。脚本同时校验 `headRefOid`，并拒绝 `main`/`master` 与 fork PR。
 
-若当前 worktree 不干净，不要在其中 stash、切分支或强制重复检出 PR 分支。在原 worktree
-先取回 PR head 对象，再按精确 SHA 建立 detached 隔离 worktree：
+若当前 worktree 不干净，不要在其中 stash、切分支或强制重复检出 PR 分支。通过共享 helper
+取回并校验精确 PR head、建立 detached worktree，再用当前 skill 的 verifier 校验：
 
 ```bash
 set -e
 PR=123 # 替换为已验证的实际数字
-REVIEW_ROUND_HOME='<REVIEW_ROUND_HOME>' # 替换为开始前记录的具体绝对路径
-ORIGINAL_WORKTREE=$(git rev-parse --show-toplevel)
-read -r PR_HEAD_REF PR_HEAD CROSS <<<"$(gh pr view "$PR" \
-  --json headRefName,headRefOid,isCrossRepository \
-  --jq '[.headRefName, .headRefOid, .isCrossRepository] | @tsv')"
-test "$CROSS" = "false" || { echo "拒绝 fork PR" >&2; exit 1; }
-case "$PR_HEAD_REF" in main | master) echo "拒绝在 $PR_HEAD_REF 上操作" >&2; exit 1 ;; esac
-git fetch origin "$PR_HEAD_REF" --quiet
-git cat-file -e "$PR_HEAD^{commit}"
-ISOLATION_ROOT=$(mktemp -d /tmp/review-round.XXXXXX)
-ISOLATED_WORKTREE="$ISOLATION_ROOT/worktree"
-git worktree add --detach "$ISOLATED_WORKTREE" "$PR_HEAD"
-(
-  cd "$ISOLATED_WORKTREE"
-  "$REVIEW_ROUND_HOME/scripts/verify-branch.sh" "$PR" --detached
-)
-printf 'ORIGINAL_WORKTREE=%s\nISOLATED_WORKTREE=%s\nREVIEW_ROUND_HOME=%s\n' \
-  "$ORIGINAL_WORKTREE" "$ISOLATED_WORKTREE" "$REVIEW_ROUND_HOME"
+'<ISOLATED_WORKTREE_HELPER>' create-review "$PR" \
+  '<REVIEW_ROUND_HOME>/scripts/verify-branch.sh'
 ```
 
-把输出的三个绝对路径记为任务上下文的具体值。从第 1 步起，**每次**工具调用都把 `workdir`
-显式设为记录的 `ISOLATED_WORKTREE`；上面子 shell 里的 `cd` 只用于初始校验，不会也不得被当作
-后续工作目录。detached worktree 内的提交仍用第 6 步的 `git push origin "HEAD:<PR head>"`
-更新原 PR，不会移动被其他 worktree 占用的本地分支引用。
+把 helper 输出的绝对路径和 PR head 记为任务上下文的具体值。从第 1 步起，**每次**工具调用
+都把 `workdir` 显式设为记录的 `ISOLATED_WORKTREE`，不得依赖 shell 的 `cd` 或变量持久化。
+detached worktree 内的提交仍用第 6 步的 `git push origin "HEAD:<PR head>"` 更新原 PR，不会
+移动被其他 worktree 占用的本地分支引用。
 
 结合当前任务记录和 PR 已有评审线程，判断这是该变更单元的第一次还是第二次独立语义检视。
 Codex review、子代理代码审计和独立人工 reviewer 共享这两次预算；无法确认时按第二次处理，避免换一种
@@ -248,19 +235,10 @@ resolve——只跑 `resolveReviewThread` 会把线程静默关掉，评审者�
 
 ## 8. 本轮结束——**不要合并**
 
-若第 0 步创建了隔离 worktree，先确认修正已推送、线程已处理且隔离工作树干净；然后把工具
-`workdir` 设为任务上下文里记录的 `ORIGINAL_WORKTREE`，将下列占位符替换为已记录的具体绝对路径再运行：
+### 8.1 检查下一轮信号（仅第一次独立检视）
 
-```bash
-set -e
-git worktree remove '<ISOLATED_WORKTREE>'
-rmdir '<ISOLATION_ROOT>'
-```
-
-不切换、stash、提交或覆盖原脏 worktree。
-
-若本轮已经是第二次有意见的独立语义检视，跳过本步骤，不触发第三次；完成第 6 步的主代理最终产品审计后
-明确报告没有第三次独立验证。只有第一次有意见的独立语义检视的修正才继续检查第二次信号：
+保持工具 `workdir` 在刚推送的 PR worktree；`round-signal.sh` 会从该目录读取 HEAD。只有第一次有意见的
+独立语义检视才运行：
 
 ```bash
 set -e
@@ -270,6 +248,9 @@ PR=123 # 替换为第0步已验证的实际数字
 
 输出 `PASSED` / `REVIEWING` / `NOT-TRIGGERED`。
 
+若本轮已经是第二次有意见的独立语义检视，**只跳过 8.1**，不触发第三次；完成第 6 步的主代理
+最终产品审计后明确报告没有第三次独立验证。无论轮次如何，都继续执行 8.2。
+
 reaction 长期留存且不带 commit 引用，所以脚本用「当前 HEAD 触发的最早一次 workflow
 run 的 `created_at`」作为推送时刻基准，并且只认 Codex 机器人的 reaction。该 SHA 尚无
 run 时直接判 `NOT-TRIGGERED`——此时若拿空字符串当阈值，`created_at > ""` 会选中所有
@@ -277,6 +258,18 @@ run 时直接判 `NOT-TRIGGERED`——此时若拿空字符串当阈值，`creat
 
 `NOT-TRIGGERED` **不等于没问题**：评论 `@codex review` 触发，别空等。
 合并需要用户**针对这个 PR** 的明确授权，关于发版的含糊表述不是合并授权。
+
+### 8.2 清理隔离 worktree（所有轮次）
+
+若第 0 步创建了隔离 worktree，确认修正已推送、线程已处理、8.1 已运行或按第二轮规则跳过，且隔离
+工作树干净；然后把工具 `workdir` 设为任务上下文中的 `ORIGINAL_WORKTREE`，替换具体绝对路径后运行：
+
+```bash
+set -e
+'<ISOLATED_WORKTREE_HELPER>' cleanup '<ISOLATED_WORKTREE>'
+```
+
+不切换、stash、提交或覆盖原脏 worktree。
 
 ## 硬性规则
 

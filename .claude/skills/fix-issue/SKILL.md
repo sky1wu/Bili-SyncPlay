@@ -10,6 +10,11 @@ description: 端到端的 GitHub issue 修复工作流。接受 issue 编号作�
 开始前完整读取 `.claude/skills/shared/review-convergence.md`。根因、范围和复审停止条件
 以它为唯一来源。
 
+同时把当前正在执行的 `fix-issue/SKILL.md` 旁的 `shared/isolated-worktree.sh` 的绝对路径
+记为 `ISOLATED_WORKTREE_HELPER`。下文的
+`<ISOLATED_WORKTREE_HELPER>` 必须在工具调用前替换为这个具体路径，不得改用目标 checkout
+里的相对路径。
+
 ## 0. 校验 `$1` 为纯数字
 
 先在 shell 外确认 `$1` 匹配 `^[0-9]+$`；若不是，停止执行并提示用户改用 `add-feature`
@@ -40,19 +45,14 @@ if test -z "$(git status --porcelain=v1 -uall)"; then
   git switch main && git pull --ff-only
   git switch -c "fix/issue-$ISSUE_NUM"
 else
-  ORIGINAL_WORKTREE=$(git rev-parse --show-toplevel)
-  git fetch origin main --quiet
-  ISOLATION_ROOT=$(mktemp -d /tmp/fix-issue.XXXXXX)
-  ISOLATED_WORKTREE="$ISOLATION_ROOT/worktree"
-  git worktree add -b "fix/issue-$ISSUE_NUM" "$ISOLATED_WORKTREE" origin/main
-  printf 'ORIGINAL_WORKTREE=%s\nISOLATED_WORKTREE=%s\n' "$ORIGINAL_WORKTREE" "$ISOLATED_WORKTREE"
+  '<ISOLATED_WORKTREE_HELPER>' create-branch "fix/issue-$ISSUE_NUM"
 fi
 ```
 
 - 开工前确认当前分支。如在 `main`/`master`，**立即**切到 feature 分支再开始改动。
 - 分支命名：`fix/issue-$ISSUE_NUM`；若 issue 其实是新功能需求，改用 `add-feature` 技能。
 - 创建后 `git rev-parse --abbrev-ref HEAD` 再确认一次。
-- 若命令输出隔离路径，把两个绝对路径记为任务上下文的具体值；从第 2.5 步起，每次工具调用都将
+- 若命令输出隔离路径，把三个绝对路径记为任务上下文的具体值；从第 2.5 步起，每次工具调用都将
   `workdir` 显式设为输出的 `ISOLATED_WORKTREE`，不得依赖上一个 shell 的 `cd` 或变量。
 
 ## 2.5 根因与修复边界（写代码前强制）
@@ -119,14 +119,21 @@ git switch main && git pull --ff-only
 ```
 
 若第 2 步使用了隔离 worktree：先在隔离目录中执行已授权的 `gh pr merge --squash`；确认 PR
-状态为 `MERGED` 后，将工具 `workdir` 设为任务上下文里记录的 `ORIGINAL_WORKTREE`，把下列占位符替换为
-已记录的具体绝对路径/分支名再运行：
+状态为 `MERGED` 后删除仍存在的远端分支：
 
 ```bash
 set -e
-git worktree remove '<ISOLATED_WORKTREE>'
+REMOTE_BRANCH=$(git ls-remote --heads origin 'refs/heads/fix/issue-<ISSUE_NUM>')
+if test -n "$REMOTE_BRANCH"; then git push origin --delete 'fix/issue-<ISSUE_NUM>'; fi
+```
+
+随后将工具 `workdir` 设为任务上下文里记录的 `ORIGINAL_WORKTREE`，把占位符替换为已记录的具体
+绝对路径/分支名再运行：
+
+```bash
+set -e
+'<ISOLATED_WORKTREE_HELPER>' cleanup '<ISOLATED_WORKTREE>'
 git branch -D 'fix/issue-<ISSUE_NUM>'
-rmdir '<ISOLATION_ROOT>'
 git fetch origin main --quiet
 ```
 
