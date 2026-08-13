@@ -1,25 +1,32 @@
 #!/usr/bin/env bash
-# 用法: verify-branch.sh <PR编号> [--switch] [--allow-ahead]
+# 用法: verify-branch.sh <PR编号> [--switch] [--detached] [--allow-ahead]
 #
 #   --switch       允许自行切换到 PR 的 head 分支（编辑前用）
+#   --detached     允许在独立 worktree 中以 detached HEAD 处理精确 PR SHA
 #   --allow-ahead  允许本地领先远端（提交之后、推送之前用）
 #
-# 在动任何文件之前，确认本地就是这个 PR 的 head——分支名 *和* SHA 都要对。
+# 在动任何文件之前，确认本地就是这个 PR 的 head：命名分支要同时核对分支名与 SHA，
+# 隔离 worktree 要显式使用 --detached 并核对精确 SHA。
 
 source "$(dirname "$0")/lib.sh"
 
-PR=${1:?用法: verify-branch.sh <PR编号> [--switch] [--allow-ahead]}
+PR=${1:?用法: verify-branch.sh <PR编号> [--switch] [--detached] [--allow-ahead]}
 shift || true
 
 DO_SWITCH=0
+ALLOW_DETACHED=0
 ALLOW_AHEAD=0
 for arg in "$@"; do
   case "$arg" in
   --switch) DO_SWITCH=1 ;;
+  --detached) ALLOW_DETACHED=1 ;;
   --allow-ahead) ALLOW_AHEAD=1 ;;
   *) die "未知参数：$arg" ;;
   esac
 done
+
+[ "$DO_SWITCH" -eq 1 ] && [ "$ALLOW_DETACHED" -eq 1 ] &&
+  die "--switch 与 --detached 不能同时使用"
 
 resolve_repo
 
@@ -55,7 +62,9 @@ esac
 git fetch origin "$HEAD_REF" --quiet || die "fetch origin/$HEAD_REF 失败"
 
 CUR=$(git rev-parse --abbrev-ref HEAD)
-if [ "$CUR" != "$HEAD_REF" ]; then
+if [ "$ALLOW_DETACHED" -eq 1 ]; then
+  [ "$CUR" = "HEAD" ] || die "--detached 只能用于 detached HEAD；当前分支是 $CUR"
+elif [ "$CUR" != "$HEAD_REF" ]; then
   if [ "$DO_SWITCH" -eq 1 ]; then
     echo "当前在 $CUR，切换到 $HEAD_REF"
     git switch "$HEAD_REF" >/dev/null 2>&1 ||
@@ -69,7 +78,11 @@ fi
 LOCAL_OID=$(git rev-parse HEAD)
 
 if [ "$LOCAL_OID" = "$HEAD_OID" ]; then
-  echo "OK: 分支 $HEAD_REF 与 SHA ${HEAD_OID:0:7} 均一致"
+  if [ "$ALLOW_DETACHED" -eq 1 ]; then
+    echo "OK: detached HEAD 与 PR SHA ${HEAD_OID:0:7} 一致"
+  else
+    echo "OK: 分支 $HEAD_REF 与 SHA ${HEAD_OID:0:7} 均一致"
+  fi
   exit 0
 fi
 
@@ -85,7 +98,11 @@ fi
 if git merge-base --is-ancestor "$HEAD_OID" "$LOCAL_OID" 2>/dev/null; then
   AHEAD=$(git rev-list --count "$HEAD_OID..$LOCAL_OID")
   if [ "$ALLOW_AHEAD" -eq 1 ]; then
-    echo "OK: 本地领先远端 $AHEAD 个提交（待推送），分支 $HEAD_REF 正确"
+    if [ "$ALLOW_DETACHED" -eq 1 ]; then
+      echo "OK: detached HEAD 领先 PR $AHEAD 个提交（待推送）"
+    else
+      echo "OK: 本地领先远端 $AHEAD 个提交（待推送），分支 $HEAD_REF 正确"
+    fi
     exit 0
   fi
   die "本地领先远端 $AHEAD 个提交。编辑前应与远端一致；若这是提交后的推送前复验，请加 --allow-ahead。"

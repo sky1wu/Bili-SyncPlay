@@ -16,7 +16,7 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 
 | 脚本                      | 作用                                                |
 | ------------------------- | --------------------------------------------------- |
-| `verify-branch.sh <PR>`   | 校验本地分支名 **和** SHA 与 PR head 一致；拒 fork  |
+| `verify-branch.sh <PR>`   | 校验命名分支或明确 detached HEAD 与 PR head 一致    |
 | `list-unresolved.sh <PR>` | 翻页列出全部未解决线程，正文不截断，标注所属 commit |
 | `has-changes.sh`          | 判断本轮有无改动（含未跟踪文件）                    |
 | `reply-resolve.sh`        | 重读线程 → 回复 → 确认 → resolve                    |
@@ -44,6 +44,23 @@ PR=123 # 替换为已验证的实际数字
 技能可能从 `main` 或别的分支启动。只比分支名不够：同名本地分支可能落后于远端，那样
 你会基于旧代码处理反馈、把针对当前提交的意见误判成过时，直到 push 被非快进拒绝才
 暴露。脚本同时校验 `headRefOid`，并拒绝 `main`/`master` 与 fork PR。
+
+若当前 worktree 不干净，不要在其中 stash、切分支或强制重复检出 PR 分支。从仓库任一 worktree
+根目录按精确 PR SHA 建立 detached 隔离 worktree，然后在新目录继续：
+
+```bash
+set -e
+PR=123 # 替换为已验证的实际数字
+PR_HEAD=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+ISOLATION_ROOT=$(mktemp -d /tmp/review-round.XXXXXX)
+ISOLATED_WORKTREE="$ISOLATION_ROOT/worktree"
+git worktree add --detach "$ISOLATED_WORKTREE" "$PR_HEAD"
+cd "$ISOLATED_WORKTREE"
+.claude/skills/review-round/scripts/verify-branch.sh "$PR" --detached
+```
+
+detached worktree 内的提交仍用第 6 步的 `git push origin "HEAD:<PR head>"` 更新原 PR，不会移动
+被其他 worktree 占用的本地分支引用。
 
 结合当前任务记录和 PR 已有评审线程，判断这是该变更单元的第一次还是第二次独立语义检视。
 Codex review、子代理代码审计和独立人工 reviewer 共享这两次预算；无法确认时按第二次处理，避免换一种
@@ -188,7 +205,11 @@ PR=123 # 替换为第0步已验证的实际数字
 test -z "$(git status --porcelain=v1 -uall)" || exit 1
 # 推送前复验（中途可能被切走）。--allow-ahead 是必须的：刚 commit 完本地一定
 # 领先远端 headRefOid，严格相等会让每个有提交的轮次都在 push 前中止。
-.claude/skills/review-round/scripts/verify-branch.sh "$PR" --allow-ahead
+if git symbolic-ref --quiet --short HEAD >/dev/null; then
+  .claude/skills/review-round/scripts/verify-branch.sh "$PR" --allow-ahead
+else
+  .claude/skills/review-round/scripts/verify-branch.sh "$PR" --detached --allow-ahead
+fi
 git push origin "HEAD:$(gh pr view "$PR" --json headRefName --jq .headRefName)"
 ```
 

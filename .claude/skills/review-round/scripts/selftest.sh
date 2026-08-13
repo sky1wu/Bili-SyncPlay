@@ -218,6 +218,66 @@ else
   echo "  – 跳过（用法: selftest.sh <PR编号> 可启用）"
 fi
 
+echo "== 16. 脏分支的隔离 worktree 必须能以 detached HEAD 完成校验 =="
+TMP4=$(mktemp -d)
+(
+  REMOTE="$TMP4/remote.git"
+  SOURCE="$TMP4/source"
+  WORK="$TMP4/work"
+  FAKEBIN="$TMP4/bin"
+
+  git init -q --bare "$REMOTE" || exit 9
+  git init -q "$SOURCE" || exit 9
+  git -C "$SOURCE" config user.email t@t
+  git -C "$SOURCE" config user.name t
+  git -C "$SOURCE" config commit.gpgsign false
+  printf 'base\n' >"$SOURCE/tracked.txt"
+  git -C "$SOURCE" add tracked.txt
+  git -C "$SOURCE" commit -q -m base || exit 9
+  git -C "$SOURCE" branch -M review-head
+  git -C "$SOURCE" remote add origin "$REMOTE"
+  git -C "$SOURCE" push -q -u origin review-head || exit 9
+  HEAD_OID=$(git -C "$SOURCE" rev-parse HEAD) || exit 9
+
+  git clone -q --no-checkout "$REMOTE" "$WORK" || exit 9
+  git -C "$WORK" checkout -q --detach "$HEAD_OID" || exit 9
+  mkdir -p "$FAKEBIN"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "$1 $2" in' \
+    '"repo view") echo "sky1wu/test" ;;' \
+    '"pr view") echo "{\"headRefName\":\"review-head\",\"headRefOid\":\"$TEST_HEAD_OID\",\"headRepositoryOwner\":{\"login\":\"sky1wu\"},\"isCrossRepository\":false}" ;;' \
+    '*) exit 1 ;;' \
+    'esac' >"$FAKEBIN/gh"
+  chmod +x "$FAKEBIN/gh"
+
+  # 对照：未明确声明 detached 时必须拒绝，不能让任意 SHA 绕过分支校验。
+  if (cd "$WORK" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
+    "$HERE/verify-branch.sh" 1 >/dev/null 2>&1); then
+    exit 1
+  fi
+
+  (cd "$WORK" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
+    "$HERE/verify-branch.sh" 1 --detached >/dev/null 2>&1) || exit 2
+
+  git -C "$WORK" config user.email t@t
+  git -C "$WORK" config user.name t
+  git -C "$WORK" config commit.gpgsign false
+  printf 'ahead\n' >"$WORK/ahead.txt"
+  git -C "$WORK" add ahead.txt
+  git -C "$WORK" commit -q -m ahead || exit 9
+  (cd "$WORK" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
+    "$HERE/verify-branch.sh" 1 --detached --allow-ahead >/dev/null 2>&1) || exit 3
+)
+case $? in
+0) ok "detached 精确 SHA 与提交后领先均可校验，未声明 detached 仍拒绝" ;;
+1) no "未声明 --detached 却放行了 detached HEAD" ;;
+2) no "精确 PR SHA 的 detached worktree 仍无法开始评审" ;;
+3) no "detached worktree 提交后无法执行推送前复验" ;;
+*) no "detached worktree 自测环境异常" ;;
+esac
+rm -rf "$TMP4"
+
 echo
 echo "通过 $PASS 条，失败 $FAIL 条"
 [ "$FAIL" -eq 0 ]
