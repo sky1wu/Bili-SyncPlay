@@ -214,6 +214,19 @@ Redis 集成测试说明：
 - 如果一个文件同时开始混入状态、IO 和业务决策，应在它再次膨胀前拆分
 - 修改 store、controller、helper、protocol guard、server config/router 边界时，必须同步补或改对应测试
 
+### 评审收敛与隔离工作树
+
+仓库自动化和 agent 辅助的 PR 工作以
+[review-convergence.md](../.claude/skills/shared/review-convergence.md) 为可信来源：
+
+- 编辑前命名稳定的 Root ID 或 Decision ID，锁定预期范围及所有 effect
+  出口，并修复拥有该行为的抽象，不叠加局部例外
+- 同一变更单元最多进行两轮独立语义复审；第二轮若发现相同根因，只允许一次结构性重设计；重设计后同一根因仍存在时，停止自动编辑和复审
+- 只复审已经提交、工作树干净且通过仓库完整门禁的结果
+- 当前工作树不干净时，保持其原样，通过
+  [isolated-worktree.sh](../.claude/skills/shared/isolated-worktree.sh)
+  创建和清理任务工作树；每条任务命令都显式以该隔离工作树作为工作目录
+
 建议提交前自检：
 
 ```bash

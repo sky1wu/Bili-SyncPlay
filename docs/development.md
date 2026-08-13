@@ -214,6 +214,25 @@ When making follow-up changes, keep the current structure stable:
 - if a change mixes state, IO, and business decisions in one file, split it before it becomes the new largest file in that area
 - add or update targeted tests when changing a store, controller, helper, protocol guard, or server config/router boundary
 
+### Review convergence and isolated worktrees
+
+Repository automation and agent-assisted PR work use
+[review-convergence.md](../.claude/skills/shared/review-convergence.md) as the
+source of truth:
+
+- name a stable Root ID or Decision ID before editing, lock the intended scope
+  and effect exits, and fix the owning abstraction instead of layering local
+  exceptions
+- allow at most two independent semantic reviews for one change unit; if the
+  second review finds the same root cause, perform one structural redesign, and
+  stop automatic editing and review if that root cause survives the redesign
+- review only a committed, clean result that has passed the complete repository
+  gate
+- when the current worktree is dirty, leave it untouched and create and clean up
+  the task worktree through
+  [isolated-worktree.sh](../.claude/skills/shared/isolated-worktree.sh); run every
+  task command with that isolated worktree as its explicit working directory
+
 Recommended pre-commit checklist:
 
 ```bash
