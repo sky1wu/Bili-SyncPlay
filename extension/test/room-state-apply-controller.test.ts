@@ -793,6 +793,65 @@ test("hydrates paused room state while page bridge is not ready", async () => {
   }
 });
 
+test("hydration preserves player state when the room membership is unchanged", async () => {
+  const win = installWindowTimerStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    runtimeState.activeRoomCode = "ROOM01";
+    runtimeState.localMemberId = "local-member";
+    runtimeState.lastBufferSignalAt = 4_900;
+    runtimeState.pauseStartedAt = 5_000;
+    runtimeState.pauseClassifiedAsBuffer = true;
+    const harness = createController({
+      runtimeState,
+      requestRoomStateHydration: async () => ({
+        ok: false,
+        memberId: "local-member",
+        roomCode: "ROOM01",
+      }),
+    });
+    const initialGeneration = runtimeState.playerSessionGeneration;
+
+    await harness.controller.hydrateRoomState();
+
+    assert.equal(runtimeState.playerSessionGeneration, initialGeneration);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+  } finally {
+    win.restore();
+  }
+});
+
+test("hydration ends player state when the room membership changes", async () => {
+  const win = installWindowTimerStub();
+  try {
+    const runtimeState = createContentRuntimeState();
+    runtimeState.activeRoomCode = "ROOM01";
+    runtimeState.localMemberId = "local-member";
+    runtimeState.lastBufferSignalAt = 4_900;
+    runtimeState.pauseStartedAt = 5_000;
+    runtimeState.pauseClassifiedAsBuffer = true;
+    const harness = createController({
+      runtimeState,
+      requestRoomStateHydration: async () => ({
+        ok: false,
+        memberId: "local-member",
+        roomCode: "ROOM02",
+      }),
+    });
+    const initialGeneration = runtimeState.playerSessionGeneration;
+
+    await harness.controller.hydrateRoomState();
+
+    assert.equal(runtimeState.activeRoomCode, "ROOM02");
+    assert.equal(runtimeState.playerSessionGeneration, initialGeneration + 1);
+    assert.equal(runtimeState.lastBufferSignalAt, 0);
+    assert.equal(runtimeState.pauseStartedAt, 0);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+  } finally {
+    win.restore();
+  }
+});
+
 test("clears stale sync state when hydration switches shared video before page bridge is ready", async () => {
   const win = installWindowTimerStub();
   try {

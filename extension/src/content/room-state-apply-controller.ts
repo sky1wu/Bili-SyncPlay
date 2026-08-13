@@ -13,7 +13,7 @@ import {
   createProgrammaticPlaybackSignature,
   forcePauseVideo,
 } from "./player-binding";
-import type { ContentRuntimeState } from "./runtime-state";
+import { setRoomMembership, type ContentRuntimeState } from "./runtime-state";
 
 /**
  * Ceiling for the exponential hydration-retry backoff.
@@ -975,9 +975,11 @@ export function createRoomStateApplyController(args: {
       if (!destroyed) args.runtimeState.hydrationReady = true;
       return;
     }
-    args.runtimeState.localMemberId = response?.memberId ?? null;
-    args.runtimeState.activeRoomCode =
-      response?.roomCode ?? args.runtimeState.activeRoomCode;
+    setRoomMembership(
+      args.runtimeState,
+      response?.roomCode ?? args.runtimeState.activeRoomCode,
+      response?.memberId ?? null,
+    );
 
     if (response?.ok && response.roomState) {
       args.debugLog(

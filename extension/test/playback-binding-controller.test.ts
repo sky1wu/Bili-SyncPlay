@@ -28,14 +28,17 @@ type StubVideoElement = Omit<HTMLVideoElement, "paused" | "duration"> & {
 function installDomStub() {
   const originalDocument = globalThis.document;
   const originalWindow = globalThis.window;
-  const listeners: ListenerMap = new Map();
-
-  const video = {
-    paused: false,
-    addEventListener(type: string, listener: EventListener) {
-      listeners.set(type, listener);
-    },
-  } as unknown as StubVideoElement;
+  let listeners: ListenerMap;
+  const createVideo = (paused: boolean): StubVideoElement => {
+    listeners = new Map();
+    return {
+      paused,
+      addEventListener(type: string, listener: EventListener) {
+        listeners.set(type, listener);
+      },
+    } as unknown as StubVideoElement;
+  };
+  let video = createVideo(false);
 
   Object.assign(globalThis, {
     document: {
@@ -60,8 +63,16 @@ function installDomStub() {
   });
 
   return {
-    video,
-    listeners,
+    get video() {
+      return video;
+    },
+    get listeners() {
+      return listeners;
+    },
+    replaceVideo(paused: boolean) {
+      video = createVideo(paused);
+      return video;
+    },
     restore() {
       Object.assign(globalThis, {
         document: originalDocument,
@@ -3776,13 +3787,12 @@ test("playback binding controller classifies a stall on a rebuilt element as buf
   }
 });
 
-test("playback binding controller keeps an extension pause owned when no pause event fired", () => {
-  const dom = installDomStub();
-  const runtimeState = createContentRuntimeState();
-  runtimeState.intendedPlayState = "playing";
-  let now = 5_000;
-
-  const controller = createPlaybackBindingController({
+function createPauseOwnershipController(
+  runtimeState: ReturnType<typeof createContentRuntimeState>,
+  getMonotonicNow: () => number,
+  broadcastPlayback: () => Promise<void> = async () => {},
+) {
+  return createPlaybackBindingController({
     runtimeState,
     videoBindIntervalMs: 250,
     userGestureGraceMs: 1_200,
@@ -3794,14 +3804,22 @@ test("playback binding controller keeps an extension pause owned when no pause e
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
     getLastBroadcastAt: () => 0,
-    broadcastPlayback: async () => {},
+    broadcastPlayback,
     cancelActiveSoftApply: () => {},
     maintainActiveSoftApply: () => {},
     applyPendingPlaybackApplication: () => {},
     activatePauseHold: () => {},
     debugLog: () => {},
-    getMonotonicNow: () => now,
+    getMonotonicNow,
   });
+}
+
+test("playback binding controller keeps an extension pause owned when no pause event fired", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "playing";
+  let now = 5_000;
+  const controller = createPauseOwnershipController(runtimeState, () => now);
 
   try {
     controller.attachPlaybackListeners();
@@ -3823,6 +3841,170 @@ test("playback binding controller keeps an extension pause owned when no pause e
 
     assert.equal(runtimeState.pauseStartedAt, 5_100);
     assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller consumes extension ownership when playback resumes without a playing event", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "playing";
+  let now = 5_000;
+
+  const controller = createPauseOwnershipController(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+    assert.equal(runtimeState.lastVideoElementBoundAt, 5_000);
+
+    now = 5_100;
+    forcePauseVideo({
+      runtimeState,
+      video: dom.video,
+      getMonotonicNow: () => now,
+      pause: (video) => {
+        (video as StubVideoElement).paused = true;
+      },
+    });
+
+    now = 5_200;
+    dom.video.paused = false;
+    dom.listeners.get("timeupdate")?.(new Event("timeupdate"));
+    assert.equal(runtimeState.pauseStartedAt, 0);
+    assert.equal(runtimeState.lastForcedPauseAt, 5_100);
+
+    // The same rebuilt element pauses again inside its rebind window. The old
+    // forced-pause timestamp still fences gestures, but no longer owns this new
+    // pause after the intervening resume.
+    now = 5_300;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+
+    assert.equal(runtimeState.pauseStartedAt, 5_300);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller does not carry extension pause ownership to a replacement element", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "playing";
+  let now = 5_000;
+
+  const controller = createPauseOwnershipController(runtimeState, () => now);
+
+  try {
+    controller.attachPlaybackListeners();
+    now = 5_100;
+    forcePauseVideo({
+      runtimeState,
+      video: dom.video,
+      getMonotonicNow: () => now,
+      pause: (video) => {
+        (video as StubVideoElement).paused = true;
+      },
+    });
+
+    now = 5_200;
+    dom.replaceVideo(true);
+    controller.attachPlaybackListeners();
+    assert.equal(runtimeState.pauseStartedAt, 0);
+
+    now = 5_300;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.equal(runtimeState.pauseStartedAt, 5_300);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller ignores a stale resume event from a replaced element", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "playing";
+  let now = 5_000;
+  let broadcasts = 0;
+
+  const controller = createPauseOwnershipController(
+    runtimeState,
+    () => now,
+    async () => {
+      broadcasts += 1;
+    },
+  );
+
+  try {
+    controller.attachPlaybackListeners();
+    const replacedVideo = dom.video;
+    const replacedListeners = dom.listeners;
+
+    now = 5_100;
+    const currentVideo = dom.replaceVideo(false);
+    controller.attachPlaybackListeners();
+    now = 5_200;
+    forcePauseVideo({
+      runtimeState,
+      video: currentVideo,
+      getMonotonicNow: () => now,
+      pause: (video) => {
+        (video as StubVideoElement).paused = true;
+      },
+    });
+
+    // The detached element reports a delayed resume after the replacement has
+    // established its own pause. It may retire only its own element-local
+    // ownership, never the current element's global pause record.
+    now = 5_300;
+    replacedVideo.paused = false;
+    replacedListeners.get("playing")?.(new Event("playing"));
+
+    assert.equal(runtimeState.pauseStartedAt, 5_200);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+    assert.equal(broadcasts, 0);
+
+    now = 5_400;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    assert.equal(runtimeState.pauseStartedAt, 5_200);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
+    assert.equal(broadcasts, 1);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller clears ownership when binding an element that already resumed", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "playing";
+  let now = 5_000;
+
+  forcePauseVideo({
+    runtimeState,
+    video: dom.video,
+    getMonotonicNow: () => now,
+    pause: (video) => {
+      (video as StubVideoElement).paused = true;
+    },
+  });
+  dom.video.paused = false;
+
+  const controller = createPauseOwnershipController(runtimeState, () => now);
+
+  try {
+    now = 5_100;
+    controller.attachPlaybackListeners();
+    assert.equal(runtimeState.pauseStartedAt, 0);
+
+    now = 5_200;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    assert.equal(runtimeState.pauseStartedAt, 5_200);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
   } finally {
     dom.restore();
   }

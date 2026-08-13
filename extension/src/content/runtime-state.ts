@@ -401,6 +401,20 @@ export function invalidatePlayerSession(state: ContentRuntimeState): void {
   state.pauseClassifiedAsBuffer = false;
 }
 
+/** Update the membership identity and end element-local work on every change. */
+export function setRoomMembership(
+  state: ContentRuntimeState,
+  roomCode: string | null,
+  memberId: string | null,
+): void {
+  const roomChanged = state.activeRoomCode !== roomCode;
+  state.activeRoomCode = roomCode;
+  state.localMemberId = memberId;
+  if (roomChanged) {
+    invalidatePlayerSession(state);
+  }
+}
+
 export function createContentRuntimeState(): ContentRuntimeState {
   return {
     localMemberId: null,

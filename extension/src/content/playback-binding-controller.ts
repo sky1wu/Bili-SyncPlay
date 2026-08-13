@@ -1,8 +1,10 @@
 import type { SharedVideo } from "@bili-syncplay/protocol";
 import {
   bindVideoElement,
+  clearExtensionPauseOwnership,
   forcePauseVideo,
   getVideoElement,
+  isExtensionOwnedActivePause,
 } from "./player-binding";
 import {
   evaluateNonSharedPageGuard,
@@ -139,10 +141,18 @@ export function createPlaybackBindingController(args: {
       });
     }, 0);
   };
-  const clearActivePauseClassification = () => {
+  const clearActivePauseClassification = (video: HTMLVideoElement) => {
+    clearExtensionPauseOwnership(video);
     args.runtimeState.pauseStartedAt = 0;
     args.runtimeState.pauseClassifiedAsBuffer = false;
     clearBufferUpgradeTimer();
+  };
+  const clearActivePauseIfPlaying = (video: HTMLVideoElement): boolean => {
+    if (video.paused) {
+      return false;
+    }
+    clearActivePauseClassification(video);
+    return true;
   };
   /**
    * Bound the `buffering` classification: if the element is still paused once
@@ -251,7 +261,15 @@ export function createPlaybackBindingController(args: {
     classifyUnobservedPauseAsBuffer(video);
     void args.broadcastPlayback(video, eventSource);
     if (followUpMs) {
+      const playerSessionGeneration = args.runtimeState.playerSessionGeneration;
       window.setTimeout(() => {
+        if (
+          playerSessionGeneration !==
+            args.runtimeState.playerSessionGeneration ||
+          getVideoElement() !== video
+        ) {
+          return;
+        }
         void args.broadcastPlayback(video, eventSource);
       }, followUpMs);
     }
@@ -427,8 +445,10 @@ export function createPlaybackBindingController(args: {
    */
   function classifyUnobservedPauseAsBuffer(video: HTMLVideoElement): void {
     const now = monotonicNow();
+    if (clearActivePauseIfPlaying(video)) {
+      return;
+    }
     if (
-      !video.paused ||
       args.runtimeState.pauseStartedAt > 0 ||
       args.runtimeState.intendedPlayState !== "playing" ||
       hasRecentUserGesture() ||
@@ -1119,6 +1139,7 @@ export function createPlaybackBindingController(args: {
 
     const boundNewElement = bindVideoElement({
       video,
+      isCurrent: () => getVideoElement() === video,
       onPlay: () => {
         if (shouldPreRecordNonSharedExplicitPlay()) {
           preAuthorizeExplicitNonSharedPlay();
@@ -1126,7 +1147,7 @@ export function createPlaybackBindingController(args: {
         if (guardUnexpectedResume()) {
           return;
         }
-        clearActivePauseClassification();
+        clearActivePauseClassification(video);
         rememberExplicitPlaybackAction("playing");
         rememberExplicitUserAction("play");
         scheduleBroadcast(video, "play", 180);
@@ -1175,19 +1196,13 @@ export function createPlaybackBindingController(args: {
           args.runtimeState.lastVideoElementBoundAt > 0 &&
           now - args.runtimeState.lastVideoElementBoundAt <
             args.videoRebindBufferSignalMs;
-        const latestBufferEvidenceAt = Math.max(
-          recentBufferSignal ? args.runtimeState.lastBufferSignalAt : 0,
-          recentVideoRebind ? args.runtimeState.lastVideoElementBoundAt : 0,
-        );
-        // A waiting/rebind signal only explains this pause when it is newer than
-        // the extension's own pause command. Every extension-owned pause goes
-        // through `forcePauseVideo`, which stamps `lastForcedPauseAt` with the
-        // effect itself; treating older buffer evidence as the cause turns that
-        // owned pause into `buffering`, then the 1.5s correction leaks out as a
-        // user-like stop.
-        const forcedPauseOwnsTransition =
-          args.runtimeState.lastForcedPauseAt > 0 &&
-          args.runtimeState.lastForcedPauseAt >= latestBufferEvidenceAt;
+        // Ownership belongs to the exact pause effect on this exact element and
+        // player session. `lastForcedPauseAt` remains a durable gesture fence,
+        // so it cannot answer this lifecycle question after a resume or rebind.
+        const forcedPauseOwnsTransition = isExtensionOwnedActivePause({
+          runtimeState: args.runtimeState,
+          video,
+        });
         // When applying a remote `paused`, we hard-seek then call `video.pause()`.
         // The seek trips a `waiting` event milliseconds before the `pause`, so the
         // buffer-signal window will look "fresh" even though no real stall occurred.
@@ -1202,7 +1217,9 @@ export function createPlaybackBindingController(args: {
           (recentBufferSignal || recentVideoRebind) &&
           !forcedPauseOwnsTransition &&
           !userInitiatedPause;
-        args.runtimeState.pauseStartedAt = now;
+        if (!forcedPauseOwnsTransition) {
+          args.runtimeState.pauseStartedAt = now;
+        }
         args.runtimeState.pauseClassifiedAsBuffer = bufferInduced;
         clearBufferUpgradeTimer();
         if (bufferInduced) {
@@ -1255,7 +1272,7 @@ export function createPlaybackBindingController(args: {
         if (guardUnexpectedResume()) {
           return;
         }
-        clearActivePauseClassification();
+        clearActivePauseClassification(video);
         rememberExplicitPlaybackAction("playing");
         rememberExplicitUserAction("play");
         scheduleBroadcast(video, "playing", 180);
@@ -1332,6 +1349,7 @@ export function createPlaybackBindingController(args: {
         }
       },
       onTimeUpdate: () => {
+        clearActivePauseIfPlaying(video);
         args.maintainActiveSoftApply(video);
         if (
           monotonicNow() - args.getLastBroadcastAt() > 2000 &&
@@ -1343,6 +1361,16 @@ export function createPlaybackBindingController(args: {
     });
 
     if (boundNewElement) {
+      if (
+        !video.paused ||
+        (args.runtimeState.pauseStartedAt > 0 &&
+          !isExtensionOwnedActivePause({
+            runtimeState: args.runtimeState,
+            video,
+          }))
+      ) {
+        clearActivePauseClassification(video);
+      }
       // A *replacement* element (the player rebuilt itself) is indistinguishable
       // here from the first bind on a freshly loaded page; both leave an element
       // whose paused state we never observed transitioning. The pause

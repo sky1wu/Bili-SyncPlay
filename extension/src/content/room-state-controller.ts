@@ -1,7 +1,7 @@
 import type { RoomState, SharedVideo } from "@bili-syncplay/protocol";
 import type { SharedVideoToastPayload } from "../shared/messages";
 import type { ContentRuntimeState } from "./runtime-state";
-import { invalidatePlayerSession } from "./runtime-state";
+import { setRoomMembership } from "./runtime-state";
 import type { ToastCoordinatorState } from "./toast";
 import {
   createToastPresenter,
@@ -116,25 +116,13 @@ export function createRoomStateController(args: {
     rttMs: number | null;
   }): void {
     const previousRoomCode = args.runtimeState.activeRoomCode;
-    args.runtimeState.activeRoomCode = payload.roomCode;
-    args.runtimeState.localMemberId = payload.memberId;
+    setRoomMembership(args.runtimeState, payload.roomCode, payload.memberId);
     args.runtimeState.rttMs = payload.rttMs;
     const roomChanged = Boolean(
       previousRoomCode &&
       payload.roomCode &&
       previousRoomCode !== payload.roomCode,
     );
-
-    // Every membership change ends the local player session, including the two
-    // the `roomChanged` / `!payload.roomCode` branches below do not cover on
-    // their own: joining from no room at all, and the `null` leg of a
-    // leave-then-rejoin. Delayed local-player work (the buffer-pause upgrade)
-    // and the buffer classification it verifies itself against belong to the
-    // membership they were recorded under — carrying either across publishes the
-    // previous session's pause into the new room (#260 review).
-    if (previousRoomCode !== payload.roomCode) {
-      invalidatePlayerSession(args.runtimeState);
-    }
 
     if (roomChanged) {
       args.resetPlaybackSyncState(
