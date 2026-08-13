@@ -46,18 +46,27 @@ export function pauseVideo(video: HTMLVideoElement): void {
 }
 
 /**
- * Pause on behalf of the extension and record ownership at the instant the
- * command is issued. Keeping the marker with the effect prevents a queued pause
- * or a navigation-time video rebind from inserting newer buffer evidence between
- * an early marker and the eventual `pause()` call.
+ * Pause on behalf of the extension and establish the active pause record at the
+ * instant the command is issued. Keeping both ownership and classification with
+ * the effect prevents a queued pause or a navigation-time video rebind from
+ * inserting newer buffer evidence between an early marker and the eventual
+ * `pause()` call. It also covers players that never dispatch that `pause` event:
+ * later transport events then observe an existing non-buffer pause instead of
+ * inventing a buffer pause for the extension-owned effect.
  */
 export function forcePauseVideo(args: {
-  runtimeState: Pick<ContentRuntimeState, "lastForcedPauseAt">;
+  runtimeState: Pick<
+    ContentRuntimeState,
+    "lastForcedPauseAt" | "pauseStartedAt" | "pauseClassifiedAsBuffer"
+  >;
   video: HTMLVideoElement;
   getMonotonicNow: () => number;
   pause?: (video: HTMLVideoElement) => void;
 }): void {
-  args.runtimeState.lastForcedPauseAt = args.getMonotonicNow();
+  const now = args.getMonotonicNow();
+  args.runtimeState.lastForcedPauseAt = now;
+  args.runtimeState.pauseStartedAt = now;
+  args.runtimeState.pauseClassifiedAsBuffer = false;
   (args.pause ?? pauseVideo)(args.video);
 }
 

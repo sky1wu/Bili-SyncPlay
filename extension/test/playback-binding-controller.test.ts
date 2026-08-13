@@ -10,6 +10,7 @@ import {
 import { installClockStubs } from "./clock-stubs";
 import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
 import { derivePlaybackSyncIntent } from "../src/content/playback-broadcast";
+import { forcePauseVideo } from "../src/content/player-binding";
 import { createRoomStateController } from "../src/content/room-state-controller";
 import { createToastCoordinatorState } from "../src/content/toast";
 
@@ -3770,6 +3771,58 @@ test("playback binding controller classifies a stall on a rebuilt element as buf
 
     assert.equal(runtimeState.pauseClassifiedAsBuffer, true);
     assert.equal(runtimeState.pauseStartedAt, 5_400);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller keeps an extension pause owned when no pause event fired", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  runtimeState.intendedPlayState = "playing";
+  let now = 5_000;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => null,
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    now = 5_100;
+    forcePauseVideo({
+      runtimeState,
+      video: dom.video,
+      getMonotonicNow: () => now,
+      pause: (video) => {
+        // Some player rebuilds apply the pause without delivering its event to
+        // the listener bound above. A later transport event is the first time
+        // the controller observes the already-paused element.
+        (video as StubVideoElement).paused = true;
+      },
+    });
+
+    now = 5_400;
+    dom.listeners.get("seeked")?.(new Event("seeked"));
+
+    assert.equal(runtimeState.pauseStartedAt, 5_100);
+    assert.equal(runtimeState.pauseClassifiedAsBuffer, false);
   } finally {
     dom.restore();
   }
