@@ -218,12 +218,14 @@ else
   echo "  – 跳过（用法: selftest.sh <PR编号> 可启用）"
 fi
 
-echo "== 16. 脏分支的隔离 worktree 必须能以 detached HEAD 完成校验 =="
+echo "== 16. 隔离契约必须先 fetch、使用当前 verifier，并直接创建开发分支 =="
 TMP4=$(mktemp -d)
 (
   REMOTE="$TMP4/remote.git"
   SOURCE="$TMP4/source"
   WORK="$TMP4/work"
+  ISOLATED="$TMP4/isolated"
+  FEATURE="$TMP4/feature"
   FAKEBIN="$TMP4/bin"
 
   git init -q --bare "$REMOTE" || exit 9
@@ -234,13 +236,29 @@ TMP4=$(mktemp -d)
   printf 'base\n' >"$SOURCE/tracked.txt"
   git -C "$SOURCE" add tracked.txt
   git -C "$SOURCE" commit -q -m base || exit 9
-  git -C "$SOURCE" branch -M review-head
+  git -C "$SOURCE" branch -M main
   git -C "$SOURCE" remote add origin "$REMOTE"
+  git -C "$SOURCE" push -q -u origin main || exit 9
+  git -C "$REMOTE" symbolic-ref HEAD refs/heads/main
+
+  # 先 clone 并把 main 弄脏；此时本地尚不可能有后面的 PR 提交对象。
+  git clone -q "$REMOTE" "$WORK" || exit 9
+  printf 'dirty\n' >>"$WORK/tracked.txt"
+
+  git -C "$SOURCE" switch -q -c review-head
+  printf 'review\n' >"$SOURCE/review.txt"
+  git -C "$SOURCE" add review.txt
+  git -C "$SOURCE" commit -q -m review || exit 9
   git -C "$SOURCE" push -q -u origin review-head || exit 9
   HEAD_OID=$(git -C "$SOURCE" rev-parse HEAD) || exit 9
 
-  git clone -q --no-checkout "$REMOTE" "$WORK" || exit 9
-  git -C "$WORK" checkout -q --detach "$HEAD_OID" || exit 9
+  git -C "$WORK" cat-file -e "$HEAD_OID^{commit}" >/dev/null 2>&1 && exit 1
+  git -C "$WORK" fetch -q origin review-head || exit 2
+  git -C "$WORK" cat-file -e "$HEAD_OID^{commit}" || exit 2
+  git -C "$WORK" worktree add -q --detach "$ISOLATED" "$HEAD_OID" || exit 3
+
+  # 目标 PR 树故意不包含 review-round；只有隔离外的当前 verifier 可用。
+  [ ! -e "$ISOLATED/.claude/skills/review-round/scripts/verify-branch.sh" ] || exit 4
   mkdir -p "$FAKEBIN"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
@@ -252,28 +270,41 @@ TMP4=$(mktemp -d)
   chmod +x "$FAKEBIN/gh"
 
   # 对照：未明确声明 detached 时必须拒绝，不能让任意 SHA 绕过分支校验。
-  if (cd "$WORK" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
+  if (cd "$ISOLATED" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
     "$HERE/verify-branch.sh" 1 >/dev/null 2>&1); then
-    exit 1
+    exit 5
   fi
 
-  (cd "$WORK" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
-    "$HERE/verify-branch.sh" 1 --detached >/dev/null 2>&1) || exit 2
+  (cd "$ISOLATED" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
+    "$HERE/verify-branch.sh" 1 --detached >/dev/null 2>&1) || exit 6
 
-  git -C "$WORK" config user.email t@t
-  git -C "$WORK" config user.name t
-  git -C "$WORK" config commit.gpgsign false
-  printf 'ahead\n' >"$WORK/ahead.txt"
-  git -C "$WORK" add ahead.txt
-  git -C "$WORK" commit -q -m ahead || exit 9
-  (cd "$WORK" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
-    "$HERE/verify-branch.sh" 1 --detached --allow-ahead >/dev/null 2>&1) || exit 3
+  git -C "$ISOLATED" config user.email t@t
+  git -C "$ISOLATED" config user.name t
+  git -C "$ISOLATED" config commit.gpgsign false
+  printf 'ahead\n' >"$ISOLATED/ahead.txt"
+  git -C "$ISOLATED" add ahead.txt
+  git -C "$ISOLATED" commit -q -m ahead || exit 9
+  (cd "$ISOLATED" && PATH="$FAKEBIN:$PATH" TEST_HEAD_OID="$HEAD_OID" \
+    "$HERE/verify-branch.sh" 1 --detached --allow-ahead >/dev/null 2>&1) || exit 7
+
+  git -C "$WORK" worktree remove "$ISOLATED" || exit 9
+  git -C "$WORK" fetch -q origin main || exit 9
+  git -C "$WORK" worktree add -q -b feat/test "$FEATURE" origin/main || exit 8
+  [ "$(git -C "$FEATURE" branch --show-current)" = "feat/test" ] || exit 8
+  git -C "$WORK" worktree remove "$FEATURE" || exit 9
+  grep -q dirty "$WORK/tracked.txt" || exit 10
 )
 case $? in
-0) ok "detached 精确 SHA 与提交后领先均可校验，未声明 detached 仍拒绝" ;;
-1) no "未声明 --detached 却放行了 detached HEAD" ;;
-2) no "精确 PR SHA 的 detached worktree 仍无法开始评审" ;;
-3) no "detached worktree 提交后无法执行推送前复验" ;;
+0) ok "未取回对象的 PR 与被占用的脏 main 都能走完隔离契约" ;;
+1) no "对照失效：clone 竟预先包含了尚未创建的 PR 对象" ;;
+2) no "未在 worktree add 前取回并校验精确 PR 对象" ;;
+3) no "取回对象后仍无法建立 detached worktree" ;;
+4) no "目标旧 PR 树意外带有新 verifier，未证明隔离外 helper" ;;
+5) no "未声明 --detached 却放行了 detached HEAD" ;;
+6) no "隔离外的当前 verifier 无法校验旧 PR 树" ;;
+7) no "detached worktree 提交后无法执行推送前复验" ;;
+8) no "未在 worktree add 时从 origin/main 直接创建开发分支" ;;
+10) no "隔离流程改写了原脏 main worktree" ;;
 *) no "detached worktree 自测环境异常" ;;
 esac
 rm -rf "$TMP4"

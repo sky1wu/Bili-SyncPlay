@@ -36,17 +36,24 @@ gh issue view "$ISSUE_NUM"
 ```bash
 set -e
 ISSUE_NUM=123 # 替换为第0步已验证的实际数字
-test -z "$(git status --porcelain=v1 -uall)" || {
-  echo "工作树或索引不干净；在独立干净 worktree 中重新开始" >&2
-  exit 1
-}
-git switch main && git pull --ff-only
-git switch -c "fix/issue-$ISSUE_NUM"
+if test -z "$(git status --porcelain=v1 -uall)"; then
+  git switch main && git pull --ff-only
+  git switch -c "fix/issue-$ISSUE_NUM"
+else
+  ORIGINAL_WORKTREE=$(git rev-parse --show-toplevel)
+  git fetch origin main --quiet
+  ISOLATION_ROOT=$(mktemp -d /tmp/fix-issue.XXXXXX)
+  ISOLATED_WORKTREE="$ISOLATION_ROOT/worktree"
+  git worktree add -b "fix/issue-$ISSUE_NUM" "$ISOLATED_WORKTREE" origin/main
+  printf 'ORIGINAL_WORKTREE=%s\nISOLATED_WORKTREE=%s\n' "$ORIGINAL_WORKTREE" "$ISOLATED_WORKTREE"
+fi
 ```
 
 - 开工前确认当前分支。如在 `main`/`master`，**立即**切到 feature 分支再开始改动。
 - 分支命名：`fix/issue-$ISSUE_NUM`；若 issue 其实是新功能需求，改用 `add-feature` 技能。
 - 创建后 `git rev-parse --abbrev-ref HEAD` 再确认一次。
+- 若命令输出隔离路径，把两个绝对路径记为任务上下文的具体值；从第 2.5 步起，每次工具调用都将
+  `workdir` 显式设为输出的 `ISOLATED_WORKTREE`，不得依赖上一个 shell 的 `cd` 或变量。
 
 ## 2.5 根因与修复边界（写代码前强制）
 
@@ -103,11 +110,27 @@ gh pr create --title "fix: ..." --body "$PR_BODY"
 
 ## 7. 合并并清理
 
+普通干净 worktree 路径：
+
 ```bash
 set -e
 gh pr merge --squash --delete-branch
 git switch main && git pull --ff-only
 ```
+
+若第 2 步使用了隔离 worktree：先在隔离目录中执行已授权的 `gh pr merge --squash`；确认 PR
+状态为 `MERGED` 后，将工具 `workdir` 设为任务上下文里记录的 `ORIGINAL_WORKTREE`，把下列占位符替换为
+已记录的具体绝对路径/分支名再运行：
+
+```bash
+set -e
+git worktree remove '<ISOLATED_WORKTREE>'
+git branch -D 'fix/issue-<ISSUE_NUM>'
+rmdir '<ISOLATION_ROOT>'
+git fetch origin main --quiet
+```
+
+不在原脏 worktree 中执行 `git switch main`。
 
 - 只有在 CI 绿且评审通过后才合并。
 - 合并后本地分支一并清理。
