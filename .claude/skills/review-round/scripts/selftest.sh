@@ -218,6 +218,59 @@ else
   echo "  – 跳过（用法: selftest.sh <PR编号> 可启用）"
 fi
 
+echo "== 16. resolve 回复必须持久化收敛决策 =="
+MISSING_META_OUT=$("$HERE/reply-resolve.sh" PRRT_fake "普通回复" 1 2>&1 || true)
+case $MISSING_META_OUT in
+  *"回复第 1 行必须是 [Change-Unit:"*) ok "缺少 Change Unit 时在访问 GitHub 前拒绝" ;;
+  *) no "无决策元数据的回复未被拒绝" ;;
+esac
+BAD_RESOLUTION_BODY=$(printf '%s\n' \
+  '[Change-Unit: review-convergence]' \
+  '[Root-ID: history-loss]' \
+  '[Resolution: keep-trying]' \
+  '说明')
+BAD_RESOLUTION_OUT=$("$HERE/reply-resolve.sh" PRRT_fake "$BAD_RESOLUTION_BODY" 1 2>&1 || true)
+case $BAD_RESOLUTION_OUT in
+  *"必须记录 first-fix、structural-redesign 或 rejected"*) ok "未知 Resolution 被拒绝" ;;
+  *) no "未知 Resolution 未被拒绝" ;;
+esac
+
+echo "== 17. history 模式必须包含 resolved 与 open 线程 =="
+BAD_MODE_OUT=$("$HERE/list-unresolved.sh" 1 --unknown 2>&1 || true)
+case $BAD_MODE_OUT in
+  *"未知模式"*) ok "未知 history 模式在访问 GitHub 前被拒绝" ;;
+  *) no "未知模式未被拒绝" ;;
+esac
+TMP4=$(mktemp -d)
+cat >"$TMP4/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1:$2" = "repo:view" ]; then
+  echo "fixture/repo"
+elif [ "$1:$2" = "api:graphql" ]; then
+  cat <<'JSON'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"resolved-1","isResolved":true,"path":"a.ts","line":1,"originalLine":1,"comments":{"totalCount":2,"pageInfo":{"hasNextPage":false},"nodes":[{"author":{"login":"reviewer"},"body":"finding","pullRequestReview":{"commit":{"oid":"1111111"},"submittedAt":"2026-01-01T00:00:00Z"}},{"author":{"login":"agent"},"body":"[Change-Unit: review-convergence]\n[Root-ID: history-loss]\n[Resolution: first-fix]\nfixed","pullRequestReview":null}]}},{"id":"open-1","isResolved":false,"path":"b.ts","line":2,"originalLine":2,"comments":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"author":{"login":"reviewer"},"body":"new finding","pullRequestReview":{"commit":{"oid":"2222222"},"submittedAt":"2026-01-02T00:00:00Z"}}]}}]}}}}}
+JSON
+else
+  exit 2
+fi
+SH
+chmod +x "$TMP4/gh"
+HISTORY=$(PATH="$TMP4:$PATH" "$HERE/list-unresolved.sh" 1 --history 2>/dev/null)
+HISTORY_RC=$?
+OPEN_COUNT=$(PATH="$TMP4:$PATH" "$HERE/list-unresolved.sh" 1 --count 2>/dev/null)
+OPEN_RC=$?
+HISTORY_COUNT=$(printf '%s\n' "$HISTORY" | grep -c '^═══' || true)
+if [ "$HISTORY_RC" -eq 0 ] && [ "$OPEN_RC" -eq 0 ] &&
+  [ "$HISTORY_COUNT" -eq 2 ] && [ "$OPEN_COUNT" -eq 1 ] &&
+  printf '%s\n' "$HISTORY" | grep -q 'state=resolved' &&
+  printf '%s\n' "$HISTORY" | grep -q 'state=open' &&
+  printf '%s\n' "$HISTORY" | grep -q '\[Root-ID: history-loss\]'; then
+  ok "fixture history 同时恢复 resolved/open 线程及 Root ID（history=2 open=1）"
+else
+  no "fixture 未证明 history 覆盖已解决根因（history=$HISTORY_COUNT open=$OPEN_COUNT）"
+fi
+rm -rf "$TMP4"
+
 echo
 echo "通过 $PASS 条，失败 $FAIL 条"
 [ "$FAIL" -eq 0 ]

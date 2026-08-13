@@ -17,11 +17,12 @@ Before running repository checks locally, make sure dependencies have been insta
 Recommended root workspace commands:
 
 ```bash
-npm run lint
 npm run format:check
+npm run lint
 npm run typecheck
 npm run build
 npm test
+npm run audit
 ```
 
 Useful command matrix:
@@ -214,14 +215,25 @@ When making follow-up changes, keep the current structure stable:
 - if a change mixes state, IO, and business decisions in one file, split it before it becomes the new largest file in that area
 - add or update targeted tests when changing a store, controller, helper, protocol guard, or server config/router boundary
 
+### Agent-assisted review convergence
+
+Agent-assisted feature, fix, and review workflows follow the single source of
+truth in
+[review-convergence.md](../.claude/skills/shared/review-convergence.md). It keeps
+one ownership boundary per Change Unit, records Root IDs in review-thread
+history, and requires work to stop instead of accumulating patches when a root
+cause survives its one allowed structural redesign. This policy does not replace
+the contribution rules or repository checks below.
+
 Recommended pre-commit checklist:
 
 ```bash
-npm run lint
 npm run format:check
+npm run lint
 npm run typecheck
 npm run build
 npm test
+npm run audit
 ```
 
 Start the local server:

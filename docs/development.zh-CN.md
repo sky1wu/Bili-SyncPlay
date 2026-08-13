@@ -17,11 +17,12 @@ npm install
 推荐直接使用根工作区命令：
 
 ```bash
-npm run lint
 npm run format:check
+npm run lint
 npm run typecheck
 npm run build
 npm test
+npm run audit
 ```
 
 常用命令说明：
@@ -214,14 +215,23 @@ Redis 集成测试说明：
 - 如果一个文件同时开始混入状态、IO 和业务决策，应在它再次膨胀前拆分
 - 修改 store、controller、helper、protocol guard、server config/router 边界时，必须同步补或改对应测试
 
+### Agent 辅助评审收敛
+
+Agent 辅助的 feature、fix 和 review 工作流以
+[review-convergence.md](../.claude/skills/shared/review-convergence.md) 为唯一可信来源。它要求
+每个 Change Unit 只包含一个所有权边界，在评审线程历史中记录 Root ID，并在根因经历唯一
+一次结构性重做后仍然存在时停止，而不是继续累积补丁。本策略不替代下方的贡献规则和仓库
+检查。
+
 建议提交前自检：
 
 ```bash
-npm run lint
 npm run format:check
+npm run lint
 npm run typecheck
 npm run build
 npm test
+npm run audit
 ```
 
 启动本地服务器：
