@@ -7,6 +7,9 @@ description: 端到端的 GitHub feature 开发工作流。接受 feature 简述
 
 以 `$1` 作为 feature 简述或 issue 编号。严格按以下顺序执行，任何一步失败都先修复再进下一步，**不要跳步**。
 
+开始前完整读取 `.claude/skills/shared/review-convergence.md`；后续的评审目标、收敛账本和
+停止条件以它为唯一来源。
+
 ## 0. 解析 `$1`，确定并校验分支 slug
 
 `$1` 可能是以下两种之一，**不要**把它直接拼进 git 命令：
@@ -71,14 +74,21 @@ fi
 - **状态机/生命周期**：新状态字段要同步考虑 reset/cleanup 路径，避免遗漏姊妹状态。
 - **URL 规范化**：如果涉及共享视频 URL，继续走 `normalizeSharedVideoUrl`，不要在调用点各自处理。
 - **服务端环境变量**：集中在 server config 层解析，不要散落。
+- **决策与效果所有权**：把共享文件第 1 节应用到本设计的每个正确性决策。
+- **变更预算**：列出预期涉及的包、架构层和新增状态。后续若评审修复超出该清单，先解释
+  为什么原设计边界不成立，再扩范围。
 
 复杂度高时先和用户同步设计再动手。
 
 ## 3. 创建 feature 分支（严禁在 main 上工作）
 
 ```bash
-git switch main && git pull --ff-only
-git switch -c "feat/$BRANCH_SLUG"
+test -z "$(git status --porcelain=v1 -uall)" || {
+  echo "工作树或索引不干净；停止切分支，在独立干净 worktree 中重新开始" >&2
+  exit 1
+}
+git fetch origin main
+git switch -c "feat/$BRANCH_SLUG" origin/main
 ```
 
 - 开工前确认当前分支；如在 `main`/`master`，**立即**切到 feature 分支。
@@ -115,11 +125,21 @@ npm run format:check && npm run lint && npm run typecheck && npm run build && np
 git add <具体文件>
 # commit message：绑定 issue 时带 "(#$ISSUE_NUM)"，自由文本时不带编号
 git commit -m "feat: <简明的'为什么/带来什么价值'>"
+npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
+git fetch origin main
+test -z "$(git status --porcelain=v1 -uall)" || exit 1
+BASE_COMMIT=$(git merge-base HEAD origin/main)
+codex review --base "$BASE_COMMIT"
 git push -u origin "feat/$BRANCH_SLUG"
 gh pr create --title "feat: ..." --body "$(cat <<'EOF'
 ## Summary
 - 新增/变更点 1
 - 新增/变更点 2
+
+## Design boundary
+- 正确性决策及拥有所需信息的层：...
+- 新增状态及 reset/cleanup 生命周期：...
+- 范围外：...
 
 <!-- 如绑定 issue：Closes #NNN -->
 
@@ -131,14 +151,26 @@ EOF
 )"
 ```
 
+本地 `codex review` 必须无意见才可 push；有意见就回到第 2～5 步按同一根因重做设计、
+提交、门禁和最终产品复审。Codex 明确额度耗尽时，手工复审
+`git diff "$BASE_COMMIT" HEAD` 的同一对象，并记录没有自动结果。
+
+PR 创建后，按共享文件第 2 节重新读取已有标记评论，追加一条 `Mode: pre-push` 记录，
+写入真实 `Head`、本地复审发现过的 `Root ID` 和最终三项指标。即使本地复审一次通过也要
+记录 `Result: passed`；这条记录不算远端评审轮次。
+
 - Conventional Commits：新能力用 `feat:`；行为不变的结构改动用 `refactor:`，不要藏在 `feat:` 里。
-- 一个可评审单元一次提交；大特性拆成多个逻辑提交。
+- 一个可评审单元一次提交；大特性拆成多个逻辑提交。最后一次本地复审覆盖 HEAD 上整个
+  PR 产品，而不是只看最后一个 commit。
+- 大特性的每个中间 commit 也必须先重复第 5 步完整门禁；只有最后一个 commit 继续执行
+  上面的 push 前门禁、最终产品复审、push 和开 PR。
 - 严禁 `git add -A` / `git add .`。
 
 ## 7. 等 Codex 评审，处理**所有**相关路径
 
 - 不只是修被标的那一行，对整类问题审视所有相关代码路径。
 - 自审一轮：`grep` 被标关注点相关的调用点和姊妹函数，逐一确认修复已应用或显式不需要。
+- 后续远端评审使用 `review-round`，完整执行共享文件第 1～3 节。
 - 处理完再跑第 5 步完整预提交序列。
 - 修复后再推，等下一轮评审至通过。
 

@@ -7,9 +7,8 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 
 处理**一轮**评审。任何一步失败都先修复再进下一步，**不要跳步**。
 
-易错的多步操作都在 `scripts/` 下，**不要把它们抄成一次性命令**——脚本里带着错误处理、
-翻页和判别力测试，散写在对话里的版本必然会丢掉其中某一项（这份技能的前三轮评审共
-20 条意见，绝大多数正是这么来的）。
+开始前完整读取 `.claude/skills/shared/review-convergence.md`。根因格式、轮次记录和停止条件
+只以该文件为准。
 
 | 脚本                      | 作用                                                |
 | ------------------------- | --------------------------------------------------- |
@@ -20,186 +19,171 @@ description: 处理当前 PR 的一轮 Codex 评审反馈。从读取评审信�
 | `round-signal.sh <PR>`    | 无未解决线程时区分「通过」与「没触发」              |
 | `selftest.sh [PR]`        | 对上述防护做判别力测试                              |
 
-改动这些脚本后必须跑 `.claude/skills/review-round/scripts/selftest.sh <PR编号>`。
+不要把脚本抄成一次性命令。改动这些脚本后必须跑
+`.claude/skills/review-round/scripts/selftest.sh <PR编号>`。
 
-## 0. 确定 PR 编号，切到它的 head 分支并校验
-
-后面每个代码块都用 `$PR`，**先把它定下来**（Bash 工具不保留 shell 状态，每次新开的
-代码块都要重新赋值，或直接把编号写进命令）：
+## 0. 在切分支前拒绝脏工作树，再定位 PR
 
 ```bash
-PR=<编号>                                    # 用户指定了就用指定的
-PR=$(gh pr view --json number --jq .number)  # 否则取当前分支对应的 PR
-[ -n "$PR" ] || { echo "无法确定 PR 编号"; exit 1; }
+test -z "$(git status --porcelain=v1 -uall)" || {
+  echo "工作树或索引不干净；停止切分支，在独立干净 worktree 中重新开始" >&2
+  exit 1
+}
 
+PR=${PR:-}                                   # 用户指定时保留已有值
+if [ -z "$PR" ]; then
+  PR=$(gh pr view --json number --jq .number) # 否则取当前分支对应的 PR
+fi
+[ -n "$PR" ] || { echo "无法确定 PR 编号"; exit 1; }
 .claude/skills/review-round/scripts/verify-branch.sh "$PR" --switch
+
+BASE_REF=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
+git fetch origin "$BASE_REF"
 ```
 
-技能可能从 `main` 或别的分支启动。只比分支名不够：同名本地分支可能落后于远端，那样
-你会基于旧代码处理反馈、把针对当前提交的意见误判成过时，直到 push 被非快进拒绝才
-暴露。脚本同时校验 `headRefOid`，并拒绝 `main`/`master` 与 fork PR。
+检查必须发生在 `verify-branch --switch` 之前；Git 会把不冲突的脏改动带过分支，切完再查
+已经晚了。若被拒绝，不 stash、不替用户提交，改在目标 SHA 的独立干净 worktree 中执行。
 
-## 1. 读未解决的评审线程（权威信号）
+按共享文件第 2 节读取全部带标记的收敛评论。若一条都没有，为旧 PR 追加一次
+`Mode: legacy` / `Result: unknown` 说明；该行不参与轮次计算。追加前必须重新读取，避免
+重复写入。
+
+## 1. 读取全部未解决线程
 
 ```bash
 .claude/skills/review-round/scripts/list-unresolved.sh "$PR"
 ```
 
-**不要用 reaction 判断有没有意见。** 本仓库实测：意见最多的 PR221（11 条）和 PR222
-（14 条）reaction 完全为空；而 PR220、PR224 有 👍 但 reviews 和 comments 都是 0。
-两种信号各自都会漏判，必须以线程为准。REST 的 `pulls/$PR/comments` 也不行——它不返回
-解决状态，第 2 轮会把上一轮已 resolve 的意见重新摆上清单。
+以线程为权威信号，不用 reaction 或 REST review comments 代替：reaction 会漏意见，REST
+接口没有 resolved 状态。脚本会读完分页、完整正文、线程内全部评论，并标注 `[作者 @sha]`；
+API 或解析失败必须停止，不能把“没读到”当成“没有”。
 
-脚本已经处理掉这几件事，看输出即可：正文完整不截断（只剥 shields.io 徽章，保留评审者
-贴的截图）、读完线程里每一条评论、按游标翻页取全、每条评论标注 `[作者 @sha]`。
-API 或解析失败时脚本以非零退出——**「没读到」绝不能被当成「没有」**。
+有线程进第 2 步；没有线程直接进第 8 步。
 
-**有未解决线程 → 进第 2 步。一条都没有 → 进第 8 步。**
-
-## 2. 核对每条线程对应的是当前 HEAD
+## 2. 核对线程对应的 reviewed head
 
 ```bash
 git rev-parse --short HEAD
 ```
 
-拿它和第 1 步输出里每条评论的 `@sha` 比。**要逐线程比，不能只看全局 review 列表**：
-PR 上有多轮评审时列表里既有旧 SHA 也有当前 SHA，无从对应。本仓库 PR225 实测就同时
-挂着 `2ab3b09` 和 `938c337` 两轮的线程。`@sha` 不是当前 HEAD 的，先确认那条是否仍成立。
+逐线程比较评论的 `@sha`。旧 SHA 的意见先在当前产品上确认是否仍成立，不能按全局 review
+列表猜测。记录本次真正被评审的完整 SHA，后续收敛评论的 `Head` 必须使用它。
 
-## 3. 逐条陈述根因，再改
+## 3. 先归因和记账，再编辑
 
-先把清单摆出来并标注严重级别（P1/P2），**不要边看边改**。对每一条：
+先列出全部 P1/P2 意见，不边看边改。每个问题按共享文件第 1 节完成可证伪的根因记录，
+沿用或分配稳定 `Root ID`，再根据历史标记评论归类 `same-root` / `new`。
 
-- 用一句话陈述**根因**，而不是复述现象。
-- 点名证明它的代码路径或日志行。
-- 然后才编辑。
-- **每次 Edit/Write 之后立刻重读改动区域**，确认改动真的落地了，再动下一处。
-  静默失败的字符串替换在本仓库发生过多次；拖到第 5 步才发现，意味着中间的审计全部
-  建立在一处并不存在的改动上。
+基于 reviewed head 相对 merge base 的**最终产品**计算 `Layers`、`New states` 和
+`Uncovered exits`。编辑前重新读取标记评论，然后追加一条：
 
-**宁要单一根因修复，不要层叠补丁。** 若修复需要在已有的抑制标志 / 冷却期 / 特例分支
-之上再加一个，停下来重新推导根因——见 AGENTS.md 的 `## Debugging Sync Bugs`。
+```markdown
+<!-- review-convergence:v1 -->
 
-**编辑前必须先记一份工作树基线**，第 5 步要拿它判断本轮到底改了什么：
+Head: <reviewed-full-sha>
+Mode: auto
+Result: findings
+Signal: threads:<排序后的本轮线程id，以逗号分隔>
+
+| Root ID | Class  | Layers | New states | Uncovered exits | Decision |
+| ------- | ------ | -----: | ---------: | --------------: | -------- |
+| <实值>  | <实值> | <实值> |     <实值> |          <实值> | <实值>   |
+```
+
+用 `gh pr comment "$PR" --body "..."` 追加，不修改 PR body；一个独立根因一行，禁止提交
+占位符。拒绝意见或无需代码的意见也要记录，因为它仍是完成的评审轮次。
+
+执行共享文件的收敛闸门：连续第二轮同根就停止逐行编辑并重画所有权/生命周期/全部出口；
+第三轮同根或层数、状态数继续增长，就撤销未发布机制后重设计。不要以线程数下降冒充收敛。
+
+记录编辑前基线：
 
 ```bash
 .claude/skills/review-round/scripts/has-changes.sh --baseline /tmp/rr-baseline
 ```
 
-## 4. 审计同类路径（不要只修被标的那一行）
+## 4. 审计同类路径
 
-被标出的往往只是同一类问题的一个实例。
+- grep 被改签名的全部调用点，含 `server/src/app.ts` 与各 `index.ts` 适配层。
+- 状态问题检查所有写入、读取、reset 和 cleanup。
+- 效果问题检查全部出口；事件/异步问题覆盖缺失、重复、乱序和 timer/`await` ABA。
+- 异步 Redis / 锁操作确认都 `await` 且包 `try/catch`。
+- 协议改动执行 AGENTS.md 的完整协议清单。
 
-- grep 出被改签名的**全部调用点**，含 `server/src/app.ts` 与各 `index.ts` 适配层。
-  编译器的边界见 AGENTS.md 的 `## Protocol Changes` 第 2 条。
-- 状态清理 / reset 函数：grep 每一处相关状态，逐一确认。
-- 异步 Redis / 锁操作：确认都 `await` 且包了 `try/catch`。
-- 协议相关改动：走 AGENTS.md 的 `## Protocol Changes` 清单。
-
-逐个列出「已处理 / 不适用及原因」，再进下一步。
+逐项列出“已处理 / 不适用及原因”。每次 Edit/Write 后立刻重读改动区域。
 
 ## 5. 验证
 
 ```bash
-.claude/skills/review-round/scripts/has-changes.sh /tmp/rr-baseline || echo "本轮无改动，跳到第 7 步"
+.claude/skills/review-round/scripts/has-changes.sh /tmp/rr-baseline || echo "本轮无代码改动，跳到第 7 步"
 ```
 
-判断的是**相对第 3 步基线的新增**，两个方向都得防住：
+有代码改动时：
 
-- 用 `git status --porcelain` 而非 `git diff --quiet`——后者看不到未跟踪文件，只新增
-  测试或文档的一轮会被误判成无改动，跳过验证和提交却仍去 resolve，改动就此丢失。
-- 但也不能直接看工作树是否非空——技能启动前就存在的无关未提交文件，会让「本轮只需
-  解释或拒绝意见」的轮次误判成有改动，卡在无内容可提交的 `git commit` 上，永远到不了
-  第 7 步。
+- 回归测试必须在只回退核心实现时因目标断言失败，反向对照仍通过；确认不是“找不到用例”。
+- 按风险覆盖缺失、重复、乱序和 ABA；计时问题优先断言何时发生，不只统计次数。
+- 不用 `git checkout` / `git restore` 回退探针；事前 `cp` 源文件，测试后复制回来。
+- 重读全部改动，随后运行完整门禁：
 
-有改动时：
+```bash
+npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
+```
 
-- 对全部改动做提交前复核，确认没有被后续编辑覆盖掉。
-- 新增的回归测试必须在**修复前的代码上失败**。回退修复时**只回退源文件**：
+不得把检查管道给 `tail` / `head` 后据此判断成功；失败时报告完整输出。
 
-  ```bash
-  cp <源文件> /tmp/fix.bak    # 事前备份
-  # …验证…
-  cp /tmp/fix.bak <源文件>    # 还原
-  ```
-
-  **不要整仓 `git stash`**：新测试若追加在已跟踪的测试文件里会被一起 stash 走，测试
-  因「找不到用例」而退出非零，看着是红的，其实什么都没验证。确认失败原因是**断言
-  失败**，不是用例不存在。
-
-- 跑完整预提交序列，逐项断言退出码：
-
-  ```bash
-  fail=""
-  for step in format:check lint typecheck build test audit; do
-    npm run "$step" > "/tmp/rr-$step.log" 2>&1
-    code=$?
-    echo "$step exit=$code  log=/tmp/rr-$step.log"
-    if [ $code -ne 0 ]; then
-      echo "===== $step 完整输出 ====="; cat "/tmp/rr-$step.log"
-      fail="$step"; break
-    fi
-  done
-  if [ -n "$fail" ]; then echo "FAILED: $fail"; exit 1; fi
-  echo "ALL-GREEN"
-  ```
-
-  失败必须 `exit 1`，否则依赖退出状态的执行者会带着未通过的检查继续提交。
-  `[ $code -ne 0 ] && { …; break; }` 那种写法的循环退出码是**反的**（全绿返回 1、
-  失败返回 0）。失败时 `cat` 完整日志而非 `tail -40`——AGENTS.md 要求报告真实输出。
-  **严禁 `npm run typecheck | tail`**：管道让退出码变成 `tail` 的。
-
-## 6. 提交、推送
+## 6. 提交、本地最终产品复审、推送
 
 ```bash
 git add <本轮实际改动的具体文件>   # 严禁 git add -A / git add .
-git diff --cached                  # 核对暂存内容
+git diff --cached
 git commit -m "fix: ..."
-# 推送前复验（中途可能被切走）。--allow-ahead 是必须的：刚 commit 完本地一定
-# 领先远端 headRefOid，严格相等会让每个有提交的轮次都在 push 前中止。
+npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
+
+test -z "$(git status --porcelain=v1 -uall)" || exit 1
+BASE_COMMIT=$(git merge-base HEAD "origin/$BASE_REF")
+codex review --base "$BASE_COMMIT"
+
 .claude/skills/review-round/scripts/verify-branch.sh "$PR" --allow-ahead
 git push origin "HEAD:$(gh pr view "$PR" --json headRefName --jq .headRefName)"
 ```
 
-对第 3 步基线里**本来就脏**的文件，用 `git add -p` 按 hunk 只暂存本轮补丁——显式写
-文件名并不足以隔离改动，用户在技能启动前的未提交修改会被一起提交。
+本地复审审查 HEAD 上完整 PR 产品。有意见就禁止 push，回到第 3 步按同一 `Root ID` 处理，
+新建正常修正提交并重跑门禁/复审，不改写已发布历史。Codex 明确额度耗尽时，记录没有
+自动结果并手工复审 `git diff "$BASE_COMMIT" HEAD` 的同一对象。
 
-## 7. 回复并 resolve 线程
-
-```bash
-.claude/skills/review-round/scripts/reply-resolve.sh <线程id> "已修。<改在哪、怎么验证的；不采纳则写明理由>" <第1步看到的评论数>
-```
-
-脚本会先重读线程：若评论数与第 1 步不一致，说明扫描之后评审者又补了内容，此时**拒绝
-resolve** 并打出最新一条，让你先把它纳入根因分析。确认回复拿到 comment id 之后才
-resolve——只跑 `resolveReviewThread` 会把线程静默关掉，评审者看不到改在哪。
-
-收尾用 `.claude/skills/review-round/scripts/list-unresolved.sh "$PR" --count` 确认归零。
-
-## 8. 本轮结束——**不要合并**
+## 7. 回复并 resolve
 
 ```bash
-.claude/skills/review-round/scripts/round-signal.sh "$PR"
+.claude/skills/review-round/scripts/reply-resolve.sh \
+  <线程id> "已修。<改在哪、怎么验证；不采纳则写理由>" <第1步看到的评论数>
 ```
 
-输出 `PASSED` / `REVIEWING` / `NOT-TRIGGERED`。
+脚本会先重读线程；扫描后新增评论时拒绝 resolve。收尾运行
+`.claude/skills/review-round/scripts/list-unresolved.sh "$PR" --count` 确认归零。
 
-reaction 长期留存且不带 commit 引用，所以脚本用「当前 HEAD 触发的最早一次 workflow
-run 的 `created_at`」作为推送时刻基准，并且只认 Codex 机器人的 reaction。该 SHA 尚无
-run 时直接判 `NOT-TRIGGERED`——此时若拿空字符串当阈值，`created_at > ""` 会选中所有
-历史 reaction，旧的 👍 就成了「本轮通过」。
+## 8. 识别完成信号并记录通过轮次
 
-`NOT-TRIGGERED` **不等于没问题**：评论 `@codex review` 触发，别空等。
-合并需要用户**针对这个 PR** 的明确授权，关于发版的含糊表述不是合并授权。
+```bash
+signal_code=0
+SIGNAL=$(.claude/skills/review-round/scripts/round-signal.sh "$PR") || signal_code=$?
+printf '%s\n' "$SIGNAL"
+```
+
+- `PASSED`：使用输出中的 reaction 时间作为 `Signal`，重新读取标记评论；若同一
+  `(Head, Mode: auto, Signal)` 尚不存在，且同一 Head 没有替代本轮的 manual 通过记录，
+  追加一条无根因行的通过评论，然后成功结束。
+- `REVIEWING`：不写完成评论，继续等待。
+- `NOT-TRIGGERED`：不算轮次、不写评论，评论 `@codex review` 触发后再检查，并保留非零状态。
+- Codex 明确不可用：对同一 HEAD 完成手工最终产品复审，按结果追加一次
+  `Mode: manual` / `Result: passed|findings`；同一结果不得重复记成自动轮。
+
+每次写评论前都按共享文件第 2 节重读全部标记评论并检查重复。无未解决线程本身不等于
+评审通过。此 skill 不负责合并；没有用户针对当前 PR 的明确授权，严禁 `gh pr merge`。
 
 ## 硬性规则
 
-- **严禁**在没有用户明确指令的情况下 `gh pr merge`。
-- **严禁**只凭 reaction 判断有没有意见——以未解决线程为准。
-- **严禁**把脚本抄成一次性命令。要改行为就改脚本，并跑 `selftest.sh`。
-- **严禁**只修被标的那一行而不审计同类路径。
-- **严禁**把检查命令管道给 `tail`/`head` 后据此判断成败。
-- **严禁** `git add -A` / `git add .`。
-- **严禁**用 `git checkout <file>` / `git restore <file>` 回退探针——会连同该文件其它
-  未提交改动一起冲掉。先 `cp` 备份或 `git stash push -- <仅源文件路径>`。
-- 未真正跑过的检查，**不得**声称已验证。
+- 严禁在脏工作树上切分支或开始本轮。
+- 严禁只修被标的一行而不审计同类路径。
+- 严禁 `git add -A` / `git add .`、`--no-verify`、`--no-gpg-sign`。
+- 严禁用 reaction 代替线程读取，或把 `NOT-TRIGGERED` 当通过。
+- 未真正跑过的检查不得声称已验证。
