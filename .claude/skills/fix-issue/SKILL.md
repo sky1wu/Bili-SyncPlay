@@ -7,21 +7,23 @@ description: 端到端的 GitHub issue 修复工作流。接受 issue 编号作�
 
 以 `$1` 作为 issue 编号，严格按以下顺序执行。任何一步失败都先修复再进下一步，**不要跳步**。
 
-开始前完整读取 `.claude/skills/shared/review-convergence.md`。根因格式、停止条件和最终产品
-复审以它为唯一来源。
+开始前完整读取 `.claude/skills/shared/review-convergence.md`。根因、范围和复审停止条件
+以它为唯一来源。
 
 ## 0. 校验 `$1` 为纯数字
 
-`$1` 必须匹配 `^[0-9]+$`。若不是，停止执行并提示用户改用 `add-feature` 或先给出 issue 编号。
+先在 shell 外确认 `$1` 匹配 `^[0-9]+$`；若不是，停止执行并提示用户改用 `add-feature`
+或先给出 issue 编号。只有通过后才把实际数字写入命令：
 
 ```bash
-ISSUE_NUM="$1"   # 后续命令一律使用此变量，不要直接拼 $1
+ISSUE_NUM=123 # 替换为已验证的实际数字；不要直接拼原始 $1
 ```
 
 ## 1. 了解 issue
 
 ```bash
-ISSUE_NUM=<第0步确认的实际数字>
+set -e
+ISSUE_NUM=123 # 替换为第0步已验证的实际数字
 gh issue view "$ISSUE_NUM"
 ```
 
@@ -33,35 +35,32 @@ gh issue view "$ISSUE_NUM"
 
 ```bash
 set -e
-ISSUE_NUM=<第0步确认的实际数字>
+ISSUE_NUM=123 # 替换为第0步已验证的实际数字
 test -z "$(git status --porcelain=v1 -uall)" || {
-  echo "工作树或索引不干净；停止切分支，在独立干净 worktree 中重新开始" >&2
+  echo "工作树或索引不干净；在独立干净 worktree 中重新开始" >&2
   exit 1
 }
-git fetch origin main
-git switch -c "fix/issue-$ISSUE_NUM" origin/main
+git switch main && git pull --ff-only
+git switch -c "fix/issue-$ISSUE_NUM"
 ```
 
 - 开工前确认当前分支。如在 `main`/`master`，**立即**切到 feature 分支再开始改动。
 - 分支命名：`fix/issue-$ISSUE_NUM`；若 issue 其实是新功能需求，改用 `add-feature` 技能。
 - 创建后 `git rev-parse --abbrev-ref HEAD` 再确认一次。
 
-## 2.5 根因与修复边界闸门（写代码前强制）
+## 2.5 根因与修复边界（写代码前强制）
 
-完整读取并执行 `.claude/skills/shared/review-convergence.md` 第 1 节，先给 issue 分配
-`Root ID`、写出可证伪的根因记录；缺一项就不要实现。修复边界、效果所有权和停止信号
-以该共享文件为唯一来源，不在本 skill 另造一套。
+按共享规则写出可证伪根因和稳定 `Root ID`，并列出允许修改的文件/包、架构层、新增状态
+及全部效果出口。缺少根因证据时继续调查，不写修复；扩范围前先证明原边界为什么错误。
 
 ## 3. 实现修复 + 测试
 
-- 先读相关代码路径，**枚举所有受影响的调用点和姊妹路径**（效果出口、状态写入/读取、
-  reset/cleanup、错误处理、异步 await 等），逐项标记“适用 / 不适用及原因”。
+- 先读相关代码路径，**枚举所有受影响的调用点和姊妹路径**（状态清理、错误处理、异步 await 等）。
 - 状态类 bug：grep 所有相关字段和每个 reset/cleanup 点，逐一确认。
 - 校验类 bug：列出每个入口点。
 - 异步 Redis/锁操作：务必 `await` 并包裹 `try/catch`。
-- 先写能在修复前失败的回归，再写实现；至少包含一条反向对照。按风险补齐事件缺失、
-  重复、乱序和 `await`/timer ABA 场景。
-- 回归完成后只临时回退它守护的实现，确认断言因目标缺陷失败；对照组在回退后仍应通过。
+- 先写能在修复前失败的回归，并保留反向对照；只回退核心实现时，目标断言必须因该缺陷
+  失败，对照仍通过。
 
 ## 4. 提交前的预提交检查（强制）
 
@@ -79,41 +78,15 @@ npm run format:check && npm run lint && npm run typecheck && npm run build && np
 
 ```bash
 set -e
-ISSUE_NUM=<第0步确认的实际数字>
+ISSUE_NUM=123 # 替换为第0步已验证的实际数字
 git add <具体文件>
 git commit -m "fix: <简明的'为什么'，而不是'做了什么'> (#$ISSUE_NUM)"
 npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit
-```
-
-门禁通过后，在独立命令中复审实际提交：
-
-```bash
-set -e
-git fetch origin main
-test -z "$(git status --porcelain=v1 -uall)" || exit 1
-BASE_COMMIT=$(git merge-base HEAD origin/main)
-codex review --base "$BASE_COMMIT"
-```
-
-完整读取复审输出。命令失败或输出含任何 finding 时停止，记录为 pre-push 意见并回到
-第 2.5～4 步；不要执行下面的 push。只有明确无意见后，才另开命令执行：
-
-```bash
-set -e
-ISSUE_NUM=<第0步确认的实际数字>
 test -z "$(git status --porcelain=v1 -uall)" || exit 1
 git push -u origin "fix/issue-$ISSUE_NUM"
-PR_BODY=$(printf '## Root cause\n- 错误事实首次产生于：...\n- 被破坏的不变量：...\n\n## Why this boundary\n- 正确决策所需信息及拥有它的层：...\n- 明确未修改的层：...\n\n## Summary\n- 变更点 1\n- 变更点 2\n\nFixes #%s\n\n## Regression proof\n- [ ] 只回退核心修复后，目标断言失败\n- [ ] 反向对照在回退后仍通过\n\n## Test plan\n- [ ] 单元测试\n- [ ] 手动验证（如适用）\n' "$ISSUE_NUM")
+PR_BODY=$(printf '## Summary\n- 变更点 1\n- 变更点 2\n\nFixes #%s\n\n## Test plan\n- [ ] 单元测试\n- [ ] 手动验证（如适用）\n' "$ISSUE_NUM")
 gh pr create --title "fix: ..." --body "$PR_BODY"
 ```
-
-本地 `codex review` 有意见时只进入 pre-push 路径，不创建 `Mode: auto` 记录。Codex 明确
-额度耗尽时，手工复审
-`git diff "$(git merge-base HEAD origin/main)" HEAD` 的同一对象，并记录没有自动结果。
-
-PR 创建后，按共享文件第 2 节重新读取已有标记评论，追加一条 `Mode: pre-push` 记录，
-写入真实 `Head`、本地复审发现过的 `Root ID` 和最终三项指标。即使本地复审一次通过也要
-记录 `Result: passed`；这条记录不算远端评审轮次。
 
 - 使用 Conventional Commits：`fix:`、`feat:`、`refactor:` 等。
 - 一个可评审单元一次提交。
@@ -123,9 +96,10 @@ PR 创建后，按共享文件第 2 节重新读取已有标记评论，追加�
 
 - 收到评审反馈后：**不要只修被标的那一行**，对整类 bug 审视所有相关代码路径。
 - 自审一轮：`grep` 代码库里与被标关注点相关的调用点和姊妹函数，逐一列出确认。
-- 后续远端评审使用 `review-round`，完整执行共享文件第 1～3 节。
+- 后续远端评审使用 `review-round`。同一变更单元最多两次独立 Codex 复审；第二次仍有
+  意见时按共享规则停止自动循环，改做人工最终产品审计并报告剩余风险。
 - 处理完再次跑第 4 步的完整预提交序列。
-- 修复后再推一次，等下一轮评审直至通过。
+- 修复后再推；只在共享规则的复审预算内触发下一轮。
 
 ## 7. 合并并清理
 
