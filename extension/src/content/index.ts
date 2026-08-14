@@ -163,6 +163,7 @@ const playbackBindingController = createPlaybackBindingController({
   bufferPauseUpgradeMs: BUFFER_PAUSE_UPGRADE_MS,
   videoRebindBufferSignalMs: VIDEO_REBIND_BUFFER_SIGNAL_MS,
   getSharedVideo: () => shareController.getSharedVideo(),
+  getCurrentPlaybackVideo: () => shareController.getCurrentPlaybackVideo(),
   hasRecentRemoteStopIntent: (currentVideoUrl) =>
     syncController.hasRecentRemoteStopIntent(currentVideoUrl),
   normalizeUrl,

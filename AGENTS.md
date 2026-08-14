@@ -121,7 +121,11 @@ before changing the code it describes.
   carrying the proof and the next source rebuilt the same wrong answer. **Chase
   the whole equivalence class in one pass.** A regression on one polarity proves
   nothing about the other — every bangumi test used a `ss` page, which is why
-  this shipped.
+  this shipped. A synchronous media event does not make identity synchronous:
+  natural-end handling and its terminal flush use a fresh page-bridge read only
+  for unstable `ss` / festival identities, share the adjacent `pause` / `ended`
+  read, keep the event-time anchor, and revalidate the whole playback context
+  after awaiting; a stable `ep` identity stays address-bar-authoritative (#291).
 - **Share ownership** (#235, #242): `sharedVideo.sharedByMemberId` is a durable
   reference to a volatile identity, resolved at build time by
   `roomStateFromSessions` and never rewritten into the room. A full `room:state`

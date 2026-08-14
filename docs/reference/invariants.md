@@ -133,6 +133,21 @@ So on an `ep` route the rules invert. Two predicates in `video-identity.ts`
 state the comparison, and `page-record-staleness.ts` applies it to every source
 the page offers at once:
 
+- **A synchronous media event does not make the video identity synchronous.**
+  On an `ss` route, `pause` / `ended` can fire while synchronous
+  `getSharedVideo()` still has only the season fallback: reusing a cached
+  snapshot requires corroborating page DOM that is not reliable at that instant
+  (#291). The natural-end lifecycle therefore uses the synchronous answer only
+  when it is stable; an opaque identity gets one fresh
+  `getCurrentPlaybackVideo()` read, shared by the adjacent `pause` and `ended`
+  callbacks. The same rule applies when the terminal-suppression timer decides
+  whether it owes the room a final paused snapshot. The marker remains anchored
+  on the media event, not the later bridge reply, and after every await the
+  playback context, player session, video element, room/share ownership and
+  gesture evidence are rechecked before any marker, hold, suppression or
+  broadcast is changed. **Never extend that async fallback to a stable `ep`
+  identity:** page globals may still name the previous episode there, while the
+  address bar already gives the authoritative current one.
 - **A snapshot naming another episode is "not resolved yet", not "resolved".**
   Answering `null` is what makes the eight-attempt retry in
   `resolveCurrentSharePayload` real — its exit condition is a non-null snapshot,
