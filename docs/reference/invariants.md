@@ -157,12 +157,12 @@ the page offers at once:
   identity:** page globals may still name the previous episode there, while the
   address bar already gives the authoritative current one.
 - **A snapshot naming another episode is "not resolved yet", not "resolved".**
-  Answering `null` is what makes the eight-attempt retry in
-  `resolveCurrentSharePayload` real — its exit condition is a non-null snapshot,
-  so before the gate the first stale read returned and the other seven never ran,
-  even though the page globals had already caught up by the second read. The
-  worst case then degrades to parsing the address bar rather than to sharing the
-  previous episode.
+  Snapshot refresh callers still receive `null`, so none can mistake stale page
+  globals for the current episode. Explicit sharing does not wait for that
+  duplicate confirmation on an `ep` route: `resolveCurrentSharePayload` parses
+  the already-authoritative address bar immediately. Its eight-attempt retry is
+  reserved for `/festival/` and `/bangumi/play/ssNNN`, where the address bar does
+  not name the in-player video and a page snapshot is indispensable (#289).
 - **An `ep` route must never be recorded as an address-bar identity refuted.**
   `rememberSnapshotResolved` is guarded by `isAddressBarOpaqueVideoUrl`, which is
   festival-only for exactly this reason. Refuting it would nail the wrong answer

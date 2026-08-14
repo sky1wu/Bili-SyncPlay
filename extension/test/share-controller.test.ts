@@ -1089,10 +1089,10 @@ test("bangumi ep page must not share the previous episode while the address bar 
   }
 });
 
-test("bangumi ep page retry converges on the episode the address bar names", async () => {
-  // The retry loop's exit condition is "got a non-null snapshot", so before the
-  // gate the first read returned and the other seven attempts never ran — even
-  // though Bilibili had already refreshed the page globals by the second read.
+test("bangumi ep page skips bridge retries even if a later snapshot would agree", async () => {
+  // The address bar already gives the complete, authoritative identity. Even
+  // if Bilibili happened to refresh its globals on a later read, polling for
+  // that duplicate answer would only delay sharing (#289).
   const dom = installEpisodePageDomStub({
     currentPartTitle: "44 连影",
     currentPartEpId: "ep396138",
@@ -1122,9 +1122,13 @@ test("bangumi ep page retry converges on the episode the address bar names", asy
     assert.equal(
       payload?.video.url,
       "https://www.bilibili.com/bangumi/play/ep396139",
-      `settled after ${reads} read(s) on ${payload?.video.url}`,
     );
     assert.equal(payload?.video.title, "45 某话");
+    assert.equal(
+      reads,
+      0,
+      "polled page globals despite an authoritative ep URL",
+    );
   } finally {
     dom.restore();
   }
@@ -1244,7 +1248,7 @@ test("bangumi ep page never refutes its own address bar after a snapshot resolve
 
   try {
     assert.equal(
-      (await controller.resolveCurrentSharePayload())?.video.videoId,
+      (await controller.refreshFestivalSnapshot(0))?.videoId,
       "ep396139",
     );
 
@@ -1284,21 +1288,30 @@ test("bangumi ep page refuses a snapshot that names no episode at all", async ()
   });
 
   try {
+    assert.equal(
+      await controller.refreshFestivalSnapshot(0),
+      null,
+      "accepted a bvid:cid snapshot with no episode confirmation",
+    );
+
     const payload = await controller.resolveCurrentSharePayload();
 
     assert.equal(
       payload?.video.url,
       "https://www.bilibili.com/bangumi/play/ep396139",
-      `settled after ${reads} read(s) on ${payload?.video.url}`,
     );
     assert.equal(payload?.video.videoId, "ep396139");
-    assert.ok(reads > 1, "gave up after the first unconfirmed read");
+    assert.equal(
+      reads,
+      1,
+      "explicit sharing retried an already-refused snapshot",
+    );
   } finally {
     dom.restore();
   }
 });
 
-test("bangumi season page still accepts a snapshot that names no episode", async () => {
+test("bangumi season page still retries for a snapshot that names no episode", async () => {
   // The opposite polarity of the same gate, and the reason it is keyed on the
   // route rather than on "is this bangumi": a `ss` address bar names no episode,
   // so there is nothing to confirm against and a `bvid:cid` snapshot is the best
@@ -1317,6 +1330,7 @@ test("bangumi season page still accepts a snapshot that names no episode", async
   });
 
   const runtimeState = createContentRuntimeState();
+  let reads = 0;
   const controller = createShareController({
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
@@ -1325,11 +1339,16 @@ test("bangumi season page still accepts a snapshot that names no episode", async
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 8,
     getFestivalSnapshot: () => null,
-    refreshFestivalBridge: async () => ({
-      videoId: "BV1xx411c7mD:9527",
-      url: "https://www.bilibili.com/video/BV1xx411c7mD?cid=9527",
-      title: "第46话",
-    }),
+    refreshFestivalBridge: async () => {
+      reads += 1;
+      return reads === 1
+        ? null
+        : {
+            videoId: "BV1xx411c7mD:9527",
+            url: "https://www.bilibili.com/video/BV1xx411c7mD?cid=9527",
+            title: "第46话",
+          };
+    },
     debugLog: () => undefined,
   });
 
@@ -1341,6 +1360,51 @@ test("bangumi season page still accepts a snapshot that names no episode", async
       payload?.video.url,
       "https://www.bilibili.com/video/BV1xx411c7mD?cid=9527",
     );
+    assert.equal(reads, 2);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("festival page still retries for its in-player identity", async () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/festival/demo",
+    pathname: "/festival/demo",
+    title: "Festival_哔哩哔哩",
+  });
+
+  const runtimeState = createContentRuntimeState();
+  let reads = 0;
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 9,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: async () => {
+      reads += 1;
+      return reads === 1
+        ? null
+        : {
+            videoId: "BVfestival:123",
+            url: "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
+            title: "Festival Episode",
+          };
+    },
+    debugLog: () => undefined,
+  });
+
+  try {
+    const payload = await controller.resolveCurrentSharePayload();
+
+    assert.equal(payload?.video.videoId, "BVfestival:123");
+    assert.equal(
+      payload?.video.url,
+      "https://www.bilibili.com/festival/demo?bvid=BVfestival&cid=123",
+    );
+    assert.equal(reads, 2);
   } finally {
     dom.restore();
   }
