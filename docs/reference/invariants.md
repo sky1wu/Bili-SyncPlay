@@ -141,7 +141,20 @@ the page offers at once:
   when it is stable; an opaque identity gets one fresh
   `getCurrentPlaybackVideo()` read, shared by the adjacent `pause` and `ended`
   callbacks and by any concurrent playback broadcast from that same page visit.
-  A second page-world request must not supersede the read that owns the handoff.
+  That read must start before the media-event callback yields: Bilibili can push
+  the next episode's `ep` URL in the same task, so starting from a later
+  microtask captures the destination visit. A second page-world request must not
+  supersede the read that owns the handoff, and the adjacent `ended` must join it
+  even when the address bar already names the next episode. Only this event-owned
+  read may retain the snapshot returned for its originating unstable visit;
+  a newer destination read may not cancel its delivery, and the retained old
+  result must never replace that newer visit's shared cache. Ordinary
+  current-page reads still discard every result whose visit changed.
+  The page-world navigation signal arrives before the snapshot reply, so the
+  navigation controller joins an in-flight natural-end resolution before it
+  advances its observed-page baseline or resets playback generations. Once the
+  resolution settles it retries that same navigation, consumes the resulting
+  marker, and only then invalidates the old page context.
   Once confirmed, that event-owned identity is carried through the terminal-
   suppression timer and its final paused broadcast; the timer must not reacquire
   mutable page state or pass the confirmed event through a post-navigation

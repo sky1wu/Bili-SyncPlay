@@ -8,6 +8,7 @@ import type { ContentRuntimeState } from "./runtime-state";
 import { markStalePageRecords } from "./page-record-staleness";
 import {
   isAddressBarOpaqueVideoUrl,
+  isUnstableSharedVideoUrl,
   lacksAddressBarEpisodeConfirmation,
   normalizePageVisitUrl,
   readAddressBarEpisodeId,
@@ -17,7 +18,9 @@ export interface ShareController {
   getSharedVideo(): SharedVideo | null;
   /** Records a real page visit so address-bar identity evidence cannot leak across it. */
   observePageVisit(pageUrl: string): void;
-  getCurrentPlaybackVideo(): Promise<SharedVideo | null>;
+  getCurrentPlaybackVideo(
+    context?: "current" | "natural-end",
+  ): Promise<SharedVideo | null>;
   getCurrentSharePayload(): {
     video: SharedVideo;
     playback: PlaybackState | null;
@@ -81,6 +84,7 @@ export function createShareController(args: {
     pathname: string;
     pageUrl: string;
     maxAgeMs: number;
+    allowSupersededResult?: boolean;
   }) => Promise<SharedVideo | null>;
   /**
    * The room's base playback rate while a rate catch-up is running for this url,
@@ -493,6 +497,7 @@ export function createShareController(args: {
 
   async function refreshFestivalSnapshot(
     maxAgeMs = args.festivalSnapshotTtlMs,
+    retainRequestedPageVisit = false,
   ): Promise<SharedVideo | null> {
     const pathname = window.location.pathname;
     const pageUrl = window.location.href.split("#")[0];
@@ -501,12 +506,19 @@ export function createShareController(args: {
       pathname,
       pageUrl,
       maxAgeMs,
+      allowSupersededResult: retainRequestedPageVisit,
     });
     const currentPageUrl = window.location.href.split("#")[0];
     if (
       normalizePageVisitUrl(currentPageUrl) !== normalizePageVisitUrl(pageUrl)
     ) {
       observePageVisit(currentPageUrl);
+      if (retainRequestedPageVisit && nextSnapshot) {
+        args.debugLog(
+          `Retained page video snapshot ${nextSnapshot.videoId} for natural-end event from ${pageUrl}; current page is ${currentPageUrl}`,
+        );
+        return nextSnapshot;
+      }
       args.debugLog(
         `Discarded page video snapshot for stale visit ${pageUrl}; current page is ${currentPageUrl}`,
       );
@@ -550,12 +562,34 @@ export function createShareController(args: {
     return nextSnapshot;
   }
 
-  async function getCurrentPlaybackVideo(): Promise<SharedVideo | null> {
-    if (canUsePageSnapshot(window.location.pathname)) {
-      const refreshed = await refreshFestivalSnapshot(0);
+  async function getCurrentPlaybackVideo(
+    context: "current" | "natural-end" = "current",
+  ): Promise<SharedVideo | null> {
+    const pathnameAtRequest = window.location.pathname;
+    const pageUrlAtRequest = window.location.href.split("#")[0];
+    // Only an address-bar-unstable event gets to retain the result belonging to
+    // its request visit. A stable `ep` route remains address-bar-authoritative,
+    // and every ordinary current-page caller still rejects cross-visit results.
+    const retainRequestedPageVisit =
+      context === "natural-end" && isUnstableSharedVideoUrl(pageUrlAtRequest);
+    if (canUsePageSnapshot(pathnameAtRequest)) {
+      const refreshed = await refreshFestivalSnapshot(
+        0,
+        retainRequestedPageVisit,
+      );
       if (refreshed) {
         return refreshed;
       }
+    }
+
+    if (
+      retainRequestedPageVisit &&
+      normalizePageVisitUrl(window.location.href.split("#")[0]) !==
+        normalizePageVisitUrl(pageUrlAtRequest)
+    ) {
+      // The event read failed after its page moved on. Falling through to the
+      // live address bar would attribute the old episode's end to the new one.
+      return null;
     }
 
     return getSharedVideo();

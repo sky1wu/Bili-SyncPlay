@@ -1603,6 +1603,111 @@ test("bangumi season page still retries for a snapshot that names no episode", a
   }
 });
 
+test("natural-end playback read retains the episode requested from a bangumi season visit", async () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/bangumi/play/ss357",
+    pathname: "/bangumi/play/ss357",
+    title: "Season page",
+  });
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  let resolveBridge!: (video: {
+    videoId: string;
+    url: string;
+    title: string;
+  }) => void;
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 8,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: (input) =>
+      new Promise((resolve) => {
+        assert.equal(input.allowSupersededResult, true);
+        resolveBridge = resolve;
+      }),
+    debugLog: () => {},
+  });
+
+  try {
+    // The argument names the one caller allowed to retain the identity of the
+    // page visit that issued the read. Ordinary current-page callers still use
+    // the default and must discard this result after navigation.
+    const read = controller.getCurrentPlaybackVideo("natural-end");
+    Object.assign(window.location, {
+      href: "https://www.bilibili.com/bangumi/play/ep249470",
+      pathname: "/bangumi/play/ep249470",
+    });
+    resolveBridge({
+      videoId: "ep249469",
+      url: sharedEpisodeUrl,
+      title: "Shared Episode",
+    });
+
+    assert.deepEqual(await read, {
+      videoId: "ep249469",
+      url: sharedEpisodeUrl,
+      title: "Shared Episode",
+    });
+  } finally {
+    dom.restore();
+  }
+});
+
+test("ordinary playback read still discards a bangumi season result after the visit changes", async () => {
+  const dom = installDomStub({
+    href: "https://www.bilibili.com/bangumi/play/ss357",
+    pathname: "/bangumi/play/ss357",
+    title: "Next Episode",
+  });
+  const runtimeState = createContentRuntimeState();
+  let resolveBridge!: (video: {
+    videoId: string;
+    url: string;
+    title: string;
+  }) => void;
+  const controller = createShareController({
+    getActiveCorrectionBaseRate: () => null,
+    runtimeState,
+    bufferPauseUpgradeMs: 1_500,
+    getMonotonicNow: () => 10_000,
+    festivalSnapshotTtlMs: 1_200,
+    nextSeq: () => 8,
+    getFestivalSnapshot: () => null,
+    refreshFestivalBridge: (input) =>
+      new Promise((resolve) => {
+        assert.equal(input.allowSupersededResult, false);
+        resolveBridge = resolve;
+      }),
+    debugLog: () => {},
+  });
+
+  try {
+    const read = controller.getCurrentPlaybackVideo();
+    const nextEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249470";
+    Object.assign(window.location, {
+      href: nextEpisodeUrl,
+      pathname: "/bangumi/play/ep249470",
+    });
+    resolveBridge({
+      videoId: "ep249469",
+      url: "https://www.bilibili.com/bangumi/play/ep249469",
+      title: "Old Episode",
+    });
+
+    assert.deepEqual(await read, {
+      videoId: "ep249470",
+      url: nextEpisodeUrl,
+      title: "Next Episode",
+    });
+  } finally {
+    dom.restore();
+  }
+});
+
 test("festival page still retries for its in-player identity", async () => {
   const dom = installDomStub({
     href: "https://www.bilibili.com/festival/demo",

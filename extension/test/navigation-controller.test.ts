@@ -441,6 +441,85 @@ test("navigation controller schedules auto-share when a bangumi season page auto
   }
 });
 
+test("navigation controller waits for the season natural-end identity before classifying its ep navigation", async () => {
+  const windowHarness = installWindowStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeRoomCode = "ROOM01";
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.localMemberId = "member-1";
+
+  let currentUrl = "https://www.bilibili.com/bangumi/play/ss357";
+  let naturalEndResolutionPending = true;
+  let resolveNaturalEnd!: () => void;
+  const naturalEndResolution = new Promise<void>((resolve) => {
+    resolveNaturalEnd = resolve;
+  });
+  const autoShareRequests: Array<{
+    previousSharedUrl: string;
+    nextNormalizedPageUrl: string;
+    previousAutoShareTargetUrl: string | null;
+  }> = [];
+
+  const controller = createNavigationController({
+    runtimeState,
+    intervalMs: 500,
+    userGestureGraceMs: 300,
+    initialRoomStatePauseHoldMs: 1_500,
+    sharedVideoNaturalEndWindowMs: 1_500,
+    getCurrentPageUrl: () => currentUrl,
+    normalizeVideoPageUrl: normalizeTestBangumiPageUrl,
+    getPendingNaturalEndResolution: () =>
+      naturalEndResolutionPending ? naturalEndResolution : null,
+    isSupportedVideoPage: (url) => url.includes("/bangumi/play/"),
+    clearFestivalSnapshot: () => {},
+    attachPlaybackListeners: () => {},
+    getVideoElement: () => ({ paused: false }) as HTMLVideoElement,
+    playVideo: async () => {},
+    pauseVideo: () => {},
+    hydrateRoomState: async () => {},
+    activatePauseHold: () => {},
+    scheduleAutoShareNextVideo: (input) => {
+      autoShareRequests.push(input);
+    },
+    debugLog: () => {},
+    getMonotonicNow: () => 6_000,
+  });
+
+  try {
+    controller.start();
+    currentUrl =
+      "https://www.bilibili.com/bangumi/play/ep249470?from_spmid=666.25.episode.0";
+    controller.notifyNavigation();
+    controller.notifyNavigation();
+    windowHarness.intervals[0]?.();
+
+    // The navigation signal arrives one window-message task before the bridge
+    // reply. It must leave the old page baseline and its generation intact so
+    // the event-owned identity remains structurally current.
+    assert.equal(runtimeState.playbackContextGeneration, 0);
+    assert.deepEqual(autoShareRequests, []);
+
+    runtimeState.sharedVideoNaturalEndUrl = sharedEpisodeUrl;
+    runtimeState.sharedVideoNaturalEndAt = 5_000;
+    naturalEndResolutionPending = false;
+    resolveNaturalEnd();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(autoShareRequests, [
+      {
+        previousSharedUrl: sharedEpisodeUrl,
+        nextNormalizedPageUrl: "https://www.bilibili.com/bangumi/play/ep249470",
+        previousAutoShareTargetUrl: null,
+      },
+    ]);
+  } finally {
+    windowHarness.restore();
+  }
+});
+
 test("navigation controller holds a non-sharer when a bangumi season page autoplays to the next episode", () => {
   const windowHarness = installWindowStub();
   const runtimeState = createContentRuntimeState();
