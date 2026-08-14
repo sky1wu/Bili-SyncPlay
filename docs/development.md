@@ -17,11 +17,12 @@ Before running repository checks locally, make sure dependencies have been insta
 Recommended root workspace commands:
 
 ```bash
-npm run lint
 npm run format:check
+npm run lint
 npm run typecheck
 npm run build
 npm test
+npm run audit
 ```
 
 Useful command matrix:
@@ -41,7 +42,7 @@ Development constraints:
 
 - Keep entry files thin and keep shared rules in a single source of truth.
 - Install dependencies with `npm install` before running local checks; use `npm ci` in CI before the same verification flow.
-- Run `npm run lint`, `npm run format:check`, `npm run typecheck`, `npm run build`, and `npm test` before committing changes.
+- Before every commit and push, run `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm run build`, `npm test`, and `npm run audit` in that order.
 - See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full contribution and refactoring constraints.
 
 ## Dependency Audit Gate
@@ -214,14 +215,26 @@ When making follow-up changes, keep the current structure stable:
 - if a change mixes state, IO, and business decisions in one file, split it before it becomes the new largest file in that area
 - add or update targeted tests when changing a store, controller, helper, protocol guard, or server config/router boundary
 
+### Agent-assisted review convergence
+
+Agent-assisted feature, fix, and review workflows follow the single source of
+truth in
+[review-convergence.md](../.claude/skills/shared/review-convergence.md). It keeps
+one ownership boundary per Change Unit, persists an immutable Review Unit and
+Root or Decision IDs in PR history, and allows at most two repair batches per
+design attempt. A failed attempt stops accumulating patches while its parent
+problem remains open for an evidence-backed replacement design. This policy
+does not replace the contribution rules or repository checks below.
+
 Recommended pre-commit checklist:
 
 ```bash
-npm run lint
 npm run format:check
+npm run lint
 npm run typecheck
 npm run build
 npm test
+npm run audit
 ```
 
 Start the local server:

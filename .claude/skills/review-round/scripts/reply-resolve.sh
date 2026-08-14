@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 用法: reply-resolve.sh <线程id> <回复正文> <第1步看到的评论数>
+# 用法: reply-resolve.sh <线程id> <带决策元数据的回复正文> <第1步看到的评论数>
 #
 # 顺序固定：重读线程 → 比对评论数 → 发回复 → 确认成功 → 才 resolve。
 # 幂等：若本脚本的同一条回复已经发出过（上次 resolve 失败等），重跑不会重复发，
@@ -18,6 +18,30 @@ SEEN=${3:?缺少「第 1 步看到的评论数」——用于检测扫描后是�
 [ "$#" -le 3 ] || die "参数多于 3 个（第 4 个是 '$4'）——回复正文很可能没有被完整引起来"
 case $SEEN in
   '' | *[!0-9]*) die "「已见评论数」必须是整数，实际收到：'$SEEN'（回复正文里的引号可能截断了参数）" ;;
+esac
+
+mapfile -t BODY_LINES <<<"$BODY"
+if [[ ${BODY_LINES[0]:-} =~ ^\[Change-Unit:\ ([a-z0-9][a-z0-9-]{0,62}[a-z0-9])\]$ ]]; then
+  CHANGE_UNIT=${BASH_REMATCH[1]}
+else
+  die "回复第 1 行必须是 [Change-Unit: <kebab-case>]"
+fi
+if [[ ${BODY_LINES[1]:-} =~ ^\[Root-ID:\ ([a-z0-9][a-z0-9-]{0,62}[a-z0-9])\]$ ]]; then
+  ID_KIND=Root
+  ROOT_ID=${BASH_REMATCH[1]}
+elif [[ ${BODY_LINES[1]:-} =~ ^\[Decision-ID:\ ([a-z0-9][a-z0-9-]{0,62}[a-z0-9])\]$ ]]; then
+  ID_KIND=Decision
+  ROOT_ID=${BASH_REMATCH[1]}
+else
+  die "回复第 2 行必须是 [Root-ID: <kebab-case>] 或 [Decision-ID: <kebab-case>]"
+fi
+case ${BODY_LINES[2]:-} in
+'[Resolution: first-fix]' | '[Resolution: structural-redesign]' | '[Resolution: rejected]' | '[Resolution: follow-up]') ;;
+*) die "回复第 3 行必须记录 first-fix、structural-redesign、rejected 或 follow-up" ;;
+esac
+[ -n "${BODY_LINES[3]:-}" ] || die "决策元数据后必须说明处理与验证结果"
+case "$CHANGE_UNIT:$ID_KIND:$ROOT_ID" in
+*--*) die "Change Unit 与 Root/Decision ID 不得包含连续连字符" ;;
 esac
 
 ME=$(gh api user --jq .login) || die "无法确定当前登录用户"
@@ -54,7 +78,9 @@ case $TOTAL in
 esac
 
 if [ "$RESOLVED" = "true" ]; then
-  echo "线程 ${THREAD_ID:0:20} 已是 resolved，跳过"
+  [ "$MINE" = "true" ] ||
+    die "线程 ${THREAD_ID:0:20} 已由外部 resolved，但缺少本用户的同一条决策元数据回复；执行 STOP，不得把缺失历史当作成功"
+  echo "线程 ${THREAD_ID:0:20} 已 resolved，且决策元数据回复已持久化"
   exit 0
 fi
 
