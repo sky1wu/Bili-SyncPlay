@@ -54,11 +54,24 @@ export function createPlaybackBindingController(args: {
    */
   videoRebindBufferSignalMs: number;
   getSharedVideo: () => SharedVideo | null;
+  /**
+   * Resolves the video actually loaded in the player through the page bridge.
+   * Bangumi season routes name the season rather than the episode, so a natural
+   * end cannot always be attributed from {@link getSharedVideo} synchronously.
+   */
+  getCurrentPlaybackVideo: () => Promise<SharedVideo | null>;
   hasRecentRemoteStopIntent: (currentVideoUrl: string) => boolean;
   normalizeUrl: (url: string | undefined | null) => string | null;
   getLastBroadcastAt: () => number;
   broadcastPlayback: (
     video: HTMLVideoElement,
+    eventSource?: LocalPlaybackEventSource,
+    naturalEnd?: boolean,
+  ) => Promise<void>;
+  /** Broadcasts an event with the identity already confirmed for that event. */
+  broadcastConfirmedPlayback: (
+    video: HTMLVideoElement,
+    currentVideo: SharedVideo,
     eventSource?: LocalPlaybackEventSource,
     naturalEnd?: boolean,
   ) => Promise<void>;
@@ -78,9 +91,26 @@ export function createPlaybackBindingController(args: {
    */
   getMonotonicNow?: () => number;
 }): PlaybackBindingController {
+  type NaturalEndContext = {
+    video: HTMLVideoElement;
+    playbackContextGeneration: number;
+    playerSessionGeneration: number;
+    activeRoomCode: string;
+    activeSharedUrl: string;
+    activeSharedByMemberId: string | null;
+    localMemberId: string | null;
+    endedAt: number;
+  };
+  type NaturalEndOutcome = "handled" | "unsuppressed" | "stale";
+
   let videoBindingTimer: number | null = null;
   let pauseBufferUpgradeTimerId: number | null = null;
   let sharerEndedFlushTimerId: number | null = null;
+  let destroyed = false;
+  let pendingNaturalEndHandling: {
+    context: NaturalEndContext;
+    promise: Promise<NaturalEndOutcome>;
+  } | null = null;
   const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
   const scheduleUpgradeTimer = (cb: () => void, ms: number): number | null => {
     if (
@@ -498,23 +528,54 @@ export function createPlaybackBindingController(args: {
   }
 
   /**
+   * Whether the synchronous identity is authoritative for a natural-end
+   * decision. A festival URL remains address-bar-opaque even when its frozen
+   * query parses into a stable-looking `bvid:cid`, so both the parsed identity
+   * and the route itself must be stable.
+   */
+  function hasSynchronousNaturalEndIdentity(
+    currentVideo: SharedVideo | null,
+  ): boolean {
+    let pageUrl = currentVideo?.url ?? null;
+    if (typeof globalThis.window !== "undefined") {
+      try {
+        pageUrl = globalThis.window.location?.href ?? pageUrl;
+      } catch {
+        // An isolated test or a page teardown can make Location unavailable;
+        // the resolved identity remains the conservative fallback below.
+      }
+    }
+    return Boolean(
+      hasStableSharedVideoIdentity(currentVideo) &&
+      !isUnstableSharedVideoUrl(pageUrl) &&
+      !isUnstableSharedVideoUrl(currentVideo?.url ?? null),
+    );
+  }
+
+  /**
    * Record that the room's shared video reached its natural end on this page.
    * This durable timestamp (cleared only by a shared-url change / room teardown)
    * lets the navigation controller recognise the autoplay-next that follows,
    * independent of the broadcast-suppression markers it clears eagerly. Set for
    * both roles — the sharer uses it to auto-share, a non-sharer to hold.
    */
-  function markSharedVideoNaturalEnd(): void {
+  function markSharedVideoNaturalEnd(
+    currentVideo: SharedVideo | null,
+    endedAt: number,
+  ): void {
     if (
       !args.runtimeState.activeRoomCode ||
       !args.runtimeState.activeSharedUrl ||
-      !isCurrentVideoShared(args.getSharedVideo())
+      !isCurrentVideoShared(currentVideo)
     ) {
       return;
     }
     args.runtimeState.sharedVideoNaturalEndUrl =
       args.runtimeState.activeSharedUrl;
-    args.runtimeState.sharedVideoNaturalEndAt = monotonicNow();
+    // Anchor the marker on the media event, not on a later page-bridge reply.
+    // The navigation controller measures its gesture and expiry windows from
+    // this instant, so moving it across an await would silently widen both.
+    args.runtimeState.sharedVideoNaturalEndAt = endedAt;
   }
 
   function isLocalSharedSource(): boolean {
@@ -526,7 +587,9 @@ export function createPlaybackBindingController(args: {
     );
   }
 
-  function shouldHoldNonSharerAtSharedVideoEnd(): boolean {
+  function shouldHoldNonSharerAtSharedVideoEnd(
+    currentVideo: SharedVideo | null,
+  ): boolean {
     if (
       !args.runtimeState.activeRoomCode ||
       !args.runtimeState.activeSharedUrl ||
@@ -537,7 +600,7 @@ export function createPlaybackBindingController(args: {
       return false;
     }
 
-    return isCurrentVideoShared(args.getSharedVideo());
+    return isCurrentVideoShared(currentVideo);
   }
 
   /**
@@ -552,8 +615,11 @@ export function createPlaybackBindingController(args: {
    * (multi-part videos); cross-video autoplay is handled by the navigation
    * controller.
    */
-  function holdNonSharerAtSharedVideoEnd(video: HTMLVideoElement): boolean {
-    if (!shouldHoldNonSharerAtSharedVideoEnd()) {
+  function holdNonSharerAtSharedVideoEnd(
+    video: HTMLVideoElement,
+    currentVideo: SharedVideo | null,
+  ): boolean {
+    if (!shouldHoldNonSharerAtSharedVideoEnd(currentVideo)) {
       return false;
     }
 
@@ -592,14 +658,19 @@ export function createPlaybackBindingController(args: {
    * state once the suppression window elapses; otherwise the room — and any
    * new joiners — would keep seeing the shared video as still playing.
    */
-  function armSharerSharedVideoEndSuppression(): boolean {
+  function armSharerSharedVideoEndSuppression(
+    video: HTMLVideoElement,
+    currentVideo: SharedVideo | null,
+    endedAt: number,
+  ): boolean {
     if (
       !args.runtimeState.activeRoomCode ||
       !args.runtimeState.activeSharedUrl ||
       !args.runtimeState.localMemberId ||
       !args.runtimeState.activeSharedByMemberId ||
+      !currentVideo ||
       !isLocalSharedSource() ||
-      !isCurrentVideoShared(args.getSharedVideo())
+      !isCurrentVideoShared(currentVideo)
     ) {
       // DIAGNOSTIC: report which condition blocked arming so a missed
       // autoplay-next (e.g. a seek to the very end advancing without it) can be
@@ -615,26 +686,174 @@ export function createPlaybackBindingController(args: {
         )} sharedBy=${Boolean(
           args.runtimeState.activeSharedByMemberId,
         )} localSharer=${isLocalSharedSource()} currentVideoShared=${isCurrentVideoShared(
-          args.getSharedVideo(),
-        )} resolved=${args.normalizeUrl(args.getSharedVideo()?.url)} active=${args.runtimeState.activeSharedUrl})`,
+          currentVideo,
+        )} resolved=${args.normalizeUrl(currentVideo?.url)} active=${args.runtimeState.activeSharedUrl})`,
       );
       return false;
     }
 
     const armedUrl = args.runtimeState.activeSharedUrl;
+    // Keep replay evidence on the same timeline as the media event. A fresh
+    // page-bridge read may return after a user gesture; arming at reply time
+    // would make that post-end gesture look older than the suppression itself.
+    const armedAt = endedAt;
+    const suppressionUntil = armedAt + args.initialRoomStatePauseHoldMs;
     args.runtimeState.sharerEndedSuppressionUrl = armedUrl;
-    args.runtimeState.sharerEndedSuppressionUntil =
-      monotonicNow() + args.initialRoomStatePauseHoldMs;
-    args.runtimeState.sharerEndedSuppressionArmedAt = monotonicNow();
+    args.runtimeState.sharerEndedSuppressionUntil = suppressionUntil;
+    args.runtimeState.sharerEndedSuppressionArmedAt = armedAt;
     clearSharerEndedFlushTimer();
-    sharerEndedFlushTimerId = scheduleUpgradeTimer(() => {
-      sharerEndedFlushTimerId = null;
-      flushSharerEndedSuppressionIfTerminal(armedUrl);
-    }, args.initialRoomStatePauseHoldMs);
+    sharerEndedFlushTimerId = scheduleUpgradeTimer(
+      () => {
+        sharerEndedFlushTimerId = null;
+        settleSharerEndedSuppression(armedUrl, armedAt, video, currentVideo);
+      },
+      Math.max(0, suppressionUntil - monotonicNow()),
+    );
     args.debugLog(
       `Suppressed sharer end-of-video broadcasts to keep autoplay-next handoff quiet`,
     );
     return true;
+  }
+
+  function captureNaturalEndContext(
+    video: HTMLVideoElement,
+    endedAt: number,
+  ): NaturalEndContext | null {
+    if (
+      !args.runtimeState.activeRoomCode ||
+      !args.runtimeState.activeSharedUrl
+    ) {
+      return null;
+    }
+    return {
+      video,
+      playbackContextGeneration: args.runtimeState.playbackContextGeneration,
+      playerSessionGeneration: args.runtimeState.playerSessionGeneration,
+      activeRoomCode: args.runtimeState.activeRoomCode,
+      activeSharedUrl: args.runtimeState.activeSharedUrl,
+      activeSharedByMemberId: args.runtimeState.activeSharedByMemberId ?? null,
+      localMemberId: args.runtimeState.localMemberId ?? null,
+      endedAt,
+    };
+  }
+
+  /**
+   * An async page-world result may only classify the exact media event that
+   * requested it. A navigation, room/share/ownership change or replacement
+   * video makes that decision stale. Gesture evidence is deliberately excluded
+   * from this lifetime: it classifies a later replay/navigation but does not
+   * replace the room, video element or natural-end event. `video.ended` is
+   * likewise not re-read here: autoplay-next may already have resumed the same
+   * element by the time the bridge replies, and that continuation is the event
+   * this marker exists to classify.
+   */
+  function isNaturalEndContextStructurallyCurrent(
+    context: NaturalEndContext,
+  ): boolean {
+    return (
+      !destroyed &&
+      context.playbackContextGeneration ===
+        args.runtimeState.playbackContextGeneration &&
+      context.playerSessionGeneration ===
+        args.runtimeState.playerSessionGeneration &&
+      getVideoElement() === context.video &&
+      args.runtimeState.activeRoomCode === context.activeRoomCode &&
+      args.runtimeState.activeSharedUrl === context.activeSharedUrl &&
+      (args.runtimeState.activeSharedByMemberId ?? null) ===
+        context.activeSharedByMemberId &&
+      (args.runtimeState.localMemberId ?? null) === context.localMemberId
+    );
+  }
+
+  function sameNaturalEndContext(
+    left: NaturalEndContext,
+    right: NaturalEndContext,
+  ): boolean {
+    return (
+      left.video === right.video &&
+      left.playbackContextGeneration === right.playbackContextGeneration &&
+      left.playerSessionGeneration === right.playerSessionGeneration &&
+      left.activeRoomCode === right.activeRoomCode &&
+      left.activeSharedUrl === right.activeSharedUrl &&
+      left.activeSharedByMemberId === right.activeSharedByMemberId &&
+      left.localMemberId === right.localMemberId
+    );
+  }
+
+  function applySharedVideoNaturalEnd(
+    video: HTMLVideoElement,
+    currentVideo: SharedVideo | null,
+    endedAt: number,
+  ): NaturalEndOutcome {
+    markSharedVideoNaturalEnd(currentVideo, endedAt);
+    if (holdNonSharerAtSharedVideoEnd(video, currentVideo)) {
+      return "handled";
+    }
+    return armSharerSharedVideoEndSuppression(video, currentVideo, endedAt)
+      ? "handled"
+      : "unsuppressed";
+  }
+
+  function resolveSharedVideoNaturalEnd(
+    context: NaturalEndContext,
+  ): Promise<NaturalEndOutcome> {
+    if (
+      pendingNaturalEndHandling &&
+      sameNaturalEndContext(pendingNaturalEndHandling.context, context)
+    ) {
+      return pendingNaturalEndHandling.promise;
+    }
+
+    const promise = Promise.resolve()
+      .then(() => args.getCurrentPlaybackVideo())
+      .then((currentVideo): NaturalEndOutcome => {
+        if (!isNaturalEndContextStructurallyCurrent(context)) {
+          args.debugLog(
+            "Dropped stale natural-end identity after resolving the current video",
+          );
+          return "stale";
+        }
+        return applySharedVideoNaturalEnd(
+          context.video,
+          currentVideo,
+          context.endedAt,
+        );
+      })
+      .catch((error: unknown): NaturalEndOutcome => {
+        if (!isNaturalEndContextStructurallyCurrent(context)) {
+          return "stale";
+        }
+        args.debugLog(
+          `Could not resolve current video at natural end: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return applySharedVideoNaturalEnd(context.video, null, context.endedAt);
+      })
+      .finally(() => {
+        if (pendingNaturalEndHandling?.context === context) {
+          pendingNaturalEndHandling = null;
+        }
+      });
+    pendingNaturalEndHandling = { context, promise };
+    return promise;
+  }
+
+  /**
+   * Attribute a media natural end to the room's shared video. Stable routes keep
+   * the existing synchronous path; an opaque bangumi season route falls through
+   * to one fresh page-bridge read shared by the adjacent `pause`/`ended` events.
+   */
+  function handleSharedVideoNaturalEnd(
+    video: HTMLVideoElement,
+    currentVideo: SharedVideo | null,
+    endedAt: number,
+  ): NaturalEndOutcome | Promise<NaturalEndOutcome> {
+    const context = captureNaturalEndContext(video, endedAt);
+    if (hasSynchronousNaturalEndIdentity(currentVideo) || context === null) {
+      return applySharedVideoNaturalEnd(video, currentVideo, endedAt);
+    }
+    return resolveSharedVideoNaturalEnd(context);
   }
 
   /**
@@ -646,27 +865,32 @@ export function createPlaybackBindingController(args: {
    * navigation, ownership change) the gate/reset already cleared it, so this is
    * a no-op beyond tidying the marker.
    */
-  function flushSharerEndedSuppressionIfTerminal(armedUrl: string): void {
-    if (args.runtimeState.sharerEndedSuppressionUrl !== armedUrl) {
+  function settleSharerEndedSuppression(
+    armedUrl: string,
+    armedAt: number,
+    video: HTMLVideoElement,
+    confirmedVideo: SharedVideo,
+  ): void {
+    if (
+      args.runtimeState.sharerEndedSuppressionUrl !== armedUrl ||
+      args.runtimeState.sharerEndedSuppressionArmedAt !== armedAt
+    ) {
       return;
     }
-    const video = getVideoElement();
-    const currentVideo = args.getSharedVideo();
     // Require `ended` specifically: a genuine terminal end leaves the element
     // parked at `ended`, whereas any autoplay continuation (cross-video or
     // multi-part) clears it. This avoids flushing a spurious pause during a
     // slow handoff where the next episode is mid-load.
-    const stillTerminalOnSameSharedVideo = Boolean(
-      video &&
+    const stillTerminalOnSameSharedVideo =
+      getVideoElement() === video &&
       video.ended &&
       isLocalSharedSource() &&
-      isCurrentVideoShared(currentVideo) &&
-      args.normalizeUrl(currentVideo?.url) === armedUrl,
-    );
+      isCurrentVideoShared(confirmedVideo) &&
+      args.normalizeUrl(confirmedVideo.url) === armedUrl;
     args.runtimeState.sharerEndedSuppressionUrl = null;
     args.runtimeState.sharerEndedSuppressionUntil = 0;
     args.runtimeState.sharerEndedSuppressionArmedAt = 0;
-    if (!video || !stillTerminalOnSameSharedVideo) {
+    if (!stillTerminalOnSameSharedVideo) {
       return;
     }
     args.debugLog(
@@ -676,7 +900,7 @@ export function createPlaybackBindingController(args: {
     // without surfacing a misleading "paused" / "jumped to <end>" toast. This
     // also covers the slow-handoff case where the autoplay-next eventually
     // lands after the flush window (e.g. a recommend-autoplay countdown).
-    void args.broadcastPlayback(video, "pause", true);
+    void args.broadcastConfirmedPlayback(video, confirmedVideo, "pause", true);
   }
 
   function shouldReapplyHoldAfterSharedVideoEnd(
@@ -1154,97 +1378,107 @@ export function createPlaybackBindingController(args: {
       },
       onPause: () => {
         const currentVideo = args.getSharedVideo();
-        // At a natural end the browser dispatches `pause` immediately before
-        // `ended`. Record the durable natural-end timestamp (for both roles)
-        // before any early return, then arm the non-sharer end-hold here
-        // (idempotent with the `ended` handler) and skip the broadcast:
-        // otherwise this end `pause` is sent to the room before `onEnded`
-        // establishes the suppression marker, flipping the room to paused and
-        // disrupting the sharer's autoplay-next advance.
-        if (video.ended) {
-          markSharedVideoNaturalEnd();
-        }
-        if (video.ended && holdNonSharerAtSharedVideoEnd(video)) {
+        const continueOrdinaryPause = () => {
+          if (hasRecentUserGesture()) {
+            args.cancelActiveSoftApply(video, "pause");
+          }
+          const now = monotonicNow();
+          const recentBufferSignal =
+            args.runtimeState.lastBufferSignalAt > 0 &&
+            now - args.runtimeState.lastBufferSignalAt <
+              args.bufferSignalWindowMs;
+          const userInitiatedPause =
+            hasRecentUserGesture() &&
+            args.runtimeState.lastUserGestureAt >
+              args.runtimeState.lastForcedPauseAt;
+          // A player rebuilding its media element produces a stall the user never
+          // asked for, but no `waiting`/`stalled` precedes it. When the rebuilt
+          // element is bound early enough to still catch its `pause`, the recent
+          // (re)bind is the only evidence available — treat it as a buffer signal
+          // in its own right. (When we bind too late to see the `pause` at all,
+          // `classifyUnobservedPauseAsBuffer` covers the same stall instead.)
+          const recentVideoRebind =
+            args.runtimeState.lastVideoElementBoundAt > 0 &&
+            now - args.runtimeState.lastVideoElementBoundAt <
+              args.videoRebindBufferSignalMs;
+          // Ownership belongs to the exact pause effect on this exact element and
+          // player session. `lastForcedPauseAt` remains a durable gesture fence,
+          // so it cannot answer this lifecycle question after a resume or rebind.
+          const forcedPauseOwnsTransition = isExtensionOwnedActivePause({
+            runtimeState: args.runtimeState,
+            video,
+          });
+          // When applying a remote `paused`, we hard-seek then call `video.pause()`.
+          // The seek trips a `waiting` event milliseconds before the `pause`, so the
+          // buffer-signal window will look "fresh" even though no real stall occurred.
+          // Classifying this as buffer-induced would (a) escape the programmatic
+          // suppression (signature=paused vs broadcast=buffering) and leak the
+          // applied state back out, and (b) record lastLocalIntent=buffering,
+          // which blocks the peer's next `playing` via local-intent-guard for up
+          // to LOCAL_INTENT_GUARD_MS — the visible "resume takes a few seconds"
+          // symptom after a remote pause→play.
+          const bufferInduced =
+            !isInsideProgrammaticPausedWindow(now) &&
+            (recentBufferSignal || recentVideoRebind) &&
+            !forcedPauseOwnsTransition &&
+            !userInitiatedPause;
+          if (!forcedPauseOwnsTransition) {
+            args.runtimeState.pauseStartedAt = now;
+          }
+          args.runtimeState.pauseClassifiedAsBuffer = bufferInduced;
+          clearBufferUpgradeTimer();
+          if (bufferInduced) {
+            armBufferPauseUpgrade(video);
+          }
+          rememberExplicitPlaybackAction("paused");
+          rememberExplicitUserAction("pause");
+          // Deauthorize the non-shared video the user paused — UNLESS this `pause`
+          // is the natural end of the video (the browser fires `pause` immediately
+          // before `ended`). At a natural end the player is about to autoplay the
+          // next episode; the navigation controller classifies that autoplay-next as
+          // a user-driven local navigation (load paused) via
+          // `previousExplicitNonSharedPlaybackUrl`, but it only sees the SPA URL
+          // change AFTER this handler runs. Clearing the authorization here would
+          // make that classification fail and let the next episode autoplay, so keep
+          // it until the navigation reset replaces it.
+          if (
+            !video.ended &&
+            currentVideo &&
+            args.normalizeUrl(currentVideo.url) ===
+              args.runtimeState.explicitNonSharedPlaybackUrl
+          ) {
+            args.runtimeState.explicitNonSharedPlaybackUrl = null;
+          }
+          scheduleBroadcast(video, "pause", 120);
+        };
+
+        if (!video.ended) {
+          continueOrdinaryPause();
           return;
         }
-        // Same natural-end window for the sharer: do not pause (autoplay-next
-        // must continue) but suppress this end `pause` broadcast so peers are not
-        // shown a spurious "paused"/"jumped to 0:00" against the old video before
-        // the next auto-share lands. See armSharerSharedVideoEndSuppression.
-        if (video.ended && armSharerSharedVideoEndSuppression()) {
-          return;
-        }
-        if (hasRecentUserGesture()) {
-          args.cancelActiveSoftApply(video, "pause");
-        }
-        const now = monotonicNow();
-        const recentBufferSignal =
-          args.runtimeState.lastBufferSignalAt > 0 &&
-          now - args.runtimeState.lastBufferSignalAt <
-            args.bufferSignalWindowMs;
-        const userInitiatedPause =
-          hasRecentUserGesture() &&
-          args.runtimeState.lastUserGestureAt >
-            args.runtimeState.lastForcedPauseAt;
-        // A player rebuilding its media element produces a stall the user never
-        // asked for, but no `waiting`/`stalled` precedes it. When the rebuilt
-        // element is bound early enough to still catch its `pause`, the recent
-        // (re)bind is the only evidence available — treat it as a buffer signal
-        // in its own right. (When we bind too late to see the `pause` at all,
-        // `classifyUnobservedPauseAsBuffer` covers the same stall instead.)
-        const recentVideoRebind =
-          args.runtimeState.lastVideoElementBoundAt > 0 &&
-          now - args.runtimeState.lastVideoElementBoundAt <
-            args.videoRebindBufferSignalMs;
-        // Ownership belongs to the exact pause effect on this exact element and
-        // player session. `lastForcedPauseAt` remains a durable gesture fence,
-        // so it cannot answer this lifecycle question after a resume or rebind.
-        const forcedPauseOwnsTransition = isExtensionOwnedActivePause({
-          runtimeState: args.runtimeState,
+
+        // Browsers dispatch this `pause` immediately before `ended`. The pause
+        // cannot be broadcast until a fresh page-bridge read has had the chance
+        // to prove that an opaque season route is still playing the room's
+        // shared episode; otherwise the room is flipped to paused before the
+        // autoplay-next handoff. The adjacent `ended` event reuses the same
+        // in-flight classification.
+        const outcome = handleSharedVideoNaturalEnd(
           video,
+          currentVideo,
+          monotonicNow(),
+        );
+        if (typeof outcome === "string") {
+          if (outcome === "unsuppressed") {
+            continueOrdinaryPause();
+          }
+          return;
+        }
+        void outcome.then((resolvedOutcome) => {
+          if (resolvedOutcome === "unsuppressed") {
+            continueOrdinaryPause();
+          }
         });
-        // When applying a remote `paused`, we hard-seek then call `video.pause()`.
-        // The seek trips a `waiting` event milliseconds before the `pause`, so the
-        // buffer-signal window will look "fresh" even though no real stall occurred.
-        // Classifying this as buffer-induced would (a) escape the programmatic
-        // suppression (signature=paused vs broadcast=buffering) and leak the
-        // applied state back out, and (b) record lastLocalIntent=buffering,
-        // which blocks the peer's next `playing` via local-intent-guard for up
-        // to LOCAL_INTENT_GUARD_MS — the visible "resume takes a few seconds"
-        // symptom after a remote pause→play.
-        const bufferInduced =
-          !isInsideProgrammaticPausedWindow(now) &&
-          (recentBufferSignal || recentVideoRebind) &&
-          !forcedPauseOwnsTransition &&
-          !userInitiatedPause;
-        if (!forcedPauseOwnsTransition) {
-          args.runtimeState.pauseStartedAt = now;
-        }
-        args.runtimeState.pauseClassifiedAsBuffer = bufferInduced;
-        clearBufferUpgradeTimer();
-        if (bufferInduced) {
-          armBufferPauseUpgrade(video);
-        }
-        rememberExplicitPlaybackAction("paused");
-        rememberExplicitUserAction("pause");
-        // Deauthorize the non-shared video the user paused — UNLESS this `pause`
-        // is the natural end of the video (the browser fires `pause` immediately
-        // before `ended`). At a natural end the player is about to autoplay the
-        // next episode; the navigation controller classifies that autoplay-next as
-        // a user-driven local navigation (load paused) via
-        // `previousExplicitNonSharedPlaybackUrl`, but it only sees the SPA URL
-        // change AFTER this handler runs. Clearing the authorization here would
-        // make that classification fail and let the next episode autoplay, so keep
-        // it until the navigation reset replaces it.
-        if (
-          !video.ended &&
-          currentVideo &&
-          args.normalizeUrl(currentVideo.url) ===
-            args.runtimeState.explicitNonSharedPlaybackUrl
-        ) {
-          args.runtimeState.explicitNonSharedPlaybackUrl = null;
-        }
-        scheduleBroadcast(video, "pause", 120);
       },
       onWaiting: () => {
         args.runtimeState.lastBufferSignalAt = monotonicNow();
@@ -1340,12 +1574,17 @@ export function createPlaybackBindingController(args: {
         // DIAGNOSTIC: confirm the natural-end event actually fires. A seek to
         // the very end can make Bilibili's multipart player advance to the next
         // part without an `ended`, so the end-suppression marker is never armed.
+        const currentVideo = args.getSharedVideo();
         args.debugLog(
-          `onEnded fired (ended=${video.ended} currentTime=${video.currentTime.toFixed(2)} resolved=${args.normalizeUrl(args.getSharedVideo()?.url)})`,
+          `onEnded fired (ended=${video.ended} currentTime=${video.currentTime.toFixed(2)} resolved=${args.normalizeUrl(currentVideo?.url)})`,
         );
-        markSharedVideoNaturalEnd();
-        if (!holdNonSharerAtSharedVideoEnd(video)) {
-          armSharerSharedVideoEndSuppression();
+        const outcome = handleSharedVideoNaturalEnd(
+          video,
+          currentVideo,
+          monotonicNow(),
+        );
+        if (typeof outcome !== "string") {
+          void outcome;
         }
       },
       onTimeUpdate: () => {
@@ -1405,6 +1644,8 @@ export function createPlaybackBindingController(args: {
     },
     attachPlaybackListeners,
     destroy() {
+      destroyed = true;
+      pendingNaturalEndHandling = null;
       if (videoBindingTimer !== null) {
         window.clearInterval(videoBindingTimer);
         videoBindingTimer = null;

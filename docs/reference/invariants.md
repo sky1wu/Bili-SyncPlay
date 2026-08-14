@@ -133,6 +133,29 @@ So on an `ep` route the rules invert. Two predicates in `video-identity.ts`
 state the comparison, and `page-record-staleness.ts` applies it to every source
 the page offers at once:
 
+- **A synchronous media event does not make the video identity synchronous.**
+  On an `ss` route, `pause` / `ended` can fire while synchronous
+  `getSharedVideo()` still has only the season fallback: reusing a cached
+  snapshot requires corroborating page DOM that is not reliable at that instant
+  (#291). The natural-end lifecycle therefore uses the synchronous answer only
+  when it is stable; an opaque identity gets one fresh
+  `getCurrentPlaybackVideo()` read, shared by the adjacent `pause` and `ended`
+  callbacks and by any concurrent playback broadcast from that same page visit.
+  A second page-world request must not supersede the read that owns the handoff.
+  Once confirmed, that event-owned identity is carried through the terminal-
+  suppression timer and its final paused broadcast; the timer must not reacquire
+  mutable page state or pass the confirmed event through a post-navigation
+  mutable-identity gate and let either erase an already-proven debt. The marker
+  remains anchored on the media event, not the later bridge reply, as does the
+  sharer's suppression arming time. After every await the playback context,
+  player session, video element and room/share ownership are rechecked before any
+  marker, hold, suppression or broadcast is changed. A later gesture is
+  classification evidence for replay/navigation, **not** a new structural lifecycle: dropping
+  the terminal result because that evidence changed loses the only paused state,
+  while arming at reply time makes the post-end gesture look older than the
+  suppression and hides it. **Never extend that async fallback to a stable `ep`
+  identity:** page globals may still name the previous episode there, while the
+  address bar already gives the authoritative current one.
 - **A snapshot naming another episode is "not resolved yet", not "resolved".**
   Answering `null` is what makes the eight-attempt retry in
   `resolveCurrentSharePayload` real — its exit condition is a non-null snapshot,

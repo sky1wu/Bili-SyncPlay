@@ -8,11 +8,12 @@ import {
   resetUserGestureState,
 } from "../src/content/runtime-state";
 import { installClockStubs } from "./clock-stubs";
-import { createPlaybackBindingController } from "../src/content/playback-binding-controller";
+import { createPlaybackBindingController as createProductionPlaybackBindingController } from "../src/content/playback-binding-controller";
 import { derivePlaybackSyncIntent } from "../src/content/playback-broadcast";
 import { forcePauseVideo } from "../src/content/player-binding";
 import { createRoomStateController } from "../src/content/room-state-controller";
 import { createToastCoordinatorState } from "../src/content/toast";
+import { normalizeSharedVideoUrl } from "../src/shared/url";
 
 type ListenerMap = Map<string, EventListener>;
 
@@ -24,6 +25,38 @@ type StubVideoElement = Omit<HTMLVideoElement, "paused" | "duration"> & {
   paused: boolean;
   duration: number;
 };
+
+type PlaybackBindingControllerArgs = Parameters<
+  typeof createProductionPlaybackBindingController
+>[0];
+
+/**
+ * Most binding tests exercise routes whose identity is synchronously stable.
+ * Keep that as their default while allowing the season-page regression to
+ * provide the distinct async page-bridge result it needs to model.
+ */
+function createPlaybackBindingController(
+  args: Omit<
+    PlaybackBindingControllerArgs,
+    "getCurrentPlaybackVideo" | "broadcastConfirmedPlayback"
+  > &
+    Partial<
+      Pick<
+        PlaybackBindingControllerArgs,
+        "getCurrentPlaybackVideo" | "broadcastConfirmedPlayback"
+      >
+    >,
+) {
+  return createProductionPlaybackBindingController({
+    ...args,
+    getCurrentPlaybackVideo:
+      args.getCurrentPlaybackVideo ?? (async () => args.getSharedVideo()),
+    broadcastConfirmedPlayback:
+      args.broadcastConfirmedPlayback ??
+      ((video, _currentVideo, eventSource, naturalEnd) =>
+        args.broadcastPlayback(video, eventSource, naturalEnd)),
+  });
+}
 
 function installDomStub() {
   const originalDocument = globalThis.document;
@@ -3530,6 +3563,470 @@ test("playback binding controller suppresses the natural-end pause broadcast for
     // No seek preceded this end, so the seek-to-end flag stays false.
   } finally {
     dom.video.pause = originalPause;
+    dom.restore();
+  }
+});
+
+test("playback binding controller records a sharer natural end from the async episode identity on a bangumi season page", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  let now = 5_000;
+  let currentPlaybackReads = 0;
+  const broadcasts: string[] = [];
+  const scheduled: Array<{ cb: () => void; ms: number }> = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  globalThis.window.setTimeout = ((cb: () => void, ms?: number) => {
+    scheduled.push({ cb, ms: ms ?? 0 });
+    return scheduled.length;
+  }) as unknown as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    // The synchronous path can only fall back to the address bar while the
+    // season route remains stable, so it cannot identify the playing episode.
+    getSharedVideo: () => ({
+      videoId: "ss357",
+      url: "https://www.bilibili.com/bangumi/play/ss357",
+      title: "Season page",
+    }),
+    // A fresh page-bridge read resolves the actual episode in the player.
+    getCurrentPlaybackVideo: () => {
+      currentPlaybackReads += 1;
+      return Promise.resolve({
+        videoId: "ep249469",
+        url: sharedEpisodeUrl,
+        title: "Shared Episode",
+      });
+    },
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource, naturalEnd) => {
+      broadcasts.push(
+        `${eventSource ?? "manual"}:${naturalEnd ? "natural-end" : "none"}`,
+      );
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    // Match the browser order: the terminal pause arrives immediately before
+    // ended. Both callbacks must share one bridge read, and the pause must stay
+    // private while that identity is unresolved.
+    dom.listeners.get("pause")?.(new Event("pause"));
+    dom.listeners.get("ended")?.(new Event("ended"));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(currentPlaybackReads, 1);
+    assert.deepEqual(broadcasts, []);
+    assert.equal(runtimeState.sharedVideoNaturalEndUrl, sharedEpisodeUrl);
+    assert.equal(runtimeState.sharedVideoNaturalEndAt, 5_000);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, sharedEpisodeUrl);
+
+    const terminalFlush = scheduled.find((entry) => entry.ms === 3_000);
+    assert.ok(terminalFlush);
+
+    // A second natural end on the same shared URL re-arms suppression while the
+    // first timer is still queued. The old timer owns the first `armedAt`, not
+    // merely the URL, so it must not clear the newer marker.
+    now = 8_100;
+    dom.listeners.get("ended")?.(new Event("ended"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(currentPlaybackReads, 2);
+    assert.equal(runtimeState.sharerEndedSuppressionArmedAt, 8_100);
+
+    terminalFlush.cb();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(broadcasts, []);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, sharedEpisodeUrl);
+    assert.equal(runtimeState.sharerEndedSuppressionArmedAt, 8_100);
+
+    const latestTerminalFlush = scheduled.filter(
+      (entry) => entry.ms === 3_000,
+    )[1];
+    assert.ok(latestTerminalFlush);
+    now = 11_100;
+    latestTerminalFlush.cb();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(currentPlaybackReads, 2);
+    assert.deepEqual(broadcasts, ["pause:natural-end"]);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, null);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.restore();
+  }
+});
+
+test("playback binding controller resolves a festival natural end before normalized routing hides the opaque page", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedVideoUrl = "https://www.bilibili.com/video/BV1xx411c7mD";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedVideoUrl;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  let currentPlaybackReads = 0;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      // A stale cached festival query can name another stable-looking BV even
+      // though the route itself cannot confirm which player item just ended.
+      videoId: "BV2xx411c7mD",
+      url: "https://www.bilibili.com/festival/demo?bvid=BV2xx411c7mD",
+      title: "Stale festival fallback",
+    }),
+    getCurrentPlaybackVideo: async () => {
+      currentPlaybackReads += 1;
+      return {
+        videoId: "BV1xx411c7mD",
+        url: sharedVideoUrl,
+        title: "Shared festival video",
+      };
+    },
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: normalizeSharedVideoUrl,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("ended")?.(new Event("ended"));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(currentPlaybackReads, 1);
+    assert.equal(runtimeState.sharedVideoNaturalEndUrl, sharedVideoUrl);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, sharedVideoUrl);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller keeps the address-bar episode authoritative at a natural end", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.pendingRoomStateHydration = false;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  let currentPlaybackReads = 0;
+  const broadcasts: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    // On an `ep` route the address bar has already moved to another episode and
+    // is authoritative. A page-bridge result can still be the previous episode.
+    getSharedVideo: () => ({
+      videoId: "ep249470",
+      url: "https://www.bilibili.com/bangumi/play/ep249470",
+      title: "Current Episode",
+    }),
+    getCurrentPlaybackVideo: async () => {
+      currentPlaybackReads += 1;
+      return {
+        videoId: "ep249469",
+        url: sharedEpisodeUrl,
+        title: "Stale Previous Episode",
+      };
+    },
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    dom.listeners.get("ended")?.(new Event("ended"));
+    await Promise.resolve();
+
+    assert.equal(currentPlaybackReads, 0);
+    assert.deepEqual(broadcasts, ["pause"]);
+    assert.equal(runtimeState.sharedVideoNaturalEndUrl, null);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, null);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller drops an async natural-end identity from an older page context", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  let resolveCurrentPlayback!: (video: SharedVideo | null) => void;
+  const broadcasts: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "ss357",
+      url: "https://www.bilibili.com/bangumi/play/ss357",
+      title: "Season page",
+    }),
+    getCurrentPlaybackVideo: () =>
+      new Promise((resolve) => {
+        resolveCurrentPlayback = resolve;
+      }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource) => {
+      broadcasts.push(eventSource ?? "manual");
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    dom.listeners.get("ended")?.(new Event("ended"));
+    await Promise.resolve();
+
+    // The SPA navigates before the page bridge answers. The old episode result
+    // must neither mark the new page nor resume its deferred pause handling.
+    resetUserGestureState(runtimeState);
+    resolveCurrentPlayback({
+      videoId: "ep249469",
+      url: sharedEpisodeUrl,
+      title: "Old Shared Episode",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(runtimeState.sharedVideoNaturalEndUrl, null);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, null);
+    assert.deepEqual(broadcasts, []);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller settles an async natural end after only gesture evidence changes", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  let resolveCurrentPlayback!: (video: SharedVideo | null) => void;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "ss357",
+      url: "https://www.bilibili.com/bangumi/play/ss357",
+      title: "Season page",
+    }),
+    getCurrentPlaybackVideo: () =>
+      new Promise((resolve) => {
+        resolveCurrentPlayback = resolve;
+      }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    dom.listeners.get("ended")?.(new Event("ended"));
+    await Promise.resolve();
+
+    // A document gesture is evidence for later navigation/replay
+    // classification, but it does not replace the page, room or media event.
+    runtimeState.lastUserGestureAt = 5_050;
+    resolveCurrentPlayback({
+      videoId: "ep249469",
+      url: sharedEpisodeUrl,
+      title: "Shared Episode",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(runtimeState.sharedVideoNaturalEndUrl, sharedEpisodeUrl);
+    assert.equal(runtimeState.sharedVideoNaturalEndAt, 5_000);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, sharedEpisodeUrl);
+    assert.equal(runtimeState.sharerEndedSuppressionArmedAt, 5_000);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller carries the confirmed identity through an async terminal flush", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  let now = 5_000;
+  let currentPlaybackReads = 0;
+  const broadcasts: string[] = [];
+  const scheduled: Array<{ cb: () => void; ms: number }> = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  globalThis.window.setTimeout = ((cb: () => void, ms?: number) => {
+    scheduled.push({ cb, ms: ms ?? 0 });
+    return scheduled.length;
+  }) as unknown as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "ss357",
+      url: "https://www.bilibili.com/bangumi/play/ss357",
+      title: "Season page",
+    }),
+    getCurrentPlaybackVideo: () => {
+      currentPlaybackReads += 1;
+      return Promise.resolve(
+        currentPlaybackReads === 1
+          ? {
+              videoId: "ep249469",
+              url: sharedEpisodeUrl,
+              title: "Shared Episode",
+            }
+          : null,
+      );
+    },
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource, naturalEnd) => {
+      broadcasts.push(
+        `${eventSource ?? "manual"}:${naturalEnd ? "natural-end" : "none"}`,
+      );
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("ended")?.(new Event("ended"));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const terminalFlush = scheduled.find((entry) => entry.ms === 3_000);
+    assert.ok(terminalFlush);
+    now = 8_000;
+    terminalFlush.cb();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(currentPlaybackReads, 1);
+    assert.deepEqual(broadcasts, ["pause:natural-end"]);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, null);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
     dom.restore();
   }
 });

@@ -67,6 +67,13 @@ export function createFestivalBridgeController(): FestivalBridgeController {
   let festivalSnapshot: FestivalSnapshot | null = null;
   let pageVisitGeneration = 0;
   let freshRequestSequence = 0;
+  let pendingFreshRead: {
+    pageVisitGeneration: number;
+    pathname: string;
+    pageVisitUrl: string;
+    requestSequence: number;
+    promise: Promise<PageVideoSnapshot | null>;
+  } | null = null;
 
   async function readFestivalSnapshotFromPageContext(
     pathname: string,
@@ -152,6 +159,51 @@ export function createFestivalBridgeController(): FestivalBridgeController {
 
   function normalizeCachedPagePathname(pathname: string): string {
     return pathname.replace(/\/+$/, "");
+  }
+
+  /**
+   * Keep one page-world read as the identity owner for a page visit. Playback
+   * events can ask for the current video concurrently during autoplay-next; a
+   * second request must join the first instead of invalidating the natural-end
+   * result that the handoff depends on. A different visit still starts a newer
+   * sequence and supersedes the old one.
+   */
+  function startOrReuseFreshRead(
+    pathname: string,
+    pageUrl: string,
+  ): NonNullable<typeof pendingFreshRead> {
+    const normalizedPathname = normalizeCachedPagePathname(pathname);
+    const pageVisitUrl = normalizePageVisitUrl(pageUrl);
+    if (
+      pendingFreshRead &&
+      pendingFreshRead.pageVisitGeneration === pageVisitGeneration &&
+      pendingFreshRead.pathname === normalizedPathname &&
+      pendingFreshRead.pageVisitUrl === pageVisitUrl
+    ) {
+      return pendingFreshRead;
+    }
+
+    const nextRead: NonNullable<typeof pendingFreshRead> = {
+      pageVisitGeneration,
+      pathname: normalizedPathname,
+      pageVisitUrl,
+      requestSequence: (freshRequestSequence += 1),
+      promise: readFestivalSnapshotFromPageContext(pathname, pageUrl),
+    };
+    pendingFreshRead = nextRead;
+    void nextRead.promise.then(
+      () => {
+        if (pendingFreshRead === nextRead) {
+          pendingFreshRead = null;
+        }
+      },
+      () => {
+        if (pendingFreshRead === nextRead) {
+          pendingFreshRead = null;
+        }
+      },
+    );
+    return nextRead;
   }
 
   function canUseCachedFestivalSnapshot(
@@ -251,18 +303,14 @@ export function createFestivalBridgeController(): FestivalBridgeController {
         };
       }
 
-      // Only an actual page-world read supersedes another read. A concurrent
-      // cache hit is observational and must not cancel a fresh read that was
-      // already in flight for this same page visit.
-      const requestVisitGeneration = pageVisitGeneration;
-      const requestSequence = (freshRequestSequence += 1);
-      const nextSnapshot = await readFestivalSnapshotFromPageContext(
-        pathname,
-        pageUrl,
-      );
+      // Concurrent consumers of the same visit share one page-world read. A
+      // different visit owns a newer sequence, while a cache hit remains purely
+      // observational and cannot cancel the read already in flight.
+      const freshRead = startOrReuseFreshRead(pathname, pageUrl);
+      const nextSnapshot = await freshRead.promise;
       if (
-        requestVisitGeneration !== pageVisitGeneration ||
-        requestSequence !== freshRequestSequence
+        freshRead.pageVisitGeneration !== pageVisitGeneration ||
+        freshRead.requestSequence !== freshRequestSequence
       ) {
         return null;
       }

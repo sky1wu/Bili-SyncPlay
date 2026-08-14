@@ -163,12 +163,20 @@ const playbackBindingController = createPlaybackBindingController({
   bufferPauseUpgradeMs: BUFFER_PAUSE_UPGRADE_MS,
   videoRebindBufferSignalMs: VIDEO_REBIND_BUFFER_SIGNAL_MS,
   getSharedVideo: () => shareController.getSharedVideo(),
+  getCurrentPlaybackVideo: () => shareController.getCurrentPlaybackVideo(),
   hasRecentRemoteStopIntent: (currentVideoUrl) =>
     syncController.hasRecentRemoteStopIntent(currentVideoUrl),
   normalizeUrl,
   getLastBroadcastAt: () => lastBroadcastAt,
   broadcastPlayback: (video, eventSource, naturalEnd) =>
     syncController.broadcastPlayback(video, eventSource, naturalEnd),
+  broadcastConfirmedPlayback: (video, currentVideo, eventSource, naturalEnd) =>
+    syncController.broadcastConfirmedPlayback(
+      video,
+      currentVideo,
+      eventSource,
+      naturalEnd,
+    ),
   cancelActiveSoftApply: (video, reason) =>
     syncController.cancelActiveSoftApply(video, reason),
   maintainActiveSoftApply: (video) =>
