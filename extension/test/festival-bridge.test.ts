@@ -18,6 +18,7 @@ function installBridgeDomStub(
   details: Array<PageBridgeDetail | DeferredPageBridgeDetail | null>,
 ): {
   flushDeferred: () => void;
+  getPostMessageCount: () => number;
   restore: () => void;
 } {
   const originalWindow = globalThis.window;
@@ -27,6 +28,7 @@ function installBridgeDomStub(
   const pendingTimeouts = new Map<number, boolean>();
   let timeoutSeq = 0;
   let deferredResponse: (() => void) | null = null;
+  let postMessageCount = 0;
 
   const windowStub = {
     setTimeout(callback: () => void) {
@@ -51,6 +53,7 @@ function installBridgeDomStub(
       }
     },
     postMessage(message: { requestId?: string }) {
+      postMessageCount += 1;
       const response = details.shift();
       if (!response || !listener) {
         return;
@@ -104,6 +107,7 @@ function installBridgeDomStub(
   });
 
   return {
+    getPostMessageCount: () => postMessageCount,
     flushDeferred() {
       if (!deferredResponse) {
         throw new Error("No deferred page-bridge response is pending");
@@ -520,6 +524,86 @@ test("festival bridge does not let a cache hit cancel an in-flight fresh read", 
     assert.equal(cachedSnapshot?.videoId, "BVcached:111");
     assert.equal(freshSnapshot?.videoId, "BVfresh:222");
     assert.equal(controller.getSnapshot()?.videoId, "BVfresh:222");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("festival bridge shares one fresh read between concurrent consumers on the same page visit", async () => {
+  const pageUrl = "https://www.bilibili.com/bangumi/play/ss357";
+  const dom = installBridgeDomStub([
+    {
+      deferred: {
+        epId: 508404,
+        cid: 987654,
+        title: "第46话",
+      },
+    },
+  ]);
+  const controller = createFestivalBridgeController();
+
+  try {
+    const naturalEndRead = controller.refreshSnapshot({
+      pathname: "/bangumi/play/ss357",
+      pageUrl,
+      maxAgeMs: 0,
+    });
+    const followupBroadcastRead = controller.refreshSnapshot({
+      pathname: "/bangumi/play/ss357",
+      pageUrl,
+      maxAgeMs: 0,
+    });
+
+    assert.equal(dom.getPostMessageCount(), 1);
+    dom.flushDeferred();
+    const [naturalEndSnapshot, followupSnapshot] = await Promise.all([
+      naturalEndRead,
+      followupBroadcastRead,
+    ]);
+    assert.deepEqual(followupSnapshot, naturalEndSnapshot);
+    assert.equal(naturalEndSnapshot?.videoId, "ep508404");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("festival bridge keeps different page visits on distinct fresh reads", async () => {
+  const dom = installBridgeDomStub([
+    {
+      deferred: {
+        epId: 508404,
+        cid: 987654,
+        title: "旧页面",
+      },
+    },
+    {
+      epId: 508405,
+      cid: 987655,
+      title: "新页面",
+    },
+  ]);
+  const controller = createFestivalBridgeController();
+
+  try {
+    const oldVisitRead = controller.refreshSnapshot({
+      pathname: "/bangumi/play/ss357",
+      pageUrl: "https://www.bilibili.com/bangumi/play/ss357",
+      maxAgeMs: 0,
+    });
+    const newVisitRead = controller.refreshSnapshot({
+      pathname: "/bangumi/play/ss358",
+      pageUrl: "https://www.bilibili.com/bangumi/play/ss358",
+      maxAgeMs: 0,
+    });
+
+    assert.equal(dom.getPostMessageCount(), 2);
+    const [oldVisitSnapshot, newVisitSnapshot] = await Promise.all([
+      oldVisitRead,
+      newVisitRead,
+    ]);
+    assert.equal(oldVisitSnapshot, null);
+    assert.equal(newVisitSnapshot?.videoId, "ep508405");
+    assert.equal(controller.getSnapshot()?.videoId, "ep508405");
   } finally {
     dom.restore();
   }

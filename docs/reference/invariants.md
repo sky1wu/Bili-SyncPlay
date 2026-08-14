@@ -140,14 +140,16 @@ the page offers at once:
   (#291). The natural-end lifecycle therefore uses the synchronous answer only
   when it is stable; an opaque identity gets one fresh
   `getCurrentPlaybackVideo()` read, shared by the adjacent `pause` and `ended`
-  callbacks. The same rule applies when the terminal-suppression timer decides
-  whether it owes the room a final paused snapshot. The marker remains anchored
-  on the media event, not the later bridge reply, and after every await the
-  playback context, player session, video element, room/share ownership and
-  gesture evidence are rechecked before any marker, hold, suppression or
-  broadcast is changed. **Never extend that async fallback to a stable `ep`
-  identity:** page globals may still name the previous episode there, while the
-  address bar already gives the authoritative current one.
+  callbacks and by any concurrent playback broadcast from that same page visit.
+  A second page-world request must not supersede the read that owns the handoff.
+  The same rule applies when the terminal-suppression timer decides whether it
+  owes the room a final paused snapshot. The marker remains anchored on the
+  media event, not the later bridge reply, and after every await the playback
+  context, player session, video element, room/share ownership and gesture
+  evidence are rechecked before any marker, hold, suppression or broadcast is
+  changed. **Never extend that async fallback to a stable `ep` identity:** page
+  globals may still name the previous episode there, while the address bar
+  already gives the authoritative current one.
 - **A snapshot naming another episode is "not resolved yet", not "resolved".**
   Answering `null` is what makes the eight-attempt retry in
   `resolveCurrentSharePayload` real — its exit condition is a non-null snapshot,
