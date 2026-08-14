@@ -70,6 +70,12 @@ export interface SyncController {
     eventSource?: LocalPlaybackEventSource,
     naturalEnd?: boolean,
   ): Promise<void>;
+  broadcastConfirmedPlayback(
+    video: HTMLVideoElement,
+    currentVideo: SharedVideo,
+    eventSource?: LocalPlaybackEventSource,
+    naturalEnd?: boolean,
+  ): Promise<void>;
   applyRoomState(
     state: RoomState,
     shareToast?: SharedVideoToastPayload | null,
@@ -889,10 +895,11 @@ export function createSyncController(args: {
     );
   }
 
-  async function broadcastPlayback(
+  async function broadcastPlaybackWithIdentity(
     video: HTMLVideoElement,
     eventSource: LocalPlaybackEventSource = "manual",
     naturalEnd?: boolean,
+    confirmedCurrentVideo?: SharedVideo,
   ): Promise<void> {
     const playbackContextGeneration =
       args.runtimeState.playbackContextGeneration;
@@ -949,7 +956,8 @@ export function createSyncController(args: {
       }
     }
 
-    const currentVideo = await args.getCurrentPlaybackVideo();
+    const currentVideo =
+      confirmedCurrentVideo ?? (await args.getCurrentPlaybackVideo());
     if (
       playbackContextGeneration !==
         args.runtimeState.playbackContextGeneration ||
@@ -1083,7 +1091,11 @@ export function createSyncController(args: {
     // bangumi /ep and /ss route transitions cannot block broadcasts forever.
     const postNavigationAnchor =
       args.runtimeState.postNavigationAnchorSharedUrl;
-    if (postNavigationAnchor) {
+    // This gate protects broadcasts whose identity was read from mutable page
+    // state after navigation. An event-owned identity carried in by the caller
+    // is already confirmed for that event, so the anchor neither applies to it
+    // nor gets consumed by it.
+    if (postNavigationAnchor && confirmedCurrentVideo === undefined) {
       const anchorAge =
         args.runtimeState.postNavigationAnchorSetAt > 0
           ? now - args.runtimeState.postNavigationAnchorSetAt
@@ -1696,6 +1708,28 @@ export function createSyncController(args: {
     }
   }
 
+  function broadcastPlayback(
+    video: HTMLVideoElement,
+    eventSource?: LocalPlaybackEventSource,
+    naturalEnd?: boolean,
+  ): Promise<void> {
+    return broadcastPlaybackWithIdentity(video, eventSource, naturalEnd);
+  }
+
+  function broadcastConfirmedPlayback(
+    video: HTMLVideoElement,
+    currentVideo: SharedVideo,
+    eventSource?: LocalPlaybackEventSource,
+    naturalEnd?: boolean,
+  ): Promise<void> {
+    return broadcastPlaybackWithIdentity(
+      video,
+      eventSource,
+      naturalEnd,
+      currentVideo,
+    );
+  }
+
   const roomStateApplyController = createRoomStateApplyController({
     runtimeState: args.runtimeState,
     lastAppliedVersionByActor: args.lastAppliedVersionByActor,
@@ -1774,6 +1808,7 @@ export function createSyncController(args: {
     getActiveCorrectionBaseRate: softApply.getActiveCorrectionBaseRate,
     applyPendingPlaybackApplication,
     broadcastPlayback,
+    broadcastConfirmedPlayback,
     applyRoomState: recordRoomConfirmedBroadcast,
     hydrateRoomState: roomStateApplyController.hydrateRoomState,
     scheduleHydrationRetry: roomStateApplyController.scheduleHydrationRetry,

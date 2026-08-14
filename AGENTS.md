@@ -122,10 +122,12 @@ before changing the code it describes.
   the whole equivalence class in one pass.** A regression on one polarity proves
   nothing about the other — every bangumi test used a `ss` page, which is why
   this shipped. A synchronous media event does not make identity synchronous:
-  natural-end handling and its terminal flush use a fresh page-bridge read only
-  for unstable `ss` / festival identities, share the adjacent `pause` / `ended`
-  read with concurrent playback broadcasts from the same page visit, keep the
-  event-time anchor, and revalidate the structural playback context after
+  natural-end handling uses a fresh page-bridge read only for unstable `ss` /
+  festival identities, shares the adjacent `pause` / `ended` read with
+  concurrent playback broadcasts from the same page visit, then carries that
+  confirmed identity through the terminal flush without reading mutable page
+  state again or applying a post-navigation mutable-identity gate to it. Keep the
+  event-time anchor and revalidate the structural playback context after
   awaiting. A later gesture is classification evidence, not a new lifecycle;
   arming suppression at the bridge reply would hide that evidence. A stable `ep`
   identity stays address-bar-authoritative (#291).

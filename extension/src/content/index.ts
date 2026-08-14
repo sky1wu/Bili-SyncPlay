@@ -170,6 +170,13 @@ const playbackBindingController = createPlaybackBindingController({
   getLastBroadcastAt: () => lastBroadcastAt,
   broadcastPlayback: (video, eventSource, naturalEnd) =>
     syncController.broadcastPlayback(video, eventSource, naturalEnd),
+  broadcastConfirmedPlayback: (video, currentVideo, eventSource, naturalEnd) =>
+    syncController.broadcastConfirmedPlayback(
+      video,
+      currentVideo,
+      eventSource,
+      naturalEnd,
+    ),
   cancelActiveSoftApply: (video, reason) =>
     syncController.cancelActiveSoftApply(video, reason),
   maintainActiveSoftApply: (video) =>

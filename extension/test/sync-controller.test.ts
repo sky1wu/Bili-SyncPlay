@@ -262,6 +262,84 @@ test("sync controller broadcasts an authoritative bangumi episode over a season 
   );
 });
 
+test("sync controller does not reacquire identity for a confirmed natural end", async () => {
+  const harness = createControllerHarness();
+  const seasonFallback = {
+    videoId: "ss357",
+    url: "https://www.bilibili.com/bangumi/play/ss357",
+    title: "Season",
+  };
+  const confirmedEpisode = {
+    videoId: "ep508404",
+    url: "https://www.bilibili.com/bangumi/play/ep508404",
+    title: "Episode 46",
+  };
+  const video = createVideo({ paused: true, currentTime: 120 });
+  let currentPlaybackReads = 0;
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM42";
+  harness.runtimeState.activeSharedUrl = confirmedEpisode.url;
+  harness.runtimeState.localMemberId = "member-1";
+  harness.runtimeState.activeSharedByMemberId = "member-1";
+  harness.setSharedVideo(seasonFallback);
+  harness.setVideoElement(video);
+  harness.setCurrentPlaybackVideoOverride(async () => {
+    currentPlaybackReads += 1;
+    return null;
+  });
+
+  await harness.controller.broadcastConfirmedPlayback(
+    video,
+    confirmedEpisode,
+    "pause",
+    true,
+  );
+
+  assert.equal(currentPlaybackReads, 0);
+  assert.equal(harness.runtimeMessages.length, 1);
+  const payload = (harness.runtimeMessages[0] as { payload: PlaybackState })
+    .payload;
+  assert.equal(payload.url, confirmedEpisode.url);
+  assert.equal(payload.playState, "paused");
+  assert.equal(payload.naturalEnd, true);
+});
+
+test("sync controller does not apply a mutable navigation identity gate to a confirmed natural end", async () => {
+  const harness = createControllerHarness();
+  const confirmedEpisode = {
+    videoId: "ep508404",
+    url: "https://www.bilibili.com/bangumi/play/ep508404",
+    title: "Episode 46",
+  };
+  const video = createVideo({ paused: true, currentTime: 120 });
+
+  harness.runtimeState.hydrationReady = true;
+  harness.runtimeState.pendingRoomStateHydration = false;
+  harness.runtimeState.activeRoomCode = "ROOM42";
+  harness.runtimeState.activeSharedUrl = confirmedEpisode.url;
+  harness.runtimeState.localMemberId = "member-1";
+  harness.runtimeState.activeSharedByMemberId = "member-1";
+  harness.runtimeState.postNavigationAnchorSharedUrl = confirmedEpisode.url;
+  harness.runtimeState.postNavigationAnchorSetAt = 9_500;
+  harness.setNow(10_000);
+  harness.setVideoElement(video);
+
+  await harness.controller.broadcastConfirmedPlayback(
+    video,
+    confirmedEpisode,
+    "pause",
+    true,
+  );
+
+  assert.equal(harness.runtimeMessages.length, 1);
+  assert.equal(
+    harness.runtimeState.postNavigationAnchorSharedUrl,
+    confirmedEpisode.url,
+  );
+});
+
 test("sync controller keeps a newer local version when acknowledgements arrive out of order", async () => {
   const harness = createControllerHarness();
   const sharedVideo = {

@@ -142,13 +142,15 @@ the page offers at once:
   `getCurrentPlaybackVideo()` read, shared by the adjacent `pause` and `ended`
   callbacks and by any concurrent playback broadcast from that same page visit.
   A second page-world request must not supersede the read that owns the handoff.
-  The same rule applies when the terminal-suppression timer decides whether it
-  owes the room a final paused snapshot. The marker remains anchored on the
-  media event, not the later bridge reply, as does the sharer's suppression
-  arming time. After every await the playback context, player session, video
-  element and room/share ownership are rechecked before any marker, hold,
-  suppression or broadcast is changed. A later gesture is classification
-  evidence for replay/navigation, **not** a new structural lifecycle: dropping
+  Once confirmed, that event-owned identity is carried through the terminal-
+  suppression timer and its final paused broadcast; the timer must not reacquire
+  mutable page state or pass the confirmed event through a post-navigation
+  mutable-identity gate and let either erase an already-proven debt. The marker
+  remains anchored on the media event, not the later bridge reply, as does the
+  sharer's suppression arming time. After every await the playback context,
+  player session, video element and room/share ownership are rechecked before any
+  marker, hold, suppression or broadcast is changed. A later gesture is
+  classification evidence for replay/navigation, **not** a new structural lifecycle: dropping
   the terminal result because that evidence changed loses the only paused state,
   while arming at reply time makes the post-end gesture look older than the
   suppression and hides it. **Never extend that async fallback to a stable `ep`

@@ -36,13 +36,25 @@ type PlaybackBindingControllerArgs = Parameters<
  * provide the distinct async page-bridge result it needs to model.
  */
 function createPlaybackBindingController(
-  args: Omit<PlaybackBindingControllerArgs, "getCurrentPlaybackVideo"> &
-    Partial<Pick<PlaybackBindingControllerArgs, "getCurrentPlaybackVideo">>,
+  args: Omit<
+    PlaybackBindingControllerArgs,
+    "getCurrentPlaybackVideo" | "broadcastConfirmedPlayback"
+  > &
+    Partial<
+      Pick<
+        PlaybackBindingControllerArgs,
+        "getCurrentPlaybackVideo" | "broadcastConfirmedPlayback"
+      >
+    >,
 ) {
   return createProductionPlaybackBindingController({
     ...args,
     getCurrentPlaybackVideo:
       args.getCurrentPlaybackVideo ?? (async () => args.getSharedVideo()),
+    broadcastConfirmedPlayback:
+      args.broadcastConfirmedPlayback ??
+      ((video, _currentVideo, eventSource, naturalEnd) =>
+        args.broadcastPlayback(video, eventSource, naturalEnd)),
   });
 }
 
@@ -3567,7 +3579,6 @@ test("playback binding controller records a sharer natural end from the async ep
   runtimeState.intendedPlayState = "playing";
   let now = 5_000;
   let currentPlaybackReads = 0;
-  let resolveFirstTerminalFlush!: (video: SharedVideo | null) => void;
   const broadcasts: string[] = [];
   const scheduled: Array<{ cb: () => void; ms: number }> = [];
   const originalSetTimeout = globalThis.window.setTimeout;
@@ -3594,11 +3605,6 @@ test("playback binding controller records a sharer natural end from the async ep
     // A fresh page-bridge read resolves the actual episode in the player.
     getCurrentPlaybackVideo: () => {
       currentPlaybackReads += 1;
-      if (currentPlaybackReads === 2) {
-        return new Promise((resolve) => {
-          resolveFirstTerminalFlush = resolve;
-        });
-      }
       return Promise.resolve({
         videoId: "ep249469",
         url: sharedEpisodeUrl,
@@ -3641,23 +3647,17 @@ test("playback binding controller records a sharer natural end from the async ep
 
     const terminalFlush = scheduled.find((entry) => entry.ms === 3_000);
     assert.ok(terminalFlush);
-    now = 8_000;
-    terminalFlush.cb();
 
     // A second natural end on the same shared URL re-arms suppression while the
-    // first terminal bridge read is unresolved. The old read owns the first
-    // `armedAt`, not merely the URL, so it must not clear the newer marker.
+    // first timer is still queued. The old timer owns the first `armedAt`, not
+    // merely the URL, so it must not clear the newer marker.
     now = 8_100;
     dom.listeners.get("ended")?.(new Event("ended"));
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(currentPlaybackReads, 3);
+    assert.equal(currentPlaybackReads, 2);
     assert.equal(runtimeState.sharerEndedSuppressionArmedAt, 8_100);
 
-    resolveFirstTerminalFlush({
-      videoId: "ep249469",
-      url: sharedEpisodeUrl,
-      title: "Shared Episode",
-    });
+    terminalFlush.cb();
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(broadcasts, []);
     assert.equal(runtimeState.sharerEndedSuppressionUrl, sharedEpisodeUrl);
@@ -3671,7 +3671,7 @@ test("playback binding controller records a sharer natural end from the async ep
     latestTerminalFlush.cb();
     await new Promise((resolve) => setImmediate(resolve));
 
-    assert.equal(currentPlaybackReads, 4);
+    assert.equal(currentPlaybackReads, 2);
     assert.deepEqual(broadcasts, ["pause:natural-end"]);
     assert.equal(runtimeState.sharerEndedSuppressionUrl, null);
   } finally {
@@ -3948,7 +3948,7 @@ test("playback binding controller settles an async natural end after only gestur
   }
 });
 
-test("playback binding controller flushes an async terminal end after only gesture evidence changes", async () => {
+test("playback binding controller carries the confirmed identity through an async terminal flush", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();
   const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
@@ -3959,7 +3959,6 @@ test("playback binding controller flushes an async terminal end after only gestu
   runtimeState.intendedPlayState = "playing";
   let now = 5_000;
   let currentPlaybackReads = 0;
-  let resolveTerminalPlayback!: (video: SharedVideo | null) => void;
   const broadcasts: string[] = [];
   const scheduled: Array<{ cb: () => void; ms: number }> = [];
   const originalSetTimeout = globalThis.window.setTimeout;
@@ -3983,16 +3982,15 @@ test("playback binding controller flushes an async terminal end after only gestu
     }),
     getCurrentPlaybackVideo: () => {
       currentPlaybackReads += 1;
-      if (currentPlaybackReads === 2) {
-        return new Promise((resolve) => {
-          resolveTerminalPlayback = resolve;
-        });
-      }
-      return Promise.resolve({
-        videoId: "ep249469",
-        url: sharedEpisodeUrl,
-        title: "Shared Episode",
-      });
+      return Promise.resolve(
+        currentPlaybackReads === 1
+          ? {
+              videoId: "ep249469",
+              url: sharedEpisodeUrl,
+              title: "Shared Episode",
+            }
+          : null,
+      );
     },
     hasRecentRemoteStopIntent: () => false,
     normalizeUrl: (url) => url ?? null,
@@ -4022,17 +4020,9 @@ test("playback binding controller flushes an async terminal end after only gestu
     assert.ok(terminalFlush);
     now = 8_000;
     terminalFlush.cb();
-    await Promise.resolve();
-
-    runtimeState.lastUserGestureAt = 8_050;
-    now = 8_050;
-    resolveTerminalPlayback({
-      videoId: "ep249469",
-      url: sharedEpisodeUrl,
-      title: "Shared Episode",
-    });
     await new Promise((resolve) => setImmediate(resolve));
 
+    assert.equal(currentPlaybackReads, 1);
     assert.deepEqual(broadcasts, ["pause:natural-end"]);
     assert.equal(runtimeState.sharerEndedSuppressionUrl, null);
   } finally {

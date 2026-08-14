@@ -68,6 +68,13 @@ export function createPlaybackBindingController(args: {
     eventSource?: LocalPlaybackEventSource,
     naturalEnd?: boolean,
   ) => Promise<void>;
+  /** Broadcasts an event with the identity already confirmed for that event. */
+  broadcastConfirmedPlayback: (
+    video: HTMLVideoElement,
+    currentVideo: SharedVideo,
+    eventSource?: LocalPlaybackEventSource,
+    naturalEnd?: boolean,
+  ) => Promise<void>;
   cancelActiveSoftApply: (
     video: HTMLVideoElement | null,
     reason: string,
@@ -652,6 +659,7 @@ export function createPlaybackBindingController(args: {
    * new joiners — would keep seeing the shared video as still playing.
    */
   function armSharerSharedVideoEndSuppression(
+    video: HTMLVideoElement,
     currentVideo: SharedVideo | null,
     endedAt: number,
   ): boolean {
@@ -660,6 +668,7 @@ export function createPlaybackBindingController(args: {
       !args.runtimeState.activeSharedUrl ||
       !args.runtimeState.localMemberId ||
       !args.runtimeState.activeSharedByMemberId ||
+      !currentVideo ||
       !isLocalSharedSource() ||
       !isCurrentVideoShared(currentVideo)
     ) {
@@ -696,7 +705,7 @@ export function createPlaybackBindingController(args: {
     sharerEndedFlushTimerId = scheduleUpgradeTimer(
       () => {
         sharerEndedFlushTimerId = null;
-        flushSharerEndedSuppressionIfTerminal(armedUrl, armedAt);
+        settleSharerEndedSuppression(armedUrl, armedAt, video, currentVideo);
       },
       Math.max(0, suppressionUntil - monotonicNow()),
     );
@@ -780,7 +789,7 @@ export function createPlaybackBindingController(args: {
     if (holdNonSharerAtSharedVideoEnd(video, currentVideo)) {
       return "handled";
     }
-    return armSharerSharedVideoEndSuppression(currentVideo, endedAt)
+    return armSharerSharedVideoEndSuppression(video, currentVideo, endedAt)
       ? "handled"
       : "unsuppressed";
   }
@@ -859,8 +868,8 @@ export function createPlaybackBindingController(args: {
   function settleSharerEndedSuppression(
     armedUrl: string,
     armedAt: number,
-    video: HTMLVideoElement | null,
-    currentVideo: SharedVideo | null,
+    video: HTMLVideoElement,
+    confirmedVideo: SharedVideo,
   ): void {
     if (
       args.runtimeState.sharerEndedSuppressionUrl !== armedUrl ||
@@ -872,17 +881,16 @@ export function createPlaybackBindingController(args: {
     // parked at `ended`, whereas any autoplay continuation (cross-video or
     // multi-part) clears it. This avoids flushing a spurious pause during a
     // slow handoff where the next episode is mid-load.
-    const stillTerminalOnSameSharedVideo = Boolean(
-      video &&
+    const stillTerminalOnSameSharedVideo =
+      getVideoElement() === video &&
       video.ended &&
       isLocalSharedSource() &&
-      isCurrentVideoShared(currentVideo) &&
-      args.normalizeUrl(currentVideo?.url) === armedUrl,
-    );
+      isCurrentVideoShared(confirmedVideo) &&
+      args.normalizeUrl(confirmedVideo.url) === armedUrl;
     args.runtimeState.sharerEndedSuppressionUrl = null;
     args.runtimeState.sharerEndedSuppressionUntil = 0;
     args.runtimeState.sharerEndedSuppressionArmedAt = 0;
-    if (!video || !stillTerminalOnSameSharedVideo) {
+    if (!stillTerminalOnSameSharedVideo) {
       return;
     }
     args.debugLog(
@@ -892,61 +900,7 @@ export function createPlaybackBindingController(args: {
     // without surfacing a misleading "paused" / "jumped to <end>" toast. This
     // also covers the slow-handoff case where the autoplay-next eventually
     // lands after the flush window (e.g. a recommend-autoplay countdown).
-    void args.broadcastPlayback(video, "pause", true);
-  }
-
-  function flushSharerEndedSuppressionIfTerminal(
-    armedUrl: string,
-    armedAt: number,
-  ): void {
-    if (
-      args.runtimeState.sharerEndedSuppressionUrl !== armedUrl ||
-      args.runtimeState.sharerEndedSuppressionArmedAt !== armedAt
-    ) {
-      return;
-    }
-    const video = getVideoElement();
-    const currentVideo = args.getSharedVideo();
-    if (
-      !video ||
-      !video.ended ||
-      !isLocalSharedSource() ||
-      hasSynchronousNaturalEndIdentity(currentVideo)
-    ) {
-      settleSharerEndedSuppression(armedUrl, armedAt, video, currentVideo);
-      return;
-    }
-
-    // The terminal player is still on an address-bar-opaque identity (notably a
-    // bangumi `ss` route). Confirm the episode before deciding whether the room
-    // needs its terminal paused snapshot. The suppression marker remains owned
-    // by `armedUrl` while this one read is in flight, and every exit below clears
-    // it only if that ownership is still current.
-    const context = captureNaturalEndContext(
-      video,
-      args.runtimeState.sharedVideoNaturalEndAt,
-    );
-    if (!context) {
-      settleSharerEndedSuppression(armedUrl, armedAt, video, currentVideo);
-      return;
-    }
-    void Promise.resolve()
-      .then(() => args.getCurrentPlaybackVideo())
-      .then((resolvedVideo) => {
-        if (!isNaturalEndContextStructurallyCurrent(context)) {
-          settleSharerEndedSuppression(armedUrl, armedAt, null, null);
-          return;
-        }
-        settleSharerEndedSuppression(armedUrl, armedAt, video, resolvedVideo);
-      })
-      .catch((error: unknown) => {
-        args.debugLog(
-          `Could not resolve terminal shared video after natural end: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        settleSharerEndedSuppression(armedUrl, armedAt, null, null);
-      });
+    void args.broadcastConfirmedPlayback(video, confirmedVideo, "pause", true);
   }
 
   function shouldReapplyHoldAfterSharedVideoEnd(
