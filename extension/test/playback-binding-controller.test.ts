@@ -3880,6 +3880,167 @@ test("playback binding controller drops an async natural-end identity from an ol
   }
 });
 
+test("playback binding controller settles an async natural end after only gesture evidence changes", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  let resolveCurrentPlayback!: (video: SharedVideo | null) => void;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "ss357",
+      url: "https://www.bilibili.com/bangumi/play/ss357",
+      title: "Season page",
+    }),
+    getCurrentPlaybackVideo: () =>
+      new Promise((resolve) => {
+        resolveCurrentPlayback = resolve;
+      }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    dom.listeners.get("ended")?.(new Event("ended"));
+    await Promise.resolve();
+
+    // A document gesture is evidence for later navigation/replay
+    // classification, but it does not replace the page, room or media event.
+    runtimeState.lastUserGestureAt = 5_050;
+    resolveCurrentPlayback({
+      videoId: "ep249469",
+      url: sharedEpisodeUrl,
+      title: "Shared Episode",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(runtimeState.sharedVideoNaturalEndUrl, sharedEpisodeUrl);
+    assert.equal(runtimeState.sharedVideoNaturalEndAt, 5_000);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, sharedEpisodeUrl);
+    assert.equal(runtimeState.sharerEndedSuppressionArmedAt, 5_000);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller flushes an async terminal end after only gesture evidence changes", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  runtimeState.intendedPlayState = "playing";
+  let now = 5_000;
+  let currentPlaybackReads = 0;
+  let resolveTerminalPlayback!: (video: SharedVideo | null) => void;
+  const broadcasts: string[] = [];
+  const scheduled: Array<{ cb: () => void; ms: number }> = [];
+  const originalSetTimeout = globalThis.window.setTimeout;
+  globalThis.window.setTimeout = ((cb: () => void, ms?: number) => {
+    scheduled.push({ cb, ms: ms ?? 0 });
+    return scheduled.length;
+  }) as unknown as typeof globalThis.window.setTimeout;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "ss357",
+      url: "https://www.bilibili.com/bangumi/play/ss357",
+      title: "Season page",
+    }),
+    getCurrentPlaybackVideo: () => {
+      currentPlaybackReads += 1;
+      if (currentPlaybackReads === 2) {
+        return new Promise((resolve) => {
+          resolveTerminalPlayback = resolve;
+        });
+      }
+      return Promise.resolve({
+        videoId: "ep249469",
+        url: sharedEpisodeUrl,
+        title: "Shared Episode",
+      });
+    },
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async (_video, eventSource, naturalEnd) => {
+      broadcasts.push(
+        `${eventSource ?? "manual"}:${naturalEnd ? "natural-end" : "none"}`,
+      );
+    },
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => now,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("ended")?.(new Event("ended"));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const terminalFlush = scheduled.find((entry) => entry.ms === 3_000);
+    assert.ok(terminalFlush);
+    now = 8_000;
+    terminalFlush.cb();
+    await Promise.resolve();
+
+    runtimeState.lastUserGestureAt = 8_050;
+    now = 8_050;
+    resolveTerminalPlayback({
+      videoId: "ep249469",
+      url: sharedEpisodeUrl,
+      title: "Shared Episode",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(broadcasts, ["pause:natural-end"]);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, null);
+  } finally {
+    globalThis.window.setTimeout = originalSetTimeout;
+    dom.restore();
+  }
+});
+
 test("playback binding controller flushes the sharer's terminal paused state when no autoplay-next follows", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();

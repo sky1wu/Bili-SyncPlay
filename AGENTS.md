@@ -125,8 +125,10 @@ before changing the code it describes.
   natural-end handling and its terminal flush use a fresh page-bridge read only
   for unstable `ss` / festival identities, share the adjacent `pause` / `ended`
   read with concurrent playback broadcasts from the same page visit, keep the
-  event-time anchor, and revalidate the whole playback context after awaiting; a
-  stable `ep` identity stays address-bar-authoritative (#291).
+  event-time anchor, and revalidate the structural playback context after
+  awaiting. A later gesture is classification evidence, not a new lifecycle;
+  arming suppression at the bridge reply would hide that evidence. A stable `ep`
+  identity stays address-bar-authoritative (#291).
 - **Share ownership** (#235, #242): `sharedVideo.sharedByMemberId` is a durable
   reference to a volatile identity, resolved at build time by
   `roomStateFromSessions` and never rewritten into the room. A full `room:state`

@@ -283,11 +283,12 @@ export interface ContentRuntimeState {
   sharerEndedSuppressionUrl: string | null;
   sharerEndedSuppressionUntil: number;
   /**
-   * Timestamp at which [[sharerEndedSuppressionUrl]] was armed. A user replay
-   * gesture only releases the suppression when it postdates this; an older
-   * gesture (e.g. the sharer dragging to the end or pressing play moments
-   * before the natural end) must not be mistaken for a fresh replay, otherwise
-   * the next-episode seek-to-0 it precedes would leak out as the very
+   * Logical arming timestamp for [[sharerEndedSuppressionUrl]], anchored on the
+   * natural-end media event. An async identity read may assign the marker later,
+   * but moving this timestamp to the bridge reply would hide a replay gesture
+   * made while that read was pending. A gesture releases suppression only when
+   * it postdates this; an older gesture (e.g. dragging to the end or pressing
+   * play just before it) must not leak the next-episode seek-to-0 as the very
    * "jumped to 0:00" noise this suppression exists to hide.
    */
   sharerEndedSuppressionArmedAt: number;

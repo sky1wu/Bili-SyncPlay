@@ -92,7 +92,6 @@ export function createPlaybackBindingController(args: {
     activeSharedUrl: string;
     activeSharedByMemberId: string | null;
     localMemberId: string | null;
-    lastUserGestureAt: number;
     endedAt: number;
   };
   type NaturalEndOutcome = "handled" | "unsuppressed" | "stale";
@@ -654,6 +653,7 @@ export function createPlaybackBindingController(args: {
    */
   function armSharerSharedVideoEndSuppression(
     currentVideo: SharedVideo | null,
+    endedAt: number,
   ): boolean {
     if (
       !args.runtimeState.activeRoomCode ||
@@ -684,16 +684,22 @@ export function createPlaybackBindingController(args: {
     }
 
     const armedUrl = args.runtimeState.activeSharedUrl;
-    const armedAt = monotonicNow();
+    // Keep replay evidence on the same timeline as the media event. A fresh
+    // page-bridge read may return after a user gesture; arming at reply time
+    // would make that post-end gesture look older than the suppression itself.
+    const armedAt = endedAt;
+    const suppressionUntil = armedAt + args.initialRoomStatePauseHoldMs;
     args.runtimeState.sharerEndedSuppressionUrl = armedUrl;
-    args.runtimeState.sharerEndedSuppressionUntil =
-      armedAt + args.initialRoomStatePauseHoldMs;
+    args.runtimeState.sharerEndedSuppressionUntil = suppressionUntil;
     args.runtimeState.sharerEndedSuppressionArmedAt = armedAt;
     clearSharerEndedFlushTimer();
-    sharerEndedFlushTimerId = scheduleUpgradeTimer(() => {
-      sharerEndedFlushTimerId = null;
-      flushSharerEndedSuppressionIfTerminal(armedUrl, armedAt);
-    }, args.initialRoomStatePauseHoldMs);
+    sharerEndedFlushTimerId = scheduleUpgradeTimer(
+      () => {
+        sharerEndedFlushTimerId = null;
+        flushSharerEndedSuppressionIfTerminal(armedUrl, armedAt);
+      },
+      Math.max(0, suppressionUntil - monotonicNow()),
+    );
     args.debugLog(
       `Suppressed sharer end-of-video broadcasts to keep autoplay-next handoff quiet`,
     );
@@ -718,20 +724,23 @@ export function createPlaybackBindingController(args: {
       activeSharedUrl: args.runtimeState.activeSharedUrl,
       activeSharedByMemberId: args.runtimeState.activeSharedByMemberId ?? null,
       localMemberId: args.runtimeState.localMemberId ?? null,
-      lastUserGestureAt: args.runtimeState.lastUserGestureAt,
       endedAt,
     };
   }
 
   /**
    * An async page-world result may only classify the exact media event that
-   * requested it. A navigation, room/share/ownership change, replacement video,
-   * or fresh gesture makes that decision stale. `video.ended` is deliberately
-   * not re-read here: autoplay-next may already have resumed the same element by
-   * the time the bridge replies, and that continuation is the event this marker
-   * exists to classify.
+   * requested it. A navigation, room/share/ownership change or replacement
+   * video makes that decision stale. Gesture evidence is deliberately excluded
+   * from this lifetime: it classifies a later replay/navigation but does not
+   * replace the room, video element or natural-end event. `video.ended` is
+   * likewise not re-read here: autoplay-next may already have resumed the same
+   * element by the time the bridge replies, and that continuation is the event
+   * this marker exists to classify.
    */
-  function isNaturalEndContextCurrent(context: NaturalEndContext): boolean {
+  function isNaturalEndContextStructurallyCurrent(
+    context: NaturalEndContext,
+  ): boolean {
     return (
       !destroyed &&
       context.playbackContextGeneration ===
@@ -743,8 +752,7 @@ export function createPlaybackBindingController(args: {
       args.runtimeState.activeSharedUrl === context.activeSharedUrl &&
       (args.runtimeState.activeSharedByMemberId ?? null) ===
         context.activeSharedByMemberId &&
-      (args.runtimeState.localMemberId ?? null) === context.localMemberId &&
-      args.runtimeState.lastUserGestureAt === context.lastUserGestureAt
+      (args.runtimeState.localMemberId ?? null) === context.localMemberId
     );
   }
 
@@ -759,8 +767,7 @@ export function createPlaybackBindingController(args: {
       left.activeRoomCode === right.activeRoomCode &&
       left.activeSharedUrl === right.activeSharedUrl &&
       left.activeSharedByMemberId === right.activeSharedByMemberId &&
-      left.localMemberId === right.localMemberId &&
-      left.lastUserGestureAt === right.lastUserGestureAt
+      left.localMemberId === right.localMemberId
     );
   }
 
@@ -773,7 +780,7 @@ export function createPlaybackBindingController(args: {
     if (holdNonSharerAtSharedVideoEnd(video, currentVideo)) {
       return "handled";
     }
-    return armSharerSharedVideoEndSuppression(currentVideo)
+    return armSharerSharedVideoEndSuppression(currentVideo, endedAt)
       ? "handled"
       : "unsuppressed";
   }
@@ -791,7 +798,7 @@ export function createPlaybackBindingController(args: {
     const promise = Promise.resolve()
       .then(() => args.getCurrentPlaybackVideo())
       .then((currentVideo): NaturalEndOutcome => {
-        if (!isNaturalEndContextCurrent(context)) {
+        if (!isNaturalEndContextStructurallyCurrent(context)) {
           args.debugLog(
             "Dropped stale natural-end identity after resolving the current video",
           );
@@ -804,7 +811,7 @@ export function createPlaybackBindingController(args: {
         );
       })
       .catch((error: unknown): NaturalEndOutcome => {
-        if (!isNaturalEndContextCurrent(context)) {
+        if (!isNaturalEndContextStructurallyCurrent(context)) {
           return "stale";
         }
         args.debugLog(
@@ -926,7 +933,7 @@ export function createPlaybackBindingController(args: {
     void Promise.resolve()
       .then(() => args.getCurrentPlaybackVideo())
       .then((resolvedVideo) => {
-        if (!isNaturalEndContextCurrent(context)) {
+        if (!isNaturalEndContextStructurallyCurrent(context)) {
           settleSharerEndedSuppression(armedUrl, armedAt, null, null);
           return;
         }
