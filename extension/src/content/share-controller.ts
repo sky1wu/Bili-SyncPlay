@@ -43,6 +43,26 @@ interface CurrentPartIdentity {
   cid: string | null;
 }
 
+interface DiscardedPageSnapshotLogState {
+  videoId: string;
+  pathname: string;
+  pageVisitUrl: string;
+  count: number;
+  firstObservedAt: number;
+  lastReportedCount: number;
+}
+
+interface DetectedPageSnapshotLogState {
+  videoId: string;
+  title: string;
+  url: string;
+  pageVisitUrl: string;
+}
+
+// A count boundary, rather than an assumed recovery event, guarantees a
+// cumulative report even if Bilibili's page globals never catch up (#290).
+const DISCARDED_PAGE_SNAPSHOT_REPORT_EVERY = 10;
+
 export function shouldIncludePlaybackInSharePayload(args: {
   activeRoomCode: string | null;
   activeSharedUrl: string | null;
@@ -280,9 +300,106 @@ export function createShareController(args: {
    * and returning through the same link.
    */
   let snapshotResolvedPageUrl: string | null = null;
+  let discardedPageSnapshotLogState: DiscardedPageSnapshotLogState | null =
+    null;
+  let detectedPageSnapshotLogState: DetectedPageSnapshotLogState | null = null;
+
+  function reportDiscardedPageSnapshotSummary(
+    state: DiscardedPageSnapshotLogState,
+    now: number,
+  ): void {
+    if (state.count <= 1 || state.count === state.lastReportedCount) {
+      return;
+    }
+    args.debugLog(
+      `Discarded page video snapshot ${state.videoId} ${state.count} times over ${Math.max(0, Math.round(now - state.firstObservedAt))}ms; address bar names ${state.pathname}`,
+    );
+    state.lastReportedCount = state.count;
+  }
+
+  function finishDiscardedPageSnapshotRun(now = args.getMonotonicNow()): void {
+    if (!discardedPageSnapshotLogState) {
+      return;
+    }
+    reportDiscardedPageSnapshotSummary(discardedPageSnapshotLogState, now);
+    discardedPageSnapshotLogState = null;
+  }
+
+  function recordDiscardedPageSnapshot(argsForRecord: {
+    videoId: string;
+    pathname: string;
+    pageUrl: string;
+  }): void {
+    const now = args.getMonotonicNow();
+    const pageVisitUrl = normalizePageVisitUrl(argsForRecord.pageUrl);
+    // A stale read re-opens the healthy transition even when the page later
+    // recovers to the same snapshot that was logged before the stale window.
+    detectedPageSnapshotLogState = null;
+    const state = discardedPageSnapshotLogState;
+    if (
+      state?.videoId !== argsForRecord.videoId ||
+      state.pathname !== argsForRecord.pathname ||
+      state.pageVisitUrl !== pageVisitUrl
+    ) {
+      finishDiscardedPageSnapshotRun(now);
+      discardedPageSnapshotLogState = {
+        videoId: argsForRecord.videoId,
+        pathname: argsForRecord.pathname,
+        pageVisitUrl,
+        count: 1,
+        firstObservedAt: now,
+        lastReportedCount: 0,
+      };
+      args.debugLog(
+        `Discarded page video snapshot ${argsForRecord.videoId}; address bar names ${argsForRecord.pathname}`,
+      );
+      return;
+    }
+
+    state.count += 1;
+    if (state.count % DISCARDED_PAGE_SNAPSHOT_REPORT_EVERY === 0) {
+      reportDiscardedPageSnapshotSummary(state, now);
+    }
+  }
+
+  function recordDetectedPageSnapshot(
+    snapshot: SharedVideo,
+    pageUrl: string,
+  ): void {
+    const pageVisitUrl = normalizePageVisitUrl(pageUrl);
+    if (
+      detectedPageSnapshotLogState?.videoId === snapshot.videoId &&
+      detectedPageSnapshotLogState.title === snapshot.title &&
+      detectedPageSnapshotLogState.url === snapshot.url &&
+      detectedPageSnapshotLogState.pageVisitUrl === pageVisitUrl
+    ) {
+      return;
+    }
+    detectedPageSnapshotLogState = {
+      videoId: snapshot.videoId,
+      title: snapshot.title,
+      url: snapshot.url,
+      pageVisitUrl,
+    };
+    args.debugLog(
+      `Page video snapshot detected id=${snapshot.videoId} title=${snapshot.title} url=${snapshot.url}`,
+    );
+  }
 
   function observePageVisit(pageUrl: string): void {
     const pageVisitUrl = normalizePageVisitUrl(pageUrl);
+    if (
+      discardedPageSnapshotLogState !== null &&
+      discardedPageSnapshotLogState.pageVisitUrl !== pageVisitUrl
+    ) {
+      finishDiscardedPageSnapshotRun();
+    }
+    if (
+      detectedPageSnapshotLogState !== null &&
+      detectedPageSnapshotLogState.pageVisitUrl !== pageVisitUrl
+    ) {
+      detectedPageSnapshotLogState = null;
+    }
     if (
       snapshotResolvedPageUrl !== null &&
       snapshotResolvedPageUrl !== pageVisitUrl
@@ -417,18 +534,19 @@ export function createShareController(args: {
         episodeId: readSnapshotEpisodeId(nextSnapshot),
       })
     ) {
-      args.debugLog(
-        `Discarded page video snapshot ${nextSnapshot.videoId}; address bar names ${pathname}`,
-      );
+      recordDiscardedPageSnapshot({
+        videoId: nextSnapshot.videoId,
+        pathname,
+        pageUrl,
+      });
       return null;
     }
+    finishDiscardedPageSnapshotRun();
     // Recorded here as well as in `getSharedVideo`: a refresh is the
     // authoritative resolution, and it can happen while no caller is reading the
     // cached snapshot — the address bar is stale from this moment on either way.
     rememberSnapshotResolved(pageUrl);
-    args.debugLog(
-      `Page video snapshot detected id=${nextSnapshot.videoId} title=${nextSnapshot.title} url=${nextSnapshot.url}`,
-    );
+    recordDetectedPageSnapshot(nextSnapshot, pageUrl);
     return nextSnapshot;
   }
 
