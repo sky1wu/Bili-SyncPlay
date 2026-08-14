@@ -10,6 +10,7 @@ import {
   isAddressBarOpaqueVideoUrl,
   lacksAddressBarEpisodeConfirmation,
   normalizePageVisitUrl,
+  readAddressBarEpisodeId,
 } from "./video-identity";
 
 export interface ShareController {
@@ -459,7 +460,18 @@ export function createShareController(args: {
     video: SharedVideo;
     playback: PlaybackState | null;
   } | null> {
-    if (canUsePageSnapshot(window.location.pathname)) {
+    const pathname = window.location.pathname;
+    // An `epNNN` route already names the playing episode completely. A page
+    // snapshot can only repeat that identity after passing the address-bar
+    // confirmation gate above, while stale Bilibili globals commonly outlive
+    // the whole retry window. Resolve from the authoritative route immediately;
+    // retries remain for festival and season routes, whose address bars do not
+    // name the video in the player (#289).
+    if (readAddressBarEpisodeId(pathname) !== null) {
+      return getCurrentSharePayload();
+    }
+
+    if (canUsePageSnapshot(pathname)) {
       for (let attempt = 1; attempt <= 8; attempt += 1) {
         const refreshed = await refreshFestivalSnapshot(
           window.location.pathname.startsWith("/bangumi/play/") || attempt === 1

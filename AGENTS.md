@@ -111,8 +111,10 @@ before changing the code it describes.
   so there every in-page source is the one that can be stale. Using an identity
   takes confirmation (`lacksAddressBarEpisodeConfirmation`; a `bvid:cid` snapshot
   names no episode, and rejecting it is free because the address bar answers
-  completely); an unconfirmed snapshot means "not resolved yet", which is what
-  makes the retry in `resolveCurrentSharePayload` real. Staleness is a separate
+  completely); an unconfirmed snapshot means "not resolved yet", but explicit
+  sharing on a stable `ep` route uses that authoritative address bar immediately.
+  `resolveCurrentSharePayload` retries only on `ss` / festival routes, where a
+  page snapshot is indispensable. Staleness is a separate
   question answered for **all** page sources at once by `markStalePageRecords` —
   seeded on a contradiction, propagated through records sharing an episode id,
   cid, or title key, with confirmed records immune — and a stale source is
