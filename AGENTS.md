@@ -126,13 +126,18 @@ before changing the code it describes.
   this shipped. A synchronous media event does not make identity synchronous:
   natural-end handling uses a fresh page-bridge read only for unstable `ss` /
   festival identities, shares the adjacent `pause` / `ended` read with
-  concurrent playback broadcasts from the same page visit, then carries that
-  confirmed identity through the terminal flush without reading mutable page
-  state again or applying a post-navigation mutable-identity gate to it. Keep the
-  event-time anchor and revalidate the structural playback context after
-  awaiting. A later gesture is classification evidence, not a new lifecycle;
-  arming suppression at the bridge reply would hide that evidence. A stable `ep`
-  identity stays address-bar-authoritative (#291).
+  concurrent playback broadcasts from the same page visit, starts that read
+  inside the media event task, and makes an `ended` that already sees the next
+  `ep` join it. Only that event read retains its originating unstable visit; an
+  arriving navigation joins it before advancing the page baseline or resetting
+  playback generations, and a newer destination read cannot cancel its delivery
+  or let its old result overwrite the newer cache. Then carry the confirmed
+  identity through the terminal flush without reading mutable page state again
+  or applying a post-navigation mutable-identity gate to it. Keep the event-time
+  anchor and revalidate the structural playback context after awaiting. A later
+  gesture is classification evidence, not a new lifecycle; arming suppression at
+  the bridge reply would hide that evidence. A stable `ep` identity stays
+  address-bar-authoritative (#291).
 - **Share ownership** (#235, #242): `sharedVideo.sharedByMemberId` is a durable
   reference to a volatile identity, resolved at build time by
   `roomStateFromSessions` and never rewritten into the room. A full `room:state`

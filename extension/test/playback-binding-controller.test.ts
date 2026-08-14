@@ -3680,6 +3680,144 @@ test("playback binding controller records a sharer natural end from the async ep
   }
 });
 
+test("playback binding controller starts the season-page natural-end read inside the media event", () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  let currentPlaybackReads = 0;
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => ({
+      videoId: "ss357",
+      url: "https://www.bilibili.com/bangumi/play/ss357",
+      title: "Season page",
+    }),
+    getCurrentPlaybackVideo: () => {
+      currentPlaybackReads += 1;
+      return new Promise(() => {});
+    },
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: () => {},
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+
+    // Bilibili may push the next episode's URL before this event task returns.
+    // The page-bridge request must therefore capture the season visit now, not
+    // from a microtask queued behind the host page's own pause listeners.
+    assert.equal(currentPlaybackReads, 1);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("playback binding controller lets ended join the season-page read after the address bar advances", async () => {
+  const dom = installDomStub();
+  const runtimeState = createContentRuntimeState();
+  const sharedEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249469";
+  const nextEpisodeUrl = "https://www.bilibili.com/bangumi/play/ep249470";
+  runtimeState.activeRoomCode = "ROOM42";
+  runtimeState.activeSharedUrl = sharedEpisodeUrl;
+  runtimeState.localMemberId = "member-1";
+  runtimeState.activeSharedByMemberId = "member-1";
+  let currentIdentity = {
+    videoId: "ss357",
+    url: "https://www.bilibili.com/bangumi/play/ss357",
+    title: "Season page",
+  };
+  let resolveCurrentPlayback!: (video: SharedVideo | null) => void;
+  const debugLogs: string[] = [];
+
+  const controller = createPlaybackBindingController({
+    runtimeState,
+    videoBindIntervalMs: 250,
+    userGestureGraceMs: 1_200,
+    initialRoomStatePauseHoldMs: 3_000,
+    bufferSignalWindowMs: 300,
+    bufferPauseUpgradeMs: 1_500,
+    videoRebindBufferSignalMs: 1_000,
+    getSharedVideo: () => currentIdentity,
+    getCurrentPlaybackVideo: () =>
+      new Promise((resolve) => {
+        resolveCurrentPlayback = resolve;
+      }),
+    hasRecentRemoteStopIntent: () => false,
+    normalizeUrl: (url) => url ?? null,
+    getLastBroadcastAt: () => 0,
+    broadcastPlayback: async () => {},
+    cancelActiveSoftApply: () => {},
+    maintainActiveSoftApply: () => {},
+    applyPendingPlaybackApplication: () => {},
+    activatePauseHold: () => {},
+    debugLog: (message) => {
+      debugLogs.push(message);
+    },
+    getMonotonicNow: () => 5_000,
+  });
+
+  try {
+    controller.attachPlaybackListeners();
+    (dom.video as { ended?: boolean }).ended = true;
+    dom.video.currentTime = 120;
+    dom.video.paused = true;
+    dom.listeners.get("pause")?.(new Event("pause"));
+    await Promise.resolve();
+
+    // The host updates the authoritative `ep` address bar before dispatching
+    // `ended`. That identity describes the next episode, while the in-flight
+    // read still owns the immediately preceding terminal pause.
+    currentIdentity = {
+      videoId: "ep249470",
+      url: nextEpisodeUrl,
+      title: "Next Episode",
+    };
+    dom.listeners.get("ended")?.(new Event("ended"));
+
+    assert.equal(
+      debugLogs.some((message) =>
+        message.startsWith("Sharer end-of-video suppression not armed"),
+      ),
+      false,
+    );
+
+    resolveCurrentPlayback({
+      videoId: "ep249469",
+      url: sharedEpisodeUrl,
+      title: "Shared Episode",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(runtimeState.sharedVideoNaturalEndUrl, sharedEpisodeUrl);
+    assert.equal(runtimeState.sharerEndedSuppressionUrl, sharedEpisodeUrl);
+  } finally {
+    dom.restore();
+  }
+});
+
 test("playback binding controller resolves a festival natural end before normalized routing hides the opaque page", async () => {
   const dom = installDomStub();
   const runtimeState = createContentRuntimeState();

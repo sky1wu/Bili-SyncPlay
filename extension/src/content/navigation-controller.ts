@@ -39,6 +39,12 @@ export function createNavigationController(args: {
   getCurrentPageUrl: () => string;
   normalizeVideoPageUrl: (url: string) => string | null;
   /**
+   * An immutable natural-end identity currently being confirmed. The SPA
+   * navigation it caused must join this before resetting playback generations;
+   * otherwise the reset invalidates the evidence needed to classify itself.
+   */
+  getPendingNaturalEndResolution?: () => Promise<unknown> | null;
+  /**
    * Resolves the in-player video URL for pages whose address bar does not reflect
    * the currently playing video. Festival pages keep a fixed `/festival/<id>`
    * route in the address bar while the player swaps videos, so `getCurrentPageUrl`
@@ -100,6 +106,8 @@ export function createNavigationController(args: {
   const readObservedPageUrl = (): string =>
     args.getResolvedVideoUrl?.() ?? args.getCurrentPageUrl();
   let navigationWatchTimer: number | null = null;
+  let pendingNaturalEndNavigationWait: Promise<unknown> | null = null;
+  let destroyed = false;
   let lastObservedPageUrl = readObservedPageUrl();
   let lastObservedNormalizedPageUrl =
     args.normalizeVideoPageUrl(lastObservedPageUrl);
@@ -170,6 +178,29 @@ export function createNavigationController(args: {
         args.runtimeState.resolvedSharedVideoUrl = nextNormalizedPageUrl;
       }
       lastObservedPageUrl = nextPageUrl;
+      return;
+    }
+
+    const pendingNaturalEndResolution =
+      args.getPendingNaturalEndResolution?.() ?? null;
+    if (pendingNaturalEndResolution) {
+      if (pendingNaturalEndNavigationWait !== pendingNaturalEndResolution) {
+        pendingNaturalEndNavigationWait = pendingNaturalEndResolution;
+        const retryAfterNaturalEnd = () => {
+          if (
+            destroyed ||
+            pendingNaturalEndNavigationWait !== pendingNaturalEndResolution
+          ) {
+            return;
+          }
+          pendingNaturalEndNavigationWait = null;
+          handlePotentialNavigation();
+        };
+        void pendingNaturalEndResolution.then(
+          retryAfterNaturalEnd,
+          retryAfterNaturalEnd,
+        );
+      }
       return;
     }
 
@@ -680,6 +711,8 @@ export function createNavigationController(args: {
       handlePotentialNavigation();
     },
     destroy() {
+      destroyed = true;
+      pendingNaturalEndNavigationWait = null;
       if (navigationWatchTimer !== null) {
         window.clearInterval(navigationWatchTimer);
         navigationWatchTimer = null;

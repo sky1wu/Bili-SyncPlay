@@ -163,7 +163,8 @@ const playbackBindingController = createPlaybackBindingController({
   bufferPauseUpgradeMs: BUFFER_PAUSE_UPGRADE_MS,
   videoRebindBufferSignalMs: VIDEO_REBIND_BUFFER_SIGNAL_MS,
   getSharedVideo: () => shareController.getSharedVideo(),
-  getCurrentPlaybackVideo: () => shareController.getCurrentPlaybackVideo(),
+  getCurrentPlaybackVideo: () =>
+    shareController.getCurrentPlaybackVideo("natural-end"),
   hasRecentRemoteStopIntent: (currentVideoUrl) =>
     syncController.hasRecentRemoteStopIntent(currentVideoUrl),
   normalizeUrl,
@@ -194,6 +195,8 @@ const navigationController = createNavigationController({
   sharedVideoNaturalEndWindowMs: SHARED_VIDEO_NATURAL_END_WINDOW_MS,
   getCurrentPageUrl: () => window.location.href.split("#")[0],
   normalizeVideoPageUrl: (url) => normalizeSharedVideoUrl(url),
+  getPendingNaturalEndResolution: () =>
+    playbackBindingController.getPendingNaturalEndResolution(),
   // Festival pages keep a fixed `/festival/<id>` route in the address bar while
   // the player swaps videos, so the navigation watcher can only observe an
   // autoplay-next through the page-bridge snapshot's resolved share URL.

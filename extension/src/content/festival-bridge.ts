@@ -59,6 +59,12 @@ export interface FestivalBridgeController {
     pathname: string;
     pageUrl: string;
     maxAgeMs: number;
+    /**
+     * Deliver this request's own page-world result even if a newer page visit
+     * starts another read first. The superseded result is never cached; this is
+     * reserved for immutable event-time identity such as a natural end.
+     */
+    allowSupersededResult?: boolean;
   }) => Promise<SharedVideo | null>;
 }
 
@@ -282,7 +288,12 @@ export function createFestivalBridgeController(): FestivalBridgeController {
       }
       return festivalSnapshot.url;
     },
-    refreshSnapshot: async ({ pathname, pageUrl, maxAgeMs }) => {
+    refreshSnapshot: async ({
+      pathname,
+      pageUrl,
+      maxAgeMs,
+      allowSupersededResult = false,
+    }) => {
       const isBangumiPage = pathname.startsWith("/bangumi/play/");
       if (!pathname.startsWith("/festival/") && !isBangumiPage) {
         pageVisitGeneration += 1;
@@ -308,11 +319,16 @@ export function createFestivalBridgeController(): FestivalBridgeController {
       // observational and cannot cancel the read already in flight.
       const freshRead = startOrReuseFreshRead(pathname, pageUrl);
       const nextSnapshot = await freshRead.promise;
-      if (
+      const readWasSuperseded =
         freshRead.pageVisitGeneration !== pageVisitGeneration ||
-        freshRead.requestSequence !== freshRequestSequence
-      ) {
-        return null;
+        freshRead.requestSequence !== freshRequestSequence;
+      if (readWasSuperseded) {
+        // A natural-end read owns the identity of the media event that issued
+        // it, not the mutable page visible when it answers. Let that caller
+        // receive its own response, while keeping the newer visit authoritative
+        // for the shared cache. Ordinary reads retain the established latest-
+        // request-wins behaviour.
+        return allowSupersededResult ? nextSnapshot : null;
       }
       if (!nextSnapshot) {
         // Mirror the fast-path freshness gate above: when a fresh read fails, only

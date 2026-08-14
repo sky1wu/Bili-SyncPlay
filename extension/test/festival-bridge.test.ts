@@ -24,7 +24,7 @@ function installBridgeDomStub(
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;
   const originalChrome = globalThis.chrome;
-  let listener: EventListener | null = null;
+  const listeners = new Set<EventListener>();
   const pendingTimeouts = new Map<number, boolean>();
   let timeoutSeq = 0;
   let deferredResponse: (() => void) | null = null;
@@ -45,29 +45,29 @@ function installBridgeDomStub(
       pendingTimeouts.set(id, false);
     },
     addEventListener(_type: string, nextListener: EventListener) {
-      listener = nextListener;
+      listeners.add(nextListener);
     },
     removeEventListener(_type: string, nextListener: EventListener) {
-      if (listener === nextListener) {
-        listener = null;
-      }
+      listeners.delete(nextListener);
     },
     postMessage(message: { requestId?: string }) {
       postMessageCount += 1;
       const response = details.shift();
-      if (!response || !listener) {
+      if (!response || listeners.size === 0) {
         return;
       }
       const detail = "deferred" in response ? response.deferred : response;
       const dispatch = () => {
-        listener?.({
-          source: windowStub,
-          data: {
-            type: "bili-syncplay:festival-video",
-            requestId: message.requestId,
-            detail,
-          },
-        } as MessageEvent);
+        for (const listener of [...listeners]) {
+          listener({
+            source: windowStub,
+            data: {
+              type: "bili-syncplay:festival-video",
+              requestId: message.requestId,
+              detail,
+            },
+          } as MessageEvent);
+        }
       };
       if ("deferred" in response) {
         deferredResponse = dispatch;
@@ -603,6 +603,51 @@ test("festival bridge keeps different page visits on distinct fresh reads", asyn
     ]);
     assert.equal(oldVisitSnapshot, null);
     assert.equal(newVisitSnapshot?.videoId, "ep508405");
+    assert.equal(controller.getSnapshot()?.videoId, "ep508405");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("festival bridge delivers an event-owned old-visit result without replacing the newer cache", async () => {
+  const dom = installBridgeDomStub([
+    {
+      deferred: {
+        epId: 508404,
+        cid: 987654,
+        title: "自然结束的旧页面",
+      },
+    },
+    {
+      epId: 508405,
+      cid: 987655,
+      title: "已经开始读取的新页面",
+    },
+  ]);
+  const controller = createFestivalBridgeController();
+
+  try {
+    const naturalEndRead = controller.refreshSnapshot({
+      pathname: "/bangumi/play/ss357",
+      pageUrl: "https://www.bilibili.com/bangumi/play/ss357",
+      maxAgeMs: 0,
+      allowSupersededResult: true,
+    });
+    const destinationRead = controller.refreshSnapshot({
+      pathname: "/bangumi/play/ep508405",
+      pageUrl: "https://www.bilibili.com/bangumi/play/ep508405",
+      maxAgeMs: 0,
+    });
+
+    assert.equal(dom.getPostMessageCount(), 2);
+    dom.flushDeferred();
+    const [naturalEndSnapshot, destinationSnapshot] = await Promise.all([
+      naturalEndRead,
+      destinationRead,
+    ]);
+
+    assert.equal(naturalEndSnapshot?.videoId, "ep508404");
+    assert.equal(destinationSnapshot?.videoId, "ep508405");
     assert.equal(controller.getSnapshot()?.videoId, "ep508405");
   } finally {
     dom.restore();

@@ -23,6 +23,12 @@ import {
 export interface PlaybackBindingController {
   start(): void;
   attachPlaybackListeners(): void;
+  /**
+   * The event-owned identity read for a terminal pause/ended pair, if one is in
+   * flight. A navigation signal joins this before it resets the page context so
+   * the immutable media event cannot be invalidated by its own autoplay-next.
+   */
+  getPendingNaturalEndResolution(): Promise<unknown> | null;
   destroy(): void;
 }
 
@@ -804,8 +810,17 @@ export function createPlaybackBindingController(args: {
       return pendingNaturalEndHandling.promise;
     }
 
-    const promise = Promise.resolve()
-      .then(() => args.getCurrentPlaybackVideo())
+    let currentVideoRead: Promise<SharedVideo | null>;
+    try {
+      // Start the page-world read inside the media event's task. Bilibili can
+      // push the next episode's URL before that task returns; deferring this
+      // call to a microtask would capture the destination visit instead.
+      currentVideoRead = Promise.resolve(args.getCurrentPlaybackVideo());
+    } catch (error) {
+      currentVideoRead = Promise.reject(error);
+    }
+
+    const promise = currentVideoRead
       .then((currentVideo): NaturalEndOutcome => {
         if (!isNaturalEndContextStructurallyCurrent(context)) {
           args.debugLog(
@@ -850,6 +865,17 @@ export function createPlaybackBindingController(args: {
     endedAt: number,
   ): NaturalEndOutcome | Promise<NaturalEndOutcome> {
     const context = captureNaturalEndContext(video, endedAt);
+    // The terminal `pause` owns the identity read for this media event. The host
+    // may update the address bar to the next authoritative `ep` route before it
+    // dispatches the adjacent `ended`; that destination identity must not bypass
+    // the read already proving which episode produced the terminal pause.
+    if (
+      context !== null &&
+      pendingNaturalEndHandling &&
+      sameNaturalEndContext(pendingNaturalEndHandling.context, context)
+    ) {
+      return pendingNaturalEndHandling.promise;
+    }
     if (hasSynchronousNaturalEndIdentity(currentVideo) || context === null) {
       return applySharedVideoNaturalEnd(video, currentVideo, endedAt);
     }
@@ -1643,6 +1669,9 @@ export function createPlaybackBindingController(args: {
       }
     },
     attachPlaybackListeners,
+    getPendingNaturalEndResolution() {
+      return pendingNaturalEndHandling?.promise ?? null;
+    },
     destroy() {
       destroyed = true;
       pendingNaturalEndHandling = null;
