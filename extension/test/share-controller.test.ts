@@ -1036,6 +1036,8 @@ function makeEpisodePageController(overrides: {
     pathname?: string;
     pageUrl?: string;
   } | null;
+  getMonotonicNow?: () => number;
+  debugLog?: (message: string) => void;
 }) {
   const runtimeState = createContentRuntimeState();
   runtimeState.activeRoomCode = "V52NR6";
@@ -1044,12 +1046,12 @@ function makeEpisodePageController(overrides: {
     getActiveCorrectionBaseRate: () => null,
     runtimeState,
     bufferPauseUpgradeMs: 1_500,
-    getMonotonicNow: () => 10_000,
+    getMonotonicNow: overrides.getMonotonicNow ?? (() => 10_000),
     festivalSnapshotTtlMs: 1_200,
     nextSeq: () => 414,
     getFestivalSnapshot: overrides.getFestivalSnapshot ?? (() => null),
     refreshFestivalBridge: overrides.refreshFestivalBridge,
-    debugLog: () => undefined,
+    debugLog: overrides.debugLog ?? (() => undefined),
   });
 }
 
@@ -1306,6 +1308,241 @@ test("bangumi ep page refuses a snapshot that names no episode at all", async ()
       1,
       "explicit sharing retried an already-refused snapshot",
     );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("bangumi ep page coalesces repeated unconfirmed snapshot diagnostics", async () => {
+  const dom = installEpisodePageDomStub({
+    currentPartTitle: "44 连影",
+    currentPartEpId: "ep396138",
+  });
+
+  let now = 1_000;
+  let snapshotVideoId = "ep396138";
+  const debugLogs: string[] = [];
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => ({
+      videoId: snapshotVideoId,
+      url: `https://www.bilibili.com/bangumi/play/${snapshotVideoId}`,
+      title: snapshotVideoId === "ep396139" ? "45 某话" : "44 连影",
+    }),
+    getMonotonicNow: () => now,
+    debugLog: (message) => {
+      debugLogs.push(message);
+    },
+  });
+
+  try {
+    for (let read = 1; read <= 25; read += 1) {
+      await controller.refreshFestivalSnapshot(0);
+      now += 250;
+    }
+
+    assert.deepEqual(debugLogs, [
+      "Discarded page video snapshot ep396138; address bar names /bangumi/play/ep396139",
+      "Discarded page video snapshot ep396138 10 times over 2250ms; address bar names /bangumi/play/ep396139",
+      "Discarded page video snapshot ep396138 20 times over 4750ms; address bar names /bangumi/play/ep396139",
+    ]);
+
+    snapshotVideoId = "ep396139";
+    assert.equal(
+      (await controller.refreshFestivalSnapshot(0))?.videoId,
+      "ep396139",
+    );
+    assert.deepEqual(debugLogs.slice(3), [
+      "Discarded page video snapshot ep396138 25 times over 6250ms; address bar names /bangumi/play/ep396139",
+      "Page video snapshot detected id=ep396139 title=45 某话 url=https://www.bilibili.com/bangumi/play/ep396139",
+    ]);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("bangumi ep page logs a confirmed snapshot once and reopens it after a stale window", async () => {
+  const dom = installEpisodePageDomStub({
+    currentPartTitle: "45 某话",
+    currentPartEpId: "ep396139",
+  });
+
+  let now = 1_000;
+  let snapshotVideoId = "ep396139";
+  const debugLogs: string[] = [];
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => ({
+      videoId: snapshotVideoId,
+      url: `https://www.bilibili.com/bangumi/play/${snapshotVideoId}`,
+      title: snapshotVideoId === "ep396139" ? "45 某话" : "44 连影",
+    }),
+    getMonotonicNow: () => now,
+    debugLog: (message) => {
+      debugLogs.push(message);
+    },
+  });
+
+  try {
+    await controller.refreshFestivalSnapshot(0);
+    now = 1_250;
+    await controller.refreshFestivalSnapshot(0);
+    now = 1_500;
+    await controller.refreshFestivalSnapshot(0);
+
+    snapshotVideoId = "ep396138";
+    now = 1_750;
+    await controller.refreshFestivalSnapshot(0);
+    now = 2_000;
+    await controller.refreshFestivalSnapshot(0);
+
+    snapshotVideoId = "ep396139";
+    now = 2_250;
+    await controller.refreshFestivalSnapshot(0);
+
+    assert.deepEqual(debugLogs, [
+      "Page video snapshot detected id=ep396139 title=45 某话 url=https://www.bilibili.com/bangumi/play/ep396139",
+      "Discarded page video snapshot ep396138; address bar names /bangumi/play/ep396139",
+      "Discarded page video snapshot ep396138 2 times over 500ms; address bar names /bangumi/play/ep396139",
+      "Page video snapshot detected id=ep396139 title=45 某话 url=https://www.bilibili.com/bangumi/play/ep396139",
+    ]);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("bangumi ep page starts a fresh diagnostic after the stale snapshot identity changes", async () => {
+  const dom = installEpisodePageDomStub({
+    currentPartTitle: "44 连影",
+    currentPartEpId: "ep396138",
+  });
+
+  let now = 1_000;
+  let snapshotVideoId = "ep396138";
+  const debugLogs: string[] = [];
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => ({
+      videoId: snapshotVideoId,
+      url: `https://www.bilibili.com/bangumi/play/${snapshotVideoId}`,
+      title: "Stale episode",
+    }),
+    getMonotonicNow: () => now,
+    debugLog: (message) => {
+      debugLogs.push(message);
+    },
+  });
+
+  try {
+    await controller.refreshFestivalSnapshot(0);
+    now = 1_250;
+    await controller.refreshFestivalSnapshot(0);
+    now = 1_500;
+    snapshotVideoId = "ep396137";
+    await controller.refreshFestivalSnapshot(0);
+
+    assert.deepEqual(debugLogs, [
+      "Discarded page video snapshot ep396138; address bar names /bangumi/play/ep396139",
+      "Discarded page video snapshot ep396138 2 times over 500ms; address bar names /bangumi/play/ep396139",
+      "Discarded page video snapshot ep396137; address bar names /bangumi/play/ep396139",
+    ]);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("bangumi ep page keeps an unconfirmed diagnostic open across empty bridge reads", async () => {
+  const dom = installEpisodePageDomStub({
+    currentPartTitle: "44 连影",
+    currentPartEpId: "ep396138",
+  });
+
+  let now = 1_000;
+  let bridgeResult: "stale" | "empty" | "current" = "stale";
+  const debugLogs: string[] = [];
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => {
+      if (bridgeResult === "empty") {
+        return null;
+      }
+      const videoId = bridgeResult === "current" ? "ep396139" : "ep396138";
+      return {
+        videoId,
+        url: `https://www.bilibili.com/bangumi/play/${videoId}`,
+        title: bridgeResult === "current" ? "45 某话" : "44 连影",
+      };
+    },
+    getMonotonicNow: () => now,
+    debugLog: (message) => {
+      debugLogs.push(message);
+    },
+  });
+
+  try {
+    await controller.refreshFestivalSnapshot(0);
+    now = 1_250;
+    bridgeResult = "empty";
+    await controller.refreshFestivalSnapshot(0);
+    now = 1_500;
+    bridgeResult = "stale";
+    await controller.refreshFestivalSnapshot(0);
+    now = 1_750;
+    bridgeResult = "current";
+    await controller.refreshFestivalSnapshot(0);
+
+    assert.deepEqual(debugLogs, [
+      "Discarded page video snapshot ep396138; address bar names /bangumi/play/ep396139",
+      "Discarded page video snapshot ep396138 2 times over 750ms; address bar names /bangumi/play/ep396139",
+      "Page video snapshot detected id=ep396139 title=45 某话 url=https://www.bilibili.com/bangumi/play/ep396139",
+    ]);
+  } finally {
+    dom.restore();
+  }
+});
+
+test("bangumi ep page starts a fresh diagnostic after leaving and returning to the same visit", async () => {
+  const dom = installEpisodePageDomStub({
+    currentPartTitle: "44 连影",
+    currentPartEpId: "ep396138",
+  });
+
+  let now = 1_000;
+  const debugLogs: string[] = [];
+  const controller = makeEpisodePageController({
+    refreshFestivalBridge: async () => ({
+      videoId: "ep396138",
+      url: "https://www.bilibili.com/bangumi/play/ep396138",
+      title: "44 连影",
+    }),
+    getMonotonicNow: () => now,
+    debugLog: (message) => {
+      debugLogs.push(message);
+    },
+  });
+
+  try {
+    await controller.refreshFestivalSnapshot(0);
+    now = 1_250;
+    await controller.refreshFestivalSnapshot(0);
+
+    now = 1_500;
+    const awayUrl = "https://www.bilibili.com/video/BVaway";
+    controller.observePageVisit(awayUrl);
+    Object.assign(window.location, {
+      href: awayUrl,
+      pathname: "/video/BVaway",
+    });
+    controller.observePageVisit(EP_PAGE_HREF);
+    Object.assign(window.location, {
+      href: EP_PAGE_HREF,
+      pathname: "/bangumi/play/ep396139",
+    });
+
+    now = 1_750;
+    await controller.refreshFestivalSnapshot(0);
+
+    assert.deepEqual(debugLogs, [
+      "Discarded page video snapshot ep396138; address bar names /bangumi/play/ep396139",
+      "Discarded page video snapshot ep396138 2 times over 500ms; address bar names /bangumi/play/ep396139",
+      "Discarded page video snapshot ep396138; address bar names /bangumi/play/ep396139",
+    ]);
   } finally {
     dom.restore();
   }
