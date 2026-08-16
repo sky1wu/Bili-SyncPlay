@@ -12,6 +12,9 @@ This directory keeps project documentation that is useful after the first README
 
 - [Remote playback ownership replaces the fixed echo window](./design/remote-echo-ownership.md)
 - [远端播放态归属标记取代固定回声窗](./design/remote-echo-ownership.zh-CN.md)
+- 自动化实机测试：[需求规格](./design/automated-real-browser-testing-requirements.zh-CN.md)、
+  [技术设计](./design/automated-real-browser-testing-design.zh-CN.md)与
+  [实施任务](./design/automated-real-browser-testing-tasks.zh-CN.md)
 
 ## Operations / 运维
 
