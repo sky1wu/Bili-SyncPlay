@@ -117,8 +117,7 @@ If a member later browses to a different non-shared video while still in the roo
 - `https://www.bilibili.com/video/*`
 - `https://www.bilibili.com/bangumi/play/*`
 - `https://www.bilibili.com/festival/*`
-- `https://www.bilibili.com/list/watchlater*` when the page URL carries `bvid`
-- `https://www.bilibili.com/medialist/play/watchlater*` when the page URL carries `bvid`
+- list playback routes when the page URL carries `bvid`: `https://www.bilibili.com/list/watchlater*`, a favourites folder `https://www.bilibili.com/list/ml<mlid>*`, a creator's collection `https://www.bilibili.com/list/<mid>*`, and their `https://www.bilibili.com/medialist/play/*` equivalents
 
 Video variants:
 

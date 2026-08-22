@@ -30,6 +30,13 @@ test("areSharedVideoUrlsEqual compares normalized shared video urls", () => {
   );
   assert.equal(
     areSharedVideoUrlsEqual(
+      "https://www.bilibili.com/list/ml67024054?oid=116993365643772&bvid=BV1px3A6GEmJ",
+      "https://www.bilibili.com/video/BV1px3A6GEmJ",
+    ),
+    true,
+  );
+  assert.equal(
+    areSharedVideoUrlsEqual(
       "https://www.bilibili.com/video/BV1xx411c7mD",
       "https://www.bilibili.com/video/BV2xx411c7mD",
     ),

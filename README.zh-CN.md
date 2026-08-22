@@ -117,8 +117,7 @@ Firefox 把扩展后台视为安全上下文，非 localhost 服务端必须用 
 - `https://www.bilibili.com/video/*`
 - `https://www.bilibili.com/bangumi/play/*`
 - `https://www.bilibili.com/festival/*`
-- `https://www.bilibili.com/list/watchlater*`，且页面 URL 中带有 `bvid`
-- `https://www.bilibili.com/medialist/play/watchlater*`，且页面 URL 中带有 `bvid`
+- 列表播放页，且页面 URL 中带有 `bvid`：稍后再看 `https://www.bilibili.com/list/watchlater*`、收藏夹 `https://www.bilibili.com/list/ml<收藏夹 id>*`、UP 主合集 `https://www.bilibili.com/list/<UP 主 mid>*`，以及它们对应的 `https://www.bilibili.com/medialist/play/*` 形式
 
 视频变体识别：
 

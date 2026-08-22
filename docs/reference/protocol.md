@@ -116,7 +116,7 @@ The developer-facing symptoms for the common codes are listed in the [troublesho
 - `/video/<id>` (multi-part via `?p=`)
 - `/bangumi/play/<id>`
 - `/festival/<id>` (identity from `bvid` + `cid` query parameters)
-- `/list/watchlater` and `/medialist/play/watchlater` (require `bvid` in the query)
+- list playback routes `/list/<segment>` and `/medialist/play/<segment>`, where `<segment>` is `watchlater`, a favourites folder `ml<mlid>`, or a creator's numeric mid (all require `bvid` in the query)
 
 All video-identity comparisons in the extension and server must go through these helpers instead of ad-hoc URL string handling.
 

@@ -18,12 +18,37 @@ export const DEFAULT_SERVER_URL =
     ? __BILI_SYNCPLAY_DEFAULT_SERVER_URL__
     : LOCALHOST_SERVER_URL;
 export const SHARE_TOAST_TTL_MS = 8000;
+/**
+ * The list-playback segments the extension injects into. Match patterns support
+ * only `*`, so the `ml<mlid>` / numeric-mid shape `parseBilibiliVideoRef`
+ * accepts has to be spelled out as prefixes: `ml`, and one entry per leading
+ * digit for a creator collection's numeric mid. A page these prefixes over-match
+ * (`/list/mlfoo`) still normalizes to `null`, so it never matches a shared URL —
+ * but keeping the prefixes narrow is what stops the content script from loading
+ * on unrelated routes under `/list/`.
+ */
+const MEDIA_LIST_SEGMENT_PREFIXES = [
+  "watchlater",
+  "ml",
+  ...Array.from({ length: 10 }, (_, digit) => String(digit)),
+];
+
+const MEDIA_LIST_PATH_PREFIXES = ["list", "medialist/play"];
+
+/**
+ * Must stay in sync with `content_scripts.matches` in `public/manifest.json`;
+ * `manifest-matches.test.ts` asserts the two agree.
+ */
 export const BILIBILI_VIDEO_URL_PATTERNS = [
   "https://www.bilibili.com/video/*",
   "https://www.bilibili.com/bangumi/play/*",
   "https://www.bilibili.com/festival/*",
-  "https://www.bilibili.com/list/watchlater*",
-  "https://www.bilibili.com/medialist/play/watchlater*",
+  ...MEDIA_LIST_PATH_PREFIXES.flatMap((pathPrefix) =>
+    MEDIA_LIST_SEGMENT_PREFIXES.map(
+      (segmentPrefix) =>
+        `https://www.bilibili.com/${pathPrefix}/${segmentPrefix}*`,
+    ),
+  ),
 ];
 
 export interface ConnectionState {

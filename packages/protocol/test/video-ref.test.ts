@@ -65,6 +65,52 @@ test("parses watchlater URLs only through explicit supported paths", () => {
   );
 });
 
+test("parses favourites-folder list playback URLs", () => {
+  // The real URL Bilibili puts in the address bar for "play all" on a
+  // favourites folder: the list id names the folder, `bvid` names the video.
+  assert.deepEqual(
+    parseBilibiliVideoRef(
+      "https://www.bilibili.com/list/ml67024054?spm_id_from=333.1387.0.0&oid=116993365643772&bvid=BV1px3A6GEmJ",
+    ),
+    {
+      videoId: "BV1px3A6GEmJ",
+      normalizedUrl: "https://www.bilibili.com/video/BV1px3A6GEmJ",
+    },
+  );
+  assert.deepEqual(
+    parseBilibiliVideoRef(
+      "https://www.bilibili.com/medialist/play/ml67024054?bvid=BV1px3A6GEmJ&p=2",
+    ),
+    {
+      videoId: "BV1px3A6GEmJ:p2",
+      normalizedUrl: "https://www.bilibili.com/video/BV1px3A6GEmJ?p=2",
+    },
+  );
+});
+
+test("parses creator collection list playback URLs", () => {
+  assert.deepEqual(
+    parseBilibiliVideoRef(
+      "https://www.bilibili.com/list/12345678?sid=4567890&oid=116993365643772&bvid=BV1px3A6GEmJ",
+    ),
+    {
+      videoId: "BV1px3A6GEmJ",
+      normalizedUrl: "https://www.bilibili.com/video/BV1px3A6GEmJ",
+    },
+  );
+});
+
+test("returns null for a list playback URL without bvid", () => {
+  assert.equal(
+    parseBilibiliVideoRef("https://www.bilibili.com/list/ml67024054"),
+    null,
+  );
+  assert.equal(
+    parseBilibiliVideoRef("https://www.bilibili.com/medialist/play/ml67024054"),
+    null,
+  );
+});
+
 test("returns null for invalid or unsupported URLs", () => {
   assert.equal(parseBilibiliVideoRef("not-a-url"), null);
   assert.equal(
@@ -85,6 +131,18 @@ test("returns null for invalid or unsupported URLs", () => {
   assert.equal(
     parseBilibiliVideoRef(
       "https://www.bilibili.com/list/fav?bvid=BV1xx411c7mD",
+    ),
+    null,
+  );
+  assert.equal(
+    parseBilibiliVideoRef(
+      "https://www.bilibili.com/medialist/detail/ml67024054?bvid=BV1xx411c7mD",
+    ),
+    null,
+  );
+  assert.equal(
+    parseBilibiliVideoRef(
+      "https://www.bilibili.com/list/ml67024054/extra?bvid=BV1xx411c7mD",
     ),
     null,
   );

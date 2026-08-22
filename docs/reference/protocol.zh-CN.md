@@ -113,7 +113,7 @@
 - `/video/<id>`（多 P 通过 `?p=` 区分）
 - `/bangumi/play/<id>`
 - `/festival/<id>`（通过 query 中的 `bvid` + `cid` 确定身份）
-- `/list/watchlater` 与 `/medialist/play/watchlater`（要求 query 中带 `bvid`）
+- 列表播放页 `/list/<segment>` 与 `/medialist/play/<segment>`，其中 `<segment>` 为 `watchlater`、收藏夹 `ml<收藏夹 id>` 或 UP 主的纯数字 mid（都要求 query 中带 `bvid`）
 
 扩展与服务端的所有视频身份比较都必须经过这些 helper，不允许各自手写 URL 字符串处理。
 
