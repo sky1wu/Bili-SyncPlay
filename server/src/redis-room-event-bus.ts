@@ -185,6 +185,19 @@ export async function createRedisRoomEventBus(
       }
       try {
         await operation;
+      } catch (error) {
+        // `close` can settle an in-flight command by REJECTION, not just by
+        // flipping `closing`: `quitAllWithin` falls back to `disconnect()`,
+        // which fails everything still on the socket. For an unsubscribe that
+        // is still success — the listener is off, `subscribers` is cleared, and
+        // the connection is gone, so nothing can be delivered — and rejecting
+        // it here would revive exactly the unhandled rejection this intent
+        // exists to prevent. A failure that arrives BEFORE the close is a real
+        // one and stays the caller's answer.
+        if (closing && intent === "unsubscribe") {
+          return;
+        }
+        throw error;
       } finally {
         if (subscriptionOperation === operation) {
           subscriptionOperation = null;
