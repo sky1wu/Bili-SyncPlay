@@ -9,8 +9,18 @@ function isSupportedBilibiliHost(hostname: string): boolean {
   return SUPPORTED_BILIBILI_HOSTS.has(hostname);
 }
 
+/**
+ * List-playback routes (`/list/...`, `/medialist/play/...`) whose address bar
+ * names the currently playing video through `bvid`: the watch-later queue, a
+ * favourites folder (`ml<mlid>`), and a creator's collection/series list, whose
+ * first segment is the uploader's numeric mid. Kept as an explicit shape rather
+ * than "any `/list/<segment>`" so unrelated routes under the same prefix keep
+ * being rejected.
+ */
+const MEDIA_LIST_SEGMENT_PATTERN = /^(?:watchlater|ml\d+|\d+)$/;
+
 function parseSupportedBilibiliPath(pathname: string): {
-  kind: "video" | "bangumi" | "festival" | "watchlater";
+  kind: "video" | "bangumi" | "festival" | "medialist";
   id: string;
 } | null {
   const normalizedPath = pathname.replace(/\/+$/, "");
@@ -28,11 +38,11 @@ function parseSupportedBilibiliPath(pathname: string): {
     return { kind: "festival", id: normalizedPath };
   }
 
-  if (
-    normalizedPath === "/list/watchlater" ||
-    normalizedPath === "/medialist/play/watchlater"
-  ) {
-    return { kind: "watchlater", id: normalizedPath };
+  const mediaListMatch = normalizedPath.match(
+    /^\/(?:list|medialist\/play)\/([^/]+)$/,
+  );
+  if (mediaListMatch && MEDIA_LIST_SEGMENT_PATTERN.test(mediaListMatch[1])) {
+    return { kind: "medialist", id: normalizedPath };
   }
 
   return null;
@@ -59,7 +69,7 @@ export function parseBilibiliVideoRef(
     const bvid = parsed.searchParams.get("bvid");
     if (
       (supportedPath.kind === "festival" ||
-        supportedPath.kind === "watchlater") &&
+        supportedPath.kind === "medialist") &&
       bvid
     ) {
       const cid = parsed.searchParams.get("cid");
@@ -74,7 +84,9 @@ export function parseBilibiliVideoRef(
       };
     }
 
-    if (supportedPath.kind === "watchlater") {
+    if (supportedPath.kind === "medialist") {
+      // A list route without `bvid` names no video: the player picks the entry
+      // itself, so the address bar cannot identify what is playing.
       return null;
     }
 
