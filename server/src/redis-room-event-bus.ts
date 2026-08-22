@@ -141,7 +141,25 @@ export async function createRedisRoomEventBus(
     connectWithin(subscribeClient),
   ]);
 
-  async function reconcileSubscription(): Promise<void> {
+  /**
+   * Drives the connection's subscription to the desired state, then reports
+   * whether the caller's intent was met.
+   *
+   * A close that lands while a command is awaiting its ACK is the opposite
+   * answer for the two intents, which is why this takes one:
+   *
+   * - `subscribe` did NOT happen — `close` clears `subscribed` and refuses to
+   *   let a late SUBSCRIBE set it, so the caller must not be told it has a
+   *   subscription. It throws.
+   * - `unsubscribe` DID happen. `close` removes every listener, clears
+   *   `subscribers`, and resets `subscribed` itself, so "stop delivering to me"
+   *   is already true by the time the loop notices `closing`. Reporting that as
+   *   a failure rejects a promise for work that completed — and consumers'
+   *   fire-and-forget unsubscribes turn it into an unhandled rejection.
+   */
+  async function reconcileSubscription(
+    intent: "subscribe" | "unsubscribe",
+  ): Promise<void> {
     while (!closing) {
       let operation = subscriptionOperation;
       if (!operation) {
@@ -175,6 +193,9 @@ export async function createRedisRoomEventBus(
       // Desired state may have changed while the command was awaiting its ACK.
       // Re-read both sides before allowing the caller to observe completion.
     }
+    if (intent === "unsubscribe") {
+      return;
+    }
     throw new Error("Room event bus closed while changing its subscription.");
   }
 
@@ -187,7 +208,7 @@ export async function createRedisRoomEventBus(
     }
     subscribers.delete(handler);
     subscribeClient.off("message", listener);
-    await reconcileSubscription();
+    await reconcileSubscription("unsubscribe");
   }
 
   return {
@@ -246,7 +267,7 @@ export async function createRedisRoomEventBus(
       subscribers.set(handler, listener);
       subscribeClient.on("message", listener);
       try {
-        await reconcileSubscription();
+        await reconcileSubscription("subscribe");
       } catch (error) {
         if (subscribers.get(handler) === listener) {
           subscribers.delete(handler);

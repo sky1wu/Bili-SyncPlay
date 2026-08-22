@@ -579,3 +579,77 @@ test("redis room event bus records publish metrics on success and failure", asyn
     await bus.close();
   }
 });
+
+test("redis room event bus resolves an unsubscribe whose ACK lands after close", async () => {
+  // The consumer asked to stop receiving messages, and `close` grants exactly
+  // that before the UNSUBSCRIBE is acknowledged. Rejecting here rejects a
+  // promise for work that completed; consumers that unsubscribe without
+  // awaiting then take the process down with an unhandled rejection.
+  let acknowledgeUnsubscribe: () => void = () => undefined;
+  let unsubscribeIssued: () => void = () => undefined;
+  const unsubscribeReachedRedis = new Promise<void>((resolve) => {
+    unsubscribeIssued = resolve;
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => undefined, {
+    unsubscribe: () =>
+      new Promise((resolve) => {
+        acknowledgeUnsubscribe = () => resolve(1);
+        unsubscribeIssued();
+      }),
+  });
+  const publisher = createFakeRedisPubSubClient(async () => undefined);
+  const bus = await createRedisRoomEventBus("redis://unused", {
+    channel: createChannel(),
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  const unsubscribe = await bus.subscribe(() => undefined);
+  const unsubscribed = unsubscribe();
+  await unsubscribeReachedRedis;
+  const closed = bus.close();
+  acknowledgeUnsubscribe();
+
+  await assert.doesNotReject(unsubscribed);
+  await closed;
+  assert.equal(subscriber.messageListenerCount(), 0);
+});
+
+test("redis room event bus rejects a subscribe whose ACK lands after close", async () => {
+  // The opposite intent gets the opposite answer: `close` refuses to let a late
+  // SUBSCRIBE mark the bus subscribed, so the caller must not be handed a
+  // subscription that does not exist.
+  let acknowledgeSubscribe: () => void = () => undefined;
+  let subscribeIssued: () => void = () => undefined;
+  const subscribeReachedRedis = new Promise<void>((resolve) => {
+    subscribeIssued = resolve;
+  });
+  const subscriber = createFakeRedisPubSubClient(async () => undefined, {
+    subscribe: () =>
+      new Promise((resolve) => {
+        acknowledgeSubscribe = () => resolve(1);
+        subscribeIssued();
+      }),
+  });
+  const publisher = createFakeRedisPubSubClient(async () => undefined);
+  const bus = await createRedisRoomEventBus("redis://unused", {
+    channel: createChannel(),
+    redisClients: {
+      publisher: publisher.client,
+      subscriber: subscriber.client,
+    },
+  });
+
+  const subscribed = bus.subscribe(() => undefined);
+  await subscribeReachedRedis;
+  const closed = bus.close();
+  acknowledgeSubscribe();
+
+  await assert.rejects(subscribed, {
+    message: "Room event bus closed while changing its subscription.",
+  });
+  await closed;
+  assert.equal(subscriber.messageListenerCount(), 0);
+});
