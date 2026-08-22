@@ -338,7 +338,7 @@ This command updates:
 - `extension/package.json`
 - `package-lock.json`
 
-The rewritten JSON and manifest files may not match Prettier style, so run `npm run format:check` (and `npm run format` if needed) before committing the version bump.
+The script runs Prettier on every file it rewrites, so the version bump is already formatted — the usual pre-commit sequence still applies, but no extra formatting step is needed.
 
 Build the extension release packages:
 
