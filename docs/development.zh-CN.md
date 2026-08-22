@@ -337,7 +337,7 @@ npm run release:version -- 1.3.0
 - `extension/package.json`
 - `package-lock.json`
 
-脚本重写的 JSON 与 manifest 文件可能不符合 Prettier 风格，提交版本号变更前先执行 `npm run format:check`（必要时 `npm run format`）。
+脚本会对自己重写的每个文件跑 Prettier，版本号变更已经是格式化好的——照常走提交前的检查序列即可，不需要额外补格式化。
 
 构建扩展发布包：
 
