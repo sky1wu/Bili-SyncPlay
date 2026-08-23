@@ -1813,82 +1813,72 @@ test("a room delete decided against one instance leaves its successor alone", as
   }
 });
 
-test("a room delete declines a body that changed between its read and its write", async (t) => {
+test("a room delete survives the changes an admin close itself causes", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
     return;
   }
 
-  // The guard has two halves and only one of them is a JS `if`. The predicate
-  // judges what the read returned; the script compares the bytes again at the
-  // instant it writes. Without the second half the decision and the delete can
-  // be split by a concurrent write, which is what a check-then-act delete by
-  // code could never promise — so the interleaving has to be forced here.
-  const namespace = uniqueNamespace("delrace");
-  const roomKey = `${namespace}:room:DELRAC`;
+  // The guard names the INSTANCE, not the bytes. An admin close disconnects
+  // every member first and their leaves rewrite the record, so a guard that
+  // compared the whole body would decline the action that caused the change —
+  // and the caller would then skip the runtime teardown and the `room_deleted`
+  // broadcast while reporting success (#277 review).
+  const namespace = uniqueNamespace("delchange");
   const roomsKey = `${namespace}:rooms-by-expiry`;
-  const base = await connect();
-  const observer = await connect();
-  let swapped = false;
-  const successorBody = JSON.stringify({
-    code: "DELRAC",
-    joinToken: "join-token-second",
-    createdAt: 2,
-    ownerMemberId: null,
-    ownerDisplayName: null,
-    sharedVideo: null,
-    playback: null,
-    version: 0,
-    lastActiveAt: 2,
-    expiresAt: null,
-  });
-  const store = await createRedisRoomStore(REDIS_URL, {
-    namespace,
-    redisClient: {
-      connect: () => Promise.resolve(),
-      quit: () => base.quit(),
-      disconnect: () => base.disconnect(),
-      async get(key: string) {
-        const value = await base.get(key);
-        if (key === roomKey && !swapped) {
-          swapped = true;
-          // The code changes hands after the read that judged it and before the
-          // write that acts on it. The successor is indexed too, at its own
-          // score: a delete that drops the index entry before deciding leaves a
-          // room no listing, count or sweep can see.
-          await base.set(key, successorBody);
-          await base.zadd(roomsKey, 4_242, "DELRAC");
-        }
-        return value;
-      },
-      scan: (cursor, matchToken, pattern, countToken, count) =>
-        base.scan(cursor, matchToken, pattern, countToken, count),
-      zscan: (key, cursor, countToken, count) =>
-        base.zscan(key, cursor, countToken, count),
-      zscore: (key, member) => base.zscore(key, member),
-      eval: (script, numKeys, ...args) => base.eval(script, numKeys, ...args),
-      zrange: (key, start, stop) => base.zrange(key, start, stop),
-      zrangebyscore: (key, min, max) => base.zrangebyscore(key, min, max),
-      zcard: (key) => base.zcard(key),
-      zcount: (key, min, max) => base.zcount(key, min, max),
-      ping: () => base.ping(),
-    },
-  });
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
 
   try {
-    const first = await store.createRoom({
-      code: "DELRAC",
-      joinToken: "join-token-first0",
+    const target = await store.createRoom({
+      code: "DELCHG",
+      joinToken: "join-token-123456",
       createdAt: 1,
     });
+    const leaveWrite = await store.updateRoom(target.code, target.version, {
+      lastActiveAt: 2_000,
+      expiresAt: 9_000,
+    });
+    assert.equal(leaveWrite.ok, true);
 
-    assert.equal(await store.deleteRoom(first), "superseded");
-    assert.ok(swapped, "the probe must have forced the interleaving");
-    assert.equal(await observer.get(roomKey), successorBody);
-    assert.equal(await observer.zscore(roomsKey, "DELRAC"), "4242");
+    assert.equal(await store.deleteRoom(target), "deleted");
+    assert.equal(await store.getRoom("DELCHG"), null);
+    assert.equal(await redis.zscore(roomsKey, "DELCHG"), null);
   } finally {
-    await observer.del(roomKey, roomsKey);
-    await observer.quit();
+    await redis.del(`${namespace}:room:DELCHG`, roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("a room delete leaves a body it cannot read to the quarantine", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("delunreadable");
+  const roomKey = `${namespace}:room:DELBAD`;
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const target = await store.createRoom({
+      code: "DELBAD",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    await redis.set(roomKey, "{not json");
+
+    // Judging is impossible, so deleting would be a guess made on a request
+    // path. The sweep's quarantine owns this case.
+    assert.equal(await store.deleteRoom(target), "superseded");
+    assert.equal(await store.deleteExpiredRoom("DELBAD", 9_000), "superseded");
+    assert.equal(await redis.get(roomKey), "{not json");
+  } finally {
+    await redis.del(roomKey, roomsKey);
+    await redis.quit();
     await store.close();
   }
 });

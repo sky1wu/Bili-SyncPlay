@@ -898,16 +898,28 @@ do NOT compose, and that is the part that decides which connection gets which:
   would decline the very action that caused the change. `deleteExpiredRoom`
   requires the record to still be expired, judged inside the guarded write —
   an expiry can land on a room other nodes are still using, and no arrangement
-  of check-then-act closes that. Both are read-judge-write, and BOTH halves are
-  load-bearing: the JS predicate judges what the read returned, the script
-  compares the raw bytes again at the instant it writes. A test that only
-  recycles the code between two calls proves the first half and says nothing
-  about the second. The OUTCOME then matters as much as the guard, because
-  runtime teardown and the `room_deleted` broadcast are addressed BY CODE: a
-  caller that runs either after a `superseded` delete acts on whoever holds the
-  code now. `resolveRoom` answers from a fresh read instead, and `closeRoom` /
-  `expireRoom` skip both steps and log `admin_room_close_superseded` /
-  `admin_room_expire_superseded`. Atomic
+  of check-then-act closes that. Each is ONE command that decodes the body and
+  compares ONE field. Not the whole bytes, the way `UPDATE_ROOM_CAS_LUA` does:
+  an update must not be built on a stale body, while a delete must not take a
+  DIFFERENT ROOM, and comparing bytes conflates the two — the leaves of the
+  members an admin close just disconnected rewrite the record, so a byte-exact
+  guard declines the action that caused the change and then skips the runtime
+  teardown and the `room_deleted` broadcast while reporting success. Nor read
+  then write under the bytes read, which has the same defect plus a split
+  between the judgement and the write. Decoding is allowed here for the reason
+  the sweep may do it: nothing is written BACK, and the rule this file lives by
+  is that room JSON is never RE-ENCODED in Lua.
+  The OUTCOME then matters as much as the guard, because runtime teardown and
+  the `room_deleted` broadcast are addressed BY CODE: a caller that runs either
+  after a `superseded` delete acts on whoever holds the code now. `resolveRoom`
+  answers from a fresh read instead, and `closeRoom` / `expireRoom` skip both
+  steps and log `admin_room_close_superseded` / `admin_room_expire_superseded`.
+  A CAPPED delete owes the same teardown as a successful one, and owes it
+  before it can be reported: the command was not cancelled, and one that lands
+  afterwards takes the index entry with it, so no sweep can rediscover the code.
+  `resolveRoom` records the runtime-teardown debt and `closeRoom` / `expireRoom`
+  hand the code to the teardown path before rethrowing — both re-read, so a room
+  that is still there settles as nothing to collect. Atomic
   `evictMemberToken` is different: the admin executor caps only its own wait and
   reports `status=error, confirmation=unconfirmed, code=block_unconfirmed`,
   while the original promise keeps the Redis write and both local-mirror

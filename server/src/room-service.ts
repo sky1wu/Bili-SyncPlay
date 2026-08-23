@@ -24,6 +24,7 @@ import {
   createRoomCode,
   roomStateFromSessions,
   roomStateOf,
+  type RoomDeleteOutcome,
   type RoomReadCaller,
   type RoomStore,
 } from "./room-store.js";
@@ -808,7 +809,19 @@ export function createRoomService(options: {
       return null;
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
-      const outcome = await roomStore.deleteExpiredRoom(code, now());
+      let outcome: RoomDeleteOutcome;
+      try {
+        outcome = await roomStore.deleteExpiredRoom(code, now());
+      } catch (error) {
+        // The cap answered; the command was not cancelled. A delete that lands
+        // afterwards takes the room body AND its index entry, so no later sweep
+        // can rediscover this code and its runtime state would be left with
+        // nobody owing it a teardown (#277 review). The debt is remembered
+        // instead — its drain re-reads, and a room that is still there settles
+        // it as nothing to collect.
+        rememberRuntimeTeardownDebt(code);
+        throw error;
+      }
       if (outcome === "superseded") {
         // The code no longer carries the expired record this read decided
         // against: an update cleared its expiry, or a different room took the

@@ -424,6 +424,31 @@ test("admin action service leaves a recycled room code alone when its close is s
   assert.equal(publishedDeleted, false);
 });
 
+test("admin action service still records the teardown a capped delete owes", async () => {
+  let torndown = false;
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("expireRoom issues no commands");
+    },
+    // The cap answered; the command was not cancelled, so this delete may still
+    // land — taking the index entry with it, after which no sweep can find the
+    // code again.
+    deleteRoom: async () => {
+      throw new Error("Redis room store operation timed out: delete_room.");
+    },
+    deleteRuntimeRoom: () => {
+      torndown = true;
+    },
+  });
+
+  await assert.rejects(
+    () => service.expireRoom(ACTOR, "ROOM01", "cleanup"),
+    /timed out/,
+  );
+  assert.equal(torndown, true);
+});
+
 test("admin action service pins the room it expires before judging it empty", async () => {
   const order: string[] = [];
   const service = createService({

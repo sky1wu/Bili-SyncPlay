@@ -805,6 +805,35 @@ test("the reaper's wait on the migration pass is left unanswered too", async () 
   });
 });
 
+test("a guarded room delete decides and writes in one command", async () => {
+  // Structural, because the property cannot be observed from outside: a delete
+  // that READS the body, judges it, then writes under those bytes can be split
+  // by a concurrent write — and closing that by treating every body change as a
+  // different room declines the admin close whose own members' leaves caused
+  // the change (#277 review). One command is what makes both true at once.
+  for (const [method, call] of Object.entries({
+    deleteRoom: (store: RoomStoreUnderTest) =>
+      ROOM_REQUEST_PATH.deleteRoom!(store),
+    deleteExpiredRoom: (store: RoomStoreUnderTest) =>
+      ROOM_REQUEST_PATH.deleteExpiredRoom!(store),
+  })) {
+    const issued = await withRoomStore(
+      null,
+      async (store, commands) => {
+        const before = commands.issuedCount();
+        await call(store).catch(() => undefined);
+        return commands.issuedCount() - before;
+      },
+      { settleBootstrap: true },
+    );
+    assert.equal(
+      issued,
+      1,
+      `${method} must decide and write in one command; it issued ${issued}`,
+    );
+  }
+});
+
 test("room store admission refuses a command instead of issuing it", async () => {
   // The other half of #277: a cap answers the caller but leaves the command on
   // the connection, so without admission a stalled Redis still accumulates one

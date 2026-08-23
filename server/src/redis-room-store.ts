@@ -319,33 +319,63 @@ return "ok"
 // body is already gone, which would abort the caller's downstream cleanup and
 // leave other nodes serving a room that no longer exists.
 //
-// Guarded by the bytes the caller read, like `UPDATE_ROOM_CAS_LUA` and for the
-// same reason one layer further on: an unconditional `DEL` by code is a write
-// nobody can bound, because a caller that stops waiting cannot stop the command
-// and the room holding that code by then may be a different one entirely — with
-// an owner who was already told their creation succeeded (#277). Comparing the
-// whole body rather than a version is what the CAS taught: a recycled code
-// starts back at version 0.
+// Guarded, because an unconditional `DEL` by code is a write nobody can bound:
+// a caller that stops waiting cannot stop the command, and the room holding
+// that code by then may be a different one entirely — with an owner who was
+// already told their creation succeeded (#277).
+//
+// The guard reads the body and compares ONE field, rather than comparing the
+// whole bytes the way `UPDATE_ROOM_CAS_LUA` does, because these two deletes ask
+// a different question than an update does. An update must not be built on a
+// stale body; a delete must not take a DIFFERENT ROOM. Comparing bytes conflates
+// the two: an admin close disconnects every member first, and their leaves
+// rewrite the record, so a byte-exact guard would decline the very action that
+// caused the change — and then skip the runtime teardown and the `room_deleted`
+// broadcast while reporting success (#277 review).
+//
+// Decoding here is safe for the same reason the sweep may do it: nothing is
+// written BACK. The rule this file lives by is that room JSON is never
+// re-encoded in Lua, because Redis's cjson formats numbers with %.14g and that
+// is how playback positions got mangled.
 //
 // Says which of the three happened rather than a DEL count: concurrent readers
 // of one expired room all reach this script and only the winner may count a
-// reclamation, while a body that no longer matches means the code still has a
-// live room behind it and owes no runtime teardown. ZREM stays unconditional on
-// the two paths where no body remains — the index entry must go even when the
-// body was already collected by whoever got here first.
-const DELETE_ROOM_CAS_LUA = `
+// reclamation, while a body the guard rejects means the code still has a live
+// room behind it and owes no runtime teardown. ZREM stays unconditional on the
+// path where no body remains — the index entry must go even when the body was
+// already collected by whoever got here first.
+const DELETE_ROOM_PREAMBLE_LUA = `
 local raw = redis.call("GET", KEYS[1])
 if not raw then
   redis.call("ZREM", KEYS[2], ARGV[1])
   return "already_deleted"
 end
-if raw ~= ARGV[2] then
+local decoded, room = pcall(cjson.decode, raw)
+if not decoded or type(room) ~= "table" then
   return "superseded"
 end
+`;
+
+const DELETE_ROOM_COMMIT_LUA = `
 redis.call("ZREM", KEYS[2], ARGV[1])
 redis.call("DEL", KEYS[1])
 return "deleted"
 `;
+
+/** ARGV: 1 code, 2 the joinToken naming the instance the caller read. */
+const DELETE_ROOM_INSTANCE_LUA = `${DELETE_ROOM_PREAMBLE_LUA}
+if room["joinToken"] ~= ARGV[2] then
+  return "superseded"
+end
+${DELETE_ROOM_COMMIT_LUA}`;
+
+/** ARGV: 1 code, 2 the instant the expiry is judged against. */
+const DELETE_EXPIRED_ROOM_LUA = `${DELETE_ROOM_PREAMBLE_LUA}
+local expiresAt = room["expiresAt"]
+if type(expiresAt) ~= "number" or expiresAt > tonumber(ARGV[2]) then
+  return "superseded"
+end
+${DELETE_ROOM_COMMIT_LUA}`;
 
 // Candidates come from the score range itself, so rooms that never expire are
 // never even looked at. A candidate whose body disagrees with its score is
@@ -1270,39 +1300,25 @@ export async function createRedisRoomStore(
   /**
    * The one guarded delete both public deletes are made of.
    *
-   * Read, judge, then write under the bytes that were judged. The predicate
-   * runs in JS on purpose: this file never decodes room JSON inside a script,
-   * because Redis's cjson formats numbers with `%.14g` and that is how playback
-   * positions got mangled. The script's own comparison is on raw bytes, so the
-   * decision and the delete cannot be split by a concurrent write — which is
-   * what a check-then-act delete by code could never promise (#277).
+   * One command, so the judgement and the delete cannot be split by a
+   * concurrent write. Reading first and writing under the bytes that were read
+   * is the other way to get that, and it is the wrong one here: every body
+   * change would then have to count as "a different room", which is exactly
+   * what the members' own leaves produce during an admin close.
    */
   async function deleteRoomWhen(
     code: string,
-    accept: (current: PersistedRoom) => boolean,
+    script: string,
+    guardArgument: string,
   ): Promise<RoomDeleteOutcome> {
-    const key = roomKey(code);
-    const rawRoom = await boundCommand("delete_room", () => redis.get(key));
-    if (rawRoom !== null) {
-      const currentRoom = parseRoom(rawRoom, code);
-      // An unreadable body is never deleted here: it cannot be judged, and the
-      // sweep's quarantine owns that case rather than a guess made on a
-      // request path.
-      if (!currentRoom || !accept(currentRoom)) {
-        return "superseded";
-      }
-    }
-    // `""` for a body we did not find. A body present at write time is then by
-    // definition not the one that was judged, so the script declines instead of
-    // deleting whatever arrived in between.
     const outcome = await boundCommand("delete_room", () =>
       redis.eval(
-        DELETE_ROOM_CAS_LUA,
+        script,
         2,
-        key,
+        roomKey(code),
         roomsByExpiryKey,
         code,
-        rawRoom ?? "",
+        guardArgument,
       ),
     );
     if (outcome === "deleted" || outcome === "already_deleted") {
@@ -1390,21 +1406,17 @@ export async function createRedisRoomStore(
       return { ok: true, room: nextRoom };
     },
     deleteRoom(expected) {
-      // Pinned by `joinToken`, not by the whole record: the members of a room an
-      // admin is closing are disconnected first, and their leaves rewrite the
-      // body, so a version-exact guard would decline the action that caused the
-      // change. A recycled code always brings a new token with it.
+      // Pinned by `joinToken`, and by nothing else: a recycled code always
+      // brings a new token, while every other field moves under an admin close
+      // as its members leave.
       return deleteRoomWhen(
         expected.code,
-        (current) => current.joinToken === expected.joinToken,
+        DELETE_ROOM_INSTANCE_LUA,
+        expected.joinToken,
       );
     },
     deleteExpiredRoom(code, currentTime) {
-      return deleteRoomWhen(
-        code,
-        (current) =>
-          current.expiresAt !== null && current.expiresAt <= currentTime,
-      );
+      return deleteRoomWhen(code, DELETE_EXPIRED_ROOM_LUA, String(currentTime));
     },
     async deleteExpiredRooms(currentTime) {
       // Candidates come from the index, so on a database that predates it the

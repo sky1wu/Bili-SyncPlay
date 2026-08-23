@@ -14,7 +14,11 @@ import {
   SESSION_NOT_FOUND_MESSAGE,
 } from "../messages.js";
 import type { LogEvent, PersistedRoom } from "../types.js";
-import type { RoomStore, RoomUpdateResult } from "../room-store.js";
+import type {
+  RoomDeleteOutcome,
+  RoomStore,
+  RoomUpdateResult,
+} from "../room-store.js";
 import type { RuntimeStore } from "../runtime-store.js";
 import { createConcurrencyLimiter } from "../concurrency-limiter.js";
 
@@ -213,6 +217,29 @@ export function createAdminActionService(options: {
     );
   }
 
+  /**
+   * The guarded delete, plus what a capped one still owes.
+   *
+   * The cap answers this action; it does not cancel the command. A delete that
+   * lands afterwards takes the room body AND its index entry, so no sweep can
+   * rediscover the code and its runtime state would be left with nobody owing
+   * it a teardown (#277 review). Handing the code to the teardown path records
+   * that debt: it re-reads, so a room that is still there settles as nothing to
+   * collect, and a stalled store keeps the debt for its next drain. Its own
+   * failure must never replace the error this action reports.
+   */
+  async function deletePersistedRoom(
+    target: PersistedRoom,
+    roomCode: string,
+  ): Promise<RoomDeleteOutcome> {
+    try {
+      return await options.roomStore.deleteRoom(target);
+    } catch (error) {
+      await options.teardownRoomRuntime(roomCode).catch(() => undefined);
+      throw error;
+    }
+  }
+
   return {
     async closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
       const target = await getRoomOrThrow(roomCode);
@@ -321,7 +348,7 @@ export function createAdminActionService(options: {
       // code, and its delete is guarded by a generation pinned before that
       // check and confirmed after it (#237, #277). A reused code therefore
       // either shows a live room or fails the generation guard.
-      const deletion = await options.roomStore.deleteRoom(target);
+      const deletion = await deletePersistedRoom(target, roomCode);
       if (deletion === "superseded") {
         options.logEvent("admin_room_close_superseded", {
           roomCode,
@@ -364,7 +391,7 @@ export function createAdminActionService(options: {
         throw new AdminActionError(409, "room_active", ROOM_ACTIVE_MESSAGE);
       }
 
-      const deletion = await options.roomStore.deleteRoom(target);
+      const deletion = await deletePersistedRoom(target, roomCode);
       // Same teardown `closeRoom` above performs. Without it an expired room
       // left its runtime keys behind — including the tokens of members who had
       // disconnected but whose identity is deliberately retained (#234) — and a

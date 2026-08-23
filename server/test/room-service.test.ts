@@ -5782,6 +5782,66 @@ test("room service meters a room reclaimed by the lazy read path", async () => {
   assert.deepEqual(reclaimed, [1, 0]);
 });
 
+test("a capped expiry delete leaves its runtime teardown as debt", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  const teardowns: string[] = [];
+  const roomStore: RoomStore = {
+    ...baseRoomStore,
+    async deleteExpiredRoom(code) {
+      // The cap answers; the command is not cancelled. It lands afterwards,
+      // taking the body AND the index entry — so the reaper's sweep below finds
+      // nothing, and only a remembered debt can still collect the runtime state.
+      const current = await baseRoomStore.getRoom(code);
+      if (current) {
+        await baseRoomStore.deleteRoom(current);
+      }
+      throw new Error("Redis room store operation timed out: delete_room.");
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      deleteRoom(code, expectedGeneration) {
+        teardowns.push(code);
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMDB",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  const owner = createSession("owner");
+  const { room } = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+  currentTime += 5_001;
+
+  await assert.rejects(
+    () => service.getRoomStateByCode(room.code),
+    /timed out/,
+  );
+  assert.deepEqual(teardowns, []);
+
+  // The sweep sees no expired room — the late delete already took it. The debt
+  // is the only thing that still knows this code's runtime state is owed.
+  const swept = await service.deleteExpiredRooms();
+  assert.equal(swept.deletedRooms, 0);
+  assert.deepEqual(teardowns, [room.code]);
+});
+
 test("a room that stopped being expired is served, not collected", async () => {
   let currentTime = 1_000;
   const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });

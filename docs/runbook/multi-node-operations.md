@@ -760,7 +760,10 @@ room instance an admin action read, `deleteExpiredRoom` re-judges the expiry
 inside the write. When either declines, the code is held by a different room
 than the caller decided against — runtime teardown and the `room_deleted`
 broadcast are skipped for that reason, and an admin action says so with
-`admin_room_close_superseded` / `admin_room_expire_superseded`.
+`admin_room_close_superseded` / `admin_room_expire_superseded`. A delete that
+hits its cap instead is reported as a store failure, and the runtime teardown it
+may still owe is remembered as debt — the reaper drains it, since a late delete
+takes the index entry and no sweep can rediscover the code.
 A stamp refused because the code changed hands logs
 `room_persist_failed reason=room_generation_superseded`: a lost race, not a
 Redis fault. Either outcome rolls the memberless room back by expiring it, and a
