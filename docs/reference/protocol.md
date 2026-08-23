@@ -113,8 +113,12 @@ confirmed whether the room was deleted or revived. A client must preserve the
 exact join intent and retry it with the connection retry backoff. The server
 reuses the same in-flight collection effect, so retries wait for the original
 outcome instead of issuing another delete. Protocol v1-v4 clients never receive
-this additive code: joins retain the pre-v5 terminal `room_not_found`, while any
-other request path that surfaces it is downgraded to `internal_error`.
+this additive code: every request that surfaces it is downgraded to
+`internal_error`, joins included. NOT to `room_not_found` — the released v1-v4
+controller treats that as terminal for both a pending join and a stored room
+context, so an outcome that cannot prove the room absent would clear the user's
+session on its way past. `internal_error` is the only pre-v5 code that reports
+"no answer" without asserting one.
 
 The developer-facing symptoms for the common codes are listed in the [troubleshooting section](../development.md#troubleshooting).
 

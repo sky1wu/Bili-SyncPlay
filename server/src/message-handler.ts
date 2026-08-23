@@ -18,7 +18,6 @@ import {
   UNSUPPORTED_PROTOCOL_VERSION_MESSAGE,
   MIN_PROTOCOL_VERSION,
   CURRENT_PROTOCOL_VERSION,
-  ROOM_NOT_FOUND_MESSAGE,
 } from "./messages.js";
 import { createPendingResyncQueue } from "./pending-resync-queue.js";
 import { RoomServiceError, type LeaveRoomReason } from "./room-service.js";
@@ -1319,17 +1318,18 @@ export function createMessageHandler(options: {
             ROOM_RESOLUTION_RETRY_PROTOCOL_VERSION
         ) {
           // Compatibility belongs to the wire error, not to the request branch
-          // that happened to surface it: create first leaves the old room and
-          // can reach the same resolution path as join. No v1-v4 state machine
-          // understands this additive outcome. Preserve join's pre-v5 terminal
-          // answer; every other request gets the established generic error.
-          if (message.type === "room:join") {
-            code = "room_not_found";
-            errorMessage = ROOM_NOT_FOUND_MESSAGE;
-          } else {
-            code = "internal_error";
-            errorMessage = INTERNAL_SERVER_ERROR_MESSAGE;
-          }
+          // that happened to surface it. No v1-v4 state machine understands
+          // this additive outcome, so it becomes the established generic error
+          // — the same one for every request, join included.
+          //
+          // NOT `room_not_found` for join, even though that is join's other
+          // pre-v5 answer: the released v1-v4 controller treats it as terminal
+          // and clears the pending join AND the stored room context, so a room
+          // this outcome cannot prove absent would take the user's session with
+          // it. `internal_error` is the only pre-v5 code that says "no answer"
+          // without asserting one.
+          code = "internal_error";
+          errorMessage = INTERNAL_SERVER_ERROR_MESSAGE;
         }
         sendError(socket, code, errorMessage);
         if (error.reason === "internal_error") {

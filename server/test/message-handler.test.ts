@@ -178,8 +178,15 @@ test("message handler exposes retryable room resolution only to clients that imp
       message: "Internal server error.",
     },
   ]);
+  // Never `room_not_found`: the released v1-v4 controller treats it as terminal
+  // for a pending join AND for a stored room context, so an outcome that cannot
+  // prove the room absent would clear the user's session on its way past.
+  // `internal_error` is the only pre-v5 code that says "no answer" without
+  // asserting one — and it is the same answer for every request, because
+  // compatibility is a property of the wire error, not of the request that
+  // surfaced it.
   assert.deepEqual(await run(4), [
-    { code: "room_not_found", message: "Room not found." },
+    { code: "internal_error", message: "Internal server error." },
   ]);
   assert.deepEqual(await run(4, "room:create"), [
     { code: "internal_error", message: "Internal server error." },
