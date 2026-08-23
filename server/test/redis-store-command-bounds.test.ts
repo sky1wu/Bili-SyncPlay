@@ -929,6 +929,77 @@ test("room store admission refuses a command instead of issuing it", async () =>
   );
 });
 
+async function assertRoomCommandAdmissionShared(args: {
+  stall: (store: RoomStoreUnderTest) => Promise<unknown>;
+  refuse: (store: RoomStoreUnderTest) => Promise<unknown>;
+  context: string;
+}): Promise<void> {
+  const bootstrapCommands = await withRoomStore(
+    null,
+    async (_store, commands) => commands.issuedCount(),
+    { settleBootstrap: true },
+  );
+  await withRoomStore(
+    bootstrapCommands,
+    async (store, commands) => {
+      const pending = args.stall(store).catch(() => undefined);
+      const issuedAfterStall = commands.issuedCount();
+      assert.equal(issuedAfterStall, bootstrapCommands + 1);
+
+      let refusalError: unknown;
+      const refusal = args.refuse(store).catch((error: unknown) => {
+        refusalError = error;
+      });
+      assert.equal(
+        await settleWithin(refusal, OBSERVATION_MS),
+        true,
+        `${args.context}: admission must answer without waiting for Redis`,
+      );
+      assert.ok(
+        refusalError instanceof RedisStoreUnavailableError &&
+          refusalError.store === "room" &&
+          refusalError.reason === "admission",
+        args.context,
+      );
+      assert.equal(
+        commands.issuedCount(),
+        issuedAfterStall,
+        `${args.context}: a refused command must not reach Redis`,
+      );
+      void pending;
+    },
+    { maxPendingCommands: 1, settleBootstrap: true },
+  );
+}
+
+test("a stalled room read refuses the next guarded delete", async () => {
+  await assertRoomCommandAdmissionShared({
+    stall: (store) => store.getRoom("ROOM01"),
+    refuse: (store) => store.deleteExpiredRoom("ROOM02", 1_000),
+    context: "stalled read before delete",
+  });
+});
+
+test("a stalled guarded delete holds its admission slot until reply", async () => {
+  await assertRoomCommandAdmissionShared({
+    stall: (store) =>
+      store.deleteRoom({
+        code: "ROOM01",
+        joinToken: "join-token-123456",
+        createdAt: 1,
+        ownerMemberId: null,
+        ownerDisplayName: null,
+        sharedVideo: null,
+        playback: null,
+        version: 0,
+        lastActiveAt: 1,
+        expiresAt: null,
+      }),
+    refuse: (store) => store.getRoom("ROOM02"),
+    context: "stalled delete before read",
+  });
+});
+
 test("room command timeouts are retryable store errors", async () => {
   const bootstrapCommands = await withRoomStore(
     null,

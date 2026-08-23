@@ -824,10 +824,11 @@ export async function createRedisRoomStore(
     // reading the silence they derive their bounds from (#277). That is why the
     // choice is per CALL — the two passes reach the very same helpers.
     //
-    // What this does NOT resolve: the three durable writes (`createRoom`,
-    // `updateRoom`, `deleteRoom`). Capping a write whose effect
-    // does not expire on its own tells a caller it failed while the write may
-    // still land, which is #237's trade and needs its own derivation.
+    // What this does NOT resolve: the two unconditional durable writes,
+    // `createRoom` and `updateRoom`. Capping either tells a caller it failed
+    // while the write may still land, which is #237's trade. The guarded
+    // deletes are different: admission may safely refuse them before issue,
+    // while their eventual outcome remains owned by the outer caller.
     (createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
@@ -850,8 +851,9 @@ export async function createRedisRoomStore(
    * the primitive is what keeps "a timeout is not a cancel" from acquiring
    * another private implementation (#242), and `trackedCount()` is the
    * admission counter below — one number for both halves of #277, counting
-   * commands that outlived their cap because those are exactly the ones still
-   * sitting in ioredis's queue.
+   * request commands that outlived their cap and guarded deletes whose outer
+   * callers stopped waiting. Both remain real unanswered commands in ioredis's
+   * queue until their reply lands.
    */
   const commandPacer = createRetryPacer({
     initialDelayMs: commandTimeoutMs,
@@ -875,23 +877,12 @@ export async function createRedisRoomStore(
   );
 
   /**
-   * The caller-side bound for a command nobody else is waiting behind.
-   *
-   * Refuse-then-cap, in that order, because the refusal is the one answer with
-   * no ambiguity in it: past `maxPendingCommands` unanswered commands the next
-   * one is never issued, so nothing can land later. The cap that follows only
-   * answers the caller — `capAttempt` leaves the command tracked, which is what
-   * lets the two maintenance passes on this connection keep deriving their own
-   * bounds from its silence, and what a connection-wide `commandTimeout` could
-   * not do (#271, #277).
-   *
-   * `async` so that no failure — the refusal, or anything `issue()` throws
-   * before it returns a promise — can leave this function synchronously. A
-   * caller assembling several of these into one `Promise.all` literal would
-   * otherwise abandon the list with earlier commands already issued and
-   * unhandled (#277 review).
+   * The shared connection admission for request-bounded commands and guarded
+   * deletes. The latter cannot take an internal timeout because their callers
+   * need the eventual outcome, but that does not license them to bypass the
+   * queue bound. Every accepted command holds its slot until the real reply.
    */
-  async function boundCommand<T>(
+  async function admitCommand<T>(
     operationName: string,
     issue: () => Promise<T>,
   ): Promise<T> {
@@ -905,8 +896,23 @@ export async function createRedisRoomStore(
         { cause },
       );
     }
-    return await commandPacer.capAttempt(
-      issue(),
+    // `async` keeps both admission refusal and a synchronous `issue()` failure
+    // inside the returned promise. This matters to callers constructing a
+    // `Promise.all` literal: no sibling command may be issued and then abandoned
+    // because a later argument threw before the aggregate owned it (#277).
+    return await commandPacer.trackCall(issue());
+  }
+
+  async function boundCommand<T>(
+    operationName: string,
+    issue: () => Promise<T>,
+  ): Promise<T> {
+    // Refuse-then-cap, in that order. Refusal proves no command was issued; the
+    // cap only answers this caller while `admitCommand` keeps the real command
+    // tracked, which a connection-wide `commandTimeout` could not preserve
+    // (#271, #277).
+    return await commandPacer.capWait(
+      admitCommand(operationName, issue),
       commandTimeoutMs,
       () =>
         new RedisRoomStoreCommandTimeoutError(operationName, commandTimeoutMs),
@@ -1314,13 +1320,16 @@ export async function createRedisRoomStore(
    * of them are silently skipped and each caller has to grow its own
    * compensation. The cap therefore belongs to the caller, on its WAIT, while
    * this command stays alive to deliver the outcome its follow-ups need.
+   * Uncapped does not mean unbounded admission: `admitCommand` refuses before
+   * issuing once this connection already owns `maxPendingCommands` real
+   * commands, and an accepted delete holds its slot until the real reply.
    */
   async function deleteRoomWhen(
     code: string,
     script: string,
     guardArgument: string,
   ): Promise<RoomDeleteOutcome> {
-    const outcome = await boundedByOuterCaller("delete_room", () =>
+    const outcome = await admitCommand("delete_room", () =>
       redis.eval(
         script,
         2,
@@ -1371,7 +1380,7 @@ export async function createRedisRoomStore(
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
       const key = roomKey(code);
       // The read half is capped like any other read; the CAS below is one of
-      // the three durable writes this change leaves for its own derivation.
+      // the two unconditional durable writes left for its own derivation.
       const rawRoom = await boundCommand("update_room", () => redis.get(key));
       if (rawRoom === null) {
         return { ok: false, reason: "not_found" };

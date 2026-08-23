@@ -646,14 +646,18 @@
   意图存放在 session storage 中，能活过 MV3 worker 重启，而在飞标记记录它所属的 WebSocket
   generation，使替换连接无需等待旧 socket 的 close 就能重发。这些重试共享该房间码唯一一个进行中
   的回收效果——真实效果只进入关服跟踪一次，请求期限只限制各自的等待，绝不能再添一层跟踪包装，
-  更不能重复底层 Redis 删除。`closeRoom` / `expireRoom` 拒绝把无法确认的动作报成完成，返回 503
+  更不能重复底层 Redis 删除。保留终局并不意味着 Redis 命令可以绕过队列 admission：请求读取与
+  两种有守卫删除在发出前共用同一个 `maxPendingCommands` 计数，获准的命令直到真实回复才释放槽位；
+  在这里被拒绝的删除从未发出，因此也没有迟到终局需要保留。`closeRoom` / `expireRoom` 拒绝把无法
+  确认的动作报成完成，返回 503
   `room_delete_unconfirmed`，而效果自己记录迟到的终局。这份所有权也延伸到关服：管理动作服务先
   关闭删除 admission，再排空已接受的 action handler，最后排空它们可能刚创建的「删除 + 后续」
   效果链；房间服务同样先关闭惰性删除 admission，再排空惰性删除及其可能刚创建的运行时拆除。
   在此期间 room store、runtime store 与事件总线都保持开放。两个所有者各自只使用一份明确预算，
   耗尽时报告剩余工作，而不是让后续依赖关闭静默截断效果。机械的那一半在
-  `redis-store-command-bounds.test.ts`：挂住一条命令时，两个删除都必须**得不到答复**——分类表
-  看不见一个悄悄重新出现在 store 里的上限。原子的 `evictMemberToken` 不同：
+  `redis-store-command-bounds.test.ts`：挂住一条命令时，两个删除都必须**得不到答复**；而读取或删除
+  占满最后一个 admission 槽位时，另一方必须在到达 Redis 前被拒绝——分类表看不见一个悄悄重新
+  出现在 store 里的上限。原子的 `evictMemberToken` 不同：
   管理命令执行器只限制自己的等待并返回
   `status=error, confirmation=unconfirmed, code=block_unconfirmed`，原始 Promise 继续承载
   Redis 写入和两层本地镜像更新，再断开套接字以触发正常离房清理。最终的

@@ -936,7 +936,11 @@ do NOT compose, and that is the part that decides which connection gets which:
   can resend without waiting for the old socket's close. Those retries share
   the one in-flight collection effect for the room code: the effect enters the
   shutdown tracker once, and request deadlines cap only their own waits—never
-  another tracked wrapper or another underlying Redis delete.
+  another tracked wrapper or another underlying Redis delete. Keeping that
+  outcome does not exempt the Redis command from queue admission: request reads
+  and both guarded deletes enter one shared `maxPendingCommands` counter before
+  they issue, and every accepted command holds its slot until the real reply.
+  A delete refused there was never sent, so it has no late outcome to preserve.
   `closeRoom` / `expireRoom` refuse to report a completed action they cannot
   confirm and return 503 `room_delete_unconfirmed`, while the effect logs its
   own late outcome. That ownership extends through shutdown: the admin action
@@ -947,8 +951,10 @@ do NOT compose, and that is the part that decides which connection gets which:
   event bus remain open. Each owner has one explicit budget and reports what
   remains instead of letting a later dependency close silently cut the effect
   off. `redis-store-command-bounds.test.ts` holds the mechanical
-  half: with a command hung, both deletes must be left UNANSWERED — no
-  classification table can see a cap that quietly reappears inside the store. Atomic
+  half: with a command hung, both deletes must be left UNANSWERED, while either
+  a read or a delete occupying the last admission slot makes the other refuse
+  without reaching Redis. No classification table can see a cap that quietly
+  reappears inside the store. Atomic
   `evictMemberToken` is different: the admin executor caps only its own wait and
   reports `status=error, confirmation=unconfirmed, code=block_unconfirmed`,
   while the original promise keeps the Redis write and both local-mirror
