@@ -6181,6 +6181,7 @@ test("room service closes lazy-delete admission before its shutdown snapshot", a
     releaseRoomRead = resolve;
   });
   let deleteAttempts = 0;
+  const events: { name: string; trigger?: unknown }[] = [];
   const service = createRoomService({
     config: getDefaultSecurityConfig(),
     persistence: {
@@ -6203,7 +6204,9 @@ test("room service closes lazy-delete admission before its shutdown snapshot", a
     },
     activeRooms: createActiveRoomRegistry(),
     generateToken: () => "token-1234567890",
-    logEvent: (() => undefined) satisfies LogEvent,
+    logEvent: ((name, payload) => {
+      events.push({ name, trigger: payload.trigger });
+    }) satisfies LogEvent,
     now: () => currentTime,
     createRoomCode: () => "ROOMCL",
   });
@@ -6228,6 +6231,16 @@ test("room service closes lazy-delete admission before its shutdown snapshot", a
   );
   assert.equal(deleteAttempts, 0);
   assert.ok(await baseRoomStore.getRoom(room.code));
+  // The wire answer is `internal_error` for every trigger, so this line is the
+  // only thing that tells an expected retryable timing from an ordinary
+  // internal failure. Logging per throw site left this trigger silent.
+  assert.ok(
+    events.some(
+      (event) =>
+        event.name === "room_expiry_delete_unconfirmed" &&
+        event.trigger === "service_closing",
+    ),
+  );
 });
 
 test("a room that stopped being expired is served, not collected", async () => {

@@ -763,11 +763,14 @@ broadcast are skipped for that reason, and an admin action says so with
 `admin_room_close_superseded` / `admin_room_expire_superseded`. A delete that
 outlives its caller's deadline is not lost: the caller stops waiting, the effect
 keeps running, and the reclamation count, the runtime teardown and the
-`room_deleted` broadcast all happen when it lands. A reader answers `null` for
-that room (an expired room reads as absent either way); an admin action refuses
-to report a completed action it cannot confirm and returns 503
-`room_delete_unconfirmed`, then logs `admin_room_delete_late_completed` or
-`admin_room_delete_late_failed` when the effect settles.
+`room_deleted` broadcast all happen when it lands. A reader does NOT answer
+`null` for that room — the late guard may still answer `superseded`, and only a
+confirmed absent room may be reported absent — so it fails retryably with
+`internal_error` and logs `room_expiry_delete_unconfirmed` with the `trigger`
+that produced it. An admin action likewise refuses to report a completed action
+it cannot confirm: 503 `room_delete_unconfirmed`, then
+`admin_room_delete_late_completed` or `admin_room_delete_late_failed` when the
+effect settles.
 A stamp refused because the code changed hands logs
 `room_persist_failed reason=room_generation_superseded`: a lost race, not a
 Redis fault. Either outcome rolls the memberless room back by expiring it, and a

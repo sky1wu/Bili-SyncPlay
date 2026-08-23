@@ -943,6 +943,31 @@ export function createRoomService(options: {
     return effect;
   }
 
+  /**
+   * Builds the unconfirmed-resolution error AND records it, in one place.
+   *
+   * The wire answer is `internal_error` for every trigger, so this log line is
+   * the only thing that can tell an expected retryable timing apart from an
+   * ordinary internal failure. Logging at each throw site instead left two of
+   * the three triggers silent, which is how the diagnosis this error exists to
+   * carry never reached anyone (#277 review).
+   */
+  function unconfirmedRoomResolution(
+    code: string,
+    trigger: RoomExpiryResolutionUnconfirmedTrigger,
+    timeoutMs?: number,
+  ): RoomExpiryResolutionUnconfirmedError {
+    logEvent("room_expiry_delete_unconfirmed", {
+      roomCode: code,
+      provider: persistence.provider,
+      trigger,
+      result: "unconfirmed",
+      confirmation: "unconfirmed",
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
+    return new RoomExpiryResolutionUnconfirmedError(code, trigger, timeoutMs);
+  }
+
   async function resolveRoom(code: string): Promise<PersistedRoom | null> {
     const room = await roomStore.getRoom(code);
     if (!room) {
@@ -954,38 +979,22 @@ export function createRoomService(options: {
       // call the room absent either: another node may already have revived the
       // stale snapshot. The caller keeps its session and may retry elsewhere.
       if (closing) {
-        throw new RoomExpiryResolutionUnconfirmedError(code, "service_closing");
+        throw unconfirmedRoomResolution(code, "service_closing");
       }
-      let outcome: RoomDeleteOutcome;
-      try {
-        outcome = await roomDeleteConfirmationPacer.capWait(
-          getOrStartExpiredRoomCollection(code),
-          roomDeleteConfirmationTimeoutMs,
-          () =>
-            new RoomExpiryResolutionUnconfirmedError(
-              code,
-              "delete_timeout",
-              roomDeleteConfirmationTimeoutMs,
-            ),
-        );
-      } catch (error) {
-        if (
-          error instanceof RoomExpiryResolutionUnconfirmedError &&
-          error.trigger === "delete_timeout"
-        ) {
-          // The wait ended; the effect did not. It still holds the delete and
-          // everything a successful one owes. The final result can still be
-          // `superseded`, so this reader must preserve its session and fail
-          // retryably instead of claiming confirmed absence.
-          logEvent("room_expiry_delete_unconfirmed", {
-            roomCode: code,
-            provider: persistence.provider,
-            result: "timeout",
-            confirmation: "unconfirmed",
-          });
-        }
-        throw error;
-      }
+      // The wait may end while the effect does not: it still holds the delete
+      // and everything a successful one owes, and its final result can still be
+      // `superseded`, so this reader fails retryably instead of claiming
+      // confirmed absence.
+      const outcome = await roomDeleteConfirmationPacer.capWait(
+        getOrStartExpiredRoomCollection(code),
+        roomDeleteConfirmationTimeoutMs,
+        () =>
+          unconfirmedRoomResolution(
+            code,
+            "delete_timeout",
+            roomDeleteConfirmationTimeoutMs,
+          ),
+      );
       if (outcome === "superseded") {
         // The code no longer carries the expired record this read decided
         // against: an update cleared its expiry, or a different room took the
@@ -1000,7 +1009,7 @@ export function createRoomService(options: {
           // The guard declined the old delete, but this later snapshot has now
           // expired too. No delete has confirmed this room absent; let the
           // caller retry rather than collapsing a still-present record to null.
-          throw new RoomExpiryResolutionUnconfirmedError(
+          throw unconfirmedRoomResolution(
             code,
             "still_expired_after_superseded",
           );

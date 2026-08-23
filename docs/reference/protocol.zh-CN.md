@@ -8,8 +8,8 @@
 
 | 常量                       | 位置                                    | 当前值 | 含义                                              |
 | -------------------------- | --------------------------------------- | ------ | ------------------------------------------------- |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
-| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`    | 服务端当前使用的版本                              |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
+| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `4`    | 服务端当前使用的版本                              |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`    | 服务端仍接受的最老客户端版本                      |
 
 客户端在 `room:create` / `room:join` 的 payload 中携带 `protocolVersion`；低于 `MIN_PROTOCOL_VERSION` 的客户端会被以 `unsupported_protocol_version` 错误码拒绝。未携带 `protocolVersion` 的旧客户端按 `server/src/messages.ts` 中的兼容策略处理。

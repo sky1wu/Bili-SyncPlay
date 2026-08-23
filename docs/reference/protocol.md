@@ -8,8 +8,8 @@
 
 | Constant                   | Location                                | Value | Meaning                                                      |
 | -------------------------- | --------------------------------------- | ----- | ------------------------------------------------------------ |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`   | Version sent by the extension in `room:create` / `room:join` |
-| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`   | Version the server currently speaks                          |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`   | Version sent by the extension in `room:create` / `room:join` |
+| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `4`   | Version the server currently speaks                          |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`   | Oldest client version the server still accepts               |
 
 Clients send `protocolVersion` inside the `room:create` / `room:join` payload; the server rejects clients below `MIN_PROTOCOL_VERSION` with the `unsupported_protocol_version` error code. Legacy clients that omit `protocolVersion` are treated according to the server's compatibility policy in `server/src/messages.ts`.
