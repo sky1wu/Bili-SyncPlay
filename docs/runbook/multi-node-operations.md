@@ -748,13 +748,29 @@ on the background passes**, on purpose:
   `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`.
 
-Four persistent writes remain uncapped by design: the runtime store's one
-write through `trackAwaitedOperation` (revoke) and the room
-store's three room-body writes. Their effects do not expire, so #237's rule
+Three persistent writes remain uncapped by design: the runtime store's one
+write through `trackAwaitedOperation` (revoke) and the room store's
+`createRoom` and `updateRoom`. Their effects do not expire, so #237's rule
 still applies: an answer that may be wrong is worse than a slow one.
 
 The generation stamp left that list in #277 by becoming conditional on the pin
 its creator read, so it now answers on the request path like any other command.
+Room deletes left it the same way, as a guarded pair: `deleteRoom` names the
+room instance an admin action read, `deleteExpiredRoom` re-judges the expiry
+inside the write. When either declines, the code is held by a different room
+than the caller decided against — runtime teardown and the `room_deleted`
+broadcast are skipped for that reason, and an admin action says so with
+`admin_room_close_superseded` / `admin_room_expire_superseded`. A delete that
+outlives its caller's deadline is not lost: the caller stops waiting, the effect
+keeps running, and the reclamation count, the runtime teardown and the
+`room_deleted` broadcast all happen when it lands. A reader does NOT answer
+`null` for that room — the late guard may still answer `superseded`, and only a
+confirmed absent room may be reported absent — so it fails retryably with
+`internal_error` and logs `room_expiry_delete_unconfirmed` with the `trigger`
+that produced it. An admin action likewise refuses to report a completed action
+it cannot confirm: 503 `room_delete_unconfirmed`, then
+`admin_room_delete_late_completed` or `admin_room_delete_late_failed` when the
+effect settles.
 A stamp refused because the code changed hands logs
 `room_persist_failed reason=room_generation_superseded`: a lost race, not a
 Redis fault. Either outcome rolls the memberless room back by expiring it, and a
@@ -827,8 +843,9 @@ incident:
   `reason=timeout` and answer their caller. A stalled kick returns
   `status=error, confirmation=unconfirmed`; its complete kick effect remains
   outstanding. Retry is safe because the block deadline only moves later. What
-  still stays **silent** is the four durable writes named above; a revoke or a
-  room-body write that never returns is what that looks like from outside. Runtime room teardown is different: its generation guard
+  still stays **silent** is the three durable writes named above; a revoke, a
+  room create or a room-body update that never returns is what that looks like
+  from outside. Runtime room teardown is different: its generation guard
   is mandatory, requests stop waiting with
   `room_runtime_cleanup_unconfirmed`, and one real effect per room generation
   continues through local-mirror settlement. Waiters on the exact effect share

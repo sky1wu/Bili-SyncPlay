@@ -177,7 +177,9 @@ test("room service rejects reconnect skip path when room was deleted concurrentl
       if (validateDeletedRoom) {
         validationReadCount += 1;
         if (validationReadCount === 2) {
-          await baseRoomStore.deleteRoom(code);
+          if (room) {
+            await baseRoomStore.deleteRoom(room);
+          }
           return null;
         }
       }
@@ -468,7 +470,10 @@ test("room service skips leave recovery when room is concurrently deleted", asyn
     async updateRoom(code, expectedVersion, patch) {
       if (patch.expiresAt !== undefined) {
         // Delete the room so the catch block's getRoom check sees the room is gone.
-        await roomStore.deleteRoom(code);
+        const existing = await roomStore.getRoom(code);
+        if (existing) {
+          await roomStore.deleteRoom(existing);
+        }
         throw new Error("expiry write failed");
       }
       return roomStore.updateRoom(code, expectedVersion, patch);
@@ -4294,7 +4299,7 @@ async function assertStaleTeardownWaiterCannotRetakeDebt(
   const second = createSession("second-generation-owner");
   const secondRoom = await service.createRoomForSession(second, "Bob");
   assert.equal(secondRoom.room.code, firstRoom.room.code);
-  await roomStore.deleteRoom(secondRoom.room.code);
+  await roomStore.deleteRoom(secondRoom.room);
 
   // Cleanup for the new generation is a distinct effect. Keying only by code
   // reused the old promise here, returned unconfirmed, and stranded the new
@@ -5102,7 +5107,10 @@ test("a failed generation stamp does not roll back a room that recycled the code
       markRoomGeneration: async () => {
         // Concurrently: our memberless room is expired and reaped, and another
         // request takes the freed code. Only then does our stamp fail.
-        await roomStore.deleteRoom("ROOMRC");
+        const stale = await roomStore.getRoom("ROOMRC");
+        if (stale) {
+          await roomStore.deleteRoom(stale);
+        }
         const replacement = await roomStore.createRoom({
           code: "ROOMRC",
           joinToken: "replacement-token",
@@ -5173,14 +5181,14 @@ test("an admin teardown works through the retry backlog", async () => {
 
   const first = createSession("first-owner");
   const owed = await service.createRoomForSession(first, "Alice");
-  await roomStore.deleteRoom(owed.room.code);
+  await roomStore.deleteRoom(owed.room);
   // An admin close whose teardown failed: the debt is queued.
   await service.teardownRoomRuntime(owed.room.code);
   assert.deepEqual(teardowns, []);
 
   const second = createSession("second-owner");
   const other = await service.createRoomForSession(second, "Bob");
-  await roomStore.deleteRoom(other.room.code);
+  await roomStore.deleteRoom(other.room);
 
   // The standalone global-admin process never runs the reaper, so
   // `deleteExpiredRooms` is not what drains this — every teardown has to.
@@ -5774,7 +5782,585 @@ test("room service meters a room reclaimed by the lazy read path", async () => {
   assert.deepEqual(reclaimed, [1, 0]);
 });
 
-test("room service counts one reclaimed room when concurrent readers race the same expiry", async () => {
+test("a capped expiry collection still finishes what it started", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  const reclaimed: number[] = [];
+  const teardowns: string[] = [];
+  let releaseDelete!: () => void;
+  let markTeardownStarted!: () => void;
+  let releaseTeardown!: () => void;
+  const deleteLanded = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  const teardownStarted = new Promise<void>((resolve) => {
+    markTeardownStarted = resolve;
+  });
+  const teardownLanded = new Promise<void>((resolve) => {
+    releaseTeardown = resolve;
+  });
+  const roomStore: RoomStore = {
+    ...baseRoomStore,
+    async deleteExpiredRoom(code, deleteTime) {
+      // Slower than the reader's deadline: the reader stops waiting, the
+      // command does not stop running.
+      await deleteLanded;
+      return await baseRoomStore.deleteExpiredRoom(code, deleteTime);
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      async deleteRoom(code, expectedGeneration) {
+        teardowns.push(code);
+        markTeardownStarted();
+        await teardownLanded;
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    metricsCollector: {
+      recordRoomsExpiredDeleted: (roomCount) => reclaimed.push(roomCount),
+    },
+    now: () => currentTime,
+    createRoomCode: () => "ROOMDB",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+    roomDeleteConfirmationTimeoutMs: 20,
+    closeBudgetMs: 1_000,
+  });
+
+  const owner = createSession("owner");
+  const { room } = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+  currentTime += 5_001;
+
+  // The reader's wait ends, but the real outcome could still be `superseded`.
+  // Preserve that third state instead of claiming the room is absent.
+  await assert.rejects(
+    () => service.getRoomStateByCode(room.code),
+    (error: unknown) =>
+      error instanceof RoomServiceError &&
+      // `internal_error` on the wire, the unconfirmed diagnosis in the details:
+      // this state is deliberately not a protocol code (#277).
+      error.code === "internal_error" &&
+      error.reason === "room_resolution_unconfirmed" &&
+      error.details.reason === "room_expiry_resolution_unconfirmed" &&
+      error.details.trigger === "delete_timeout",
+  );
+  assert.deepEqual(teardowns, []);
+  assert.deepEqual(reclaimed, []);
+
+  // Shutdown drains the outer delete first, then takes a fresh snapshot of the
+  // runtime teardown it creates. Taking both snapshots at close entry would
+  // miss this nested effect and close Redis under it.
+  let serviceClosed = false;
+  const closingService = service.close().then(() => {
+    serviceClosed = true;
+  });
+  releaseDelete();
+  await teardownStarted;
+  assert.equal(serviceClosed, false);
+  assert.deepEqual(reclaimed, [1]);
+  assert.deepEqual(teardowns, [room.code]);
+  releaseTeardown();
+  await closingService;
+  assert.equal(serviceClosed, true);
+  assert.equal(await roomStore.getRoom(room.code), null);
+});
+
+test("an unconfirmed expiry delete preserves a joined session when its late outcome is superseded", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  let markDeleteStarted!: () => void;
+  let releaseDelete!: () => void;
+  let deleteCalls = 0;
+  const deleteStarted = new Promise<void>((resolve) => {
+    markDeleteStarted = resolve;
+  });
+  const deleteLanded = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  const roomStore: RoomStore = {
+    ...baseRoomStore,
+    async deleteExpiredRoom(code, deleteTime) {
+      deleteCalls += 1;
+      markDeleteStarted();
+      await deleteLanded;
+      // Another node confirms the room is live before the guarded delete runs.
+      // The real outcome is therefore `superseded`, not absence.
+      const current = await baseRoomStore.getRoom(code);
+      assert.ok(current);
+      const revived = await baseRoomStore.updateRoom(code, current.version, {
+        expiresAt: null,
+        lastActiveAt: deleteTime,
+      });
+      assert.equal(revived.ok, true);
+      return await baseRoomStore.deleteExpiredRoom(code, deleteTime);
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: runtime,
+    generateToken: () => "token-1234567890",
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMUS",
+    roomDeleteConfirmationTimeoutMs: 5,
+    closeBudgetMs: 1_000,
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  const ownerMemberId = owner.memberId;
+  assert.ok(ownerMemberId);
+  const current = await baseRoomStore.getRoom(created.room.code);
+  assert.ok(current);
+  const expired = await baseRoomStore.updateRoom(
+    current.code,
+    current.version,
+    { expiresAt: currentTime },
+  );
+  assert.equal(expired.ok, true);
+  currentTime += 1;
+
+  const read = service.getRoomStateForSession(
+    owner,
+    created.memberToken,
+    "sync:request",
+  );
+  await deleteStarted;
+  await assert.rejects(
+    () => read,
+    (error: unknown) =>
+      error instanceof RoomServiceError &&
+      // `internal_error` on the wire, the unconfirmed diagnosis in the details:
+      // this state is deliberately not a protocol code (#277).
+      error.code === "internal_error" &&
+      error.reason === "room_resolution_unconfirmed" &&
+      error.details.reason === "room_expiry_resolution_unconfirmed" &&
+      error.details.trigger === "delete_timeout",
+  );
+
+  // A retryable resolution failure must not revoke the still-valid local and
+  // shared membership while the real delete is unresolved.
+  assert.equal(owner.roomCode, created.room.code);
+  assert.equal(owner.memberId, created.room.ownerMemberId);
+  assert.equal(owner.memberToken, created.memberToken);
+  assert.equal(
+    runtime.getRoom(created.room.code)?.members.get(ownerMemberId),
+    owner,
+  );
+
+  // Retrying the request waits on the exact same real effect. The request cap
+  // may repeat, but it cannot issue another guarded delete while the first is
+  // still unanswered.
+  const retry = service.getRoomStateForSession(
+    owner,
+    created.memberToken,
+    "room:join",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(deleteCalls, 1);
+  releaseDelete();
+  assert.equal((await retry).roomCode, created.room.code);
+  await service.close();
+  const revived = await baseRoomStore.getRoom(created.room.code);
+  assert.equal(revived?.expiresAt, null);
+  assert.equal(owner.roomCode, created.room.code);
+  assert.equal(
+    runtime.getRoom(created.room.code)?.members.get(ownerMemberId),
+    owner,
+  );
+});
+
+test("getRoomStateForSession reuses the room snapshot that authenticated the session", async () => {
+  let countRequestReads = false;
+  let requestReads = 0;
+  const baseRoomStore = createInMemoryRoomStore();
+  const roomStore: RoomStore = {
+    ...baseRoomStore,
+    async getRoom(code, caller) {
+      if (countRequestReads) {
+        requestReads += 1;
+        // Model a confirmed deletion immediately after authentication. One
+        // request must use one room snapshot; the next request owns observing
+        // the deletion and clearing the session through the same auth entry.
+        if (requestReads > 1) {
+          return null;
+        }
+      }
+      return await baseRoomStore.getRoom(code, caller);
+    },
+  };
+  const runtime = createInMemoryRuntimeStore();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: runtime,
+    generateToken: () => "token-1234567890",
+    logEvent: (() => undefined) satisfies LogEvent,
+    createRoomCode: () => "ROOMSN",
+  });
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  countRequestReads = true;
+  const state = await service.getRoomStateForSession(
+    owner,
+    created.memberToken,
+    "sync:request",
+  );
+
+  assert.equal(requestReads, 1);
+  assert.equal(state.roomCode, created.room.code);
+  assert.equal(owner.roomCode, created.room.code);
+  assert.equal(owner.memberToken, created.memberToken);
+  await service.close();
+});
+
+test("repeated expiry wait caps keep one shutdown-tracked delete effect", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  let releaseDelete!: () => void;
+  let markDeleteFinished!: () => void;
+  const deleteHeld = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  const deleteFinished = new Promise<void>((resolve) => {
+    markDeleteFinished = resolve;
+  });
+  const roomStore: RoomStore = {
+    ...baseRoomStore,
+    async deleteExpiredRoom(code, deleteTime) {
+      await deleteHeld;
+      const outcome = await baseRoomStore.deleteExpiredRoom(code, deleteTime);
+      markDeleteFinished();
+      return outcome;
+    },
+  };
+  const closeEvents: Array<Record<string, unknown>> = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms: createInMemoryRuntimeStore(() => currentTime),
+    generateToken: () => "token-1234567890",
+    logEvent: (event, data) => {
+      if (event === "room_service_close_unfinished") {
+        closeEvents.push(data);
+      }
+    },
+    now: () => currentTime,
+    createRoomCode: () => "ROOMTW",
+    roomDeleteConfirmationTimeoutMs: 5,
+    closeBudgetMs: 5,
+  });
+
+  const owner = createSession("owner");
+  const { room } = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+  currentTime += 5_001;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(
+      () => service.getRoomStateByCode(room.code),
+      (error: unknown) =>
+        error instanceof RoomServiceError &&
+        error.code === "internal_error" &&
+        error.reason === "room_resolution_unconfirmed",
+    );
+  }
+
+  await service.close();
+  assert.equal(closeEvents.length, 1);
+  assert.equal(closeEvents[0]?.pendingRoomDeletions, 1);
+
+  releaseDelete();
+  await deleteFinished;
+});
+
+test("room service reports runtime teardown left at shutdown", async () => {
+  const currentTime = 1_000;
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  let markTeardownStarted!: () => void;
+  let releaseTeardown!: () => void;
+  const teardownStarted = new Promise<void>((resolve) => {
+    markTeardownStarted = resolve;
+  });
+  const teardownLanded = new Promise<void>((resolve) => {
+    releaseTeardown = resolve;
+  });
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: createInMemoryRoomStore({ now: () => currentTime }),
+    activeRooms: {
+      ...runtime,
+      async deleteRoom(code, expectedGeneration) {
+        markTeardownStarted();
+        await teardownLanded;
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: () => "token-1234567890",
+    logEvent: (event) => events.push(event),
+    now: () => currentTime,
+    runtimeTeardownConfirmationTimeoutMs: 5,
+    closeBudgetMs: 5,
+  });
+
+  const teardown = service.teardownRoomRuntime("ROOMHU");
+  await teardownStarted;
+  await teardown;
+  await service.close();
+
+  assert.ok(events.includes("room_service_close_unfinished"));
+  releaseTeardown();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("room service reports settled runtime teardown retry debt at shutdown", async () => {
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const closeEvents: Array<Record<string, unknown>> = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: createInMemoryRoomStore({ now: () => 1_000 }),
+    activeRooms: {
+      ...runtime,
+      deleteRoom: async () => false,
+    },
+    generateToken: () => "token-1234567890",
+    logEvent: (event, data) => {
+      if (event === "room_service_close_unfinished") {
+        closeEvents.push(data);
+      }
+    },
+    now: () => 1_000,
+  });
+
+  // The effect answers immediately, so no pacer entry remains. Its guarded
+  // skip still leaves one logical cleanup debt that only this process knows.
+  await service.teardownRoomRuntime("ROOMDR");
+  await Promise.resolve();
+  await service.close();
+
+  assert.equal(closeEvents.length, 1);
+  assert.equal(closeEvents[0]?.pendingRuntimeTeardowns, 1);
+});
+
+test("room service closes lazy-delete admission before its shutdown snapshot", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  let holdRoomRead = false;
+  let markRoomReadStarted!: () => void;
+  let releaseRoomRead!: () => void;
+  const roomReadStarted = new Promise<void>((resolve) => {
+    markRoomReadStarted = resolve;
+  });
+  const roomReadLanded = new Promise<void>((resolve) => {
+    releaseRoomRead = resolve;
+  });
+  let deleteAttempts = 0;
+  const events: { name: string; trigger?: unknown }[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore: {
+      ...baseRoomStore,
+      async getRoom(code, caller) {
+        if (holdRoomRead) {
+          markRoomReadStarted();
+          await roomReadLanded;
+        }
+        return baseRoomStore.getRoom(code, caller);
+      },
+      async deleteExpiredRoom(code, deleteTime) {
+        deleteAttempts += 1;
+        return baseRoomStore.deleteExpiredRoom(code, deleteTime);
+      },
+    },
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: () => "token-1234567890",
+    logEvent: ((name, payload) => {
+      events.push({ name, trigger: payload.trigger });
+    }) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMCL",
+  });
+
+  const owner = createSession("owner");
+  const { room } = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+  currentTime += 5_001;
+
+  holdRoomRead = true;
+  const read = service.getRoomStateByCode(room.code);
+  await roomReadStarted;
+  await service.close();
+  releaseRoomRead();
+
+  await assert.rejects(
+    () => read,
+    (error: unknown) =>
+      error instanceof RoomServiceError &&
+      error.details.reason === "room_expiry_resolution_unconfirmed" &&
+      error.details.trigger === "service_closing",
+  );
+  assert.equal(deleteAttempts, 0);
+  assert.ok(await baseRoomStore.getRoom(room.code));
+  // The wire answer is `internal_error` for every trigger, so this line is the
+  // only thing that tells an expected retryable timing from an ordinary
+  // internal failure. Logging per throw site left this trigger silent.
+  assert.ok(
+    events.some(
+      (event) =>
+        event.name === "room_expiry_delete_unconfirmed" &&
+        event.trigger === "service_closing",
+    ),
+  );
+});
+
+test("a room that stopped being expired is served, not collected", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  const reclaimed: number[] = [];
+  const teardowns: string[] = [];
+  let revived = false;
+  const roomStore: RoomStore = {
+    ...baseRoomStore,
+    async deleteExpiredRoom(code, deleteTime) {
+      if (!revived) {
+        revived = true;
+        // Another node still has members here and clears the expiry between
+        // this reader's snapshot and its delete — the case an expiry written by
+        // a leave is already known to produce (#235 review).
+        const current = await baseRoomStore.getRoom(code);
+        if (current) {
+          await baseRoomStore.updateRoom(code, current.version, {
+            expiresAt: null,
+            lastActiveAt: deleteTime,
+          });
+        }
+      }
+      return await baseRoomStore.deleteExpiredRoom(code, deleteTime);
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      deleteRoom(code, expectedGeneration) {
+        teardowns.push(code);
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    metricsCollector: {
+      recordRoomsExpiredDeleted: (roomCount) => reclaimed.push(roomCount),
+    },
+    now: () => currentTime,
+    createRoomCode: () => "ROOMRV",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  const owner = createSession("owner");
+  const { room } = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+  currentTime += 5_001;
+
+  // The snapshot said expired; the record says otherwise by the time the delete
+  // runs. Answering `null` here would hide a room other nodes are using, and
+  // tearing its runtime state down would take their members' identities with it.
+  const state = await service.getRoomStateByCode(room.code);
+  assert.equal(state?.roomCode, room.code);
+  assert.deepEqual(reclaimed, []);
+  assert.deepEqual(teardowns, []);
+  assert.ok(await roomStore.getRoom(room.code));
+});
+
+test("a superseded expiry that elapses before the fresh read remains unconfirmed", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const roomStore: RoomStore = {
+    ...baseRoomStore,
+    async deleteExpiredRoom(code, deleteTime) {
+      const current = await baseRoomStore.getRoom(code);
+      assert.ok(current);
+      const brieflyRevived = await baseRoomStore.updateRoom(
+        code,
+        current.version,
+        { expiresAt: deleteTime + 1, lastActiveAt: deleteTime },
+      );
+      assert.equal(brieflyRevived.ok, true);
+      const outcome = await baseRoomStore.deleteExpiredRoom(code, deleteTime);
+      assert.equal(outcome, "superseded");
+      currentTime = deleteTime + 2;
+      return outcome;
+    },
+  };
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore,
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: () => "token-1234567890",
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMRE",
+  });
+
+  const owner = createSession("owner");
+  const { room } = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+  currentTime += 5_001;
+
+  await assert.rejects(
+    () => service.getRoomStateByCode(room.code),
+    (error: unknown) =>
+      error instanceof RoomServiceError &&
+      error.details.reason === "room_expiry_resolution_unconfirmed" &&
+      error.details.trigger === "still_expired_after_superseded",
+  );
+  assert.ok(await baseRoomStore.getRoom(room.code));
+});
+
+test("room service shares one collection effect across concurrent expired-room readers", async () => {
   let currentTime = 1_000;
   const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
   const reclaimed: number[] = [];
@@ -5785,13 +6371,12 @@ test("room service counts one reclaimed room when concurrent readers race the sa
   let heldDeletes = 0;
   const roomStore = {
     ...baseRoomStore,
-    // Both readers take their expired snapshot, then both park here before
-    // either delete lands — the interleaving a shared Redis makes routine, and
-    // the one an idempotent delete cannot distinguish on its own.
-    async deleteRoom(code: string) {
+    // Both readers take their expired snapshot, but the service owns one real
+    // collection effect and both request-side waits join it.
+    async deleteExpiredRoom(code: string, currentTimeMs: number) {
       heldDeletes += 1;
       await deletesHeld;
-      return baseRoomStore.deleteRoom(code);
+      return await baseRoomStore.deleteExpiredRoom(code, currentTimeMs);
     },
   };
   const service = createRoomService({
@@ -5826,13 +6411,12 @@ test("room service counts one reclaimed room when concurrent readers race the sa
     service.getRoomStateByCode(room.code),
   ];
 
-  while (heldDeletes < 2) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(heldDeletes, 1);
   releaseDeletes();
   assert.deepEqual(await Promise.all(reads), [null, null]);
 
-  // One room died; only the delete that actually removed the record counts it.
+  // One room died through one guarded delete and is counted once.
   assert.deepEqual(reclaimed, [1]);
 });
 

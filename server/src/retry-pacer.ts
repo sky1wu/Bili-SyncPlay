@@ -122,6 +122,16 @@ export type RetryPacer = {
     timeoutMs: number,
     makeTimeoutError: () => Error,
   ) => Promise<T>;
+  /**
+   * Cap only this caller's wait on a call already owned and tracked elsewhere.
+   * Repeated waiters therefore add bounded timers, never duplicate entries to
+   * the shutdown-tracked set while the one real call remains unanswered.
+   */
+  capWait: <T>(
+    call: Promise<T>,
+    timeoutMs: number,
+    makeTimeoutError: () => Error,
+  ) => Promise<T>;
   /** Remember an uncapped call until it really answers, preserving its result. */
   trackCall: <T>(call: Promise<T>) => Promise<T>;
   /** Calls that have not answered yet. */
@@ -164,6 +174,16 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
     return call;
   }
 
+  async function capWait<T>(
+    call: Promise<T>,
+    timeoutMs: number,
+    makeTimeoutError: () => Error,
+  ): Promise<T> {
+    return (await bounded(call, timeoutMs, (_resolve, reject) => {
+      reject(makeTimeoutError());
+    })) as Awaited<typeof call>;
+  }
+
   return {
     delayFor(attempt) {
       return Math.min(initialDelayMs * 2 ** (attempt - 1), maxDelayMs);
@@ -191,10 +211,9 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
       });
     },
     async capAttempt(call, timeoutMs, makeTimeoutError) {
-      return (await bounded(trackCall(call), timeoutMs, (_resolve, reject) => {
-        reject(makeTimeoutError());
-      })) as Awaited<typeof call>;
+      return capWait(trackCall(call), timeoutMs, makeTimeoutError);
     },
+    capWait,
     trackCall,
     trackedCount() {
       return trackedCalls.size;

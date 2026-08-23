@@ -7,6 +7,7 @@ import {
 } from "../src/admin/action-service.js";
 import { createAuditLogService } from "../src/admin/audit-log.js";
 import type { AdminSession } from "../src/admin/types.js";
+import type { RoomStore } from "../src/room-store.js";
 import type { AttachedSession, PersistedRoom, Session } from "../src/types.js";
 
 const ACTOR: AdminSession = {
@@ -70,21 +71,35 @@ function createService(options: {
   requestAdminCommand: Parameters<
     typeof createAdminActionService
   >[0]["requestAdminCommand"];
-  deleteRoom?: (roomCode: string) => Promise<boolean>;
+  deleteRoom?: RoomStore["deleteRoom"];
+  getRoom?: (roomCode: string) => Promise<PersistedRoom | null>;
+  onGetRoom?: () => void;
+  onListSessionsByRoom?: () => void;
   deleteRuntimeRoom?: (roomCode: string) => void;
   publishRoomDeleted?: (roomCode: string) => Promise<void>;
   auditLogService?: ReturnType<typeof createAuditLogService>;
   maxFanoutConcurrency?: number;
+  logEvent?: (name: string, data?: Record<string, unknown>) => void;
+  roomDeleteConfirmTimeoutMs?: number;
+  closeBudgetMs?: number;
 }) {
   const auditLogService = options.auditLogService ?? createAuditLogService();
   return createAdminActionService({
     instanceId: "instance-1",
     roomStore: {
-      getRoom: async (roomCode: string) => createRoom(roomCode),
+      getRoom: async (roomCode: string) => {
+        options.onGetRoom?.();
+        return options.getRoom
+          ? await options.getRoom(roomCode)
+          : createRoom(roomCode);
+      },
       updateRoom: async () => {
         throw new Error("updateRoom should not be called in this test");
       },
-      deleteRoom: options.deleteRoom ?? (async () => true),
+      deleteRoom: options.deleteRoom ?? (async () => "deleted"),
+      deleteExpiredRoom: async () => {
+        throw new Error("deleteExpiredRoom should not be called in this test");
+      },
       listRooms: async () => [],
       countRooms: async () => 0,
       isReady: async () => true,
@@ -104,15 +119,20 @@ function createService(options: {
       options.deleteRuntimeRoom?.(roomCode);
     },
     listClusterSessions: async () => (options.session ? [options.session] : []),
-    listClusterSessionsByRoom: async () => options.sessionsByRoom ?? [],
+    listClusterSessionsByRoom: async () => {
+      options.onListSessionsByRoom?.();
+      return options.sessionsByRoom ?? [];
+    },
     requestAdminCommand: options.requestAdminCommand,
     auditLogService,
     getRoomStateByCode: async () => null,
     publishRoomStateUpdate: async () => {},
     publishRoomDeleted: options.publishRoomDeleted ?? (async () => {}),
-    logEvent: () => {},
+    logEvent: (name, data) => options.logEvent?.(name, data),
     now: () => 10_000,
     maxFanoutConcurrency: options.maxFanoutConcurrency,
+    roomDeleteConfirmTimeoutMs: options.roomDeleteConfirmTimeoutMs,
+    closeBudgetMs: options.closeBudgetMs,
   });
 }
 
@@ -385,6 +405,304 @@ test("concurrent admin commands receive distinct request ids", async () => {
   assert.notEqual(requestIds[0], requestIds[1]);
 });
 
+test("admin action service leaves a recycled room code alone when its close is superseded", async () => {
+  let deletedRuntimeRoom = false;
+  let publishedDeleted = false;
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("no sessions to disconnect");
+    },
+    // The room this action read is gone and a different room now holds the
+    // code. Both steps below are addressed BY CODE, so running them would tear
+    // down and evict the successor's members.
+    deleteRoom: async () => "superseded",
+    deleteRuntimeRoom: () => {
+      deletedRuntimeRoom = true;
+    },
+    publishRoomDeleted: async () => {
+      publishedDeleted = true;
+    },
+  });
+
+  const result = await service.closeRoom(ACTOR, "ROOM01", "shutdown");
+
+  assert.equal(result.roomCode, "ROOM01");
+  assert.equal(deletedRuntimeRoom, false);
+  assert.equal(publishedDeleted, false);
+});
+
+test("a capped room deletion still completes its follow-ups when the command lands", async () => {
+  const published: string[] = [];
+  let torndown = false;
+  let releaseDelete!: () => void;
+  let markPublishStarted!: () => void;
+  let releasePublish!: () => void;
+  const deleteLanded = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  const publishStarted = new Promise<void>((resolve) => {
+    markPublishStarted = resolve;
+  });
+  const publishLanded = new Promise<void>((resolve) => {
+    releasePublish = resolve;
+  });
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("closeRoom has no sessions to disconnect");
+    },
+    // Slower than the deadline below: the action stops waiting, the command
+    // does not stop running.
+    deleteRoom: async () => {
+      await deleteLanded;
+      return "deleted";
+    },
+    deleteRuntimeRoom: () => {
+      torndown = true;
+    },
+    publishRoomDeleted: async (roomCode) => {
+      published.push(roomCode);
+      markPublishStarted();
+      await publishLanded;
+    },
+    roomDeleteConfirmTimeoutMs: 20,
+    closeBudgetMs: 1_000,
+  });
+
+  const closing = service.closeRoom(ACTOR, "ROOM01", "shutdown");
+  await assert.rejects(closing, (error: unknown) => {
+    assert.ok(error instanceof AdminActionError);
+    assert.equal(error.statusCode, 503);
+    assert.equal(error.code, "room_delete_unconfirmed");
+    return true;
+  });
+
+  // Answered, and NOT acted upon: the record may still be there, so nothing
+  // addressed by code may run yet.
+  assert.equal(torndown, false);
+  assert.deepEqual(published, []);
+
+  // Shutdown drains the effect owner before closing its stores or event bus.
+  // Releasing only the delete is not enough: close waits through every
+  // follow-up in the same chain, including the one-shot publish.
+  let serviceClosed = false;
+  const closingService = service.close().then(() => {
+    serviceClosed = true;
+  });
+  releaseDelete();
+  await publishStarted;
+  assert.equal(serviceClosed, false);
+  assert.equal(torndown, true);
+  assert.deepEqual(published, ["ROOM01"]);
+  releasePublish();
+  await closingService;
+  assert.equal(serviceClosed, true);
+});
+
+test("admin action service reports deletion effects left at shutdown", async () => {
+  let releaseDelete!: () => void;
+  const deleteLanded = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  const events: string[] = [];
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("closeRoom has no sessions to disconnect");
+    },
+    deleteRoom: async () => {
+      await deleteLanded;
+      return "deleted";
+    },
+    roomDeleteConfirmTimeoutMs: 5,
+    closeBudgetMs: 5,
+    logEvent: (event) => events.push(event),
+  });
+
+  await assert.rejects(
+    () => service.closeRoom(ACTOR, "ROOM01", "shutdown"),
+    (error: unknown) =>
+      error instanceof AdminActionError &&
+      error.code === "room_delete_unconfirmed",
+  );
+  await service.close();
+
+  assert.ok(events.includes("admin_action_service_close_unfinished"));
+  releaseDelete();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("admin action shutdown gates admission and drains accepted deletion handlers", async () => {
+  let markRoomReadStarted!: () => void;
+  let releaseRoomRead!: () => void;
+  const roomReadStarted = new Promise<void>((resolve) => {
+    markRoomReadStarted = resolve;
+  });
+  const roomReadLanded = new Promise<void>((resolve) => {
+    releaseRoomRead = resolve;
+  });
+  const deleted: string[] = [];
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("closeRoom has no sessions to disconnect");
+    },
+    getRoom: async (roomCode) => {
+      markRoomReadStarted();
+      await roomReadLanded;
+      return createRoom(roomCode);
+    },
+    deleteRoom: async (room) => {
+      deleted.push(room.code);
+      return "deleted";
+    },
+    closeBudgetMs: 1_000,
+  });
+
+  // Accepted before close, but still before the deletion pacer when shutdown
+  // starts. The handler owner must keep the later-created delete in the drain.
+  const action = service.closeRoom(ACTOR, "ROOM01", "shutdown");
+  await roomReadStarted;
+  let serviceClosed = false;
+  const closingService = service.close().then(() => {
+    serviceClosed = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(serviceClosed, false);
+
+  releaseRoomRead();
+  await Promise.all([action, closingService]);
+  assert.deepEqual(deleted, ["ROOM01"]);
+
+  await assert.rejects(
+    () => service.expireRoom(ACTOR, "ROOM02", "shutdown"),
+    (error: unknown) =>
+      error instanceof AdminActionError &&
+      error.code === "admin_action_service_closed",
+  );
+});
+
+test("admin action shutdown reports accepted deletion handlers left behind", async () => {
+  let markRoomReadStarted!: () => void;
+  let releaseRoomRead!: () => void;
+  const roomReadStarted = new Promise<void>((resolve) => {
+    markRoomReadStarted = resolve;
+  });
+  const roomReadLanded = new Promise<void>((resolve) => {
+    releaseRoomRead = resolve;
+  });
+  const reports: Record<string, unknown>[] = [];
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("closeRoom has no sessions to disconnect");
+    },
+    getRoom: async (roomCode) => {
+      markRoomReadStarted();
+      await roomReadLanded;
+      return createRoom(roomCode);
+    },
+    closeBudgetMs: 5,
+    logEvent: (event, data) => {
+      if (event === "admin_action_service_close_unfinished" && data) {
+        reports.push(data);
+      }
+    },
+  });
+
+  const action = service.closeRoom(ACTOR, "ROOM01", "shutdown");
+  await roomReadStarted;
+  await service.close();
+
+  assert.equal(reports[0]?.pendingHandlers, 1);
+  assert.equal(reports[0]?.pendingRoomDeletions, 0);
+  releaseRoomRead();
+  await action;
+});
+
+test("a capped room deletion that turns out superseded runs nothing by code", async () => {
+  const published: string[] = [];
+  let torndown = false;
+  let releaseDelete!: () => void;
+  const deleteLanded = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("expireRoom issues no commands");
+    },
+    deleteRoom: async () => {
+      await deleteLanded;
+      return "superseded";
+    },
+    deleteRuntimeRoom: () => {
+      torndown = true;
+    },
+    publishRoomDeleted: async (roomCode) => {
+      published.push(roomCode);
+    },
+    roomDeleteConfirmTimeoutMs: 20,
+  });
+
+  await assert.rejects(
+    () => service.expireRoom(ACTOR, "ROOM01", "cleanup"),
+    (error: unknown) =>
+      error instanceof AdminActionError &&
+      error.code === "room_delete_unconfirmed",
+  );
+
+  releaseDelete();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  // The code belongs to a different room by now, and both steps are addressed
+  // by code.
+  assert.equal(torndown, false);
+  assert.deepEqual(published, []);
+});
+
+test("admin action service pins the room it expires before judging it empty", async () => {
+  const order: string[] = [];
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("expireRoom issues no commands");
+    },
+    onGetRoom: () => order.push("read_room"),
+    onListSessionsByRoom: () => order.push("list_sessions"),
+    deleteRoom: async () => {
+      order.push("delete");
+      return "deleted";
+    },
+  });
+
+  await service.expireRoom(ACTOR, "ROOM01", "cleanup");
+
+  // Both questions are asked BY CODE. Asking "is it empty?" first let the
+  // verdict describe the room that was leaving and the delete describe the one
+  // that took its code.
+  assert.deepEqual(order, ["read_room", "list_sessions", "delete"]);
+});
+
+test("admin action service leaves a recycled room code alone when its expire is superseded", async () => {
+  let deletedRuntimeRoom = false;
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("expireRoom issues no commands");
+    },
+    deleteRoom: async () => "superseded",
+    deleteRuntimeRoom: () => {
+      deletedRuntimeRoom = true;
+    },
+  });
+
+  const result = await service.expireRoom(ACTOR, "ROOM01", "cleanup");
+
+  assert.equal(result.roomCode, "ROOM01");
+  assert.equal(deletedRuntimeRoom, false);
+});
+
 test("admin action service keeps room state when closeRoom cannot disconnect every session", async () => {
   let deletedPersistedRoom = false;
   let deletedRuntimeRoom = false;
@@ -404,7 +722,7 @@ test("admin action service keeps room state when closeRoom cannot disconnect eve
     }),
     deleteRoom: async () => {
       deletedPersistedRoom = true;
-      return true;
+      return "deleted";
     },
     deleteRuntimeRoom: () => {
       deletedRuntimeRoom = true;

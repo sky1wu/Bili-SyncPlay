@@ -197,7 +197,7 @@ test("redis room store scores non-expiring rooms at +inf and expiring ones at th
     assert.equal(reexpired.ok, true);
     assert.equal(await redis.zscore(roomsKey, room.code), "1500");
   } finally {
-    await store.deleteRoom("SCORE1");
+    await redis.del(`${namespace}:room:SCORE1`);
     await redis.del(roomsKey);
     await redis.quit();
     await store.close();
@@ -269,7 +269,7 @@ test("redis room reaper rescores rather than deletes a room whose expiry was cle
     assert.ok(await store.getRoom(room.code));
     assert.equal(await redis.zscore(roomsKey, room.code), "inf");
   } finally {
-    await store.deleteRoom("REVIVE");
+    await redis.del(`${namespace}:room:REVIVE`);
     await redis.del(roomsKey);
     await redis.quit();
     await store.close();
@@ -433,7 +433,7 @@ test("redis room listing prunes members whose room body is gone", async (t) => {
     assert.equal(await redis.hlen(orphanKeys.hash), 0);
     assert.equal(await redis.zscore(orphanKeys.queue, "GHOST1"), null);
   } finally {
-    await store.deleteRoom("LIVE01");
+    await redis.del(`${namespace}:room:LIVE01`);
     await redis.del(roomsKey, orphanKeys.hash, orphanKeys.queue);
     await redis.quit();
     await store.close();
@@ -704,7 +704,7 @@ test("redis room reaper bounds the shared orphan handoff and skips a reused code
     assert.equal(await redis.zcard(orphanKeys.queue), 1);
     assert.ok(await store.getRoom("REUSED"));
   } finally {
-    await store.deleteRoom("REUSED");
+    await redis.del(`${namespace}:room:REUSED`);
     await redis.del(roomsKey, orphanKeys.hash, orphanKeys.queue);
     await redis.quit();
     await store.close();
@@ -774,7 +774,7 @@ test("redis room reaper keeps orphan claims behind corrupt room bodies", async (
     await acknowledgeOrphanClaims(store, released);
     assert.equal(await redis.hlen(orphanKeys.hash), 0);
   } finally {
-    await store.deleteRoom("REUSED");
+    await redis.del(`${namespace}:room:REUSED`);
     await redis.del(
       `${namespace}:room:BADTYP`,
       `${namespace}:room:BADJSN`,
@@ -881,8 +881,8 @@ test("redis room listing sorts by createdAt without a keyspace scan", async (t) 
       ["OLDER1", "NEWER1"],
     );
   } finally {
-    await store.deleteRoom("OLDER1");
-    await store.deleteRoom("NEWER1");
+    await redis.del(`${namespace}:room:OLDER1`);
+    await redis.del(`${namespace}:room:NEWER1`);
     await redis.del(`${namespace}:rooms-by-expiry`);
     await redis.quit();
     await store.close();
@@ -935,7 +935,7 @@ test("redis room update applies the patch, bumps version, and rejects stale writ
     }
     assert.equal(missing.reason, "not_found");
   } finally {
-    await store.deleteRoom("CASRM1");
+    await redis.del(`${namespace}:room:CASRM1`);
     await redis.del(`${namespace}:rooms-by-expiry`);
     await redis.quit();
     await store.close();
@@ -979,7 +979,7 @@ test("redis room update preserves playback number precision", async (t) => {
 
     assert.deepEqual((await store.getRoom(room.code))?.playback, playback);
   } finally {
-    await store.deleteRoom("PRECIS");
+    await redis.del(`${namespace}:room:PRECIS`);
     await redis.del(`${namespace}:rooms-by-expiry`);
     await redis.quit();
     await store.close();
@@ -1024,7 +1024,7 @@ test("redis room create leaves the winner untouched when a code collides", async
     );
     assert.equal(await redis.zscore(roomsKey, "COLLID"), "5000");
   } finally {
-    await store.deleteRoom("COLLID");
+    await redis.del(`${namespace}:room:COLLID`);
     await redis.del(roomsKey);
     await redis.quit();
     await store.close();
@@ -1093,9 +1093,9 @@ test("redis room count answers every filter from the sorted set alone", async (t
     });
     assert.equal(listed.length, 2);
   } finally {
-    await store.deleteRoom("LIVEAA");
-    await store.deleteRoom("GONEBB");
-    await store.deleteRoom("LATERC");
+    await redis.del(`${namespace}:room:LIVEAA`);
+    await redis.del(`${namespace}:room:GONEBB`);
+    await redis.del(`${namespace}:room:LATERC`);
     await redis.del(`${namespace}:rooms-by-expiry`);
     await redis.quit();
     await store.close();
@@ -1232,7 +1232,7 @@ test("redis room expiry score matches exactly what ZSCORE reads back", async (t)
       expiryScore(expiring.room),
     );
   } finally {
-    await store.deleteRoom("FMTCHK");
+    await redis.del(`${namespace}:room:FMTCHK`);
     await redis.del(roomsKey);
     await redis.quit();
     await store.close();
@@ -1753,17 +1753,192 @@ test("redis room store reports which delete removed the room and still drops the
     // The delete is idempotent, so both a losing concurrent reader and the
     // reaper can arrive after the room is already gone. Only the call that
     // actually removed the body may be counted as reclaiming a room.
-    assert.equal(await store.deleteRoom(room.code), true);
-    assert.equal(await store.deleteRoom(room.code), false);
+    assert.equal(await store.deleteRoom(room), "deleted");
+    assert.equal(await store.deleteRoom(room), "already_deleted");
     assert.equal(await store.getRoom(room.code), null);
     assert.equal(await redis.zscore(roomsKey, room.code), null);
 
     // An index entry whose body is already gone must still be dropped, and must
     // not be reported as a room this call reclaimed.
     await redis.zadd(roomsKey, "inf", "DELTWO");
-    assert.equal(await store.deleteRoom("DELTWO"), false);
+    assert.equal(
+      await store.deleteRoom({ ...room, code: "DELTWO" }),
+      "already_deleted",
+    );
     assert.equal(await redis.zscore(roomsKey, "DELTWO"), null);
   } finally {
+    await redis.del(roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("a room delete decided against one instance leaves its successor alone", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("delrecycle");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const first = await store.createRoom({
+      code: "DELREC",
+      joinToken: "join-token-first0",
+      createdAt: 1,
+    });
+    // The caller stops waiting for its delete. Before that command reaches
+    // Redis the room is gone anyway and the code is handed to a new room whose
+    // owner has already been told their creation succeeded.
+    assert.equal(await store.deleteRoom(first), "deleted");
+    const second = await store.createRoom({
+      code: "DELREC",
+      joinToken: "join-token-second",
+      createdAt: 2,
+    });
+
+    // Now the abandoned delete lands. Unguarded, it took whichever room held
+    // the code (#277).
+    assert.equal(await store.deleteRoom(first), "superseded");
+    assert.equal((await store.getRoom("DELREC"))?.joinToken, second.joinToken);
+    assert.equal(await redis.zscore(roomsKey, "DELREC"), "inf");
+  } finally {
+    await redis.del(`${namespace}:room:DELREC`);
+    await redis.del(roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("a room delete survives the changes an admin close itself causes", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // The guard names the INSTANCE, not the bytes. An admin close disconnects
+  // every member first and their leaves rewrite the record, so a guard that
+  // compared the whole body would decline the action that caused the change —
+  // and the caller would then skip the runtime teardown and the `room_deleted`
+  // broadcast while reporting success (#277 review).
+  const namespace = uniqueNamespace("delchange");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const target = await store.createRoom({
+      code: "DELCHG",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    const leaveWrite = await store.updateRoom(target.code, target.version, {
+      lastActiveAt: 2_000,
+      expiresAt: 9_000,
+    });
+    assert.equal(leaveWrite.ok, true);
+
+    assert.equal(await store.deleteRoom(target), "deleted");
+    assert.equal(await store.getRoom("DELCHG"), null);
+    assert.equal(await redis.zscore(roomsKey, "DELCHG"), null);
+  } finally {
+    await redis.del(`${namespace}:room:DELCHG`, roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("a room delete leaves a body it cannot read to the quarantine", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("delunreadable");
+  const roomKey = `${namespace}:room:DELBAD`;
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const target = await store.createRoom({
+      code: "DELBAD",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    await redis.set(roomKey, "{not json");
+
+    // Judging is impossible, so deleting would be a guess made on a request
+    // path. The sweep's quarantine owns this case.
+    assert.equal(await store.deleteRoom(target), "superseded");
+    assert.equal(await store.deleteExpiredRoom("DELBAD", 9_000), "superseded");
+    assert.equal(await redis.get(roomKey), "{not json");
+  } finally {
+    await redis.del(roomKey, roomsKey);
+    await redis.quit();
+    await store.close();
+  }
+});
+
+test("an expired-room delete declines once the room stops being expired", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("delrevive");
+  const roomsKey = `${namespace}:rooms-by-expiry`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+
+  try {
+    const room = await store.createRoom({
+      code: "DELREV",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+    });
+    const expired = await store.updateRoom(room.code, room.version, {
+      expiresAt: 500,
+      lastActiveAt: 400,
+    });
+    assert.equal(expired.ok, true);
+    if (!expired.ok) {
+      throw new Error("Expected the expiry write to succeed.");
+    }
+
+    // A reader takes that expired snapshot. Before its delete runs, a node that
+    // still has members there clears the expiry — the case the leave path is
+    // already known to produce (#235 review).
+    const revived = await store.updateRoom(room.code, expired.room.version, {
+      expiresAt: null,
+      lastActiveAt: 900,
+    });
+    assert.equal(revived.ok, true);
+
+    // Judged from a fresh read inside the guarded write, so the snapshot that
+    // said "expired" cannot collect a room that came back to life.
+    assert.equal(await store.deleteExpiredRoom("DELREV", 1_000), "superseded");
+    assert.ok(await store.getRoom("DELREV"));
+    assert.equal(await redis.zscore(roomsKey, "DELREV"), "inf");
+
+    // Still expired, so it is still collectable.
+    const reexpired = await store.updateRoom(
+      "DELREV",
+      revived.ok ? revived.room.version : 0,
+      {
+        expiresAt: 900,
+        lastActiveAt: 900,
+      },
+    );
+    assert.equal(reexpired.ok, true);
+    assert.equal(await store.deleteExpiredRoom("DELREV", 1_000), "deleted");
+    assert.equal(await store.getRoom("DELREV"), null);
+    assert.equal(await redis.zscore(roomsKey, "DELREV"), null);
+  } finally {
+    await redis.del(`${namespace}:room:DELREV`);
     await redis.del(roomsKey);
     await redis.quit();
     await store.close();

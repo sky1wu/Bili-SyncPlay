@@ -1,4 +1,4 @@
-import type { ClientMessage } from "@bili-syncplay/protocol";
+import type { ClientMessage, ErrorCode } from "@bili-syncplay/protocol";
 import type { WebSocket } from "ws";
 import { performance } from "node:perf_hooks";
 import type {
@@ -1309,7 +1309,9 @@ export function createMessageHandler(options: {
       }
     } catch (error) {
       if (error instanceof RoomServiceError) {
-        sendError(socket, error.code, error.message);
+        const code: ErrorCode = error.code;
+        const errorMessage = error.message;
+        sendError(socket, code, errorMessage);
         if (error.reason === "internal_error") {
           logEvent("room_persist_failed", {
             sessionId: session.id,

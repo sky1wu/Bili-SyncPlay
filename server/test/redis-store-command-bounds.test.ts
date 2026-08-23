@@ -547,7 +547,21 @@ const ROOM_CALLER_CHOSEN: Record<
   getRoom: (store, caller) => store.getRoom("ROOM01", caller),
 };
 
+/**
+ * Methods whose bound belongs to an OUTER caller, each naming whose deadline.
+ *
+ * The two deletes are here rather than on the request path, and that placement
+ * IS the fix: a cap inside the store answers by discarding the command's
+ * outcome, so everything a successful delete owes — the reclamation count, the
+ * runtime teardown, the `room_deleted` broadcast — silently stops happening,
+ * and each caller grows its own compensation for it (#277 review). The caller
+ * caps its WAIT instead and keeps the effect.
+ */
 const ROOM_BOUNDED_ELSEWHERE: Record<string, string> = {
+  deleteRoom:
+    "admin action service: room-deletion confirmation deadline; the effect keeps the outcome its teardown and room_deleted broadcast need",
+  deleteExpiredRoom:
+    "room-service: expired-room collection deadline; the effect keeps the outcome its reclamation count and runtime teardown need",
   deleteExpiredRooms: "maintenance-pass: room-reaper's per-tick sweep cap",
   acknowledgeOrphanedIndexClaims:
     "maintenance-pass: room-reaper's per-tick sweep cap",
@@ -559,8 +573,6 @@ const ROOM_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
   createRoom:
     "#237's trade: the write may land after the caller is told it did not",
   updateRoom: "read half capped; the CAS is #237's trade",
-  deleteRoom:
-    "#237's trade: the write may land after the caller is told it did not",
 };
 
 test("every room store method is classified by what bounds its commands", async () => {
@@ -752,6 +764,58 @@ test("the room reaper's sweep is left unanswered, so its pass can report stalled
   );
 });
 
+test("both guarded deletes are left unanswered, so their callers can own the effect", async () => {
+  // The mechanical half of "the cap belongs to the caller". A cap re-introduced
+  // in the store would answer by discarding this command's outcome, and every
+  // follow-up a successful delete owes — the reclamation count, the runtime
+  // teardown, the `room_deleted` broadcast — would silently stop happening
+  // (#277 review). Nothing in the classification table can see that; this can.
+  const bootstrapCommands = await withRoomStore(
+    null,
+    async (_store, commands) => commands.issuedCount(),
+    { settleBootstrap: true },
+  );
+
+  const calls: Record<string, (store: RoomStoreUnderTest) => Promise<unknown>> =
+    {
+      deleteRoom: (store) =>
+        Promise.resolve(
+          store.deleteRoom({
+            code: "ROOM01",
+            joinToken: "join-token-123456",
+            createdAt: 1,
+            ownerMemberId: null,
+            ownerDisplayName: null,
+            sharedVideo: null,
+            playback: null,
+            version: 0,
+            lastActiveAt: 1,
+            expiresAt: null,
+          }),
+        ),
+      deleteExpiredRoom: (store) =>
+        Promise.resolve(store.deleteExpiredRoom("ROOM01", 1_000)),
+    };
+
+  for (const [method, call] of Object.entries(calls)) {
+    await withRoomStore(
+      bootstrapCommands,
+      async (store) => {
+        const answered = await settleWithin(
+          call(store).catch(() => undefined),
+          OBSERVATION_MS,
+        );
+        assert.equal(
+          answered,
+          false,
+          `${method} answered on its own; its caller's deadline is the only one that may`,
+        );
+      },
+      { settleBootstrap: true },
+    );
+  }
+});
+
 test("the room reaper's orphan acknowledgement is left unanswered too", async () => {
   const bootstrapCommands = await withRoomStore(
     null,
@@ -790,6 +854,46 @@ test("the reaper's wait on the migration pass is left unanswered too", async () 
   });
 });
 
+test("a guarded room delete decides and writes in one command", async () => {
+  // Structural, because the property cannot be observed from outside: a delete
+  // that READS the body, judges it, then writes under those bytes can be split
+  // by a concurrent write — and closing that by treating every body change as a
+  // different room declines the admin close whose own members' leaves caused
+  // the change (#277 review). One command is what makes both true at once.
+  for (const [method, call] of Object.entries({
+    deleteRoom: (store: RoomStoreUnderTest) =>
+      store.deleteRoom({
+        code: "ROOM01",
+        joinToken: "join-token-123456",
+        createdAt: 1,
+        ownerMemberId: null,
+        ownerDisplayName: null,
+        sharedVideo: null,
+        playback: null,
+        version: 0,
+        lastActiveAt: 1,
+        expiresAt: null,
+      }),
+    deleteExpiredRoom: (store: RoomStoreUnderTest) =>
+      store.deleteExpiredRoom("ROOM01", 1_000),
+  })) {
+    const issued = await withRoomStore(
+      null,
+      async (store, commands) => {
+        const before = commands.issuedCount();
+        await call(store).catch(() => undefined);
+        return commands.issuedCount() - before;
+      },
+      { settleBootstrap: true },
+    );
+    assert.equal(
+      issued,
+      1,
+      `${method} must decide and write in one command; it issued ${issued}`,
+    );
+  }
+});
+
 test("room store admission refuses a command instead of issuing it", async () => {
   // The other half of #277: a cap answers the caller but leaves the command on
   // the connection, so without admission a stalled Redis still accumulates one
@@ -823,6 +927,77 @@ test("room store admission refuses a command instead of issuing it", async () =>
     },
     { maxPendingCommands: 1, settleBootstrap: true },
   );
+});
+
+async function assertRoomCommandAdmissionShared(args: {
+  stall: (store: RoomStoreUnderTest) => Promise<unknown>;
+  refuse: (store: RoomStoreUnderTest) => Promise<unknown>;
+  context: string;
+}): Promise<void> {
+  const bootstrapCommands = await withRoomStore(
+    null,
+    async (_store, commands) => commands.issuedCount(),
+    { settleBootstrap: true },
+  );
+  await withRoomStore(
+    bootstrapCommands,
+    async (store, commands) => {
+      const pending = args.stall(store).catch(() => undefined);
+      const issuedAfterStall = commands.issuedCount();
+      assert.equal(issuedAfterStall, bootstrapCommands + 1);
+
+      let refusalError: unknown;
+      const refusal = args.refuse(store).catch((error: unknown) => {
+        refusalError = error;
+      });
+      assert.equal(
+        await settleWithin(refusal, OBSERVATION_MS),
+        true,
+        `${args.context}: admission must answer without waiting for Redis`,
+      );
+      assert.ok(
+        refusalError instanceof RedisStoreUnavailableError &&
+          refusalError.store === "room" &&
+          refusalError.reason === "admission",
+        args.context,
+      );
+      assert.equal(
+        commands.issuedCount(),
+        issuedAfterStall,
+        `${args.context}: a refused command must not reach Redis`,
+      );
+      void pending;
+    },
+    { maxPendingCommands: 1, settleBootstrap: true },
+  );
+}
+
+test("a stalled room read refuses the next guarded delete", async () => {
+  await assertRoomCommandAdmissionShared({
+    stall: (store) => store.getRoom("ROOM01"),
+    refuse: (store) => store.deleteExpiredRoom("ROOM02", 1_000),
+    context: "stalled read before delete",
+  });
+});
+
+test("a stalled guarded delete holds its admission slot until reply", async () => {
+  await assertRoomCommandAdmissionShared({
+    stall: (store) =>
+      store.deleteRoom({
+        code: "ROOM01",
+        joinToken: "join-token-123456",
+        createdAt: 1,
+        ownerMemberId: null,
+        ownerDisplayName: null,
+        sharedVideo: null,
+        playback: null,
+        version: 0,
+        lastActiveAt: 1,
+        expiresAt: null,
+      }),
+    refuse: (store) => store.getRoom("ROOM02"),
+    context: "stalled delete before read",
+  });
 });
 
 test("room command timeouts are retryable store errors", async () => {

@@ -94,3 +94,28 @@ test("trackCall preserves the real outcome while counting an unanswered call", a
   assert.equal(pacer.trackedCount(), 0);
   pacer.stop();
 });
+
+test("capWait does not track repeated waits on an already tracked call", async () => {
+  const pacer = createRetryPacer({ initialDelayMs: 1, maxDelayMs: 1 });
+  let resolveCall!: (value: string) => void;
+  const call = new Promise<string>((resolve) => {
+    resolveCall = resolve;
+  });
+  const tracked = pacer.trackCall(call);
+
+  await assert.rejects(
+    pacer.capWait(tracked, 1, () => new Error("first wait capped")),
+    /first wait capped/,
+  );
+  await assert.rejects(
+    pacer.capWait(tracked, 1, () => new Error("second wait capped")),
+    /second wait capped/,
+  );
+  assert.equal(pacer.trackedCount(), 1);
+
+  resolveCall("answered");
+  assert.equal(await tracked, "answered");
+  await Promise.resolve();
+  assert.equal(pacer.trackedCount(), 0);
+  pacer.stop();
+});

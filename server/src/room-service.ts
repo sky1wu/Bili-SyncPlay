@@ -24,6 +24,7 @@ import {
   createRoomCode,
   roomStateFromSessions,
   roomStateOf,
+  type RoomDeleteOutcome,
   type RoomReadCaller,
   type RoomStore,
 } from "./room-store.js";
@@ -68,6 +69,24 @@ const JOIN_ADMISSION_LOCK_RETRY_INTERVAL_MS = 25;
  */
 export const DEFAULT_RUNTIME_TEARDOWN_CONFIRM_TIMEOUT_MS = 5_000;
 
+/**
+ * How long a reader waits for an expired room's collection to confirm.
+ *
+ * Its own constant, not the teardown's: this one bounds a READ that found an
+ * expired room. If the bound wins, the read fails retryably rather than
+ * claiming the room is absent: the guarded delete may still answer
+ * `superseded`, which means another node kept that room alive. The teardown's
+ * constant instead bounds a request waiting to know whether cleanup happened.
+ * Two behaviours, two constants (#271).
+ */
+export const DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS = 5_000;
+
+/**
+ * Leaves one second inside the shutdown step for reporting and dependency close
+ * hand-off. The delete and teardown pacers share this one budget below.
+ */
+export const DEFAULT_ROOM_SERVICE_CLOSE_BUDGET_MS = 4_000;
+
 type ServiceErrorReason =
   | "room_not_found"
   | "join_token_invalid"
@@ -75,6 +94,7 @@ type ServiceErrorReason =
   | "not_in_room"
   | "room_full"
   | "invalid_message"
+  | "room_resolution_unconfirmed"
   | "internal_error";
 
 export class RoomServiceError extends Error {
@@ -85,6 +105,43 @@ export class RoomServiceError extends Error {
     readonly details: Record<string, unknown> = {},
   ) {
     super(message);
+  }
+}
+
+type RoomExpiryResolutionUnconfirmedTrigger =
+  "delete_timeout" | "service_closing" | "still_expired_after_superseded";
+
+/**
+ * "This room's collection has not confirmed" — a DIAGNOSIS, not a wire code.
+ *
+ * The distinction is deliberately kept off the protocol. On the wire this is
+ * `internal_error`, the same answer every other bounded store command already
+ * gives when it cannot answer, and the only pre-v5 code that reports "no
+ * answer" without asserting one. Minting a code for it would cost a protocol
+ * version, a compatibility gate for every older client, and a client-side
+ * state machine — for a window that heals itself on the next attempt. The
+ * `trigger` and `confirmation` details below keep the diagnosis where it is
+ * actually needed: the log.
+ */
+class RoomExpiryResolutionUnconfirmedError extends RoomServiceError {
+  constructor(
+    roomCode: string,
+    readonly trigger: RoomExpiryResolutionUnconfirmedTrigger,
+    timeoutMs?: number,
+  ) {
+    super(
+      "internal_error",
+      INTERNAL_SERVER_ERROR_MESSAGE,
+      "room_resolution_unconfirmed",
+      {
+        roomCode,
+        reason: "room_expiry_resolution_unconfirmed",
+        trigger,
+        confirmation: "unconfirmed",
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      },
+    );
+    this.name = "RoomExpiryResolutionUnconfirmedError";
   }
 }
 
@@ -197,6 +254,10 @@ export function createRoomService(options: {
   resolveRoomResidue?: (roomCode: string) => Promise<boolean>;
   /** Request-side confirmation budget; maintenance passes keep their own cap. */
   runtimeTeardownConfirmationTimeoutMs?: number;
+  /** How long a reader waits for an expired room's collection to confirm. */
+  roomDeleteConfirmationTimeoutMs?: number;
+  /** Shared by late persisted-room deletions and runtime teardown effects. */
+  closeBudgetMs?: number;
 }): {
   createRoomForSession: (
     session: Session,
@@ -254,6 +315,7 @@ export function createRoomService(options: {
   ) => Promise<ReturnType<typeof roomStateOf> | null>;
   deleteExpiredRooms: (currentTime?: number) => Promise<ExpiredRoomSweepCounts>;
   teardownRoomRuntime: (code: string) => Promise<void>;
+  close: () => Promise<void>;
 } {
   const { config, persistence, roomStore, generateToken, logEvent } = options;
   const runtimeStoreOption = options.runtimeStore ?? options.activeRooms;
@@ -266,7 +328,22 @@ export function createRoomService(options: {
     initialDelayMs: runtimeTeardownConfirmationTimeoutMs,
     maxDelayMs: runtimeTeardownConfirmationTimeoutMs,
   });
+  const roomDeleteConfirmationTimeoutMs =
+    options.roomDeleteConfirmationTimeoutMs ??
+    DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS;
+  const roomDeleteConfirmationPacer = createRetryPacer({
+    initialDelayMs: roomDeleteConfirmationTimeoutMs,
+    maxDelayMs: roomDeleteConfirmationTimeoutMs,
+  });
+  const closeBudgetMs =
+    options.closeBudgetMs ?? DEFAULT_ROOM_SERVICE_CLOSE_BUDGET_MS;
+  let closing = false;
+  let closePromise: Promise<void> | null = null;
   const playbackAuthorityByRoom = new Map<string, PlaybackAuthority>();
+  const expiredRoomCollectionEffects = new Map<
+    string,
+    Promise<RoomDeleteOutcome>
+  >();
 
   if (!runtimeStoreOption) {
     throw new Error("RuntimeStore is required");
@@ -802,31 +879,177 @@ export function createRoomService(options: {
     return settledCodes;
   }
 
+  /**
+   * One effect: the guarded delete AND everything a successful one owes.
+   *
+   * They belong together because a reader may stop waiting. The cap below
+   * answers that reader without cancelling the command, so anything left
+   * outside this chain — the reclamation metric, the runtime teardown — would
+   * simply not happen once the delete lands late, and each caller would have to
+   * grow its own compensation for it (#277 review).
+   */
+  async function collectExpiredRoom(code: string): Promise<RoomDeleteOutcome> {
+    const outcome = await roomStore.deleteExpiredRoom(code, now());
+    if (outcome === "superseded") {
+      // Nothing of that room to collect, and the runtime state under this code
+      // belongs to whoever holds it now — the one case where the teardown would
+      // be actively wrong.
+      return outcome;
+    }
+    // Counted here as well as in the sweep: a room read between its expiry
+    // instant and the next pass dies on this path instead, and leaving it out
+    // would make reclamations look like they trail room creations forever.
+    //
+    // Only the effect whose delete actually removed the record counts it. Lazy
+    // readers now share one effect below, but the reaper's sweep can still race
+    // it; counting an `already_deleted` arrival would meter one room twice,
+    // which is the exact defect this counter exists to remove (#254 review).
+    if (outcome === "deleted") {
+      options.metricsCollector?.recordRoomsExpiredDeleted(1);
+    }
+    // Same helper as the reaper: it refuses to tear down a code that has
+    // already been recycled, and queues a failed teardown for retry.
+    await collectRuntimeStateForDeletedRooms([], [code], "request");
+    return outcome;
+  }
+
+  function getOrStartExpiredRoomCollection(
+    code: string,
+  ): Promise<RoomDeleteOutcome> {
+    const existing = expiredRoomCollectionEffects.get(code);
+    if (existing) {
+      return existing;
+    }
+
+    // One real, shutdown-tracked delete effect per room code while its guarded
+    // outcome is still unknown. Retries cap only their waits on this promise;
+    // they must add neither another tracked wrapper nor another Redis delete.
+    const effect = roomDeleteConfirmationPacer.trackCall(
+      collectExpiredRoom(code),
+    );
+    expiredRoomCollectionEffects.set(code, effect);
+    void effect.then(
+      () => {
+        if (expiredRoomCollectionEffects.get(code) === effect) {
+          expiredRoomCollectionEffects.delete(code);
+        }
+      },
+      () => {
+        if (expiredRoomCollectionEffects.get(code) === effect) {
+          expiredRoomCollectionEffects.delete(code);
+        }
+      },
+    );
+    return effect;
+  }
+
+  /**
+   * Builds the unconfirmed-resolution error AND records it, in one place.
+   *
+   * The wire answer is `internal_error` for every trigger, so this log line is
+   * the only thing that can tell an expected retryable timing apart from an
+   * ordinary internal failure. Logging at each throw site instead left two of
+   * the three triggers silent, which is how the diagnosis this error exists to
+   * carry never reached anyone (#277 review).
+   */
+  function unconfirmedRoomResolution(
+    code: string,
+    trigger: RoomExpiryResolutionUnconfirmedTrigger,
+    timeoutMs?: number,
+  ): RoomExpiryResolutionUnconfirmedError {
+    logEvent("room_expiry_delete_unconfirmed", {
+      roomCode: code,
+      provider: persistence.provider,
+      trigger,
+      result: "unconfirmed",
+      confirmation: "unconfirmed",
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
+    return new RoomExpiryResolutionUnconfirmedError(code, trigger, timeoutMs);
+  }
+
   async function resolveRoom(code: string): Promise<PersistedRoom | null> {
     const room = await roomStore.getRoom(code);
     if (!room) {
       return null;
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
-      const deletedHere = await roomStore.deleteRoom(code);
-      // Counted here as well as in the sweep: a room read between its expiry
-      // instant and the next pass dies on this path instead, and leaving it out
-      // would make reclamations look like they trail room creations forever.
-      //
-      // Only the caller whose delete actually removed the record counts it.
-      // Concurrent readers all see the same expired snapshot and all reach this
-      // delete — and the reaper's sweep can be one of them — so counting every
-      // arrival would meter one room several times, which is the exact defect
-      // this counter exists to remove (#254 review).
-      if (deletedHere) {
-        options.metricsCollector?.recordRoomsExpiredDeleted(1);
+      // `close()` may have run while the room read above was in flight. Do not
+      // admit a new lazy-delete effect after its shutdown snapshot, but do not
+      // call the room absent either: another node may already have revived the
+      // stale snapshot. The caller keeps its session and may retry elsewhere.
+      if (closing) {
+        throw unconfirmedRoomResolution(code, "service_closing");
       }
-      // Same helper as the reaper: it refuses to tear down a code that has
-      // already been recycled, and queues a failed teardown for retry.
-      await collectRuntimeStateForDeletedRooms([], [code], "request");
+      // The wait may end while the effect does not: it still holds the delete
+      // and everything a successful one owes, and its final result can still be
+      // `superseded`, so this reader fails retryably instead of claiming
+      // confirmed absence.
+      const outcome = await roomDeleteConfirmationPacer.capWait(
+        getOrStartExpiredRoomCollection(code),
+        roomDeleteConfirmationTimeoutMs,
+        () =>
+          unconfirmedRoomResolution(
+            code,
+            "delete_timeout",
+            roomDeleteConfirmationTimeoutMs,
+          ),
+      );
+      if (outcome === "superseded") {
+        // The code no longer carries the expired record this read decided
+        // against: an update cleared its expiry, or a different room took the
+        // code. Answered from a fresh read rather than from the snapshot that is
+        // now known to be stale. A room that reads as expired AGAIN remains an
+        // unconfirmed resolution instead of looping back into another delete.
+        const fresh = await roomStore.getRoom(code);
+        if (!fresh) {
+          return null;
+        }
+        if (fresh.expiresAt !== null && fresh.expiresAt <= now()) {
+          // The guard declined the old delete, but this later snapshot has now
+          // expired too. No delete has confirmed this room absent; let the
+          // caller retry rather than collapsing a still-present record to null.
+          throw unconfirmedRoomResolution(
+            code,
+            "still_expired_after_superseded",
+          );
+        }
+        return fresh;
+      }
       return null;
     }
     return room;
+  }
+
+  async function closeRoomService(): Promise<void> {
+    const deadline = performance.now() + closeBudgetMs;
+    const remainingBudgetMs = (): number =>
+      Math.max(deadline - performance.now(), 0);
+
+    // Drain the outer delete chain first. A delete that settles here may start
+    // a runtime teardown only after its Redis outcome arrives, so taking both
+    // pacer snapshots together would let that nested effect escape shutdown.
+    await roomDeleteConfirmationPacer.settleTracked(remainingBudgetMs());
+    const remaining = remainingBudgetMs();
+    if (remaining > 0) {
+      await runtimeTeardownConfirmationPacer.settleTracked(remaining);
+    }
+
+    const pendingRoomDeletions = roomDeleteConfirmationPacer.trackedCount();
+    // The debt ledger is the source of truth, not the request confirmation
+    // pacer. A fast rejection or guarded skip leaves no tracked request, but its
+    // ownerless ledger entry is still the only trail to runtime state whose
+    // persisted room has already gone.
+    const pendingRuntimeTeardownCount = pendingRuntimeTeardowns.size;
+    if (pendingRoomDeletions > 0 || pendingRuntimeTeardownCount > 0) {
+      logEvent("room_service_close_unfinished", {
+        provider: persistence.provider,
+        pendingRoomDeletions,
+        pendingRuntimeTeardowns: pendingRuntimeTeardownCount,
+        budgetMs: closeBudgetMs,
+        result: "timeout",
+      });
+    }
   }
 
   function getPlaybackAuthority(roomCode: string): PlaybackAuthority | null {
@@ -1542,6 +1765,14 @@ export function createRoomService(options: {
   }
 
   return {
+    close() {
+      if (!closePromise) {
+        // Close lazy-delete admission before the drain takes its first snapshot.
+        closing = true;
+        closePromise = closeRoomService();
+      }
+      return closePromise;
+    },
     /**
      * Tear down a deleted room's runtime state, guarded and retried.
      *
@@ -2280,14 +2511,12 @@ export function createRoomService(options: {
         memberToken,
         messageType,
       );
-      const persistedRoom = await resolveRoom(access.persistedRoom.code);
-      if (!persistedRoom) {
-        throw new RoomServiceError(
-          "room_not_found",
-          ROOM_NOT_FOUND_MESSAGE,
-          "room_not_found",
-        );
-      }
+      // Authentication and room resolution are one snapshot. Resolving again
+      // opens a second confirmed-absence branch that bypasses the session
+      // cleanup owned by `requireJoinedRoomSession`; it can also return a state
+      // assembled from two different room lifetimes. A later request observes
+      // any deletion through the same authoritative entry point.
+      const persistedRoom = access.persistedRoom;
       return roomStateFromSessions(
         persistedRoom,
         await runtimeStore.listClusterSessionsByRoom(persistedRoom.code),

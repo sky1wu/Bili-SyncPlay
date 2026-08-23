@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getDefaultSecurityConfig } from "../src/app.js";
 import { createMessageHandler } from "../src/message-handler.js";
+import {
+  CURRENT_PROTOCOL_VERSION,
+  MIN_PROTOCOL_VERSION,
+} from "../src/messages.js";
 import { RoomServiceError } from "../src/room-service.js";
 import { createSessionRateLimitState } from "../src/rate-limit.js";
 import type { AttachedSession, SecurityConfig, Session } from "../src/types.js";
@@ -102,6 +106,91 @@ test("message handler rejects detached sessions before processing", async () => 
     ),
     /Detached session cannot process client message/,
   );
+});
+
+test("an unconfirmed room resolution reaches every client as internal_error", async () => {
+  async function run(
+    protocolVersion: number,
+    messageType: "room:join" | "room:create" = "room:join",
+  ) {
+    const errors: Array<{ code: string; message: string }> = [];
+    const handler = createMessageHandler({
+      config: CONFIG,
+      roomService: {
+        async createRoomForSession() {
+          throw new RoomServiceError(
+            "internal_error",
+            "Internal server error.",
+            "room_resolution_unconfirmed",
+          );
+        },
+        async joinRoomForSession() {
+          throw new RoomServiceError(
+            "internal_error",
+            "Internal server error.",
+            "room_resolution_unconfirmed",
+          );
+        },
+        async leaveRoomForSession() {
+          return { room: null };
+        },
+        async shareVideoForSession() {
+          throw new Error("unreachable");
+        },
+        async updatePlaybackForSession() {
+          throw new Error("unreachable");
+        },
+        async updateProfileForSession() {
+          throw new Error("unreachable");
+        },
+        async getRoomStateForSession() {
+          throw new Error("unreachable");
+        },
+      },
+      logEvent() {},
+      send() {},
+      sendError(_socket, code, message) {
+        errors.push({ code, message });
+      },
+      async publishRoomEvent() {},
+      instanceId: "node-a",
+    });
+
+    const session = createSession(`client-${protocolVersion}-${messageType}`);
+    if (messageType === "room:create") {
+      await handler.handleClientMessage(session, {
+        type: "room:create",
+        payload: { protocolVersion },
+      });
+    } else {
+      await handler.handleClientMessage(session, {
+        type: "room:join",
+        payload: {
+          roomCode: "ROOM01",
+          joinToken: "join-token-1",
+          protocolVersion,
+        },
+      });
+    }
+    return errors;
+  }
+
+  // One answer, every client, every request. The unconfirmed state is a
+  // DIAGNOSIS and stays off the wire (#277): minting a code for it costs a
+  // protocol version and a compatibility gate for every older client, for a
+  // window the next attempt resolves on its own.
+  //
+  // And never `room_not_found`: the released controller treats that as terminal
+  // for a pending join AND for a stored room context, so an outcome that cannot
+  // prove the room absent would clear the user's session on its way past.
+  for (const version of [MIN_PROTOCOL_VERSION, CURRENT_PROTOCOL_VERSION]) {
+    assert.deepEqual(await run(version), [
+      { code: "internal_error", message: "Internal server error." },
+    ]);
+    assert.deepEqual(await run(version, "room:create"), [
+      { code: "internal_error", message: "Internal server error." },
+    ]);
+  }
 });
 
 test("message handler creates a room and sends bootstrap state to the creator", async () => {
@@ -964,7 +1053,7 @@ test("message handler accepts room:create without protocolVersion (legacy client
   assert.ok(events.includes("room_created"));
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:created");
-  assert.equal(sent[0].serverProtocolVersion, 4);
+  assert.equal(sent[0].serverProtocolVersion, CURRENT_PROTOCOL_VERSION);
   assert.equal(sent[1].type, "room:state");
 });
 
@@ -1157,21 +1246,22 @@ test("message handler accepts room:join with matching protocolVersion and return
     payload: {
       roomCode: "ROOM01",
       joinToken: "join-token-1",
-      protocolVersion: 4,
+      protocolVersion: CURRENT_PROTOCOL_VERSION,
     },
   });
 
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 4);
+  assert.equal(sent[0].serverProtocolVersion, CURRENT_PROTOCOL_VERSION);
   assert.equal(sent[1].type, "room:state");
 });
 
 test("message handler accepts room:join from a still-supported older protocol version", async () => {
   // v2 clients (below CURRENT but >= MIN) stay in the compatibility window: the
   // server accepts them and advertises its CURRENT version. The v3 `naturalEnd`
-  // playback flag and the v4 `room:state.playbackAgeMs` are both additive, so
-  // these older clients simply ignore them.
+  // playback flag and the v4 `room:state.playbackAgeMs` are additive. The v5
+  // retryable room-resolution result is gated at the server boundary, so these
+  // older clients remain inside the compatibility window too.
   const sent: Array<{ type: string; serverProtocolVersion?: number }> = [];
   const session = createSession("older-joiner");
 
@@ -1246,7 +1336,7 @@ test("message handler accepts room:join from a still-supported older protocol ve
 
   assert.equal(session.protocolVersion, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 4);
+  assert.equal(sent[0].serverProtocolVersion, CURRENT_PROTOCOL_VERSION);
   assert.equal(sent[1].type, "room:state");
 });
 

@@ -862,16 +862,16 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: four durable writes.** One runtime-store write
-  through `trackAwaitedOperation` (`revokeMemberToken`) and three room-body
-  writes stay uncapped,
+- **Still open, deliberately: three durable writes.** One runtime-store write
+  through `trackAwaitedOperation` (`revokeMemberToken`) and the room store's
+  `createRoom` and `updateRoom` stay uncapped,
   because #237 settled that an answer which can be wrong is worse than a slow
   one and their effects do not expire on their own. The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
   had no production callers, so #277 removed them. **A write leaves this list by
   becoming CONDITIONAL, never by re-arguing #237**: a guarded write's late
   landing is a no-op, so the answer its caller was given cannot be wrong.
-  `markRoomGeneration` is the third to leave that way, and it took the ordinary
+  `markRoomGeneration` was the third to leave that way, and it took the ordinary
   request-path cap rather than a caller-side deadline, because room creation is
   its only caller and nothing derives a bound from its silence. Its pin belongs
   to the REQUEST: the creator reads the key and passes the value in. Re-reading
@@ -889,7 +889,85 @@ do NOT compose, and that is the part that decides which connection gets which:
   which is equally true when an admin touched our still-memberless room — so it
   re-reads, compares the join token to see whether the record is still ours, and
   re-CASes within its own bounded attempt count. Only what it truly could not
-  expire is reported. Atomic
+  expire is reported.
+
+  The room store's delete left the same list the same way, in TWO guarded forms
+  because the guard is a property of the CALL, not of the method. `deleteRoom`
+  pins the instance by `joinToken`: an admin closing a room disconnects its
+  members first and their leaves rewrite the record, so a version-exact guard
+  would decline the very action that caused the change. `deleteExpiredRoom`
+  requires the record to still be expired, judged inside the guarded write —
+  an expiry can land on a room other nodes are still using, and no arrangement
+  of check-then-act closes that. Each is ONE command that decodes the body and
+  compares ONE field. Not the whole bytes, the way `UPDATE_ROOM_CAS_LUA` does:
+  an update must not be built on a stale body, while a delete must not take a
+  DIFFERENT ROOM, and comparing bytes conflates the two — the leaves of the
+  members an admin close just disconnected rewrite the record, so a byte-exact
+  guard declines the action that caused the change and then skips the runtime
+  teardown and the `room_deleted` broadcast while reporting success. Nor read
+  then write under the bytes read, which has the same defect plus a split
+  between the judgement and the write. Decoding is allowed here for the reason
+  the sweep may do it: nothing is written BACK, and the rule this file lives by
+  is that room JSON is never RE-ENCODED in Lua.
+  The OUTCOME then matters as much as the guard, because runtime teardown and
+  the `room_deleted` broadcast are addressed BY CODE: a caller that runs either
+  after a `superseded` delete acts on whoever holds the code now. `resolveRoom`
+  answers from a fresh read instead, and `closeRoom` / `expireRoom` skip both
+  steps and log `admin_room_close_superseded` / `admin_room_expire_superseded`.
+
+  **Which is why neither delete may be capped inside the store.** A successful
+  delete owes more than its own answer — a reclamation count, the runtime
+  teardown, the one-shot `room_deleted` — and every one of those lives in the
+  CALLER. A cap in the store answers by DISCARDING the command's outcome, so all
+  of them silently stop happening, and each caller then grows a private
+  compensation for each one: a teardown debt here, a re-read-and-announce there.
+  Three review comments on #302 were three symptoms of that single placement.
+  The rule is the one #282 and #284 already settled one layer down: **the cap
+  answers the caller, the effect keeps the outcome its follow-ups need.** So the
+  store declares `boundedByOuterCaller`, each caller builds delete-plus-
+  follow-ups as ONE chain and caps only its own WAIT, and a delete that lands
+  late still counts, still tears down, still broadcasts. `resolveRoom` preserves
+  a third outcome: on the deadline it fails rather than answering `null`,
+  because the late guard may still answer `superseded` and only a confirmed
+  absent room may be reported absent. **That third outcome stays off the wire.**
+  It reaches clients as `internal_error` — the answer every other bounded store
+  command already gives when it cannot answer, and the only existing code that
+  says "no answer" without asserting one. Minting a code for it would buy a
+  protocol version, a compatibility gate for every older client and a
+  client-side retry state machine, in exchange for a window the next attempt
+  resolves by itself; the diagnosis belongs in the log's `trigger` and
+  `confirmation` details instead. It must never become `room_not_found`: the
+  released controller treats that as terminal for a pending join AND for a
+  stored room context, so an outcome that cannot prove the room absent would
+  clear the user's session on its way past. Concurrent readers share the one
+  in-flight collection effect for the room code: the effect enters the shutdown
+  tracker once, and request deadlines cap only their own waits—never another
+  tracked wrapper or another underlying Redis delete.
+  Preserving the outcome still requires Redis queue admission. Request reads and
+  both guarded deletes enter one shared `maxPendingCommands` counter before
+  they issue, and every accepted command holds its slot until the real reply.
+  A delete refused there was never sent, so it has no late outcome to preserve.
+  A join error captures that generation and its exact target before persisting
+  any credential change, then revalidates both after the await; an old
+  `member_token_invalid` response can therefore neither clear nor schedule a
+  retry over a replacement socket or a newer popup join.
+  `closeRoom` / `expireRoom` refuse to report a completed action they cannot
+  confirm and return 503 `room_delete_unconfirmed`, while the effect logs its
+  own late outcome. That ownership extends through shutdown: the admin action
+  service first closes deletion admission, then drains accepted action handlers
+  before the delete-plus-follow-ups chains they may create. The room service
+  likewise closes lazy-delete admission, then drains lazy deletions before any
+  runtime teardown they create, all while the room store, runtime store and
+  event bus remain open. Each owner has one explicit budget and reports what
+  remains instead of letting a later dependency close silently cut the effect
+  off. Runtime teardown is reported from its retry-debt ledger rather than its
+  request-confirmation tracker: a fast rejection or guarded skip can settle the
+  latter while leaving an ownerless debt as the only process-local trail to an
+  already deleted room. `redis-store-command-bounds.test.ts` holds the mechanical
+  half: with a command hung, both deletes must be left UNANSWERED, while either
+  a read or a delete occupying the last admission slot makes the other refuse
+  without reaching Redis. No classification table can see a cap that quietly
+  reappears inside the store. Atomic
   `evictMemberToken` is different: the admin executor caps only its own wait and
   reports `status=error, confirmation=unconfirmed, code=block_unconfirmed`,
   while the original promise keeps the Redis write and both local-mirror
@@ -941,6 +1019,7 @@ do NOT compose, and that is the part that decides which connection gets which:
   a `SET NX PX` that lands after its caller gave up releases itself at its TTL,
   so "may have landed" costs one lock interval rather than a permanent wrong
   answer.
+
 - **An expiring claim still has an owner.** Claiming writes the token, slot TTL,
   and teardown-index score in one Lua operation, so an old tracking write cannot
   arrive after a newer owner and overwrite its score. Early cleanup uses a

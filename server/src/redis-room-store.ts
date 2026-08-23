@@ -16,6 +16,7 @@ import { RedisStoreUnavailableError } from "./redis-store-unavailable.js";
 import {
   createPersistedRoom,
   type OrphanedIndexClaim,
+  type RoomDeleteOutcome,
   type RoomStore,
   type RoomUpdateResult,
 } from "./room-store.js";
@@ -314,17 +315,67 @@ return "ok"
 // Membership goes first: a Lua error does not roll back, and a body left
 // without membership is repaired by the next reconcile, whereas a membership
 // left without a body would keep the room in every count until the orphan
-// sweep runs. Doing both here also keeps deleteRoom from throwing after the
+// sweep runs. Doing both here also keeps the delete from throwing after the
 // body is already gone, which would abort the caller's downstream cleanup and
 // leave other nodes serving a room that no longer exists.
-// Returns the DEL count, not "ok": concurrent readers of the same expired room
-// all reach this script, and the caller has to be able to tell which one of them
-// actually removed the body. ZREM stays unconditional — the index entry must go
-// even when the body was already collected by whoever got here first.
-const DELETE_ROOM_LUA = `
-redis.call("ZREM", KEYS[2], ARGV[1])
-return redis.call("DEL", KEYS[1])
+//
+// Guarded, because an unconditional `DEL` by code is a write nobody can bound:
+// a caller that stops waiting cannot stop the command, and the room holding
+// that code by then may be a different one entirely — with an owner who was
+// already told their creation succeeded (#277).
+//
+// The guard reads the body and compares ONE field, rather than comparing the
+// whole bytes the way `UPDATE_ROOM_CAS_LUA` does, because these two deletes ask
+// a different question than an update does. An update must not be built on a
+// stale body; a delete must not take a DIFFERENT ROOM. Comparing bytes conflates
+// the two: an admin close disconnects every member first, and their leaves
+// rewrite the record, so a byte-exact guard would decline the very action that
+// caused the change — and then skip the runtime teardown and the `room_deleted`
+// broadcast while reporting success (#277 review).
+//
+// Decoding here is safe for the same reason the sweep may do it: nothing is
+// written BACK. The rule this file lives by is that room JSON is never
+// re-encoded in Lua, because Redis's cjson formats numbers with %.14g and that
+// is how playback positions got mangled.
+//
+// Says which of the three happened rather than a DEL count: concurrent readers
+// of one expired room all reach this script and only the winner may count a
+// reclamation, while a body the guard rejects means the code still has a live
+// room behind it and owes no runtime teardown. ZREM stays unconditional on the
+// path where no body remains — the index entry must go even when the body was
+// already collected by whoever got here first.
+const DELETE_ROOM_PREAMBLE_LUA = `
+local raw = redis.call("GET", KEYS[1])
+if not raw then
+  redis.call("ZREM", KEYS[2], ARGV[1])
+  return "already_deleted"
+end
+local decoded, room = pcall(cjson.decode, raw)
+if not decoded or type(room) ~= "table" then
+  return "superseded"
+end
 `;
+
+const DELETE_ROOM_COMMIT_LUA = `
+redis.call("ZREM", KEYS[2], ARGV[1])
+redis.call("DEL", KEYS[1])
+return "deleted"
+`;
+
+/** ARGV: 1 code, 2 the joinToken naming the instance the caller read. */
+const DELETE_ROOM_INSTANCE_LUA = `${DELETE_ROOM_PREAMBLE_LUA}
+if room["joinToken"] ~= ARGV[2] then
+  return "superseded"
+end
+${DELETE_ROOM_COMMIT_LUA}`;
+
+/** ARGV: 1 code, 2 the instant the expiry is judged against. */
+const DELETE_EXPIRED_ROOM_LUA = `${DELETE_ROOM_PREAMBLE_LUA}
+local expiresAt = room["expiresAt"]
+if type(expiresAt) ~= "number" or expiresAt > tonumber(ARGV[2]) then
+  return "superseded"
+end
+${DELETE_ROOM_COMMIT_LUA}`;
 
 // Candidates come from the score range itself, so rooms that never expire are
 // never even looked at. A candidate whose body disagrees with its score is
@@ -773,14 +824,15 @@ export async function createRedisRoomStore(
     // reading the silence they derive their bounds from (#277). That is why the
     // choice is per CALL — the two passes reach the very same helpers.
     //
-    // What this does NOT resolve: the three durable writes (`createRoom`,
-    // `updateRoom`, `deleteRoom`). Capping a write whose effect
-    // does not expire on its own tells a caller it failed while the write may
-    // still land, which is #237's trade and needs its own derivation.
+    // What this does NOT resolve: the two unconditional durable writes,
+    // `createRoom` and `updateRoom`. Capping either tells a caller it failed
+    // while the write may still land, which is #237's trade. The guarded
+    // deletes are different: admission may safely refuse them before issue,
+    // while their eventual outcome remains owned by the outer caller.
     (createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the three durable writes",
+        "boundCommand's cap on the request path, room-service's expired-room collection deadline and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the two durable writes",
     }) as RedisRoomStoreClient);
   const {
     orphanedRoomCodesKey,
@@ -799,8 +851,9 @@ export async function createRedisRoomStore(
    * the primitive is what keeps "a timeout is not a cancel" from acquiring
    * another private implementation (#242), and `trackedCount()` is the
    * admission counter below — one number for both halves of #277, counting
-   * commands that outlived their cap because those are exactly the ones still
-   * sitting in ioredis's queue.
+   * request commands that outlived their cap and guarded deletes whose outer
+   * callers stopped waiting. Both remain real unanswered commands in ioredis's
+   * queue until their reply lands.
    */
   const commandPacer = createRetryPacer({
     initialDelayMs: commandTimeoutMs,
@@ -824,23 +877,12 @@ export async function createRedisRoomStore(
   );
 
   /**
-   * The caller-side bound for a command nobody else is waiting behind.
-   *
-   * Refuse-then-cap, in that order, because the refusal is the one answer with
-   * no ambiguity in it: past `maxPendingCommands` unanswered commands the next
-   * one is never issued, so nothing can land later. The cap that follows only
-   * answers the caller — `capAttempt` leaves the command tracked, which is what
-   * lets the two maintenance passes on this connection keep deriving their own
-   * bounds from its silence, and what a connection-wide `commandTimeout` could
-   * not do (#271, #277).
-   *
-   * `async` so that no failure — the refusal, or anything `issue()` throws
-   * before it returns a promise — can leave this function synchronously. A
-   * caller assembling several of these into one `Promise.all` literal would
-   * otherwise abandon the list with earlier commands already issued and
-   * unhandled (#277 review).
+   * The shared connection admission for request-bounded commands and guarded
+   * deletes. The latter cannot take an internal timeout because their callers
+   * need the eventual outcome, but that does not license them to bypass the
+   * queue bound. Every accepted command holds its slot until the real reply.
    */
-  async function boundCommand<T>(
+  async function admitCommand<T>(
     operationName: string,
     issue: () => Promise<T>,
   ): Promise<T> {
@@ -854,8 +896,23 @@ export async function createRedisRoomStore(
         { cause },
       );
     }
-    return await commandPacer.capAttempt(
-      issue(),
+    // `async` keeps both admission refusal and a synchronous `issue()` failure
+    // inside the returned promise. This matters to callers constructing a
+    // `Promise.all` literal: no sibling command may be issued and then abandoned
+    // because a later argument threw before the aggregate owned it (#277).
+    return await commandPacer.trackCall(issue());
+  }
+
+  async function boundCommand<T>(
+    operationName: string,
+    issue: () => Promise<T>,
+  ): Promise<T> {
+    // Refuse-then-cap, in that order. Refusal proves no command was issued; the
+    // cap only answers this caller while `admitCommand` keeps the real command
+    // tracked, which a connection-wide `commandTimeout` could not preserve
+    // (#271, #277).
+    return await commandPacer.capWait(
+      admitCommand(operationName, issue),
       commandTimeoutMs,
       () =>
         new RedisRoomStoreCommandTimeoutError(operationName, commandTimeoutMs),
@@ -1246,6 +1303,48 @@ export async function createRedisRoomStore(
     return filtered.slice(start, start + query.pageSize);
   }
 
+  /**
+   * The one guarded delete both public deletes are made of.
+   *
+   * One command, so the judgement and the delete cannot be split by a
+   * concurrent write. Reading first and writing under the bytes that were read
+   * is the other way to get that, and it is the wrong one here: every body
+   * change would then have to count as "a different room", which is exactly
+   * what the members' own leaves produce during an admin close.
+   *
+   * Uncapped HERE on purpose, and this is the half that took three review
+   * rounds to place correctly (#277 review). A successful delete owes more than
+   * its own answer — the reclamation metric, the runtime teardown, the
+   * `room_deleted` broadcast — and every one of those lives in the CALLER. A
+   * cap inside this store answers by discarding the command's outcome, so all
+   * of them are silently skipped and each caller has to grow its own
+   * compensation. The cap therefore belongs to the caller, on its WAIT, while
+   * this command stays alive to deliver the outcome its follow-ups need.
+   * Uncapped does not mean unbounded admission: `admitCommand` refuses before
+   * issuing once this connection already owns `maxPendingCommands` real
+   * commands, and an accepted delete holds its slot until the real reply.
+   */
+  async function deleteRoomWhen(
+    code: string,
+    script: string,
+    guardArgument: string,
+  ): Promise<RoomDeleteOutcome> {
+    const outcome = await admitCommand("delete_room", () =>
+      redis.eval(
+        script,
+        2,
+        roomKey(code),
+        roomsByExpiryKey,
+        code,
+        guardArgument,
+      ),
+    );
+    if (outcome === "deleted" || outcome === "already_deleted") {
+      return outcome;
+    }
+    return "superseded";
+  }
+
   return {
     async createRoom(input) {
       const room = createPersistedRoom(input);
@@ -1281,7 +1380,7 @@ export async function createRedisRoomStore(
     async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
       const key = roomKey(code);
       // The read half is capped like any other read; the CAS below is one of
-      // the three durable writes this change leaves for its own derivation.
+      // the two unconditional durable writes left for its own derivation.
       const rawRoom = await boundCommand("update_room", () => redis.get(key));
       if (rawRoom === null) {
         return { ok: false, reason: "not_found" };
@@ -1324,15 +1423,18 @@ export async function createRedisRoomStore(
       }
       return { ok: true, room: nextRoom };
     },
-    async deleteRoom(code) {
-      const deleted = await redis.eval(
-        DELETE_ROOM_LUA,
-        2,
-        roomKey(code),
-        roomsByExpiryKey,
-        code,
+    deleteRoom(expected) {
+      // Pinned by `joinToken`, and by nothing else: a recycled code always
+      // brings a new token, while every other field moves under an admin close
+      // as its members leave.
+      return deleteRoomWhen(
+        expected.code,
+        DELETE_ROOM_INSTANCE_LUA,
+        expected.joinToken,
       );
-      return Number(deleted) > 0;
+    },
+    deleteExpiredRoom(code, currentTime) {
+      return deleteRoomWhen(code, DELETE_EXPIRED_ROOM_LUA, String(currentTime));
     },
     async deleteExpiredRooms(currentTime) {
       // Candidates come from the index, so on a database that predates it the

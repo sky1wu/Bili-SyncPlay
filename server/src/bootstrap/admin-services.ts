@@ -69,6 +69,7 @@ export function createAdminServices(args: {
   auditStoreOverride?: GlobalAuditStore;
 }): Promise<{
   adminRouter: ReturnType<typeof createAdminRouter>;
+  closeAdminActionService: () => Promise<void>;
   close: () => Promise<void>;
 }> {
   return (async () => {
@@ -300,6 +301,7 @@ export function createAdminServices(args: {
 
     return {
       adminRouter,
+      closeAdminActionService: actionService.close,
       async close() {
         // Settled together, not awaited in sequence: the two hold independent
         // Redis connections with no ordering between them, so a rejection from
