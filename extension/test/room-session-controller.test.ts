@@ -16,7 +16,6 @@ function createControllerHarness(options?: {
   getMonotonicNow?: () => number;
   getActivePendingLocalShareUrl?: () => string | null;
   onEnsureSharedVideoOpen?: () => void;
-  getJoinRetryDelayMs?: (attempt: number) => number;
 }) {
   const runtimeState = createBackgroundRuntimeState();
   const sendToServerCalls: Array<unknown> = [];
@@ -116,7 +115,6 @@ function createControllerHarness(options?: {
     shareToastTtlMs: 8_000,
     getMonotonicNow: options?.getMonotonicNow,
     bootstrapRoomStateTimeoutMs: options?.bootstrapRoomStateTimeoutMs,
-    getJoinRetryDelayMs: options?.getJoinRetryDelayMs,
   });
 
   return {
@@ -168,7 +166,7 @@ test("room session controller clears pending join on unsupported_protocol_versio
   const harness = createControllerHarness();
   harness.runtimeState.room.pendingJoinRoomCode = "ROOM-PV";
   harness.runtimeState.room.pendingJoinToken = "join-token-pv";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
+  harness.runtimeState.room.pendingJoinRequestSent = true;
 
   const resultPromise = harness.controller.waitForJoinAttemptResult(50);
   await harness.controller.handleServerMessage({
@@ -182,7 +180,7 @@ test("room session controller clears pending join on unsupported_protocol_versio
   assert.equal(await resultPromise, "failed");
   assert.equal(harness.runtimeState.room.pendingJoinRoomCode, null);
   assert.equal(harness.runtimeState.room.pendingJoinToken, null);
-  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, null);
+  assert.equal(harness.runtimeState.room.pendingJoinRequestSent, false);
   assert.equal(harness.runtimeState.room.roomCode, null);
 });
 
@@ -192,7 +190,6 @@ test("room session controller clears stored room on unsupported_protocol_version
   harness.runtimeState.room.joinToken = "join-token-st";
   harness.runtimeState.room.memberToken = "member-token-st";
   harness.runtimeState.room.memberId = "member-st";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
   setLocaleForTests("en-US");
 
   try {
@@ -228,7 +225,7 @@ test("room session controller sends join request after connect and normalizes pe
   assert.equal(harness.connectCalls, 1);
   assert.equal(harness.runtimeState.room.pendingJoinRoomCode, "ROOM01");
   assert.equal(harness.runtimeState.room.pendingJoinToken, "token-1");
-  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 0);
+  assert.equal(harness.runtimeState.room.pendingJoinRequestSent, true);
   assert.equal(harness.sendToServerCalls.length, 1);
   assert.deepEqual(harness.sendToServerCalls[0], {
     type: "room:join",
@@ -249,7 +246,7 @@ test("room session controller resolves failed join attempts and clears stale roo
   const harness = createControllerHarness();
   harness.runtimeState.room.pendingJoinRoomCode = "ROOM02";
   harness.runtimeState.room.pendingJoinToken = "join-token-2";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
+  harness.runtimeState.room.pendingJoinRequestSent = true;
   harness.runtimeState.room.roomCode = "ROOM02";
   harness.runtimeState.room.joinToken = "join-token-2";
   harness.runtimeState.room.memberToken = "member-token-2";
@@ -267,7 +264,7 @@ test("room session controller resolves failed join attempts and clears stale roo
   assert.equal(await resultPromise, "failed");
   assert.equal(harness.runtimeState.room.pendingJoinRoomCode, null);
   assert.equal(harness.runtimeState.room.pendingJoinToken, null);
-  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, null);
+  assert.equal(harness.runtimeState.room.pendingJoinRequestSent, false);
   assert.equal(harness.runtimeState.room.roomCode, null);
   assert.equal(harness.runtimeState.room.memberToken, null);
   assert.equal(
@@ -276,285 +273,6 @@ test("room session controller resolves failed join attempts and clears stale roo
   );
   assert.equal(harness.persistReasons.length, 1);
   assert.equal(harness.notifyAllCalls, 1);
-});
-
-test("room session controller treats room_full as terminal for pending and stored joins", async () => {
-  const pending = createControllerHarness();
-  pending.runtimeState.room.pendingJoinRoomCode = "ROOM02";
-  pending.runtimeState.room.pendingJoinToken = "join-token-2";
-  pending.runtimeState.room.pendingJoinRequestGeneration = 0;
-
-  await pending.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "room_full",
-      message: "Room is full.",
-    },
-  } satisfies ServerMessage);
-
-  assert.equal(pending.runtimeState.room.pendingJoinRoomCode, null);
-  assert.equal(pending.runtimeState.room.pendingJoinToken, null);
-  assert.equal(pending.runtimeState.room.pendingJoinRequestGeneration, null);
-  assert.equal(pending.persistReasons.length, 1);
-
-  const stored = createControllerHarness();
-  stored.runtimeState.room.roomCode = "ROOM03";
-  stored.runtimeState.room.joinToken = "join-token-3";
-  stored.runtimeState.room.memberToken = "member-token-3";
-  stored.runtimeState.room.pendingJoinRequestGeneration = 0;
-
-  await stored.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "room_full",
-      message: "Room is full.",
-    },
-  } satisfies ServerMessage);
-
-  assert.equal(stored.runtimeState.room.roomCode, null);
-  assert.equal(stored.runtimeState.room.joinToken, null);
-  assert.equal(stored.runtimeState.room.memberToken, null);
-  assert.equal(stored.runtimeState.room.pendingJoinRequestGeneration, null);
-  assert.equal(stored.persistReasons.length, 1);
-});
-
-test("room session controller retries an unconfirmed pending join without discarding its intent", async () => {
-  const harness = createControllerHarness({ getJoinRetryDelayMs: () => 0 });
-  harness.runtimeState.connection.connected = true;
-  harness.runtimeState.room.pendingJoinRoomCode = "ROOM05";
-  harness.runtimeState.room.pendingJoinToken = "join-token-5";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
-
-  await harness.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "room_resolution_unconfirmed",
-      message: "Internal server error.",
-    },
-  } satisfies ServerMessage);
-  await new Promise((resolve) => setTimeout(resolve, 5));
-
-  assert.equal(harness.runtimeState.room.pendingJoinRoomCode, "ROOM05");
-  assert.equal(harness.runtimeState.room.pendingJoinToken, "join-token-5");
-  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 0);
-  assert.deepEqual(harness.sendToServerCalls, [
-    {
-      type: "room:join",
-      payload: {
-        roomCode: "ROOM05",
-        joinToken: "join-token-5",
-        displayName: undefined,
-        protocolVersion: PROTOCOL_VERSION,
-      },
-    },
-  ]);
-  assert.equal(harness.persistReasons.length, 0);
-  assert.equal(harness.disconnectCalls, 0);
-});
-
-test("an old member-token error cannot schedule over a replacement socket join", async () => {
-  let markPersistStarted!: () => void;
-  let releasePersist!: () => void;
-  const persistStarted = new Promise<void>((resolve) => {
-    markPersistStarted = resolve;
-  });
-  const persistGate = new Promise<void>((resolve) => {
-    releasePersist = resolve;
-  });
-  const harness = createControllerHarness({
-    getJoinRetryDelayMs: () => 0,
-    async persistState(callCount) {
-      if (callCount === 1) {
-        markPersistStarted();
-        await persistGate;
-      }
-    },
-  });
-  harness.runtimeState.connection.connected = true;
-  harness.runtimeState.room.pendingJoinRoomCode = "ROOM05";
-  harness.runtimeState.room.pendingJoinToken = "join-token-5";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
-  harness.runtimeState.room.memberToken = "member-token-old";
-
-  const handlingOldError = harness.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "member_token_invalid",
-      message: "Member token is invalid.",
-    },
-  } satisfies ServerMessage);
-  await persistStarted;
-
-  harness.runtimeState.connection.socketGeneration = 1;
-  harness.controller.sendJoinRequest("ROOM05", "join-token-5");
-  releasePersist();
-  await handlingOldError;
-  await new Promise((resolve) => setTimeout(resolve, 5));
-
-  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 1);
-  assert.equal(harness.sendToServerCalls.length, 1);
-});
-
-test("an old member-token error cannot schedule over a newer popup join", async () => {
-  let markPersistStarted!: () => void;
-  let releasePersist!: () => void;
-  const persistStarted = new Promise<void>((resolve) => {
-    markPersistStarted = resolve;
-  });
-  const persistGate = new Promise<void>((resolve) => {
-    releasePersist = resolve;
-  });
-  const harness = createControllerHarness({
-    getJoinRetryDelayMs: () => 0,
-    async persistState(callCount) {
-      if (callCount === 1) {
-        markPersistStarted();
-        await persistGate;
-      }
-    },
-  });
-  harness.runtimeState.connection.connected = true;
-  harness.runtimeState.room.pendingJoinRoomCode = "ROOM05";
-  harness.runtimeState.room.pendingJoinToken = "join-token-5";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
-  harness.runtimeState.room.memberToken = "member-token-old";
-
-  const handlingOldError = harness.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "member_token_invalid",
-      message: "Member token is invalid.",
-    },
-  } satisfies ServerMessage);
-  await persistStarted;
-
-  await harness.controller.requestJoinRoom("ROOM06", "join-token-6");
-  releasePersist();
-  await handlingOldError;
-  await new Promise((resolve) => setTimeout(resolve, 5));
-
-  assert.equal(harness.runtimeState.room.pendingJoinRoomCode, "ROOM06");
-  assert.equal(harness.runtimeState.room.pendingJoinToken, "join-token-6");
-  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 0);
-  assert.equal(harness.sendToServerCalls.length, 1);
-});
-
-test("room session controller keeps retrying when an unconfirmed join is rate limited", async () => {
-  const harness = createControllerHarness({ getJoinRetryDelayMs: () => 0 });
-  harness.runtimeState.connection.connected = true;
-  harness.runtimeState.room.pendingJoinRoomCode = "ROOM05";
-  harness.runtimeState.room.pendingJoinToken = "join-token-5";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
-
-  await harness.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "room_resolution_unconfirmed",
-      message: "Internal server error.",
-    },
-  } satisfies ServerMessage);
-  await new Promise((resolve) => setTimeout(resolve, 5));
-
-  await harness.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "rate_limited",
-      message: "Rate limit exceeded. Please retry later.",
-    },
-  } satisfies ServerMessage);
-  await new Promise((resolve) => setTimeout(resolve, 5));
-
-  assert.equal(harness.runtimeState.room.pendingJoinRoomCode, "ROOM05");
-  assert.equal(harness.runtimeState.room.pendingJoinToken, "join-token-5");
-  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 0);
-  const expectedJoinRequest = {
-    type: "room:join",
-    payload: {
-      roomCode: "ROOM05",
-      joinToken: "join-token-5",
-      displayName: undefined,
-      protocolVersion: PROTOCOL_VERSION,
-    },
-  };
-  assert.deepEqual(harness.sendToServerCalls, [
-    expectedJoinRequest,
-    expectedJoinRequest,
-  ]);
-  assert.equal(harness.persistReasons.length, 0);
-  assert.equal(harness.disconnectCalls, 0);
-});
-
-test("room session controller replaces an old retry timer after reconnect", async () => {
-  const harness = createControllerHarness({
-    getJoinRetryDelayMs: (attempt) => (attempt === 1 ? 10 : 100),
-  });
-  harness.runtimeState.connection.connected = true;
-  harness.runtimeState.room.pendingJoinRoomCode = "ROOM05";
-  harness.runtimeState.room.pendingJoinToken = "join-token-5";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
-
-  await harness.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "room_resolution_unconfirmed",
-      message: "Internal server error.",
-    },
-  } satisfies ServerMessage);
-
-  // A replacement socket resends before the first timer expires, then receives
-  // another transient response that owns a later backoff.
-  harness.runtimeState.connection.socketGeneration = 1;
-  harness.controller.sendJoinRequest("ROOM05", "join-token-5");
-  await harness.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "room_resolution_unconfirmed",
-      message: "Internal server error.",
-    },
-  } satisfies ServerMessage);
-
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(harness.sendToServerCalls.length, 1);
-
-  await new Promise((resolve) => setTimeout(resolve, 90));
-  assert.equal(harness.sendToServerCalls.length, 2);
-  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 1);
-});
-
-test("room session controller retries unconfirmed restoration of a stored room", async () => {
-  const harness = createControllerHarness({ getJoinRetryDelayMs: () => 0 });
-  harness.runtimeState.connection.connected = true;
-  harness.runtimeState.room.roomCode = "ROOM06";
-  harness.runtimeState.room.joinToken = "join-token-6";
-  harness.runtimeState.room.memberToken = "member-token-6";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
-
-  await harness.controller.handleServerMessage({
-    type: "error",
-    payload: {
-      code: "room_resolution_unconfirmed",
-      message: "Internal server error.",
-    },
-  } satisfies ServerMessage);
-  await new Promise((resolve) => setTimeout(resolve, 5));
-
-  assert.equal(harness.runtimeState.room.roomCode, "ROOM06");
-  assert.equal(harness.runtimeState.room.memberToken, "member-token-6");
-  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 0);
-  assert.deepEqual(harness.sendToServerCalls, [
-    {
-      type: "room:join",
-      payload: {
-        roomCode: "ROOM06",
-        joinToken: "join-token-6",
-        memberToken: "member-token-6",
-        displayName: undefined,
-        protocolVersion: PROTOCOL_VERSION,
-      },
-    },
-  ]);
-  assert.equal(harness.persistReasons.length, 0);
-  assert.equal(harness.disconnectCalls, 0);
 });
 
 test("room session controller confirms pending local share and notifies content on matching room state", async () => {
@@ -938,7 +656,7 @@ test("room session controller queues reconnect deltas until fresh bootstrap stat
 test("room session controller queues member deltas that arrive before room joined", async () => {
   const harness = createControllerHarness();
   harness.runtimeState.room.roomCode = "ROOM04";
-  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
+  harness.runtimeState.room.pendingJoinRequestSent = true;
   harness.runtimeState.room.roomState = {
     roomCode: "ROOM04",
     sharedVideo: {

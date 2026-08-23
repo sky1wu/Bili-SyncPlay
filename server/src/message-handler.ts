@@ -37,7 +37,6 @@ const CLOSE_CODE_JOIN_ROLLBACK_FAILED = 1011;
  * client anyway. The rollback keeps running, ordered on the session's key.
  */
 const JOIN_ROLLBACK_TIMEOUT_MS = 5_000;
-const ROOM_RESOLUTION_RETRY_PROTOCOL_VERSION = 5;
 
 export function createMessageHandler(options: {
   config: {
@@ -1310,27 +1309,8 @@ export function createMessageHandler(options: {
       }
     } catch (error) {
       if (error instanceof RoomServiceError) {
-        let code: ErrorCode = error.code;
-        let errorMessage = error.message;
-        if (
-          code === "room_resolution_unconfirmed" &&
-          (session.protocolVersion ?? MIN_PROTOCOL_VERSION) <
-            ROOM_RESOLUTION_RETRY_PROTOCOL_VERSION
-        ) {
-          // Compatibility belongs to the wire error, not to the request branch
-          // that happened to surface it. No v1-v4 state machine understands
-          // this additive outcome, so it becomes the established generic error
-          // — the same one for every request, join included.
-          //
-          // NOT `room_not_found` for join, even though that is join's other
-          // pre-v5 answer: the released v1-v4 controller treats it as terminal
-          // and clears the pending join AND the stored room context, so a room
-          // this outcome cannot prove absent would take the user's session with
-          // it. `internal_error` is the only pre-v5 code that says "no answer"
-          // without asserting one.
-          code = "internal_error";
-          errorMessage = INTERNAL_SERVER_ERROR_MESSAGE;
-        }
+        const code: ErrorCode = error.code;
+        const errorMessage = error.message;
         sendError(socket, code, errorMessage);
         if (error.reason === "internal_error") {
           logEvent("room_persist_failed", {

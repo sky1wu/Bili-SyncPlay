@@ -40,8 +40,6 @@ function createControllerHarness(
       displayName: string | null;
       roomState: RoomState | null;
       awaitingFreshRoomState?: boolean;
-      pendingJoinRoomCode?: string | null;
-      pendingJoinToken?: string | null;
     };
     settingsState?: {
       pageShareButtonEnabled: boolean;
@@ -116,8 +114,6 @@ function createControllerHarness(
   };
   const roomSessionState = {
     awaitingFreshRoomState: false,
-    pendingJoinRoomCode: null,
-    pendingJoinToken: null,
     ...(overrides.roomSessionState ?? {
       roomCode: "ROOM01",
       memberToken: "member-token-1",
@@ -360,29 +356,6 @@ test("message controller reconnects on popup:get-state when room context exists 
 
   assert.equal(harness.calls.connect, 1);
   assert.deepEqual(response, harness.popupState);
-});
-
-test("message controller reconnects a persisted explicit join when popup opens offline", async () => {
-  const harness = createControllerHarness({
-    connectionState: { connected: false, lastError: null },
-    roomSessionState: {
-      roomCode: null,
-      memberToken: null,
-      memberId: null,
-      displayName: "Alice",
-      roomState: null,
-      pendingJoinRoomCode: "ROOM05",
-      pendingJoinToken: "join-token-5",
-    },
-  });
-
-  await harness.controller.handleRuntimeMessage(
-    { type: "popup:get-state" },
-    {},
-    () => {},
-  );
-
-  assert.equal(harness.calls.connect, 1);
 });
 
 test("message controller updates the page share button setting from popup", async () => {

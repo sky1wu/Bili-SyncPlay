@@ -105,20 +105,16 @@ Receivers subtract it from the message's local arrival time to get the anchor th
 
 ## Error Codes (`ErrorCode`)
 
-`origin_not_allowed`, `room_not_found`, `join_token_invalid`, `member_token_invalid`, `not_in_room`, `rate_limited`, `invalid_message`, `payload_too_large`, `room_full`, `room_resolution_unconfirmed`, `unsupported_protocol_version`, `internal_error`
+`origin_not_allowed`, `room_not_found`, `join_token_invalid`, `member_token_invalid`, `not_in_room`, `rate_limited`, `invalid_message`, `payload_too_large`, `room_full`, `unsupported_protocol_version`, `internal_error`
 
-`room_resolution_unconfirmed` (protocol v5+) is a transient join result: the
-server found an expired room snapshot but its guarded collection has not yet
-confirmed whether the room was deleted or revived. A client must preserve the
-exact join intent and retry it with the connection retry backoff. The server
-reuses the same in-flight collection effect, so retries wait for the original
-outcome instead of issuing another delete. Protocol v1-v4 clients never receive
-this additive code: every request that surfaces it is downgraded to
-`internal_error`, joins included. NOT to `room_not_found` — the released v1-v4
-controller treats that as terminal for both a pending join and a stored room
-context, so an outcome that cannot prove the room absent would clear the user's
-session on its way past. `internal_error` is the only pre-v5 code that reports
-"no answer" without asserting one.
+A request that finds an expired room whose guarded collection has not confirmed
+whether the room was deleted or revived receives `internal_error`, like every
+other bounded store command that cannot answer. That state is deliberately NOT
+its own code: it would cost a protocol version and a compatibility gate for
+every older client, for a window the next attempt resolves by itself. It must
+never be reported as `room_not_found` — the released controller treats that as
+terminal for both a pending join and a stored room context, so an outcome that
+cannot prove the room absent would clear the user's session on its way past.
 
 The developer-facing symptoms for the common codes are listed in the [troubleshooting section](../development.md#troubleshooting).
 

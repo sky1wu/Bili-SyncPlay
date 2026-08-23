@@ -278,18 +278,6 @@ async function bootstrap(): Promise<void> {
       set roomState(value) {
         roomSessionState.roomState = value;
       },
-      get pendingJoinRoomCode() {
-        return roomSessionState.pendingJoinRoomCode;
-      },
-      set pendingJoinRoomCode(value) {
-        roomSessionState.pendingJoinRoomCode = value;
-      },
-      get pendingJoinToken() {
-        return roomSessionState.pendingJoinToken;
-      },
-      set pendingJoinToken(value) {
-        roomSessionState.pendingJoinToken = value;
-      },
       get serverUrl() {
         return connectionState.serverUrl;
       },
@@ -478,13 +466,11 @@ registerBackgroundListeners({
 registerReconnectWatchdog({
   alarms: chrome.alarms,
   // While bootstrap is still pending it runs its own auto-connect for a
-  // restored room session or explicit join intent, so the watchdog only acts
-  // after bootstrap has finished and that intent is offline.
+  // restored room session, so the watchdog only acts on a session that
+  // finished bootstrapping but is offline.
   shouldReconnect: () =>
     bootstrapStatus === "ready" &&
-    (roomSessionState.roomCode !== null ||
-      (roomSessionState.pendingJoinRoomCode !== null &&
-        roomSessionState.pendingJoinToken !== null)) &&
+    roomSessionState.roomCode !== null &&
     !connectionState.connected,
   connect: () => {
     void socketController.connect();

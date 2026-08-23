@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getDefaultSecurityConfig } from "../src/app.js";
 import { createMessageHandler } from "../src/message-handler.js";
-import { CURRENT_PROTOCOL_VERSION } from "../src/messages.js";
+import {
+  CURRENT_PROTOCOL_VERSION,
+  MIN_PROTOCOL_VERSION,
+} from "../src/messages.js";
 import { RoomServiceError } from "../src/room-service.js";
 import { createSessionRateLimitState } from "../src/rate-limit.js";
 import type { AttachedSession, SecurityConfig, Session } from "../src/types.js";
@@ -105,7 +108,7 @@ test("message handler rejects detached sessions before processing", async () => 
   );
 });
 
-test("message handler exposes retryable room resolution only to clients that implement it", async () => {
+test("an unconfirmed room resolution reaches every client as internal_error", async () => {
   async function run(
     protocolVersion: number,
     messageType: "room:join" | "room:create" = "room:join",
@@ -116,14 +119,14 @@ test("message handler exposes retryable room resolution only to clients that imp
       roomService: {
         async createRoomForSession() {
           throw new RoomServiceError(
-            "room_resolution_unconfirmed",
+            "internal_error",
             "Internal server error.",
             "room_resolution_unconfirmed",
           );
         },
         async joinRoomForSession() {
           throw new RoomServiceError(
-            "room_resolution_unconfirmed",
+            "internal_error",
             "Internal server error.",
             "room_resolution_unconfirmed",
           );
@@ -172,25 +175,22 @@ test("message handler exposes retryable room resolution only to clients that imp
     return errors;
   }
 
-  assert.deepEqual(await run(5), [
-    {
-      code: "room_resolution_unconfirmed",
-      message: "Internal server error.",
-    },
-  ]);
-  // Never `room_not_found`: the released v1-v4 controller treats it as terminal
+  // One answer, every client, every request. The unconfirmed state is a
+  // DIAGNOSIS and stays off the wire (#277): minting a code for it costs a
+  // protocol version and a compatibility gate for every older client, for a
+  // window the next attempt resolves on its own.
+  //
+  // And never `room_not_found`: the released controller treats that as terminal
   // for a pending join AND for a stored room context, so an outcome that cannot
   // prove the room absent would clear the user's session on its way past.
-  // `internal_error` is the only pre-v5 code that says "no answer" without
-  // asserting one — and it is the same answer for every request, because
-  // compatibility is a property of the wire error, not of the request that
-  // surfaced it.
-  assert.deepEqual(await run(4), [
-    { code: "internal_error", message: "Internal server error." },
-  ]);
-  assert.deepEqual(await run(4, "room:create"), [
-    { code: "internal_error", message: "Internal server error." },
-  ]);
+  for (const version of [MIN_PROTOCOL_VERSION, CURRENT_PROTOCOL_VERSION]) {
+    assert.deepEqual(await run(version), [
+      { code: "internal_error", message: "Internal server error." },
+    ]);
+    assert.deepEqual(await run(version, "room:create"), [
+      { code: "internal_error", message: "Internal server error." },
+    ]);
+  }
 });
 
 test("message handler creates a room and sends bootstrap state to the creator", async () => {

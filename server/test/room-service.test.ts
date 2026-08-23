@@ -5851,7 +5851,10 @@ test("a capped expiry collection still finishes what it started", async () => {
     () => service.getRoomStateByCode(room.code),
     (error: unknown) =>
       error instanceof RoomServiceError &&
-      error.code === "room_resolution_unconfirmed" &&
+      // `internal_error` on the wire, the unconfirmed diagnosis in the details:
+      // this state is deliberately not a protocol code (#277).
+      error.code === "internal_error" &&
+      error.reason === "room_resolution_unconfirmed" &&
       error.details.reason === "room_expiry_resolution_unconfirmed" &&
       error.details.trigger === "delete_timeout",
   );
@@ -5944,7 +5947,10 @@ test("an unconfirmed expiry delete preserves a joined session when its late outc
     () => read,
     (error: unknown) =>
       error instanceof RoomServiceError &&
-      error.code === "room_resolution_unconfirmed" &&
+      // `internal_error` on the wire, the unconfirmed diagnosis in the details:
+      // this state is deliberately not a protocol code (#277).
+      error.code === "internal_error" &&
+      error.reason === "room_resolution_unconfirmed" &&
       error.details.reason === "room_expiry_resolution_unconfirmed" &&
       error.details.trigger === "delete_timeout",
   );
@@ -6078,7 +6084,8 @@ test("repeated expiry wait caps keep one shutdown-tracked delete effect", async 
       () => service.getRoomStateByCode(room.code),
       (error: unknown) =>
         error instanceof RoomServiceError &&
-        error.code === "room_resolution_unconfirmed",
+        error.code === "internal_error" &&
+        error.reason === "room_resolution_unconfirmed",
     );
   }
 

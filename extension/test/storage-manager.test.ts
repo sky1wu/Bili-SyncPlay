@@ -78,8 +78,6 @@ test("loadPersistedBackgroundSnapshot combines session room state and local prof
   assert.equal(snapshot.serverUrl, "ws://localhost:8787");
   assert.equal(snapshot.pageShareButtonEnabled, true);
   assert.equal(snapshot.roomState?.roomCode, "ROOM01");
-  assert.equal(snapshot.pendingJoinRoomCode, null);
-  assert.equal(snapshot.pendingJoinToken, null);
 });
 
 test("persistBackgroundState only writes session storage", async () => {
@@ -94,8 +92,6 @@ test("persistBackgroundState only writes session storage", async () => {
   state.room.joinToken = "join-token-2";
   state.room.memberToken = "member-token-2";
   state.room.memberId = "member-2";
-  state.room.pendingJoinRoomCode = "ROOM03";
-  state.room.pendingJoinToken = "join-token-3";
 
   await persistBackgroundState(state);
 
@@ -109,8 +105,6 @@ test("persistBackgroundState only writes session storage", async () => {
     memberToken: "member-token-2",
     memberId: "member-2",
     roomState: null,
-    pendingJoinRoomCode: "ROOM03",
-    pendingJoinToken: "join-token-3",
   });
 });
 
@@ -122,8 +116,6 @@ test("persistBackgroundProfile only writes local storage", async () => {
     memberToken: "member-token-3",
     memberId: "member-3",
     roomState: null,
-    pendingJoinRoomCode: null,
-    pendingJoinToken: null,
   };
 
   const state = createBackgroundRuntimeState();
@@ -139,8 +131,6 @@ test("persistBackgroundProfile only writes local storage", async () => {
     memberToken: "member-token-3",
     memberId: "member-3",
     roomState: null,
-    pendingJoinRoomCode: null,
-    pendingJoinToken: null,
   });
   assert.deepEqual(localBucket["bili-syncplay-profile"], {
     displayName: "Bob",

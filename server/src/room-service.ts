@@ -111,6 +111,18 @@ export class RoomServiceError extends Error {
 type RoomExpiryResolutionUnconfirmedTrigger =
   "delete_timeout" | "service_closing" | "still_expired_after_superseded";
 
+/**
+ * "This room's collection has not confirmed" — a DIAGNOSIS, not a wire code.
+ *
+ * The distinction is deliberately kept off the protocol. On the wire this is
+ * `internal_error`, the same answer every other bounded store command already
+ * gives when it cannot answer, and the only pre-v5 code that reports "no
+ * answer" without asserting one. Minting a code for it would cost a protocol
+ * version, a compatibility gate for every older client, and a client-side
+ * state machine — for a window that heals itself on the next attempt. The
+ * `trigger` and `confirmation` details below keep the diagnosis where it is
+ * actually needed: the log.
+ */
 class RoomExpiryResolutionUnconfirmedError extends RoomServiceError {
   constructor(
     roomCode: string,
@@ -118,7 +130,7 @@ class RoomExpiryResolutionUnconfirmedError extends RoomServiceError {
     timeoutMs?: number,
   ) {
     super(
-      "room_resolution_unconfirmed",
+      "internal_error",
       INTERNAL_SERVER_ERROR_MESSAGE,
       "room_resolution_unconfirmed",
       {

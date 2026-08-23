@@ -102,16 +102,13 @@
 
 ## 错误码（`ErrorCode`）
 
-`origin_not_allowed`、`room_not_found`、`join_token_invalid`、`member_token_invalid`、`not_in_room`、`rate_limited`、`invalid_message`、`payload_too_large`、`room_full`、`room_resolution_unconfirmed`、`unsupported_protocol_version`、`internal_error`
+`origin_not_allowed`、`room_not_found`、`join_token_invalid`、`member_token_invalid`、`not_in_room`、`rate_limited`、`invalid_message`、`payload_too_large`、`room_full`、`unsupported_protocol_version`、`internal_error`
 
-`room_resolution_unconfirmed`（协议 v5+）表示一次临时性的加入结果：服务端读到了
-已过期的房间快照，但其守卫删除尚未确认房间最终是被删除还是被另一节点恢复。客户端
-必须保留同一份加入意图，并按连接重试的退避节奏重试。服务端会复用同一个进行中的
-回收效果，因此重试只等待原始结果，不会再发起一次删除。协议 v1-v4 客户端不会收到这个
-新增错误码：所有可能逸出该结果的请求路径**一律**降级为 `internal_error`，加入也不例外。
-**不能**降级为 `room_not_found`——已发布的 v1-v4 控制器把它当作终态处理，无论是待加入还是
-已存房间上下文都会被清空，于是一个根本无法证明房间不存在的结果，会顺手带走用户的会话。
-`internal_error` 是 v5 之前唯一能表达「没有答案」而不宣告某个答案的错误码。
+当一次请求读到已过期的房间快照、而其守卫删除尚未确认房间是被删除还是被恢复时，返回
+`internal_error`——与所有答不出来的受界存储命令一致。这个状态**刻意不设专用错误码**：那要付出
+一次协议版本和一道面向所有旧客户端的兼容门槛，换来的只是一个下次尝试就会自行化解的窗口。它
+**绝不能**被报成 `room_not_found`——已发布的控制器把该码当作终态处理，无论待加入还是已存房间
+上下文都会被清空，于是一个根本无法证明房间不存在的结果，会顺手带走用户的会话。
 
 常见错误码对应的开发者侧现象见[故障排查](../development.zh-CN.md#故障排查)。
 

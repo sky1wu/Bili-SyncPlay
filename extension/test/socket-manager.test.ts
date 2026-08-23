@@ -13,15 +13,13 @@ test("reconnect backoff grows and caps at thirty seconds", () => {
   assert.equal(getReconnectDelayMs(50), 30000);
 });
 
-test("reconnect scheduling requires a room intent and has no attempt cap", () => {
+test("reconnect scheduling requires an active room or pending create and has no attempt cap", () => {
   assert.equal(
     shouldReconnect({
       connected: false,
       reconnectTimer: null,
       roomCode: "ROOM01",
       pendingCreateRoom: false,
-      pendingJoinRoomCode: null,
-      pendingJoinToken: null,
     }),
     true,
   );
@@ -32,8 +30,6 @@ test("reconnect scheduling requires a room intent and has no attempt cap", () =>
       reconnectTimer: null,
       roomCode: null,
       pendingCreateRoom: false,
-      pendingJoinRoomCode: null,
-      pendingJoinToken: null,
     }),
     false,
   );
@@ -44,8 +40,6 @@ test("reconnect scheduling requires a room intent and has no attempt cap", () =>
       reconnectTimer: null,
       roomCode: "ROOM01",
       pendingCreateRoom: false,
-      pendingJoinRoomCode: null,
-      pendingJoinToken: null,
     }),
     false,
   );
@@ -56,32 +50,6 @@ test("reconnect scheduling requires a room intent and has no attempt cap", () =>
       reconnectTimer: 42,
       roomCode: "ROOM01",
       pendingCreateRoom: false,
-      pendingJoinRoomCode: null,
-      pendingJoinToken: null,
-    }),
-    false,
-  );
-
-  assert.equal(
-    shouldReconnect({
-      connected: false,
-      reconnectTimer: null,
-      roomCode: null,
-      pendingCreateRoom: false,
-      pendingJoinRoomCode: "ROOM02",
-      pendingJoinToken: "join-token-2",
-    }),
-    true,
-  );
-
-  assert.equal(
-    shouldReconnect({
-      connected: false,
-      reconnectTimer: null,
-      roomCode: null,
-      pendingCreateRoom: false,
-      pendingJoinRoomCode: "ROOM02",
-      pendingJoinToken: null,
     }),
     false,
   );

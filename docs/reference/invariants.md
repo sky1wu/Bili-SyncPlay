@@ -927,18 +927,22 @@ do NOT compose, and that is the part that decides which connection gets which:
   store declares `boundedByOuterCaller`, each caller builds delete-plus-
   follow-ups as ONE chain and caps only its own WAIT, and a delete that lands
   late still counts, still tears down, still broadcasts. `resolveRoom` preserves
-  a third outcome: on the deadline it fails retryably and leaves the session
-  untouched, because the late guard may still answer `superseded`; only a
-  confirmed absent room answers `null`. Join clients receive the dedicated
-  `room_resolution_unconfirmed` result and resend the exact join intent. That
-  intent lives in session storage across an MV3 worker restart, while the
-  in-flight marker names its WebSocket generation so a replacement connection
-  can resend without waiting for the old socket's close. Those retries share
-  the one in-flight collection effect for the room code: the effect enters the
-  shutdown tracker once, and request deadlines cap only their own waits—never
-  another tracked wrapper or another underlying Redis delete. That additive
-  error is gated at the common send boundary for every request: v1-v4
-  joins retain `room_not_found`, and every other path receives `internal_error`.
+  a third outcome: on the deadline it fails rather than answering `null`,
+  because the late guard may still answer `superseded` and only a confirmed
+  absent room may be reported absent. **That third outcome stays off the wire.**
+  It reaches clients as `internal_error` — the answer every other bounded store
+  command already gives when it cannot answer, and the only existing code that
+  says "no answer" without asserting one. Minting a code for it would buy a
+  protocol version, a compatibility gate for every older client and a
+  client-side retry state machine, in exchange for a window the next attempt
+  resolves by itself; the diagnosis belongs in the log's `trigger` and
+  `confirmation` details instead. It must never become `room_not_found`: the
+  released controller treats that as terminal for a pending join AND for a
+  stored room context, so an outcome that cannot prove the room absent would
+  clear the user's session on its way past. Concurrent readers share the one
+  in-flight collection effect for the room code: the effect enters the shutdown
+  tracker once, and request deadlines cap only their own waits—never another
+  tracked wrapper or another underlying Redis delete.
   Preserving the outcome still requires Redis queue admission. Request reads and
   both guarded deletes enter one shared `maxPendingCommands` counter before
   they issue, and every accepted command holds its slot until the real reply.
