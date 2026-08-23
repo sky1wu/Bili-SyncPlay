@@ -936,9 +936,11 @@ do NOT compose, and that is the part that decides which connection gets which:
   can resend without waiting for the old socket's close. Those retries share
   the one in-flight collection effect for the room code: the effect enters the
   shutdown tracker once, and request deadlines cap only their own waits—never
-  another tracked wrapper or another underlying Redis delete. Keeping that
-  outcome does not exempt the Redis command from queue admission: request reads
-  and both guarded deletes enter one shared `maxPendingCommands` counter before
+  another tracked wrapper or another underlying Redis delete. That additive
+  error is gated at the common send boundary for every request: v1-v4
+  joins retain `room_not_found`, and every other path receives `internal_error`.
+  Preserving the outcome still requires Redis queue admission. Request reads and
+  both guarded deletes enter one shared `maxPendingCommands` counter before
   they issue, and every accepted command holds its slot until the real reply.
   A delete refused there was never sent, so it has no late outcome to preserve.
   A join error captures that generation and its exact target before persisting

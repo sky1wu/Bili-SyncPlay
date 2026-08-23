@@ -1315,17 +1315,21 @@ export function createMessageHandler(options: {
         let errorMessage = error.message;
         if (
           code === "room_resolution_unconfirmed" &&
-          message.type === "room:join" &&
           (session.protocolVersion ?? MIN_PROTOCOL_VERSION) <
             ROOM_RESOLUTION_RETRY_PROTOCOL_VERSION
         ) {
-          // Older clients cannot retry this additive third outcome: their join
-          // state machine only knows success or terminal failure and would stay
-          // pending forever on an unknown/transient code. Preserve the pre-v5
-          // behaviour for them; v5+ clients keep the join intent and retry the
-          // same server-side collection effect.
-          code = "room_not_found";
-          errorMessage = ROOM_NOT_FOUND_MESSAGE;
+          // Compatibility belongs to the wire error, not to the request branch
+          // that happened to surface it: create first leaves the old room and
+          // can reach the same resolution path as join. No v1-v4 state machine
+          // understands this additive outcome. Preserve join's pre-v5 terminal
+          // answer; every other request gets the established generic error.
+          if (message.type === "room:join") {
+            code = "room_not_found";
+            errorMessage = ROOM_NOT_FOUND_MESSAGE;
+          } else {
+            code = "internal_error";
+            errorMessage = INTERNAL_SERVER_ERROR_MESSAGE;
+          }
         }
         sendError(socket, code, errorMessage);
         if (error.reason === "internal_error") {

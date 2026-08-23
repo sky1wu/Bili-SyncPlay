@@ -106,13 +106,20 @@ test("message handler rejects detached sessions before processing", async () => 
 });
 
 test("message handler exposes retryable room resolution only to clients that implement it", async () => {
-  async function run(protocolVersion: number) {
+  async function run(
+    protocolVersion: number,
+    messageType: "room:join" | "room:create" = "room:join",
+  ) {
     const errors: Array<{ code: string; message: string }> = [];
     const handler = createMessageHandler({
       config: CONFIG,
       roomService: {
         async createRoomForSession() {
-          throw new Error("unreachable");
+          throw new RoomServiceError(
+            "room_resolution_unconfirmed",
+            "Internal server error.",
+            "room_resolution_unconfirmed",
+          );
         },
         async joinRoomForSession() {
           throw new RoomServiceError(
@@ -146,17 +153,22 @@ test("message handler exposes retryable room resolution only to clients that imp
       instanceId: "node-a",
     });
 
-    await handler.handleClientMessage(
-      createSession(`client-${protocolVersion}`),
-      {
+    const session = createSession(`client-${protocolVersion}-${messageType}`);
+    if (messageType === "room:create") {
+      await handler.handleClientMessage(session, {
+        type: "room:create",
+        payload: { protocolVersion },
+      });
+    } else {
+      await handler.handleClientMessage(session, {
         type: "room:join",
         payload: {
           roomCode: "ROOM01",
           joinToken: "join-token-1",
           protocolVersion,
         },
-      },
-    );
+      });
+    }
     return errors;
   }
 
@@ -168,6 +180,9 @@ test("message handler exposes retryable room resolution only to clients that imp
   ]);
   assert.deepEqual(await run(4), [
     { code: "room_not_found", message: "Room not found." },
+  ]);
+  assert.deepEqual(await run(4, "room:create"), [
+    { code: "internal_error", message: "Internal server error." },
   ]);
 });
 

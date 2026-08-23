@@ -112,8 +112,9 @@ server found an expired room snapshot but its guarded collection has not yet
 confirmed whether the room was deleted or revived. A client must preserve the
 exact join intent and retry it with the connection retry backoff. The server
 reuses the same in-flight collection effect, so retries wait for the original
-outcome instead of issuing another delete. Older join clients receive the
-pre-v5 terminal `room_not_found` result for compatibility.
+outcome instead of issuing another delete. Protocol v1-v4 clients never receive
+this additive code: joins retain the pre-v5 terminal `room_not_found`, while any
+other request path that surfaces it is downgraded to `internal_error`.
 
 The developer-facing symptoms for the common codes are listed in the [troubleshooting section](../development.md#troubleshooting).
 
