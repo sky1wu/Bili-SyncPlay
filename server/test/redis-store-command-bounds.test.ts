@@ -538,6 +538,23 @@ const ROOM_REQUEST_PATH: Record<
   countRooms: (store) =>
     store.countRooms({ keyword: "", includeExpired: true }),
   isReady: (store) => store.isReady(),
+  // Two durable writes, and here because each is now conditional (#277): the
+  // read half judges, the script writes only under the bytes that were judged,
+  // and a delete that lands after the cap finds a body it never approved.
+  deleteRoom: (store) =>
+    store.deleteRoom({
+      code: "ROOM01",
+      joinToken: "join-token-123456",
+      createdAt: 1,
+      ownerMemberId: null,
+      ownerDisplayName: null,
+      sharedVideo: null,
+      playback: null,
+      version: 0,
+      lastActiveAt: 1,
+      expiresAt: null,
+    }),
+  deleteExpiredRoom: (store) => store.deleteExpiredRoom("ROOM01", 1_000),
 };
 
 const ROOM_CALLER_CHOSEN: Record<
@@ -559,8 +576,6 @@ const ROOM_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
   createRoom:
     "#237's trade: the write may land after the caller is told it did not",
   updateRoom: "read half capped; the CAS is #237's trade",
-  deleteRoom:
-    "#237's trade: the write may land after the caller is told it did not",
 };
 
 test("every room store method is classified by what bounds its commands", async () => {

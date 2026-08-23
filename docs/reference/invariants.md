@@ -862,16 +862,16 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: four durable writes.** One runtime-store write
-  through `trackAwaitedOperation` (`revokeMemberToken`) and three room-body
-  writes stay uncapped,
+- **Still open, deliberately: three durable writes.** One runtime-store write
+  through `trackAwaitedOperation` (`revokeMemberToken`) and the room store's
+  `createRoom` and `updateRoom` stay uncapped,
   because #237 settled that an answer which can be wrong is worse than a slow
   one and their effects do not expire on their own. The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
   had no production callers, so #277 removed them. **A write leaves this list by
   becoming CONDITIONAL, never by re-arguing #237**: a guarded write's late
   landing is a no-op, so the answer its caller was given cannot be wrong.
-  `markRoomGeneration` is the third to leave that way, and it took the ordinary
+  `markRoomGeneration` was the third to leave that way, and it took the ordinary
   request-path cap rather than a caller-side deadline, because room creation is
   its only caller and nothing derives a bound from its silence. Its pin belongs
   to the REQUEST: the creator reads the key and passes the value in. Re-reading
@@ -889,7 +889,25 @@ do NOT compose, and that is the part that decides which connection gets which:
   which is equally true when an admin touched our still-memberless room — so it
   re-reads, compares the join token to see whether the record is still ours, and
   re-CASes within its own bounded attempt count. Only what it truly could not
-  expire is reported. Atomic
+  expire is reported.
+
+  The room store's delete left the same list the same way, in TWO guarded forms
+  because the guard is a property of the CALL, not of the method. `deleteRoom`
+  pins the instance by `joinToken`: an admin closing a room disconnects its
+  members first and their leaves rewrite the record, so a version-exact guard
+  would decline the very action that caused the change. `deleteExpiredRoom`
+  requires the record to still be expired, judged inside the guarded write —
+  an expiry can land on a room other nodes are still using, and no arrangement
+  of check-then-act closes that. Both are read-judge-write, and BOTH halves are
+  load-bearing: the JS predicate judges what the read returned, the script
+  compares the raw bytes again at the instant it writes. A test that only
+  recycles the code between two calls proves the first half and says nothing
+  about the second. The OUTCOME then matters as much as the guard, because
+  runtime teardown and the `room_deleted` broadcast are addressed BY CODE: a
+  caller that runs either after a `superseded` delete acts on whoever holds the
+  code now. `resolveRoom` answers from a fresh read instead, and `closeRoom` /
+  `expireRoom` skip both steps and log `admin_room_close_superseded` /
+  `admin_room_expire_superseded`. Atomic
   `evictMemberToken` is different: the admin executor caps only its own wait and
   reports `status=error, confirmation=unconfirmed, code=block_unconfirmed`,
   while the original promise keeps the Redis write and both local-mirror
@@ -941,6 +959,7 @@ do NOT compose, and that is the part that decides which connection gets which:
   a `SET NX PX` that lands after its caller gave up releases itself at its TTL,
   so "may have landed" costs one lock interval rather than a permanent wrong
   answer.
+
 - **An expiring claim still has an owner.** Claiming writes the token, slot TTL,
   and teardown-index score in one Lua operation, so an old tracking write cannot
   arrive after a newer owner and overwrite its score. Early cleanup uses a

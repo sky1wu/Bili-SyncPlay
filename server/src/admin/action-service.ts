@@ -215,7 +215,7 @@ export function createAdminActionService(options: {
 
   return {
     async closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
-      await getRoomOrThrow(roomCode);
+      const target = await getRoomOrThrow(roomCode);
       const sessions = await options.listClusterSessionsByRoom(roomCode);
       const disconnectResults = await Promise.all(
         sessions.map((session) =>
@@ -302,9 +302,37 @@ export function createAdminActionService(options: {
         );
       }
 
-      await options.roomStore.deleteRoom(roomCode);
-      await options.teardownRoomRuntime(roomCode);
-      await options.publishRoomDeleted(roomCode);
+      // The delete names the room this action read, so a code that changed
+      // hands while its members were being disconnected is left alone. Both
+      // steps after it are addressed BY CODE, so running them on a superseded
+      // delete would tear down and evict the room that holds the code now.
+      //
+      // Two by-code windows this guard does NOT close, both older than it and
+      // neither expressible without an instance identity on the wire: the
+      // disconnect fan-out above enumerates sessions by code, so a code that
+      // changed hands before it ran disconnects the successor's members and no
+      // later verdict can undo that; and `publishRoomDeleted` names a code, so
+      // a successful delete followed by an immediate reuse can show the new
+      // room's members one empty `room:state` until the next room event
+      // corrects them.
+      //
+      // `teardownRoomRuntime` is NOT one of them, though it is addressed by
+      // code too: it skips outright when a persisted room exists under that
+      // code, and its delete is guarded by a generation pinned before that
+      // check and confirmed after it (#237, #277). A reused code therefore
+      // either shows a live room or fails the generation guard.
+      const deletion = await options.roomStore.deleteRoom(target);
+      if (deletion === "superseded") {
+        options.logEvent("admin_room_close_superseded", {
+          roomCode,
+          sessionCount: sessions.length,
+          result: "ok",
+          actor: actor.username,
+        });
+      } else {
+        await options.teardownRoomRuntime(roomCode);
+        await options.publishRoomDeleted(roomCode);
+      }
       const disconnectedSessionCount = disconnectResults.filter(
         ({ result }) => result.status === "ok",
       ).length;
@@ -325,18 +353,33 @@ export function createAdminActionService(options: {
     },
 
     async expireRoom(actor: AdminSession, roomCode: string, reason?: string) {
+      // The instance is pinned BEFORE the emptiness check, not after. Both are
+      // addressed by code, so reading afterwards let the two describe different
+      // rooms: a code that changed hands in between produced an "empty" verdict
+      // about the room that is gone and a guarded delete of the one that
+      // replaced it — which its members were already in.
+      const target = await getRoomOrThrow(roomCode);
       const sessions = await options.listClusterSessionsByRoom(roomCode);
       if (sessions.length > 0) {
         throw new AdminActionError(409, "room_active", ROOM_ACTIVE_MESSAGE);
       }
 
-      await getRoomOrThrow(roomCode);
-      await options.roomStore.deleteRoom(roomCode);
+      const deletion = await options.roomStore.deleteRoom(target);
       // Same teardown `closeRoom` above performs. Without it an expired room
       // left its runtime keys behind — including the tokens of members who had
       // disconnected but whose identity is deliberately retained (#234) — and a
-      // recycled room code would inherit them (#237 review).
-      await options.teardownRoomRuntime(roomCode);
+      // recycled room code would inherit them (#237 review). Skipped on a
+      // superseded delete for the same reason it is guarded: the runtime state
+      // under that code now belongs to a different room.
+      if (deletion === "superseded") {
+        options.logEvent("admin_room_expire_superseded", {
+          roomCode,
+          result: "ok",
+          actor: actor.username,
+        });
+      } else {
+        await options.teardownRoomRuntime(roomCode);
+      }
 
       options.logEvent("admin_room_expired", {
         roomCode,

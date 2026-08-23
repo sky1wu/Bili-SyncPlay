@@ -372,7 +372,10 @@ test("websocket lifecycle mirrors sessions into the shared redis runtime store",
     }
   } finally {
     if (roomCode) {
-      await roomStore.deleteRoom(roomCode);
+      const persisted = await roomStore.getRoom(roomCode);
+      if (persisted) {
+        await roomStore.deleteRoom(persisted);
+      }
       await runtimeStore.deleteRoom(
         roomCode,
         await runtimeStore.getRoomGeneration(roomCode),
@@ -464,7 +467,10 @@ test("profile updates are reflected in redis-backed room state views", async (t)
     }
   } finally {
     if (roomCode) {
-      await roomStore.deleteRoom(roomCode);
+      const persisted = await roomStore.getRoom(roomCode);
+      if (persisted) {
+        await roomStore.deleteRoom(persisted);
+      }
       await runtimeStore.deleteRoom(
         roomCode,
         await runtimeStore.getRoomGeneration(roomCode),

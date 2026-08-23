@@ -672,12 +672,15 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
   僵住，靠的正是这份沉默。它们的信号还是调用方的那些：`room_reaper_sweep_timeout` →
   `room_reaper_sweep_stalled`、`node_heartbeat_failed`。
 
-仍有四个持久写按设计不设上限：运行时存储经 `trackAwaitedOperation` 的一个（吊销），
-以及房间存储的三个房间体写。它们的副作用不会自行过期，所以 #237 的
+仍有三个持久写按设计不设上限：运行时存储经 `trackAwaitedOperation` 的一个（吊销），
+以及房间存储的 `createRoom` 与 `updateRoom`。它们的副作用不会自行过期，所以 #237 的
 规则仍适用：一个可能是错的答复比一个慢的答复更糟。
 
 generation 写在 #277 中因为变成「以建房方所 pin 的值为条件」而离开了这份名单，现在像其他
-命令一样在请求路径上答复调用方。因为代号易主而被拒绝的写会打
+命令一样在请求路径上答复调用方。删房也以同样方式离开，且是一对有守卫的形态：`deleteRoom`
+点名管理动作读到的那个房间实例，`deleteExpiredRoom` 在写入内部重新判定过期。任何一个被拒
+时，这个代号已经属于另一间房——运行时拆除与 `room_deleted` 广播因此被跳过，管理动作会打
+`admin_room_close_superseded` / `admin_room_expire_superseded`。因为代号易主而被拒绝的写会打
 `room_persist_failed reason=room_generation_superseded`：那是一次输掉的竞争，不是 Redis
 故障。两种结果都会把这间还没有成员的房间回滚为过期，而回滚本身写不进去时会另打一行
 `room_rollback_failed`——那间房没有成员也没有 `expiresAt`，reaper 不会收集它，代号会一直被
@@ -732,8 +735,8 @@ generation 写在 #277 中因为变成「以建房方所 pin 的值为条件」�
   之后房间存储与运行时存储的**请求路径也在这份名单里**——它们会打 `reason=timeout` 并答复
   调用方。僵住的踢人会返回 `status=error, confirmation=unconfirmed`，其完整踢出效果仍在
   进行中；封禁截止时间只会向后推进，所以可以安全重试。
-  仍然**保持沉默**的是上面点名的四个持久写；从外面看，就是一次永远不返回的吊销或
-  房间体写。运行时删房不同：generation 守卫为必填，请求等待到期会记录
+  仍然**保持沉默**的是上面点名的三个持久写；从外面看，就是一次永远不返回的吊销、
+  建房或房间体更新。运行时删房不同：generation 守卫为必填，请求等待到期会记录
   `room_runtime_cleanup_unconfirmed`，每个房间 generation 唯一一条真实效果继续完成本地镜像
   收敛；同一效果的等待者共用一条独立于 Redis liveness 常量的确认期限。重试债只在创建最新
   的精确 generation 效果时授予 owner，复用效果的等待者不能转移它，并且在房间读取 `await`

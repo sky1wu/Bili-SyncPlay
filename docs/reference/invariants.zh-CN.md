@@ -598,8 +598,8 @@
 - **Node 的 `requestTimeout` 不是慢 handler 的兜底。** 它约束的是**接收**请求，不是产出响应，
   所以一个在等僵死 Redis 的 HTTP handler 永远不会被答复——这是实测结论，而 #269 和 #277 的
   第一轮都曾在注释里倚靠它。任何"这条路径至少还有 HTTP 服务器兜底"的论证在这里都不成立。
-- **仍然刻意留着的：四个持久写。** 运行时存储经 `trackAwaitedOperation` 的一个写
-  （`revokeMemberToken`）和房间存储的三个房间体写维持无上限，
+- **仍然刻意留着的：三个持久写。** 运行时存储经 `trackAwaitedOperation` 的一个写
+  （`revokeMemberToken`）和房间存储的 `createRoom` 与 `updateRoom` 维持无上限，
   因为 #237 已经判过"一个可能是错的答复比一个慢的答复更
   糟"，而它们的副作用不会自己过期。独立的 `blockMemberToken` 路径和房间存储中无条件写入的
   `saveRoom` 都没有生产调用方，所以 #277 直接删除了它们。**一个写离开这张表靠的是变成
@@ -615,7 +615,19 @@
   这条路径不再只有 Redis 报错才能走到，超时和输掉代号同样会走到。回滚遇到版本冲突**不等于**
   「没有东西要收」——它只说明这条记录动过，而管理员碰了我们这间还没有成员的房间同样会让它
   动过——所以回滚会重读、用 joinToken 比对这条记录是否仍是我们那间，并在自己的尝试次数上限
-  内重做 CAS；只有真正没能过期掉的房间才会被上报。原子的 `evictMemberToken` 不同：
+  内重做 CAS；只有真正没能过期掉的房间才会被上报。
+
+  房间存储的删房以同样的方式离开了这份名单，而且是**两个**有守卫的形态——因为守卫是
+  **调用**的性质，不是方法的性质。`deleteRoom` 用 `joinToken` 钉住房间实例：管理员关房会
+  先断开所有成员，他们的离房会重写记录，所以「版本必须一致」的守卫反而会拒掉引发这次变化的
+  那个动作本身。`deleteExpiredRoom` 要求记录**仍然过期**，且这个判断放在同一次有守卫的写
+  里——过期时间可能落在别的节点仍在使用的房间上，任何「先查后做」的排列都堵不住它。两者都是
+  读—判断—写，且**两半都吃劲**：JS 判据判的是这次读回来的东西，脚本在真正写入的那一刻再比
+  一次原始字节；只在两次调用之间回收代号的测试只证明了前一半，对后一半一无所知。随后
+  **结果**和守卫同样重要：运行时拆除与 `room_deleted` 广播都是**按代号**寻址的，所以在
+  `superseded` 之后仍执行它们，作用的是现在持有这个代号的房间。`resolveRoom` 因此改为重新
+  读取后作答，`closeRoom` / `expireRoom` 跳过这两步并记录 `admin_room_close_superseded` /
+  `admin_room_expire_superseded`。原子的 `evictMemberToken` 不同：
   管理命令执行器只限制自己的等待并返回
   `status=error, confirmation=unconfirmed, code=block_unconfirmed`，原始 Promise 继续承载
   Redis 写入和两层本地镜像更新，再断开套接字以触发正常离房清理。最终的
@@ -650,6 +662,7 @@
   `acquireRoomLock`、`tryClaimMessageSlot` 不同：一条 `SET NX PX` 即使在调用方放弃之后
   才落地，也会在 TTL 到期时自行释放，"可能已经落地"的代价是一个锁周期，而不是一个永久
   的错误答案。
+
 - **会过期的声明仍然有所有者。** claim 用一条 Lua 同时写入令牌、槽 TTL 与 teardown 索引分数，
   旧 tracking 写入就不能在新 owner 之后到达并覆盖它的分数。提前清理再用另一条 Lua 先校验
   令牌，同时删除槽与 teardown 索引。受界的 release 可能拖到旧 TTL 之后、且另一个节点已经

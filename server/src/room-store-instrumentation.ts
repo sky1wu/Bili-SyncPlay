@@ -54,7 +54,12 @@ export function instrumentRoomStore(
     updateRoom: measure("update_room", (code, expectedVersion, patch) =>
       roomStore.updateRoom(code, expectedVersion, patch),
     ),
-    deleteRoom: measure("delete_room", (code) => roomStore.deleteRoom(code)),
+    deleteRoom: measure("delete_room", (expected) =>
+      roomStore.deleteRoom(expected),
+    ),
+    deleteExpiredRoom: measure("delete_expired_room", (code, currentTime) =>
+      roomStore.deleteExpiredRoom(code, currentTime),
+    ),
     deleteExpiredRooms: measure("delete_expired_rooms", (now) =>
       roomStore.deleteExpiredRooms(now),
     ),

@@ -240,14 +240,22 @@ before changing the code it describes.
   cannot be recreated. Thus a newer generation's success or a live persisted
   room supersedes older effects whose late skip/failure must not retain or
   resurrect the debt.
-  Still open on purpose: the four durable writes, where
+  Still open on purpose: the three durable writes, where
   #237's trade holds because their effects — unlike a lock's or a dedup slot's
   — do not expire. A write leaves that list by becoming CONDITIONAL, never by
   re-arguing #237: a guarded write's late landing is a no-op, so the answer its
   caller was given cannot be wrong. `markRoomGeneration` compares the creator's
   pin, and that pin belongs to the REQUEST — re-reading it inside the store
   would reopen the hole, since a read answered late pins the successor's value
-  and waves the stale stamp through. The former
+  and waves the stale stamp through. The room delete left as a PAIR, because
+  which guard applies is a property of the CALL: `joinToken` for an admin close
+  (whose own members' leaves rewrite the record, so a version-exact guard would
+  decline the action that caused the change) and still-expired, judged inside
+  the guarded write, for the lazy collect. Read-judge-write needs BOTH halves —
+  the predicate on what was read, the script on the raw bytes at write time —
+  and the OUTCOME is load-bearing too: runtime teardown and the `room_deleted`
+  broadcast are addressed by code, so nobody may run them after a superseded
+  delete. The former
   standalone `blockMemberToken` had no production caller and was removed rather
   than kept as another unbounded path beside atomic eviction; the room store's
   unused unconditional `saveRoom` write was removed for the same reason.

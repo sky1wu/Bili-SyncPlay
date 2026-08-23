@@ -28,6 +28,20 @@ export type RoomUpdateResult =
   | { ok: true; room: PersistedRoom }
   | { ok: false; reason: "not_found" | "version_conflict" };
 
+/**
+ * What a guarded room delete found.
+ *
+ * - `deleted` — this call removed the record it was given.
+ * - `already_deleted` — the record was gone; concurrent readers of one expired
+ *   room all reach the delete and only the winner may count a reclamation.
+ * - `superseded` — the code carries a body the guard rejected: a different room
+ *   took the code, or (for the expired variant) an update cleared its expiry.
+ *   The distinction is not cosmetic — runtime teardown and a `room_deleted`
+ *   broadcast are addressed BY CODE, so running either after a `superseded`
+ *   delete acts on whoever holds the code now.
+ */
+export type RoomDeleteOutcome = "deleted" | "already_deleted" | "superseded";
+
 /** Chooses whether this read owns its deadline or is inside a maintenance pass. */
 export type RoomReadCaller = "request" | "maintenance_pass";
 
@@ -66,11 +80,31 @@ export type RoomStore = {
     patch: PersistedRoomPatch,
   ) => Promise<RoomUpdateResult>;
   /**
-   * Removes the room record. Idempotent, and reports whether THIS call is the
-   * one that removed it: concurrent readers of the same expired room all reach
-   * the delete, and only the winner may be counted as having reclaimed a room.
+   * Removes the room INSTANCE the caller read, whatever state it is in now.
+   *
+   * Guarded rather than by code alone, because an unconditional delete by code
+   * is a write nobody can bound: a caller that stops waiting cannot stop the
+   * command, and a `DEL` that lands afterwards takes whichever room holds the
+   * code by then — one whose owner was already told their creation succeeded
+   * (#277). The instance is pinned by `joinToken`, not by `version`: an admin
+   * closing a room disconnects its members first, and their leaves update the
+   * record, so a version-exact guard would decline the very action that caused
+   * the change.
    */
-  deleteRoom: (code: string) => Promise<boolean>;
+  deleteRoom: (expected: PersistedRoom) => Promise<RoomDeleteOutcome>;
+  /**
+   * Removes the room under this code only while it is still expired.
+   *
+   * The expiry is judged inside the same guarded write, never from the caller's
+   * earlier read: between that read and this call an update can clear
+   * `expiresAt` — the invariant that an expiry can land on a room other nodes
+   * are still using is exactly this case — and no arrangement of check-then-act
+   * closes it.
+   */
+  deleteExpiredRoom: (
+    code: string,
+    currentTime: number,
+  ) => Promise<RoomDeleteOutcome>;
   /**
    * Deletes every expired room and reports what the pass found, split by
    * category.
@@ -215,8 +249,27 @@ export function createInMemoryRoomStore(
       rooms.set(code, nextRoom);
       return { ok: true, room: cloneRoom(nextRoom) };
     },
-    async deleteRoom(code): Promise<boolean> {
-      return rooms.delete(code);
+    async deleteRoom(expected): Promise<RoomDeleteOutcome> {
+      const room = rooms.get(expected.code);
+      if (!room) {
+        return "already_deleted";
+      }
+      if (room.joinToken !== expected.joinToken) {
+        return "superseded";
+      }
+      rooms.delete(expected.code);
+      return "deleted";
+    },
+    async deleteExpiredRoom(code, currentTime): Promise<RoomDeleteOutcome> {
+      const room = rooms.get(code);
+      if (!room) {
+        return "already_deleted";
+      }
+      if (room.expiresAt === null || room.expiresAt > currentTime) {
+        return "superseded";
+      }
+      rooms.delete(code);
+      return "deleted";
     },
     async deleteExpiredRooms(currentTime): Promise<ExpiredRoomSweep> {
       const deletedRoomCodes: string[] = [];
