@@ -1015,13 +1015,16 @@ export function createRoomService(options: {
     }
 
     const pendingRoomDeletions = roomDeleteConfirmationPacer.trackedCount();
-    const pendingRuntimeTeardowns =
-      runtimeTeardownConfirmationPacer.trackedCount();
-    if (pendingRoomDeletions > 0 || pendingRuntimeTeardowns > 0) {
+    // The debt ledger is the source of truth, not the request confirmation
+    // pacer. A fast rejection or guarded skip leaves no tracked request, but its
+    // ownerless ledger entry is still the only trail to runtime state whose
+    // persisted room has already gone.
+    const pendingRuntimeTeardownCount = pendingRuntimeTeardowns.size;
+    if (pendingRoomDeletions > 0 || pendingRuntimeTeardownCount > 0) {
       logEvent("room_service_close_unfinished", {
         provider: persistence.provider,
         pendingRoomDeletions,
-        pendingRuntimeTeardowns,
+        pendingRuntimeTeardowns: pendingRuntimeTeardownCount,
         budgetMs: closeBudgetMs,
         result: "timeout",
       });

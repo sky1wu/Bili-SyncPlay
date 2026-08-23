@@ -6131,6 +6131,36 @@ test("room service reports runtime teardown left at shutdown", async () => {
   await new Promise((resolve) => setImmediate(resolve));
 });
 
+test("room service reports settled runtime teardown retry debt at shutdown", async () => {
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const closeEvents: Array<Record<string, unknown>> = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: createInMemoryRoomStore({ now: () => 1_000 }),
+    activeRooms: {
+      ...runtime,
+      deleteRoom: async () => false,
+    },
+    generateToken: () => "token-1234567890",
+    logEvent: (event, data) => {
+      if (event === "room_service_close_unfinished") {
+        closeEvents.push(data);
+      }
+    },
+    now: () => 1_000,
+  });
+
+  // The effect answers immediately, so no pacer entry remains. Its guarded
+  // skip still leaves one logical cleanup debt that only this process knows.
+  await service.teardownRoomRuntime("ROOMDR");
+  await Promise.resolve();
+  await service.close();
+
+  assert.equal(closeEvents.length, 1);
+  assert.equal(closeEvents[0]?.pendingRuntimeTeardowns, 1);
+});
+
 test("room service closes lazy-delete admission before its shutdown snapshot", async () => {
   let currentTime = 1_000;
   const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });

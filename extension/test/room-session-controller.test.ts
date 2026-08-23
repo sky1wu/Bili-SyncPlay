@@ -352,6 +352,93 @@ test("room session controller retries an unconfirmed pending join without discar
   assert.equal(harness.disconnectCalls, 0);
 });
 
+test("an old member-token error cannot schedule over a replacement socket join", async () => {
+  let markPersistStarted!: () => void;
+  let releasePersist!: () => void;
+  const persistStarted = new Promise<void>((resolve) => {
+    markPersistStarted = resolve;
+  });
+  const persistGate = new Promise<void>((resolve) => {
+    releasePersist = resolve;
+  });
+  const harness = createControllerHarness({
+    getJoinRetryDelayMs: () => 0,
+    async persistState(callCount) {
+      if (callCount === 1) {
+        markPersistStarted();
+        await persistGate;
+      }
+    },
+  });
+  harness.runtimeState.connection.connected = true;
+  harness.runtimeState.room.pendingJoinRoomCode = "ROOM05";
+  harness.runtimeState.room.pendingJoinToken = "join-token-5";
+  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
+  harness.runtimeState.room.memberToken = "member-token-old";
+
+  const handlingOldError = harness.controller.handleServerMessage({
+    type: "error",
+    payload: {
+      code: "member_token_invalid",
+      message: "Member token is invalid.",
+    },
+  } satisfies ServerMessage);
+  await persistStarted;
+
+  harness.runtimeState.connection.socketGeneration = 1;
+  harness.controller.sendJoinRequest("ROOM05", "join-token-5");
+  releasePersist();
+  await handlingOldError;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 1);
+  assert.equal(harness.sendToServerCalls.length, 1);
+});
+
+test("an old member-token error cannot schedule over a newer popup join", async () => {
+  let markPersistStarted!: () => void;
+  let releasePersist!: () => void;
+  const persistStarted = new Promise<void>((resolve) => {
+    markPersistStarted = resolve;
+  });
+  const persistGate = new Promise<void>((resolve) => {
+    releasePersist = resolve;
+  });
+  const harness = createControllerHarness({
+    getJoinRetryDelayMs: () => 0,
+    async persistState(callCount) {
+      if (callCount === 1) {
+        markPersistStarted();
+        await persistGate;
+      }
+    },
+  });
+  harness.runtimeState.connection.connected = true;
+  harness.runtimeState.room.pendingJoinRoomCode = "ROOM05";
+  harness.runtimeState.room.pendingJoinToken = "join-token-5";
+  harness.runtimeState.room.pendingJoinRequestGeneration = 0;
+  harness.runtimeState.room.memberToken = "member-token-old";
+
+  const handlingOldError = harness.controller.handleServerMessage({
+    type: "error",
+    payload: {
+      code: "member_token_invalid",
+      message: "Member token is invalid.",
+    },
+  } satisfies ServerMessage);
+  await persistStarted;
+
+  await harness.controller.requestJoinRoom("ROOM06", "join-token-6");
+  releasePersist();
+  await handlingOldError;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.equal(harness.runtimeState.room.pendingJoinRoomCode, "ROOM06");
+  assert.equal(harness.runtimeState.room.pendingJoinToken, "join-token-6");
+  assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 0);
+  assert.equal(harness.sendToServerCalls.length, 1);
+});
+
 test("room session controller keeps retrying when an unconfirmed join is rate limited", async () => {
   const harness = createControllerHarness({ getJoinRetryDelayMs: () => 0 });
   harness.runtimeState.connection.connected = true;

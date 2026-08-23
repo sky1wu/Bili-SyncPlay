@@ -941,6 +941,10 @@ do NOT compose, and that is the part that decides which connection gets which:
   and both guarded deletes enter one shared `maxPendingCommands` counter before
   they issue, and every accepted command holds its slot until the real reply.
   A delete refused there was never sent, so it has no late outcome to preserve.
+  A join error captures that generation and its exact target before persisting
+  any credential change, then revalidates both after the await; an old
+  `member_token_invalid` response can therefore neither clear nor schedule a
+  retry over a replacement socket or a newer popup join.
   `closeRoom` / `expireRoom` refuse to report a completed action they cannot
   confirm and return 503 `room_delete_unconfirmed`, while the effect logs its
   own late outcome. That ownership extends through shutdown: the admin action
@@ -950,7 +954,10 @@ do NOT compose, and that is the part that decides which connection gets which:
   runtime teardown they create, all while the room store, runtime store and
   event bus remain open. Each owner has one explicit budget and reports what
   remains instead of letting a later dependency close silently cut the effect
-  off. `redis-store-command-bounds.test.ts` holds the mechanical
+  off. Runtime teardown is reported from its retry-debt ledger rather than its
+  request-confirmation tracker: a fast rejection or guarded skip can settle the
+  latter while leaving an ownerless debt as the only process-local trail to an
+  already deleted room. `redis-store-command-bounds.test.ts` holds the mechanical
   half: with a command hung, both deletes must be left UNANSWERED, while either
   a read or a delete occupying the last admission slot makes the other refuse
   without reaching Redis. No classification table can see a cap that quietly

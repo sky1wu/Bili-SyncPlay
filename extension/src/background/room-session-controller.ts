@@ -46,6 +46,9 @@ type JoinRetryTarget = {
   roomCode: string;
   joinToken: string;
 };
+type JoinRequestIdentity = JoinRetryTarget & {
+  socketGeneration: number;
+};
 type PendingMemberDelta = {
   type: "joined" | "left";
   roomCode: string;
@@ -361,14 +364,6 @@ export function createRoomSessionController(args: {
     });
   }
 
-  function hasJoinRequestOnCurrentSocket(): boolean {
-    return (
-      args.roomSessionState.pendingJoinRequestGeneration !== null &&
-      args.roomSessionState.pendingJoinRequestGeneration ===
-        args.connectionState.socketGeneration
-    );
-  }
-
   function getJoinRetryTarget(): JoinRetryTarget | null {
     if (
       args.roomSessionState.pendingJoinRoomCode &&
@@ -390,6 +385,23 @@ export function createRoomSessionController(args: {
     return null;
   }
 
+  function getCurrentJoinRequestIdentity(): JoinRequestIdentity | null {
+    const socketGeneration = args.roomSessionState.pendingJoinRequestGeneration;
+    if (!hasJoinRequestOnCurrentSocket() || socketGeneration === null) {
+      return null;
+    }
+    const target = getJoinRetryTarget();
+    return target ? { ...target, socketGeneration } : null;
+  }
+
+  function hasJoinRequestOnCurrentSocket(): boolean {
+    return (
+      args.roomSessionState.pendingJoinRequestGeneration !== null &&
+      args.roomSessionState.pendingJoinRequestGeneration ===
+        args.connectionState.socketGeneration
+    );
+  }
+
   function isCurrentJoinRetryTarget(target: JoinRetryTarget): boolean {
     const current = getJoinRetryTarget();
     return (
@@ -399,12 +411,21 @@ export function createRoomSessionController(args: {
     );
   }
 
-  function scheduleJoinRetryAfterTransientError(errorCode: ErrorCode): boolean {
-    if (!hasJoinRequestOnCurrentSocket()) {
-      return false;
-    }
-    const target = getJoinRetryTarget();
-    if (!target) {
+  function isCurrentJoinRequestIdentity(request: JoinRequestIdentity): boolean {
+    const current = getCurrentJoinRequestIdentity();
+    return (
+      current?.socketGeneration === request.socketGeneration &&
+      current.source === request.source &&
+      current.roomCode === request.roomCode &&
+      current.joinToken === request.joinToken
+    );
+  }
+
+  function scheduleJoinRetryAfterTransientError(
+    request: JoinRequestIdentity,
+    errorCode: ErrorCode,
+  ): boolean {
+    if (!isCurrentJoinRequestIdentity(request)) {
       return false;
     }
 
@@ -414,13 +435,13 @@ export function createRoomSessionController(args: {
     args.roomSessionState.pendingJoinRequestGeneration = null;
     args.log(
       "background",
-      `Retrying ${target.source} join for ${target.roomCode} after ${errorCode}`,
+      `Retrying ${request.source} join for ${request.roomCode} after ${errorCode}`,
     );
     pendingJoinRetryAttempt += 1;
     const retryDelayMs = resolveJoinRetryDelayMs(pendingJoinRetryAttempt);
     args.log(
       "background",
-      `Join retry for ${target.roomCode} scheduled in ${retryDelayMs}ms`,
+      `Join retry for ${request.roomCode} scheduled in ${retryDelayMs}ms`,
     );
     // A reconnect can re-issue the intent before the previous timer fires. Its
     // next transient response replaces that schedule, so keep exactly one
@@ -431,9 +452,9 @@ export function createRoomSessionController(args: {
       if (
         args.connectionState.connected &&
         !hasJoinRequestOnCurrentSocket() &&
-        isCurrentJoinRetryTarget(target)
+        isCurrentJoinRetryTarget(request)
       ) {
-        sendJoinRequest(target.roomCode, target.joinToken);
+        sendJoinRequest(request.roomCode, request.joinToken);
         args.notifyAll();
       }
     }, retryDelayMs);
@@ -548,7 +569,11 @@ export function createRoomSessionController(args: {
           message.payload.code,
           message.payload.message,
         );
-        const joinErrorDisposition = hasJoinRequestOnCurrentSocket()
+        // Capture the exact request before any branch can await. A state write
+        // may yield to a replacement socket or a newer popup join; that newer
+        // request must never inherit this older response's retry lifecycle.
+        const joinRequest = getCurrentJoinRequestIdentity();
+        const joinErrorDisposition = joinRequest
           ? JOIN_ERROR_DISPOSITIONS[message.payload.code]
           : null;
         if (joinErrorDisposition === "retry-without-member-token") {
@@ -559,9 +584,13 @@ export function createRoomSessionController(args: {
           await args.persistState();
         }
         if (
+          joinRequest &&
           (joinErrorDisposition === "retry" ||
             joinErrorDisposition === "retry-without-member-token") &&
-          scheduleJoinRetryAfterTransientError(message.payload.code)
+          scheduleJoinRetryAfterTransientError(
+            joinRequest,
+            message.payload.code,
+          )
         ) {
           args.logServerError(message.payload.code, message.payload.message);
           args.notifyAll();
