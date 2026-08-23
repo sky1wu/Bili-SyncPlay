@@ -44,6 +44,15 @@ import type {
 const PLAYBACK_AUTHORITY_WINDOW_MS = 1200;
 const PLAYBACK_AUTHORITY_SWEEP_INTERVAL_MS = 60_000;
 const MAX_VERSION_RETRIES = 3;
+/**
+ * How many times the rollback of an unstamped room re-reads and re-CASes.
+ *
+ * Its own constant rather than `MAX_VERSION_RETRIES`: that one bounds a
+ * request's optimistic update of a LIVE room, where giving up simply reports a
+ * conflict to the caller. This one bounds a compensation whose failure leaves a
+ * room nothing collects, so the two are free to move for different reasons.
+ */
+const ROOM_ROLLBACK_MAX_ATTEMPTS = 3;
 const ROOM_LAST_ACTIVE_WRITE_INTERVAL_MS = 30_000;
 const JOIN_ADMISSION_LOCK_KEY = "join-admission";
 const JOIN_ADMISSION_LOCK_TTL_MS = 30_000;
@@ -1607,13 +1616,22 @@ export function createRoomService(options: {
       // still owed for the code's previous occupant was decided against the old
       // one and will now decline.
       //
-      // On failure the persisted room has to go with it: it would otherwise sit
-      // there with no members and no `expiresAt`, which the reaper never
-      // collects, holding its code and counting towards room totals forever
-      // (#237 review).
-      try {
-        await runtimeStore.markRoomGeneration(room.code, randomUUID());
-      } catch (error) {
+      // When it does not land the persisted room has to go with it: it would
+      // otherwise sit there with no members and no `expiresAt`, which the
+      // reaper never collects, holding its code and counting towards room
+      // totals forever (#237 review).
+      //
+      // The stamp is capped now (#277), so "did not land" also covers a write
+      // that is merely still out there. That case converges without help: the
+      // rolled-back room is reaped, and the teardown reads the generation when
+      // it runs — finding this late stamp and deleting under it, or finding the
+      // older value and leaving a tombstone the late stamp then declines
+      // against. Neither outcome can reach a room this code goes on to serve.
+      const persistedRoom = room;
+      const rollbackUnstampedRoom = async (
+        reason: string,
+        error?: unknown,
+      ): Promise<never> => {
         // CAS on the version we just created, not a delete by code. Between the
         // failure and this line an admin can expire the (still memberless) room
         // and another request can take the code — deleting by code would then
@@ -1623,22 +1641,115 @@ export function createRoomService(options: {
         // Expiring rather than deleting: `updateRoom` is the only conditional
         // primitive the store has, and a room marked expired is collected by the
         // reaper and can never be mistaken for a live one.
-        await roomStore
-          .updateRoom(room.code, room.version, { expiresAt: now() })
-          .catch(() => undefined);
+        //
+        // What the rollback prevents is a PERMANENT orphan: a room with no
+        // members and no `expiresAt` is exactly what the reaper never collects,
+        // so failing to write it holds the code and the room total until an
+        // operator intervenes. Until #277 only a Redis error could reach this
+        // path and the failure was swallowed; capping the stamp makes it
+        // reachable by a timeout and by a lost code too, so what the rollback
+        // could not do is now said out loud.
+        //
+        // A conflict is not by itself evidence that there is nothing to
+        // collect. It only says the record moved since we created it — which is
+        // true both when the code changed hands (nothing of ours survives) and
+        // when an admin merely touched OUR still-memberless room (the orphan is
+        // still there). The two are told apart by re-reading, never assumed.
+        let rollbackResidue: string | null = null;
+        try {
+          let expectedVersion = persistedRoom.version;
+          // Attempts against a live conflict, not a retry schedule: a losing
+          // CAS re-reads to the current version immediately, and only a
+          // concurrent writer on this same record can make it lose again.
+          for (let attempt = 0; ; attempt += 1) {
+            const rollback = await roomStore.updateRoom(
+              persistedRoom.code,
+              expectedVersion,
+              { expiresAt: now() },
+            );
+            if (rollback.ok || rollback.reason === "not_found") {
+              break;
+            }
+            // Re-read on EVERY conflict, the last one included: giving up is a
+            // report, and a report about a room that has since been replaced is
+            // a false alarm. A different room under this code owes us nothing,
+            // and one that is already expired is already collectable.
+            const current = await roomStore.getRoom(persistedRoom.code);
+            if (
+              !current ||
+              current.joinToken !== persistedRoom.joinToken ||
+              current.expiresAt !== null
+            ) {
+              break;
+            }
+            if (attempt + 1 >= ROOM_ROLLBACK_MAX_ATTEMPTS) {
+              rollbackResidue = "version_conflict";
+              break;
+            }
+            expectedVersion = current.version;
+          }
+        } catch (rollbackError) {
+          rollbackResidue =
+            rollbackError instanceof Error
+              ? rollbackError.message
+              : String(rollbackError);
+        }
+        if (rollbackResidue !== null) {
+          logEvent(
+            "room_rollback_failed",
+            {
+              sessionId: session.id,
+              roomCode: persistedRoom.code,
+              provider: persistence.provider,
+              result: "error",
+              reason,
+              error: rollbackResidue,
+            },
+            { level: "error" },
+          );
+        }
         logEvent("room_persist_failed", {
           sessionId: session.id,
-          roomCode: room.code,
+          roomCode: persistedRoom.code,
           provider: persistence.provider,
           result: "error",
-          reason: "room_generation_mark_failed",
-          error: error instanceof Error ? error.message : String(error),
+          reason,
+          ...(error === undefined
+            ? {}
+            : {
+                error: error instanceof Error ? error.message : String(error),
+              }),
         });
         throw new RoomServiceError(
           "internal_error",
           INTERNAL_SERVER_ERROR_MESSAGE,
           "internal_error",
         );
+      };
+      let stamped = false;
+      try {
+        // Pinned immediately before the stamp, and by THIS request: the stamp
+        // is conditional on it, so a stamp that lands after we stopped waiting
+        // is a no-op rather than an overwrite of the next occupant's generation
+        // (#277). Re-reading the pin inside the store would reopen exactly that
+        // hole — a read answered late would pin the successor's value and the
+        // guard would wave the stale stamp through.
+        const pinnedGeneration = await runtimeStore.getRoomGeneration(
+          persistedRoom.code,
+        );
+        stamped = await runtimeStore.markRoomGeneration(
+          persistedRoom.code,
+          randomUUID(),
+          pinnedGeneration,
+        );
+      } catch (error) {
+        await rollbackUnstampedRoom("room_generation_mark_failed", error);
+      }
+      if (!stamped) {
+        // The pin no longer held: a teardown owed for the previous occupant
+        // tombstoned the key, or the code changed hands. Either way this room
+        // instance was never stamped, so it must not go live.
+        await rollbackUnstampedRoom("room_generation_superseded");
       }
 
       const memberToken = generateToken();

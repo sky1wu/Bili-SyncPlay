@@ -748,10 +748,19 @@ on the background passes**, on purpose:
   `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`.
 
-Five persistent writes remain uncapped by design: the runtime store's two
-writes through `trackAwaitedOperation` (revoke / generation) and the room
+Four persistent writes remain uncapped by design: the runtime store's one
+write through `trackAwaitedOperation` (revoke) and the room
 store's three room-body writes. Their effects do not expire, so #237's rule
-still applies: an answer that may be wrong is worse than a slow one. The unused
+still applies: an answer that may be wrong is worse than a slow one.
+
+The generation stamp left that list in #277 by becoming conditional on the pin
+its creator read, so it now answers on the request path like any other command.
+A stamp refused because the code changed hands logs
+`room_persist_failed reason=room_generation_superseded`: a lost race, not a
+Redis fault. Either outcome rolls the memberless room back by expiring it, and a
+rollback that could not be written logs `room_rollback_failed` — that room has
+no members and no `expiresAt`, so the reaper will not collect it and the code
+stays held until somebody does. The unused
 standalone `blockMemberToken` operation and the unused unconditional room-store
 `saveRoom` write were removed in #277. The atomic
 `evictMemberToken` call now caps only the executor's wait: it returns
@@ -818,9 +827,8 @@ incident:
   `reason=timeout` and answer their caller. A stalled kick returns
   `status=error, confirmation=unconfirmed`; its complete kick effect remains
   outstanding. Retry is safe because the block deadline only moves later. What
-  still stays **silent** is the five durable writes named above; a revoke,
-  generation stamp, or room-body write that never returns is what that looks
-  like from outside. Runtime room teardown is different: its generation guard
+  still stays **silent** is the four durable writes named above; a revoke or a
+  room-body write that never returns is what that looks like from outside. Runtime room teardown is different: its generation guard
   is mandatory, requests stop waiting with
   `room_runtime_cleanup_unconfirmed`, and one real effect per room generation
   continues through local-mirror settlement. Waiters on the exact effect share

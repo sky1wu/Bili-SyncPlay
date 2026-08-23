@@ -1715,6 +1715,81 @@ test("redis runtime store leaves a kick entirely unapplied when it fails", async
   }
 });
 
+test("redis runtime store declines a generation stamp that lost its pin", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+
+  try {
+    // A creator stamps the code, then its request is answered by the cap
+    // without the stamp being cancelled: the write is still out there.
+    assert.equal(
+      await store.markRoomGeneration("ROOMPS", "generation-1", null),
+      true,
+    );
+
+    // Meanwhile the room is rolled back, the code is freed, and the next
+    // occupant stamps its own generation.
+    assert.equal(
+      await store.markRoomGeneration("ROOMPS", "generation-2", "generation-1"),
+      true,
+    );
+
+    // Now the first creator's write lands. Unconditional, it replaced the pin
+    // every teardown and every queued join write compares against — the new
+    // room's own generation — with a value belonging to a room that no longer
+    // exists (#277).
+    assert.equal(
+      await store.markRoomGeneration("ROOMPS", "generation-1", null),
+      false,
+    );
+    assert.equal(await store.getRoomGeneration("ROOMPS"), "generation-2");
+  } finally {
+    await store.close();
+  }
+});
+
+test("redis runtime store lets a new occupant stamp over a teardown tombstone", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const session = createSession("session-tomb");
+  session.memberId = "member-tomb";
+  session.memberToken = "token-tomb";
+
+  try {
+    assert.equal(
+      await store.markRoomGeneration("ROOMTB", "generation-1", null),
+      true,
+    );
+    store.addMember("ROOMTB", session.memberId, session, session.memberToken);
+    await store.flush?.();
+    assert.equal(await store.deleteRoom("ROOMTB", "generation-1"), true);
+
+    // The teardown leaves a tombstone rather than deleting the key, and the
+    // guard must not mistake that for "somebody else owns this code": taking
+    // over a torn-down code is exactly what a creator does. A guard written as
+    // "only stamp an ABSENT key" would refuse every recycled code here.
+    const pinned = await store.getRoomGeneration("ROOMTB");
+    assert.notEqual(pinned, null);
+    assert.equal(
+      await store.markRoomGeneration("ROOMTB", "generation-2", pinned),
+      true,
+    );
+    assert.equal(await store.getRoomGeneration("ROOMTB"), "generation-2");
+  } finally {
+    await store.close();
+  }
+});
+
 test("redis runtime store declines a teardown decided against an older room generation", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");
@@ -1731,7 +1806,7 @@ test("redis runtime store declines a teardown decided against an older room gene
   current.memberToken = "token-gen-new";
 
   try {
-    await store.markRoomGeneration("ROOMGN", "generation-1");
+    await store.markRoomGeneration("ROOMGN", "generation-1", null);
     store.addMember(
       "ROOMGN",
       previous.memberId,
@@ -1745,7 +1820,7 @@ test("redis runtime store declines a teardown decided against an older room gene
     assert.equal(decidedAgainst, "generation-1");
 
     // Before it runs, the code comes back into use as a different room.
-    await store.markRoomGeneration("ROOMGN", "generation-2");
+    await store.markRoomGeneration("ROOMGN", "generation-2", "generation-1");
     store.addMember("ROOMGN", current.memberId, current, current.memberToken);
     await store.flush?.();
 
@@ -1950,7 +2025,7 @@ test("redis runtime store treats leftover session keys as residue on a room code
       keyPrefix: `${keyPrefix}gen:`,
     });
     try {
-      await clean.markRoomGeneration("ROOMGO", "generation-1");
+      await clean.markRoomGeneration("ROOMGO", "generation-1", null);
       assert.equal(await clean.hasRoomResidue("ROOMGO"), false);
     } finally {
       await clean.close();

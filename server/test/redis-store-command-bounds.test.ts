@@ -185,6 +185,12 @@ const RUNTIME_REQUEST_PATH: Record<
     Promise.resolve(store.listClusterActiveRoomCodes?.()),
   purgeSessionsByInstance: (store) =>
     Promise.resolve(store.purgeSessionsByInstance?.("session-1-node")),
+  // A durable write, and here because its script became conditional on the
+  // creator's pin (#277): a stamp that lands after the cap can only find the
+  // successor's generation and decline, so answering the caller can no longer
+  // be the wrong answer #237 refused to give.
+  markRoomGeneration: (store) =>
+    Promise.resolve(store.markRoomGeneration("ROOM01", "generation-1", null)),
 };
 
 /**
@@ -231,17 +237,18 @@ const RUNTIME_CALLER_CHOSEN: Record<
 };
 
 /**
- * The two remaining durable writes #237 argued must never be told they failed
- * while their write may still land. Their side effect does not expire on its
- * own, so bounding them re-opens that trade — deliberately still open (#277).
- * The unused standalone token-block write was deleted, and the production
- * eviction call now reports an unconfirmed deadline while its real effect
- * continues, instead of misreporting a late success as failure.
+ * The one remaining durable write #237 argued must never be told it failed
+ * while the write may still land. Its side effect does not expire on its own,
+ * so bounding it re-opens that trade — deliberately still open (#277).
+ *
+ * What left this table left it by becoming CONDITIONAL, not by re-arguing #237:
+ * a guarded write's late landing is a no-op, so the answer its caller was given
+ * cannot be wrong. The unused standalone token-block write was deleted; the
+ * production eviction call reports an unconfirmed deadline while its real
+ * effect continues; and `markRoomGeneration` compares the creator's pin.
  */
 const RUNTIME_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
   revokeMemberToken:
-    "#237: an answer that can be wrong is worse than a slow one",
-  markRoomGeneration:
     "#237: an answer that can be wrong is worse than a slow one",
 };
 
@@ -389,6 +396,48 @@ test("runtime command timeouts and admission refusals are retryable store errors
       commands.issuedCount(),
       issuedAfterTimeout,
       "runtime admission refusal must not issue another command",
+    );
+  } finally {
+    await store.close();
+  }
+});
+
+test("a capped generation stamp is still counted as outstanding", async () => {
+  // The cap answers the creator; it must not cancel the stamp or forget it.
+  // Forgetting is the failure that matters here twice over: admission would
+  // degrade from a bound on ioredis's queue into a rate of one stamp per
+  // timeout window (#242), and nothing would still be counting a write that
+  // may yet land — which is the evidence every other bound on this connection
+  // is derived from (#271).
+  const commands = createProbeCommands(0);
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: createRuntimeProbeClient(commands),
+    pendingOperationTimeoutMs: BUDGET_MS,
+    closeQuitTimeoutMs: BUDGET_MS,
+    maxPendingOperations: 1,
+    onPendingOperationError() {},
+    onCloseUnfinished() {},
+  });
+  try {
+    await assert.rejects(
+      Promise.resolve(store.markRoomGeneration("ROOM01", "generation-1", null)),
+      (error: unknown) =>
+        error instanceof RedisStoreUnavailableError &&
+        error.store === "runtime" &&
+        error.reason === "timeout",
+    );
+    const issuedAfterTimeout = commands.issuedCount();
+    await assert.rejects(
+      Promise.resolve(store.markRoomGeneration("ROOM01", "generation-2", null)),
+      (error: unknown) =>
+        error instanceof RedisStoreUnavailableError &&
+        error.store === "runtime" &&
+        error.reason === "admission",
+    );
+    assert.equal(
+      commands.issuedCount(),
+      issuedAfterTimeout,
+      "a stamp refused by admission must not reach Redis",
     );
   } finally {
     await store.close();

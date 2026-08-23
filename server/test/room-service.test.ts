@@ -1226,8 +1226,8 @@ test("room service flushes pending runtime store writes before exposing updated 
     getRoomGeneration(code, caller?: RuntimeReadCaller) {
       return activeRooms.getRoomGeneration(code, caller);
     },
-    markRoomGeneration(code, generation) {
-      return activeRooms.markRoomGeneration(code, generation);
+    markRoomGeneration(code, generation, expectedPrevious) {
+      return activeRooms.markRoomGeneration(code, generation, expectedPrevious);
     },
     deleteRoom(code, expectedGeneration) {
       clusterSessionsByRoom.delete(code);
@@ -4830,6 +4830,264 @@ test("rolls the room back when its generation cannot be stamped", async () => {
   // version we created — see the recycling test below.
   assert.equal((await roomStore.getRoom("ROOMRB"))?.expiresAt, 1_000);
   assert.equal(await roomStore.countRooms({ includeExpired: false }), 0);
+});
+
+test("rolls the room back when its generation stamp lost the code", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const events: { name: string; reason?: unknown }[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...runtime,
+      async getRoomGeneration(code, caller) {
+        const pinned = await runtime.getRoomGeneration(code, caller);
+        // Between this creator's pin and its stamp, the teardown still owed for
+        // the code's PREVIOUS occupant lands and tombstones the key. The stamp
+        // that follows is therefore holding a value that no longer describes
+        // the key — the same shape as a stamp arriving after its caller stopped
+        // waiting, which is why the write has to be conditional (#277).
+        await runtime.markRoomGeneration(code, "deleted", pinned);
+        return pinned;
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name, payload) => {
+      events.push({
+        name,
+        reason: (payload as { reason?: unknown } | undefined)?.reason,
+      });
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMSU",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  await assert.rejects(
+    service.createRoomForSession(createSession("owner"), "Alice"),
+    /internal server error/i,
+  );
+
+  // A stamp that did not land leaves the same memberless, never-expiring room
+  // behind as a stamp that threw, so it takes the same rollback.
+  assert.equal((await roomStore.getRoom("ROOMSU"))?.expiresAt, 1_000);
+  assert.equal(await roomStore.countRooms({ includeExpired: false }), 0);
+  // Reported as what it is: nothing failed, the code was taken.
+  assert.ok(
+    events.some(
+      (event) =>
+        event.name === "room_persist_failed" &&
+        event.reason === "room_generation_superseded",
+    ),
+  );
+  // And the value the winner wrote is untouched.
+  assert.equal(runtime.getRoomGeneration("ROOMSU"), "deleted");
+});
+
+test("rolls an unstamped room back over a concurrent update of the same record", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const events: string[] = [];
+  let raced = false;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expectedVersion, patch) {
+        if (!raced) {
+          raced = true;
+          // An admin touches the still-memberless room between our create and
+          // our rollback. The version we are holding is now stale — a conflict
+          // that says nothing about whether our room is still there.
+          const current = await roomStore.getRoom(code);
+          assert.ok(current);
+          await roomStore.updateRoom(code, current.version, {
+            lastActiveAt: 2_000,
+          });
+        }
+        return await roomStore.updateRoom(code, expectedVersion, patch);
+      },
+    },
+    activeRooms: {
+      ...runtime,
+      markRoomGeneration: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMCF",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  await assert.rejects(
+    service.createRoomForSession(createSession("owner"), "Alice"),
+    /internal server error/i,
+  );
+
+  // Treating the conflict as "somebody else owns this code now" left the room
+  // behind: same record, still memberless, still never expiring.
+  assert.equal((await roomStore.getRoom("ROOMCF"))?.expiresAt, 1_000);
+  assert.ok(!events.includes("room_rollback_failed"));
+});
+
+test("reports the residue when the rollback keeps losing the version race", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      // A writer that never lets go: every rollback attempt loses to it.
+      async updateRoom() {
+        return { ok: false, reason: "version_conflict" };
+      },
+    },
+    activeRooms: {
+      ...runtime,
+      markRoomGeneration: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMCX",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  await assert.rejects(
+    service.createRoomForSession(createSession("owner"), "Alice"),
+    /internal server error/i,
+  );
+
+  // Bounded, so the request still ends — and the room it could not expire is
+  // named, because nothing else will ever collect it.
+  assert.equal((await roomStore.getRoom("ROOMCX"))?.expiresAt, null);
+  assert.ok(events.includes("room_rollback_failed"));
+});
+
+test("does not report a rollback whose room was replaced on the last attempt", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const events: string[] = [];
+  // Only the rollback calls `updateRoom` here, so this counts its attempts.
+  let conflicts = 0;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      async updateRoom() {
+        conflicts += 1;
+        return { ok: false, reason: "version_conflict" };
+      },
+      async getRoom(code, caller) {
+        const current = await roomStore.getRoom(code, caller);
+        if (!current || conflicts < 3) {
+          return current;
+        }
+        // Our room is deleted and the code is reused, and the conflict that
+        // exposes it is the LAST one. Giving up without looking would report an
+        // orphan that no longer exists.
+        return { ...current, joinToken: "replacement-token" };
+      },
+    },
+    activeRooms: {
+      ...runtime,
+      markRoomGeneration: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMLR",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  await assert.rejects(
+    service.createRoomForSession(createSession("owner"), "Alice"),
+    /internal server error/i,
+  );
+
+  assert.ok(!events.includes("room_rollback_failed"));
+});
+
+test("reports the residue when the rollback of an unstamped room fails", async () => {
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const runtime = createInMemoryRuntimeStore(() => 1_000);
+  const events: { name: string; roomCode?: unknown }[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      async updateRoom() {
+        throw new Error("redis unavailable");
+      },
+    },
+    activeRooms: {
+      ...runtime,
+      markRoomGeneration: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name, payload) => {
+      events.push({
+        name,
+        roomCode: (payload as { roomCode?: unknown } | undefined)?.roomCode,
+      });
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMRF",
+    resolveActiveRoom: async (code) => runtime.getRoom(code),
+  });
+
+  await assert.rejects(
+    service.createRoomForSession(createSession("owner"), "Alice"),
+    /internal server error/i,
+  );
+
+  // The room is still there, memberless and with no `expiresAt`: the reaper
+  // never collects that, so the code and the room total are held until somebody
+  // acts on it. Which nobody could, while this failure was swallowed.
+  const orphan = await roomStore.getRoom("ROOMRF");
+  assert.equal(orphan?.expiresAt, null);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.name === "room_rollback_failed" && event.roomCode === "ROOMRF",
+    ),
+  );
 });
 
 test("a failed generation stamp does not roll back a room that recycled the code", async () => {

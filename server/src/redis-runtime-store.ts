@@ -581,7 +581,25 @@ end
 return 0
 `;
 
+/**
+ * Stamp a new generation, but only over the value the creator pinned.
+ *
+ * Unconditional before #277, which is what made this write impossible to bound:
+ * its caller could stop waiting, roll the room back, and have the `SET` land
+ * afterwards on a code the next occupant already stamped — replacing the pin
+ * every teardown and every queued join write compares against. Guarded, a late
+ * stamp finds the successor's generation and does nothing.
+ *
+ * `ARGV[2]` is the pin, `""` for an absent key — the same convention as
+ * `JOIN_ROOM_INDEX_LUA`. A tombstone is a perfectly good pin here, unlike
+ * there: taking over a torn-down code is exactly what a creator does.
+ *
+ * KEYS: 1 generation. ARGV: 1 new generation, 2 pinned previous value.
+ */
 const MARK_ROOM_GENERATION_LUA = `
+if (redis.call("GET", KEYS[1]) or "") ~= ARGV[2] then
+  return 0
+end
 redis.call("SET", KEYS[1], ARGV[1])
 return 1
 `;
@@ -814,21 +832,25 @@ export async function createRedisRuntimeStore(
     // also why the bound has to be chosen per CALL, not per method:
     // `loadSession` is reached from the join path AND from the reaper.
     //
-    // What this does NOT resolve: two durable writes through
-    // `trackAwaitedOperation` (`revokeMemberToken`, `markRoomGeneration`).
-    // Capping those
+    // What this does NOT resolve: one durable write through
+    // `trackAwaitedOperation` (`revokeMemberToken`). Capping it
     // re-opens #237's trade that an answer which can be wrong is worse than a
-    // slow one, and their side effects do not expire on their own the way a
+    // slow one, and its side effect does not expire on its own the way a
     // lock or a dedup slot does. The former standalone `blockMemberToken` path
     // had no production caller and was removed in #277 rather than preserving
-    // another unbounded persistent write. `deleteRoom` is different: its
-    // generation guard is mandatory, and `room-service` caps only a request's
-    // wait while retaining one real per-room effect through local settlement;
-    // maintenance callers still await that effect.
+    // another unbounded persistent write. Three writes left that list by
+    // becoming CONDITIONAL rather than by re-arguing #237, since a guarded
+    // write's late landing is a no-op and can no longer be the wrong answer:
+    // `deleteRoom`, whose generation guard is now mandatory and whose one real
+    // per-room effect `room-service` retains through local settlement while
+    // capping only a request's wait (maintenance callers still await the
+    // effect); `evictMemberToken`, whose caller reports an unconfirmed
+    // deadline; and `markRoomGeneration`, whose script now compares the
+    // creator's pin, which is what let it take the ordinary request-path cap.
     createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's two remaining durable writes",
+        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's one remaining durable write",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
@@ -2063,17 +2085,44 @@ export async function createRedisRuntimeStore(
         redis.get(roomGenerationKey(keyPrefix, code)),
       );
     },
-    markRoomGeneration(code: string, generation: string) {
-      ensurePendingCapacity("mark_room_generation");
-      return trackAwaitedOperation(
-        "mark_room_generation",
-        redis.eval(
+    async markRoomGeneration(
+      code: string,
+      generation: string,
+      expectedPrevious: string | null,
+    ) {
+      // Bounded like any other request-path command now that the script is
+      // conditional: room creation is the only caller, nothing else derives a
+      // bound from this command's silence, and a stamp that lands after the cap
+      // can no longer clobber the code's next occupant (#277).
+      const applied = await boundCommand("mark_room_generation", () => {
+        const stamp = redis.eval(
           MARK_ROOM_GENERATION_LUA,
           1,
           roomGenerationKey(keyPrefix, code),
           generation,
-        ),
-      ).then(() => undefined);
+          expectedPrevious ?? "",
+        );
+        // The cap answers the caller without cancelling this write, so a
+        // failure that arrives afterwards reaches nobody through the returned
+        // promise. Reported here instead, which is also what keeps the late
+        // half of a capped stamp observable (#266). A prompt failure logs once:
+        // the cap never fired, so there is no `timeout` line beside it.
+        void stamp.catch((error: unknown) => {
+          metricsCollector?.observeRedisRuntimeStoreFailure(
+            "mark_room_generation",
+          );
+          logPendingOperationError(
+            {
+              operationName: "mark_room_generation",
+              pendingCount: pendingOperations.size,
+              reason: "failed",
+            },
+            error,
+          );
+        });
+        return stamp;
+      });
+      return Number(applied) === 1;
     },
     deleteRoom(code: string, expectedGeneration: string | null) {
       ensurePendingCapacity("delete_room");

@@ -240,9 +240,14 @@ before changing the code it describes.
   cannot be recreated. Thus a newer generation's success or a live persisted
   room supersedes older effects whose late skip/failure must not retain or
   resurrect the debt.
-  Still open on purpose: the five durable writes, where
+  Still open on purpose: the four durable writes, where
   #237's trade holds because their effects — unlike a lock's or a dedup slot's
-  — do not expire. The former
+  — do not expire. A write leaves that list by becoming CONDITIONAL, never by
+  re-arguing #237: a guarded write's late landing is a no-op, so the answer its
+  caller was given cannot be wrong. `markRoomGeneration` compares the creator's
+  pin, and that pin belongs to the REQUEST — re-reading it inside the store
+  would reopen the hole, since a read answered late pins the successor's value
+  and waves the stale stamp through. The former
   standalone `blockMemberToken` had no production caller and was removed rather
   than kept as another unbounded path beside atomic eviction; the room store's
   unused unconditional `saveRoom` write was removed for the same reason.

@@ -229,11 +229,19 @@ export type RuntimeStore = {
   /**
    * Stamp a fresh generation on a code, marking the start of a new room
    * instance. Called once when a room is created.
+   *
+   * Conditional on `expectedPrevious` — the value the caller read from this key
+   * before writing — and returns whether the stamp landed. Its caller may stop
+   * waiting (#277), and an unconditional `SET` that arrived afterwards would
+   * overwrite the generation of whoever took the code next, which is the pin
+   * every teardown and every queued join write compares against. Guarded, that
+   * late write is a no-op instead. `null` pins an absent key.
    */
   markRoomGeneration: (
     code: string,
     generation: string,
-  ) => void | Promise<void>;
+    expectedPrevious: string | null,
+  ) => boolean | Promise<boolean>;
   heartbeatNode: (status: ClusterNodeStatus) => Promise<void>;
   listNodeStatuses: (
     caller: RuntimeReadCaller,
@@ -603,8 +611,12 @@ export function createInMemoryRuntimeStore(
     getRoomGeneration(code, _caller = "request") {
       return roomGenerations.get(code) ?? null;
     },
-    markRoomGeneration(code, generation) {
+    markRoomGeneration(code, generation, expectedPrevious) {
+      if ((roomGenerations.get(code) ?? null) !== expectedPrevious) {
+        return false;
+      }
       roomGenerations.set(code, generation);
+      return true;
     },
     deleteRoom(code, expectedGeneration) {
       if ((roomGenerations.get(code) ?? null) !== expectedGeneration) {
