@@ -72,12 +72,15 @@ function createService(options: {
     typeof createAdminActionService
   >[0]["requestAdminCommand"];
   deleteRoom?: RoomStore["deleteRoom"];
+  getRoom?: (roomCode: string) => Promise<PersistedRoom | null>;
   onGetRoom?: () => void;
   onListSessionsByRoom?: () => void;
   deleteRuntimeRoom?: (roomCode: string) => void;
   publishRoomDeleted?: (roomCode: string) => Promise<void>;
   auditLogService?: ReturnType<typeof createAuditLogService>;
   maxFanoutConcurrency?: number;
+  logEvent?: (name: string) => void;
+  roomDeleteConfirmTimeoutMs?: number;
 }) {
   const auditLogService = options.auditLogService ?? createAuditLogService();
   return createAdminActionService({
@@ -85,7 +88,9 @@ function createService(options: {
     roomStore: {
       getRoom: async (roomCode: string) => {
         options.onGetRoom?.();
-        return createRoom(roomCode);
+        return options.getRoom
+          ? await options.getRoom(roomCode)
+          : createRoom(roomCode);
       },
       updateRoom: async () => {
         throw new Error("updateRoom should not be called in this test");
@@ -122,9 +127,10 @@ function createService(options: {
     getRoomStateByCode: async () => null,
     publishRoomStateUpdate: async () => {},
     publishRoomDeleted: options.publishRoomDeleted ?? (async () => {}),
-    logEvent: () => {},
+    logEvent: (name) => options.logEvent?.(name),
     now: () => 10_000,
     maxFanoutConcurrency: options.maxFanoutConcurrency,
+    roomDeleteConfirmTimeoutMs: options.roomDeleteConfirmTimeoutMs,
   });
 }
 
@@ -424,29 +430,93 @@ test("admin action service leaves a recycled room code alone when its close is s
   assert.equal(publishedDeleted, false);
 });
 
-test("admin action service still records the teardown a capped delete owes", async () => {
+test("a capped room deletion still completes its follow-ups when the command lands", async () => {
+  const published: string[] = [];
   let torndown = false;
+  let releaseDelete!: () => void;
+  const deleteLanded = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("closeRoom has no sessions to disconnect");
+    },
+    // Slower than the deadline below: the action stops waiting, the command
+    // does not stop running.
+    deleteRoom: async () => {
+      await deleteLanded;
+      return "deleted";
+    },
+    deleteRuntimeRoom: () => {
+      torndown = true;
+    },
+    publishRoomDeleted: async (roomCode) => {
+      published.push(roomCode);
+    },
+    roomDeleteConfirmTimeoutMs: 20,
+  });
+
+  const closing = service.closeRoom(ACTOR, "ROOM01", "shutdown");
+  await assert.rejects(closing, (error: unknown) => {
+    assert.ok(error instanceof AdminActionError);
+    assert.equal(error.statusCode, 503);
+    assert.equal(error.code, "room_delete_unconfirmed");
+    return true;
+  });
+
+  // Answered, and NOT acted upon: the record may still be there, so nothing
+  // addressed by code may run yet.
+  assert.equal(torndown, false);
+  assert.deepEqual(published, []);
+
+  // The effect owns the follow-ups, so a delete that lands after the deadline
+  // still tears the runtime state down and still sends the one `room_deleted`
+  // nobody repeats.
+  releaseDelete();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(torndown, true);
+  assert.deepEqual(published, ["ROOM01"]);
+});
+
+test("a capped room deletion that turns out superseded runs nothing by code", async () => {
+  const published: string[] = [];
+  let torndown = false;
+  let releaseDelete!: () => void;
+  const deleteLanded = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
   const service = createService({
     sessionsByRoom: [],
     requestAdminCommand: async () => {
       throw new Error("expireRoom issues no commands");
     },
-    // The cap answered; the command was not cancelled, so this delete may still
-    // land — taking the index entry with it, after which no sweep can find the
-    // code again.
     deleteRoom: async () => {
-      throw new Error("Redis room store operation timed out: delete_room.");
+      await deleteLanded;
+      return "superseded";
     },
     deleteRuntimeRoom: () => {
       torndown = true;
     },
+    publishRoomDeleted: async (roomCode) => {
+      published.push(roomCode);
+    },
+    roomDeleteConfirmTimeoutMs: 20,
   });
 
   await assert.rejects(
     () => service.expireRoom(ACTOR, "ROOM01", "cleanup"),
-    /timed out/,
+    (error: unknown) =>
+      error instanceof AdminActionError &&
+      error.code === "room_delete_unconfirmed",
   );
-  assert.equal(torndown, true);
+
+  releaseDelete();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  // The code belongs to a different room by now, and both steps are addressed
+  // by code.
+  assert.equal(torndown, false);
+  assert.deepEqual(published, []);
 });
 
 test("admin action service pins the room it expires before judging it empty", async () => {

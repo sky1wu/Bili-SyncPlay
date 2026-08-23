@@ -5782,22 +5782,23 @@ test("room service meters a room reclaimed by the lazy read path", async () => {
   assert.deepEqual(reclaimed, [1, 0]);
 });
 
-test("a capped expiry delete leaves its runtime teardown as debt", async () => {
+test("a capped expiry collection still finishes what it started", async () => {
   let currentTime = 1_000;
   const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
   const runtime = createInMemoryRuntimeStore(() => currentTime);
+  const reclaimed: number[] = [];
   const teardowns: string[] = [];
+  let releaseDelete!: () => void;
+  const deleteLanded = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
   const roomStore: RoomStore = {
     ...baseRoomStore,
-    async deleteExpiredRoom(code) {
-      // The cap answers; the command is not cancelled. It lands afterwards,
-      // taking the body AND the index entry — so the reaper's sweep below finds
-      // nothing, and only a remembered debt can still collect the runtime state.
-      const current = await baseRoomStore.getRoom(code);
-      if (current) {
-        await baseRoomStore.deleteRoom(current);
-      }
-      throw new Error("Redis room store operation timed out: delete_room.");
+    async deleteExpiredRoom(code, deleteTime) {
+      // Slower than the reader's deadline: the reader stops waiting, the
+      // command does not stop running.
+      await deleteLanded;
+      return await baseRoomStore.deleteExpiredRoom(code, deleteTime);
     },
   };
   const service = createRoomService({
@@ -5819,9 +5820,13 @@ test("a capped expiry delete leaves its runtime teardown as debt", async () => {
       return () => `token-${++id}`.padEnd(16, "x");
     })(),
     logEvent: (() => undefined) satisfies LogEvent,
+    metricsCollector: {
+      recordRoomsExpiredDeleted: (roomCount) => reclaimed.push(roomCount),
+    },
     now: () => currentTime,
     createRoomCode: () => "ROOMDB",
     resolveActiveRoom: async (code) => runtime.getRoom(code),
+    roomDeleteConfirmationTimeoutMs: 20,
   });
 
   const owner = createSession("owner");
@@ -5829,17 +5834,20 @@ test("a capped expiry delete leaves its runtime teardown as debt", async () => {
   await service.leaveRoomForSession(owner);
   currentTime += 5_001;
 
-  await assert.rejects(
-    () => service.getRoomStateByCode(room.code),
-    /timed out/,
-  );
+  // An expired room reads as absent whether or not its collection confirmed, so
+  // the reader is answered rather than failed.
+  assert.equal(await service.getRoomStateByCode(room.code), null);
   assert.deepEqual(teardowns, []);
+  assert.deepEqual(reclaimed, []);
 
-  // The sweep sees no expired room — the late delete already took it. The debt
-  // is the only thing that still knows this code's runtime state is owed.
-  const swept = await service.deleteExpiredRooms();
-  assert.equal(swept.deletedRooms, 0);
+  // The effect kept the delete AND everything a successful one owes: the
+  // reclamation count and the runtime teardown both happen when it lands, with
+  // nobody having to compensate for them afterwards.
+  releaseDelete();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(reclaimed, [1]);
   assert.deepEqual(teardowns, [room.code]);
+  assert.equal(await roomStore.getRoom(room.code), null);
 });
 
 test("a room that stopped being expired is served, not collected", async () => {

@@ -831,7 +831,7 @@ export async function createRedisRoomStore(
     (createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the three durable writes",
+        "boundCommand's cap on the request path, room-service's expired-room collection deadline and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the two durable writes",
     }) as RedisRoomStoreClient);
   const {
     orphanedRoomCodesKey,
@@ -1305,13 +1305,22 @@ export async function createRedisRoomStore(
    * is the other way to get that, and it is the wrong one here: every body
    * change would then have to count as "a different room", which is exactly
    * what the members' own leaves produce during an admin close.
+   *
+   * Uncapped HERE on purpose, and this is the half that took three review
+   * rounds to place correctly (#277 review). A successful delete owes more than
+   * its own answer — the reclamation metric, the runtime teardown, the
+   * `room_deleted` broadcast — and every one of those lives in the CALLER. A
+   * cap inside this store answers by discarding the command's outcome, so all
+   * of them are silently skipped and each caller has to grow its own
+   * compensation. The cap therefore belongs to the caller, on its WAIT, while
+   * this command stays alive to deliver the outcome its follow-ups need.
    */
   async function deleteRoomWhen(
     code: string,
     script: string,
     guardArgument: string,
   ): Promise<RoomDeleteOutcome> {
-    const outcome = await boundCommand("delete_room", () =>
+    const outcome = await boundedByOuterCaller("delete_room", () =>
       redis.eval(
         script,
         2,

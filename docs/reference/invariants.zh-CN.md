@@ -631,10 +631,20 @@
   随后**结果**和守卫同样重要：运行时拆除与 `room_deleted` 广播都是**按代号**寻址的，所以在
   `superseded` 之后仍执行它们，作用的是现在持有这个代号的房间。`resolveRoom` 因此改为重新
   读取后作答，`closeRoom` / `expireRoom` 跳过这两步并记录 `admin_room_close_superseded` /
-  `admin_room_expire_superseded`。**被上限打断的删除欠着和成功删除一样的拆除**，而且必须在
-  上报之前就欠下：命令没有被取消，迟到落地会把索引项一并带走，此后没有任何 sweep 还能重新
-  发现这个代号。`resolveRoom` 记下这笔运行时拆除债，`closeRoom` / `expireRoom` 在重新抛出
-  之前先把代号交给拆除路径——两者都会重读，所以房间还在时就结清为「没有东西要收」。原子的 `evictMemberToken` 不同：
+  `admin_room_expire_superseded`。
+
+  **也正因如此，这两个删除都不能把上限设在 store 里面。** 一次成功的删除欠下的不止是它自己的
+  答复——回收计数、运行时拆除、那条一次性的 `room_deleted`——而它们**都住在调用方**。设在
+  store 里的上限，其答复调用方的方式就是**丢掉命令的结果**，于是这些后续全都静默地不再发生，
+  每个调用方只好各自长出一块私有补偿：这里补一笔拆除债，那里补一次「再读一遍再广播」。#302
+  的三条复审意见，是同一处放置错误的三个症状。规则就是 #282 与 #284 在下一层已经定过的那条：
+  **上限只答复调用方，效果继续持有它的后续所需要的那个结果。** 所以 store 声明
+  `boundedByOuterCaller`，每个调用方把「删除 + 后续」串成**一条链**并只给自己的**等待**设上限；
+  迟到落地的删除照样计数、照样拆除、照样广播。`resolveRoom` 在期限到达时回答 `null`（过期
+  房间本来就读作不存在）；`closeRoom` / `expireRoom` 拒绝把无法确认的动作报成完成，返回 503
+  `room_delete_unconfirmed`，而效果自己记录迟到的终局。机械的那一半在
+  `redis-store-command-bounds.test.ts`：挂住一条命令时，两个删除都必须**得不到答复**——分类表
+  看不见一个悄悄重新出现在 store 里的上限。原子的 `evictMemberToken` 不同：
   管理命令执行器只限制自己的等待并返回
   `status=error, confirmation=unconfirmed, code=block_unconfirmed`，原始 Promise 继续承载
   Redis 写入和两层本地镜像更新，再断开套接字以触发正常离房清理。最终的

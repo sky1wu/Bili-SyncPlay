@@ -914,12 +914,25 @@ do NOT compose, and that is the part that decides which connection gets which:
   after a `superseded` delete acts on whoever holds the code now. `resolveRoom`
   answers from a fresh read instead, and `closeRoom` / `expireRoom` skip both
   steps and log `admin_room_close_superseded` / `admin_room_expire_superseded`.
-  A CAPPED delete owes the same teardown as a successful one, and owes it
-  before it can be reported: the command was not cancelled, and one that lands
-  afterwards takes the index entry with it, so no sweep can rediscover the code.
-  `resolveRoom` records the runtime-teardown debt and `closeRoom` / `expireRoom`
-  hand the code to the teardown path before rethrowing — both re-read, so a room
-  that is still there settles as nothing to collect. Atomic
+
+  **Which is why neither delete may be capped inside the store.** A successful
+  delete owes more than its own answer — a reclamation count, the runtime
+  teardown, the one-shot `room_deleted` — and every one of those lives in the
+  CALLER. A cap in the store answers by DISCARDING the command's outcome, so all
+  of them silently stop happening, and each caller then grows a private
+  compensation for each one: a teardown debt here, a re-read-and-announce there.
+  Three review comments on #302 were three symptoms of that single placement.
+  The rule is the one #282 and #284 already settled one layer down: **the cap
+  answers the caller, the effect keeps the outcome its follow-ups need.** So the
+  store declares `boundedByOuterCaller`, each caller builds delete-plus-
+  follow-ups as ONE chain and caps only its own WAIT, and a delete that lands
+  late still counts, still tears down, still broadcasts. `resolveRoom` answers
+  `null` on the deadline (an expired room reads as absent either way);
+  `closeRoom` / `expireRoom` refuse to report a completed action they cannot
+  confirm and return 503 `room_delete_unconfirmed`, while the effect logs its
+  own late outcome. `redis-store-command-bounds.test.ts` holds the mechanical
+  half: with a command hung, both deletes must be left UNANSWERED — no
+  classification table can see a cap that quietly reappears inside the store. Atomic
   `evictMemberToken` is different: the admin executor caps only its own wait and
   reports `status=error, confirmation=unconfirmed, code=block_unconfirmed`,
   while the original promise keeps the Redis write and both local-mirror

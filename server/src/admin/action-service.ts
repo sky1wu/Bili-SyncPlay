@@ -21,6 +21,7 @@ import type {
 } from "../room-store.js";
 import type { RuntimeStore } from "../runtime-store.js";
 import { createConcurrencyLimiter } from "../concurrency-limiter.js";
+import { createRetryPacer } from "../retry-pacer.js";
 
 /** Leave half the bus's reply capacity for concurrent single-admin actions. */
 export const ADMIN_COMMAND_FANOUT_CONCURRENCY = Math.max(
@@ -36,6 +37,19 @@ export class AdminActionError extends Error {
     readonly details?: Record<string, unknown>,
   ) {
     super(message);
+  }
+}
+
+/** Default deadline for an admin action's wait on its room deletion. */
+export const DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS = 5_000;
+
+type RoomDeletionAction = "close_room" | "expire_room";
+
+class RoomDeletionUnconfirmedError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(
+      `Room deletion did not confirm within ${timeoutMs}ms; its real effect is still tracked.`,
+    );
   }
 }
 
@@ -67,6 +81,14 @@ export function createAdminActionService(options: {
   now?: () => number;
   /** Shared across every close-room fan-out owned by this service instance. */
   maxFanoutConcurrency?: number;
+  /**
+   * How long an admin action waits for its room deletion to confirm.
+   *
+   * A behaviour deadline of this action, not the store's liveness backstop: the
+   * effect it caps keeps running, and its follow-ups belong to that effect
+   * (#277).
+   */
+  roomDeleteConfirmTimeoutMs?: number;
 }) {
   const now = options.now ?? Date.now;
   const fanoutLimiter = createConcurrencyLimiter(
@@ -105,6 +127,14 @@ export function createAdminActionService(options: {
       ROOM_VERSION_CONFLICT_MESSAGE,
     );
   }
+
+  const roomDeleteConfirmTimeoutMs =
+    options.roomDeleteConfirmTimeoutMs ??
+    DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS;
+  const roomDeletionPacer = createRetryPacer({
+    initialDelayMs: roomDeleteConfirmTimeoutMs,
+    maxDelayMs: roomDeleteConfirmTimeoutMs,
+  });
 
   function writeAudit(
     actor: AdminSession,
@@ -218,25 +248,120 @@ export function createAdminActionService(options: {
   }
 
   /**
-   * The guarded delete, plus what a capped one still owes.
+   * One effect: the guarded delete AND everything a successful one owes.
    *
-   * The cap answers this action; it does not cancel the command. A delete that
-   * lands afterwards takes the room body AND its index entry, so no sweep can
-   * rediscover the code and its runtime state would be left with nobody owing
-   * it a teardown (#277 review). Handing the code to the teardown path records
-   * that debt: it re-reads, so a room that is still there settles as nothing to
-   * collect, and a stalled store keeps the debt for its next drain. Its own
-   * failure must never replace the error this action reports.
+   * The follow-ups are inside the chain, not after the await, because this
+   * action may stop waiting. The cap below answers it without cancelling the
+   * command, so a delete that lands afterwards would otherwise skip the runtime
+   * teardown and the `room_deleted` broadcast entirely — and each of them would
+   * then need its own compensation bolted onto the failure path (#277 review).
+   * Both are addressed BY CODE, which is why `superseded` runs neither: the
+   * code belongs to a different room by then.
+   *
+   * Terminal reporting belongs to the effect, so a late outcome is still
+   * visible after the caller has been answered.
    */
-  async function deletePersistedRoom(
-    target: PersistedRoom,
-    roomCode: string,
-  ): Promise<RoomDeleteOutcome> {
+  function startRoomDeletion(args: {
+    target: PersistedRoom;
+    roomCode: string;
+    actor: AdminSession;
+    action: RoomDeletionAction;
+    announce: boolean;
+  }): { effect: Promise<RoomDeleteOutcome>; giveUpWaiting: () => void } {
+    let waiterGaveUp = false;
+    const effect = (async () => {
+      const outcome = await options.roomStore.deleteRoom(args.target);
+      if (outcome !== "superseded") {
+        await options.teardownRoomRuntime(args.roomCode);
+        if (args.announce) {
+          await options.publishRoomDeleted(args.roomCode);
+        }
+      }
+      return outcome;
+    })().then(
+      (outcome) => {
+        if (waiterGaveUp) {
+          options.logEvent("admin_room_delete_late_completed", {
+            roomCode: args.roomCode,
+            action: args.action,
+            outcome,
+            result: "ok",
+            actor: args.actor.username,
+          });
+        }
+        return outcome;
+      },
+      (error: unknown) => {
+        if (waiterGaveUp) {
+          options.logEvent("admin_room_delete_late_failed", {
+            roomCode: args.roomCode,
+            action: args.action,
+            result: "error",
+            actor: args.actor.username,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        throw error;
+      },
+    );
+    return {
+      effect,
+      giveUpWaiting: () => {
+        waiterGaveUp = true;
+      },
+    };
+  }
+
+  /**
+   * Waits for one room deletion, bounded, and reports what it could not learn.
+   *
+   * An unconfirmed deletion is NOT reported as a completed action: the record
+   * may still be there. The effect keeps running either way, so its follow-ups
+   * are owed to it and not to this waiter.
+   */
+  async function confirmRoomDeletion(args: {
+    target: PersistedRoom;
+    roomCode: string;
+    actor: AdminSession;
+    action: RoomDeletionAction;
+    announce: boolean;
+  }): Promise<RoomDeleteOutcome> {
+    const started = startRoomDeletion(args);
     try {
-      return await options.roomStore.deleteRoom(target);
+      return await roomDeletionPacer.capAttempt(
+        started.effect,
+        roomDeleteConfirmTimeoutMs,
+        () => {
+          started.giveUpWaiting();
+          return new RoomDeletionUnconfirmedError(roomDeleteConfirmTimeoutMs);
+        },
+      );
     } catch (error) {
-      await options.teardownRoomRuntime(roomCode).catch(() => undefined);
-      throw error;
+      if (!(error instanceof RoomDeletionUnconfirmedError)) {
+        throw error;
+      }
+      options.logEvent("admin_room_delete_unconfirmed", {
+        roomCode: args.roomCode,
+        action: args.action,
+        result: "timeout",
+        confirmation: "unconfirmed",
+        actor: args.actor.username,
+      });
+      writeAudit(
+        args.actor,
+        args.action,
+        "room",
+        args.roomCode,
+        { confirmation: "unconfirmed" },
+        "rejected",
+        "room_delete_unconfirmed",
+      );
+      throw new AdminActionError(
+        503,
+        "room_delete_unconfirmed",
+        "Room deletion was not confirmed before the deadline.",
+        { roomCode: args.roomCode },
+      );
     }
   }
 
@@ -348,7 +473,13 @@ export function createAdminActionService(options: {
       // code, and its delete is guarded by a generation pinned before that
       // check and confirmed after it (#237, #277). A reused code therefore
       // either shows a live room or fails the generation guard.
-      const deletion = await deletePersistedRoom(target, roomCode);
+      const deletion = await confirmRoomDeletion({
+        target,
+        roomCode,
+        actor,
+        action: "close_room",
+        announce: true,
+      });
       if (deletion === "superseded") {
         options.logEvent("admin_room_close_superseded", {
           roomCode,
@@ -356,9 +487,6 @@ export function createAdminActionService(options: {
           result: "ok",
           actor: actor.username,
         });
-      } else {
-        await options.teardownRoomRuntime(roomCode);
-        await options.publishRoomDeleted(roomCode);
       }
       const disconnectedSessionCount = disconnectResults.filter(
         ({ result }) => result.status === "ok",
@@ -391,21 +519,24 @@ export function createAdminActionService(options: {
         throw new AdminActionError(409, "room_active", ROOM_ACTIVE_MESSAGE);
       }
 
-      const deletion = await deletePersistedRoom(target, roomCode);
-      // Same teardown `closeRoom` above performs. Without it an expired room
-      // left its runtime keys behind — including the tokens of members who had
-      // disconnected but whose identity is deliberately retained (#234) — and a
-      // recycled room code would inherit them (#237 review). Skipped on a
-      // superseded delete for the same reason it is guarded: the runtime state
-      // under that code now belongs to a different room.
+      const deletion = await confirmRoomDeletion({
+        target,
+        roomCode,
+        actor,
+        action: "expire_room",
+        announce: false,
+      });
+      // The teardown `closeRoom` also owes rides inside the effect above: without
+      // it an expired room left its runtime keys behind — including the tokens
+      // of members who had disconnected but whose identity is deliberately
+      // retained (#234) — and a recycled room code would inherit them (#237
+      // review).
       if (deletion === "superseded") {
         options.logEvent("admin_room_expire_superseded", {
           roomCode,
           result: "ok",
           actor: actor.username,
         });
-      } else {
-        await options.teardownRoomRuntime(roomCode);
       }
 
       options.logEvent("admin_room_expired", {

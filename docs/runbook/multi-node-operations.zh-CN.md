@@ -680,9 +680,11 @@ generation 写在 #277 中因为变成「以建房方所 pin 的值为条件」�
 命令一样在请求路径上答复调用方。删房也以同样方式离开，且是一对有守卫的形态：`deleteRoom`
 点名管理动作读到的那个房间实例，`deleteExpiredRoom` 在写入内部重新判定过期。任何一个被拒
 时，这个代号已经属于另一间房——运行时拆除与 `room_deleted` 广播因此被跳过，管理动作会打
-`admin_room_close_superseded` / `admin_room_expire_superseded`。若删除是撞上了上限，则按存储
-故障上报，同时把它可能仍欠的运行时拆除记为债由 reaper 排空——迟到落地的删除会把索引项一并
-带走，之后没有 sweep 还能重新发现这个代号。因为代号易主而被拒绝的写会打
+`admin_room_close_superseded` / `admin_room_expire_superseded`。删除超出调用方期限时不会丢：调用方停止等待，
+效果继续跑，回收计数、运行时拆除与 `room_deleted` 广播都在它落地时照常发生。读取方对这间房
+回答 `null`（过期房间本来就读作不存在）；管理动作拒绝把无法确认的动作报成完成，返回 503
+`room_delete_unconfirmed`，等效果结算后再打 `admin_room_delete_late_completed` 或
+`admin_room_delete_late_failed`。因为代号易主而被拒绝的写会打
 `room_persist_failed reason=room_generation_superseded`：那是一次输掉的竞争，不是 Redis
 故障。两种结果都会把这间还没有成员的房间回滚为过期，而回滚本身写不进去时会另打一行
 `room_rollback_failed`——那间房没有成员也没有 `expiresAt`，reaper 不会收集它，代号会一直被

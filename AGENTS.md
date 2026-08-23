@@ -256,8 +256,11 @@ before changing the code it describes.
   room, changed", and decoding is allowed only because nothing is written back.
   The OUTCOME is load-bearing too: runtime teardown and the `room_deleted`
   broadcast are addressed by code, so nobody may run them after a superseded
-  delete — and a CAPPED delete still owes that teardown as debt, since a late
-  one takes the index entry with it. The former
+  delete — and neither delete may be capped INSIDE the store, because a cap
+  there answers by discarding the outcome those follow-ups need, which turns one
+  misplacement into a private compensation per caller. Cap the caller's WAIT,
+  keep the effect; the mechanical half is that a hung delete must be left
+  unanswered. The former
   standalone `blockMemberToken` had no production caller and was removed rather
   than kept as another unbounded path beside atomic eviction; the room store's
   unused unconditional `saveRoom` write was removed for the same reason.

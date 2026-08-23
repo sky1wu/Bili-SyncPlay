@@ -538,23 +538,6 @@ const ROOM_REQUEST_PATH: Record<
   countRooms: (store) =>
     store.countRooms({ keyword: "", includeExpired: true }),
   isReady: (store) => store.isReady(),
-  // Two durable writes, and here because each is now conditional (#277): the
-  // read half judges, the script writes only under the bytes that were judged,
-  // and a delete that lands after the cap finds a body it never approved.
-  deleteRoom: (store) =>
-    store.deleteRoom({
-      code: "ROOM01",
-      joinToken: "join-token-123456",
-      createdAt: 1,
-      ownerMemberId: null,
-      ownerDisplayName: null,
-      sharedVideo: null,
-      playback: null,
-      version: 0,
-      lastActiveAt: 1,
-      expiresAt: null,
-    }),
-  deleteExpiredRoom: (store) => store.deleteExpiredRoom("ROOM01", 1_000),
 };
 
 const ROOM_CALLER_CHOSEN: Record<
@@ -564,7 +547,21 @@ const ROOM_CALLER_CHOSEN: Record<
   getRoom: (store, caller) => store.getRoom("ROOM01", caller),
 };
 
+/**
+ * Methods whose bound belongs to an OUTER caller, each naming whose deadline.
+ *
+ * The two deletes are here rather than on the request path, and that placement
+ * IS the fix: a cap inside the store answers by discarding the command's
+ * outcome, so everything a successful delete owes — the reclamation count, the
+ * runtime teardown, the `room_deleted` broadcast — silently stops happening,
+ * and each caller grows its own compensation for it (#277 review). The caller
+ * caps its WAIT instead and keeps the effect.
+ */
 const ROOM_BOUNDED_ELSEWHERE: Record<string, string> = {
+  deleteRoom:
+    "admin action service: room-deletion confirmation deadline; the effect keeps the outcome its teardown and room_deleted broadcast need",
+  deleteExpiredRoom:
+    "room-service: expired-room collection deadline; the effect keeps the outcome its reclamation count and runtime teardown need",
   deleteExpiredRooms: "maintenance-pass: room-reaper's per-tick sweep cap",
   acknowledgeOrphanedIndexClaims:
     "maintenance-pass: room-reaper's per-tick sweep cap",
@@ -767,6 +764,58 @@ test("the room reaper's sweep is left unanswered, so its pass can report stalled
   );
 });
 
+test("both guarded deletes are left unanswered, so their callers can own the effect", async () => {
+  // The mechanical half of "the cap belongs to the caller". A cap re-introduced
+  // in the store would answer by discarding this command's outcome, and every
+  // follow-up a successful delete owes — the reclamation count, the runtime
+  // teardown, the `room_deleted` broadcast — would silently stop happening
+  // (#277 review). Nothing in the classification table can see that; this can.
+  const bootstrapCommands = await withRoomStore(
+    null,
+    async (_store, commands) => commands.issuedCount(),
+    { settleBootstrap: true },
+  );
+
+  const calls: Record<string, (store: RoomStoreUnderTest) => Promise<unknown>> =
+    {
+      deleteRoom: (store) =>
+        Promise.resolve(
+          store.deleteRoom({
+            code: "ROOM01",
+            joinToken: "join-token-123456",
+            createdAt: 1,
+            ownerMemberId: null,
+            ownerDisplayName: null,
+            sharedVideo: null,
+            playback: null,
+            version: 0,
+            lastActiveAt: 1,
+            expiresAt: null,
+          }),
+        ),
+      deleteExpiredRoom: (store) =>
+        Promise.resolve(store.deleteExpiredRoom("ROOM01", 1_000)),
+    };
+
+  for (const [method, call] of Object.entries(calls)) {
+    await withRoomStore(
+      bootstrapCommands,
+      async (store) => {
+        const answered = await settleWithin(
+          call(store).catch(() => undefined),
+          OBSERVATION_MS,
+        );
+        assert.equal(
+          answered,
+          false,
+          `${method} answered on its own; its caller's deadline is the only one that may`,
+        );
+      },
+      { settleBootstrap: true },
+    );
+  }
+});
+
 test("the room reaper's orphan acknowledgement is left unanswered too", async () => {
   const bootstrapCommands = await withRoomStore(
     null,
@@ -813,9 +862,20 @@ test("a guarded room delete decides and writes in one command", async () => {
   // the change (#277 review). One command is what makes both true at once.
   for (const [method, call] of Object.entries({
     deleteRoom: (store: RoomStoreUnderTest) =>
-      ROOM_REQUEST_PATH.deleteRoom!(store),
+      store.deleteRoom({
+        code: "ROOM01",
+        joinToken: "join-token-123456",
+        createdAt: 1,
+        ownerMemberId: null,
+        ownerDisplayName: null,
+        sharedVideo: null,
+        playback: null,
+        version: 0,
+        lastActiveAt: 1,
+        expiresAt: null,
+      }),
     deleteExpiredRoom: (store: RoomStoreUnderTest) =>
-      ROOM_REQUEST_PATH.deleteExpiredRoom!(store),
+      store.deleteExpiredRoom("ROOM01", 1_000),
   })) {
     const issued = await withRoomStore(
       null,
