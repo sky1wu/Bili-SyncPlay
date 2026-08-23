@@ -86,7 +86,7 @@ test("mirrored runtime store keeps room generations out of the local mirror", as
   const shared = createInMemoryRuntimeStore();
   const store = createMirroredRuntimeStore(local, shared);
 
-  await store.markRoomGeneration("ROOMMG", "generation-1");
+  await store.markRoomGeneration("ROOMMG", "generation-1", null);
 
   // Mirroring it locally leaked: the node that CREATES a room writes the
   // generation, but the node that tears it down clears it — rarely the same one,
@@ -104,7 +104,7 @@ test("mirrored teardown clears the local mirror whenever the shared one applied"
   const store = createMirroredRuntimeStore(local, shared);
 
   store.addMember("ROOMTD", "member-td", createSession("session-td"), "tok-td");
-  await store.markRoomGeneration("ROOMTD", "generation-td");
+  await store.markRoomGeneration("ROOMTD", "generation-td", null);
 
   assert.equal(await store.deleteRoom("ROOMTD", "generation-td"), true);
 
@@ -121,7 +121,7 @@ test("mirrored teardown leaves the local mirror alone when the shared one declin
   const store = createMirroredRuntimeStore(local, shared);
 
   store.addMember("ROOMTS", "member-ts", createSession("session-ts"), "tok-ts");
-  await store.markRoomGeneration("ROOMTS", "generation-live");
+  await store.markRoomGeneration("ROOMTS", "generation-live", null);
 
   // A teardown scheduled before the room was stamped still expects `null`.
   assert.equal(await store.deleteRoom("ROOMTS", null), false);

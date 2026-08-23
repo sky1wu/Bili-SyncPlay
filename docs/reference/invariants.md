@@ -312,7 +312,10 @@ decides something has to know which of the two questions it is asking (#242):
   have to outlive every write that could still be holding the old pin, and
   nothing bounds those, so a lapsed tombstone lets a `""` pin match an absent
   key all over again. What reclaims it is the next occupant's
-  `markRoomGeneration`. Pinning the tombstone ITSELF is refused, or a pin taken
+  `markRoomGeneration`, which is itself conditional on the value that occupant
+  pinned — a tombstone is a perfectly good pin THERE, since taking over a
+  torn-down code is exactly what a creator does. For the JOIN write it is not:
+  pinning the tombstone ITSELF is refused, or a pin taken
   after the teardown would match it. `hasRoomResidue` ignores the key, so a
   tombstone never keeps a code reserved. A new write that seats or moves
   anything by room code needs the same pin; one that only touches keys named
@@ -859,13 +862,34 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: five durable writes.** Two runtime-store writes
-  through `trackAwaitedOperation` (`revokeMemberToken` and
-  `markRoomGeneration`) and three room-body writes stay uncapped,
+- **Still open, deliberately: four durable writes.** One runtime-store write
+  through `trackAwaitedOperation` (`revokeMemberToken`) and three room-body
+  writes stay uncapped,
   because #237 settled that an answer which can be wrong is worse than a slow
   one and their effects do not expire on their own. The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
-  had no production callers, so #277 removed them. Atomic
+  had no production callers, so #277 removed them. **A write leaves this list by
+  becoming CONDITIONAL, never by re-arguing #237**: a guarded write's late
+  landing is a no-op, so the answer its caller was given cannot be wrong.
+  `markRoomGeneration` is the third to leave that way, and it took the ordinary
+  request-path cap rather than a caller-side deadline, because room creation is
+  its only caller and nothing derives a bound from its silence. Its pin belongs
+  to the REQUEST: the creator reads the key and passes the value in. Re-reading
+  it inside the store would reopen the hole the guard closes — a read answered
+  after the caller gave up pins the SUCCESSOR's value, and the guard then waves
+  the stale stamp through. A declined stamp is not a failure of Redis, so the
+  creator rolls its memberless room back and reports
+  `reason=room_generation_superseded` rather than a store error. That rollback
+  is what keeps an unstamped room from becoming a permanent orphan — no members
+  and no `expiresAt` is precisely what the reaper never collects — so a rollback
+  that cannot be written is now logged (`room_rollback_failed`) instead of
+  swallowed: capping the stamp made that path reachable by a timeout and by a
+  lost code, not only by a Redis error. A version conflict on that rollback is
+  NOT evidence there is nothing to collect — it says only that the record moved,
+  which is equally true when an admin touched our still-memberless room — so it
+  re-reads, compares the join token to see whether the record is still ours, and
+  re-CASes within its own bounded attempt count. Only what it truly could not
+  expire is reported. Atomic
   `evictMemberToken` is different: the admin executor caps only its own wait and
   reports `status=error, confirmation=unconfirmed, code=block_unconfirmed`,
   while the original promise keeps the Redis write and both local-mirror
