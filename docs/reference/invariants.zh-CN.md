@@ -642,7 +642,11 @@
   `boundedByOuterCaller`，每个调用方把「删除 + 后续」串成**一条链**并只给自己的**等待**设上限；
   迟到落地的删除照样计数、照样拆除、照样广播。`resolveRoom` 在期限到达时回答 `null`（过期
   房间本来就读作不存在）；`closeRoom` / `expireRoom` 拒绝把无法确认的动作报成完成，返回 503
-  `room_delete_unconfirmed`，而效果自己记录迟到的终局。机械的那一半在
+  `room_delete_unconfirmed`，而效果自己记录迟到的终局。这份所有权也延伸到关服：管理动作服务先
+  关闭删除 admission，再排空已接受的 action handler，最后排空它们可能刚创建的「删除 + 后续」
+  效果链；房间服务同样先关闭惰性删除 admission，再排空惰性删除及其可能刚创建的运行时拆除。
+  在此期间 room store、runtime store 与事件总线都保持开放。两个所有者各自只使用一份明确预算，
+  耗尽时报告剩余工作，而不是让后续依赖关闭静默截断效果。机械的那一半在
   `redis-store-command-bounds.test.ts`：挂住一条命令时，两个删除都必须**得不到答复**——分类表
   看不见一个悄悄重新出现在 store 里的上限。原子的 `evictMemberToken` 不同：
   管理命令执行器只限制自己的等待并返回

@@ -544,6 +544,8 @@ export function createSharedServerShutdownSteps(args: {
   runtimeStoreStepName?: string;
   adminCommandBus: AdminCommandBus;
   roomEventBus: RoomEventBus;
+  closeAdminActionService: () => Promise<void>;
+  closeRoomService: () => Promise<void>;
   closeAdminServices: () => Promise<void>;
 }): ShutdownStep[] {
   const steps: ShutdownStep[] = [
@@ -552,6 +554,18 @@ export function createSharedServerShutdownSteps(args: {
     {
       name: "stop_room_index_reconciler",
       run: () => args.roomIndexReconciler?.stop(),
+    },
+    {
+      name: "close_admin_action_service",
+      // A late admin delete still owns runtime teardown and a one-shot room
+      // event, so drain it while both stores and the event bus remain open.
+      run: () => args.closeAdminActionService(),
+    },
+    {
+      name: "close_room_service",
+      // This includes lazy expiry deletions and the runtime teardowns they may
+      // start only after the delete answers. Both dependencies are still open.
+      run: () => args.closeRoomService(),
     },
     {
       name: "close_room_store",

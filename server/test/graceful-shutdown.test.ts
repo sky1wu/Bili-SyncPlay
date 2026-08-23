@@ -528,7 +528,7 @@ const inertEventStore: GlobalEventStore = {
   countsByEventInWindow: () => ({}),
 };
 
-test("the reconciler is stopped before the room store it talks to is closed", async () => {
+test("room deletion owners drain before their dependencies close", async () => {
   const order: string[] = [];
   const steps = createSharedServerShutdownSteps({
     roomStore: {
@@ -546,13 +546,29 @@ test("the reconciler is stopped before the room store it talks to is closed", as
     eventStore: inertEventStore,
     adminCommandBus: createInMemoryAdminCommandBus(() => 0),
     roomEventBus: createInMemoryRoomEventBus(),
-    closeAdminServices: async () => undefined,
+    closeAdminActionService: async () => {
+      order.push("close_admin_action_service");
+    },
+    closeRoomService: async () => {
+      order.push("close_room_service");
+    },
+    closeAdminServices: async () => {
+      order.push("close_admin_services");
+    },
   });
 
   assert.deepEqual(await runShutdownSteps(steps, () => undefined), []);
 
-  // Reversing these two lets a SCAN/GET/EVAL in flight hit a closed connection.
-  assert.deepEqual(order, ["stop_room_index_reconciler", "close_room_store"]);
+  // The reconciler and both effect owners still need the room store; the
+  // deletion owners also need runtime state and the room-event bus, which close
+  // later in the shared sequence.
+  assert.deepEqual(order, [
+    "stop_room_index_reconciler",
+    "close_admin_action_service",
+    "close_room_service",
+    "close_room_store",
+    "close_admin_services",
+  ]);
 });
 
 test("the event store closes after every shared log producer", () => {
@@ -562,6 +578,8 @@ test("the event store closes after every shared log producer", () => {
     eventStore: inertEventStore,
     adminCommandBus: createInMemoryAdminCommandBus(() => 0),
     roomEventBus: createInMemoryRoomEventBus(),
+    closeAdminActionService: async () => undefined,
+    closeRoomService: async () => undefined,
     closeAdminServices: async () => undefined,
   });
 

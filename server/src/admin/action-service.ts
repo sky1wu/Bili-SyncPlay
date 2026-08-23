@@ -43,6 +43,9 @@ export class AdminActionError extends Error {
 /** Default deadline for an admin action's wait on its room deletion. */
 export const DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS = 5_000;
 
+/** Leaves shutdown-step time for reporting after draining deletion effects. */
+export const DEFAULT_ADMIN_ACTION_SERVICE_CLOSE_BUDGET_MS = 4_000;
+
 type RoomDeletionAction = "close_room" | "expire_room";
 
 class RoomDeletionUnconfirmedError extends Error {
@@ -89,6 +92,8 @@ export function createAdminActionService(options: {
    * (#277).
    */
   roomDeleteConfirmTimeoutMs?: number;
+  /** How long shutdown waits for deletion effects that outlived requests. */
+  closeBudgetMs?: number;
 }) {
   const now = options.now ?? Date.now;
   const fanoutLimiter = createConcurrencyLimiter(
@@ -135,6 +140,54 @@ export function createAdminActionService(options: {
     initialDelayMs: roomDeleteConfirmTimeoutMs,
     maxDelayMs: roomDeleteConfirmTimeoutMs,
   });
+  const closeBudgetMs =
+    options.closeBudgetMs ?? DEFAULT_ADMIN_ACTION_SERVICE_CLOSE_BUDGET_MS;
+  const roomDeletionHandlerPacer = createRetryPacer({
+    initialDelayMs: closeBudgetMs,
+    maxDelayMs: closeBudgetMs,
+  });
+  let closing = false;
+  let closePromise: Promise<void> | null = null;
+
+  async function closeActionService(): Promise<void> {
+    const deadline = performance.now() + closeBudgetMs;
+    const remainingBudgetMs = (): number =>
+      Math.max(deadline - performance.now(), 0);
+
+    // An accepted action can still be in its room read or disconnect fan-out
+    // and create a deletion only afterwards. Drain handlers first, then take a
+    // fresh deletion snapshot so that late-created effect stays in this same
+    // lifecycle boundary.
+    await roomDeletionHandlerPacer.settleTracked(remainingBudgetMs());
+    const remaining = remainingBudgetMs();
+    if (remaining > 0) {
+      await roomDeletionPacer.settleTracked(remaining);
+    }
+    const pendingHandlers = roomDeletionHandlerPacer.trackedCount();
+    const pendingRoomDeletions = roomDeletionPacer.trackedCount();
+    if (pendingHandlers > 0 || pendingRoomDeletions > 0) {
+      options.logEvent("admin_action_service_close_unfinished", {
+        instanceId: options.instanceId,
+        pendingHandlers,
+        pendingRoomDeletions,
+        budgetMs: closeBudgetMs,
+        result: "timeout",
+      });
+    }
+  }
+
+  function runRoomDeletionAction<T>(action: () => Promise<T>): Promise<T> {
+    if (closing) {
+      return Promise.reject(
+        new AdminActionError(
+          503,
+          "admin_action_service_closed",
+          "Admin action service is shutting down.",
+        ),
+      );
+    }
+    return roomDeletionHandlerPacer.trackCall(action());
+  }
 
   function writeAudit(
     actor: AdminSession,
@@ -365,7 +418,7 @@ export function createAdminActionService(options: {
     }
   }
 
-  return {
+  const actions = {
     async closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
       const target = await getRoomOrThrow(roomCode);
       const sessions = await options.listClusterSessionsByRoom(roomCode);
@@ -711,6 +764,28 @@ export function createAdminActionService(options: {
         sessionId,
         roomCode: commandResult.roomCode ?? session.roomCode,
       };
+    },
+  };
+
+  return {
+    ...actions,
+    close() {
+      if (!closePromise) {
+        // Close the gate before the async drain takes its first snapshot.
+        closing = true;
+        closePromise = closeActionService();
+      }
+      return closePromise;
+    },
+    closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
+      return runRoomDeletionAction(() =>
+        actions.closeRoom(actor, roomCode, reason),
+      );
+    },
+    expireRoom(actor: AdminSession, roomCode: string, reason?: string) {
+      return runRoomDeletionAction(() =>
+        actions.expireRoom(actor, roomCode, reason),
+      );
     },
   };
 }

@@ -5789,8 +5789,16 @@ test("a capped expiry collection still finishes what it started", async () => {
   const reclaimed: number[] = [];
   const teardowns: string[] = [];
   let releaseDelete!: () => void;
+  let markTeardownStarted!: () => void;
+  let releaseTeardown!: () => void;
   const deleteLanded = new Promise<void>((resolve) => {
     releaseDelete = resolve;
+  });
+  const teardownStarted = new Promise<void>((resolve) => {
+    markTeardownStarted = resolve;
+  });
+  const teardownLanded = new Promise<void>((resolve) => {
+    releaseTeardown = resolve;
   });
   const roomStore: RoomStore = {
     ...baseRoomStore,
@@ -5810,8 +5818,10 @@ test("a capped expiry collection still finishes what it started", async () => {
     roomStore,
     activeRooms: {
       ...runtime,
-      deleteRoom(code, expectedGeneration) {
+      async deleteRoom(code, expectedGeneration) {
         teardowns.push(code);
+        markTeardownStarted();
+        await teardownLanded;
         return runtime.deleteRoom(code, expectedGeneration);
       },
     },
@@ -5827,6 +5837,7 @@ test("a capped expiry collection still finishes what it started", async () => {
     createRoomCode: () => "ROOMDB",
     resolveActiveRoom: async (code) => runtime.getRoom(code),
     roomDeleteConfirmationTimeoutMs: 20,
+    closeBudgetMs: 1_000,
   });
 
   const owner = createSession("owner");
@@ -5840,14 +5851,119 @@ test("a capped expiry collection still finishes what it started", async () => {
   assert.deepEqual(teardowns, []);
   assert.deepEqual(reclaimed, []);
 
-  // The effect kept the delete AND everything a successful one owes: the
-  // reclamation count and the runtime teardown both happen when it lands, with
-  // nobody having to compensate for them afterwards.
+  // Shutdown drains the outer delete first, then takes a fresh snapshot of the
+  // runtime teardown it creates. Taking both snapshots at close entry would
+  // miss this nested effect and close Redis under it.
+  let serviceClosed = false;
+  const closingService = service.close().then(() => {
+    serviceClosed = true;
+  });
   releaseDelete();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await teardownStarted;
+  assert.equal(serviceClosed, false);
   assert.deepEqual(reclaimed, [1]);
   assert.deepEqual(teardowns, [room.code]);
+  releaseTeardown();
+  await closingService;
+  assert.equal(serviceClosed, true);
   assert.equal(await roomStore.getRoom(room.code), null);
+});
+
+test("room service reports runtime teardown left at shutdown", async () => {
+  const currentTime = 1_000;
+  const runtime = createInMemoryRuntimeStore(() => currentTime);
+  let markTeardownStarted!: () => void;
+  let releaseTeardown!: () => void;
+  const teardownStarted = new Promise<void>((resolve) => {
+    markTeardownStarted = resolve;
+  });
+  const teardownLanded = new Promise<void>((resolve) => {
+    releaseTeardown = resolve;
+  });
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: createInMemoryRoomStore({ now: () => currentTime }),
+    activeRooms: {
+      ...runtime,
+      async deleteRoom(code, expectedGeneration) {
+        markTeardownStarted();
+        await teardownLanded;
+        return runtime.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: () => "token-1234567890",
+    logEvent: (event) => events.push(event),
+    now: () => currentTime,
+    runtimeTeardownConfirmationTimeoutMs: 5,
+    closeBudgetMs: 5,
+  });
+
+  const teardown = service.teardownRoomRuntime("ROOMHU");
+  await teardownStarted;
+  await teardown;
+  await service.close();
+
+  assert.ok(events.includes("room_service_close_unfinished"));
+  releaseTeardown();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("room service closes lazy-delete admission before its shutdown snapshot", async () => {
+  let currentTime = 1_000;
+  const baseRoomStore = createInMemoryRoomStore({ now: () => currentTime });
+  let holdRoomRead = false;
+  let markRoomReadStarted!: () => void;
+  let releaseRoomRead!: () => void;
+  const roomReadStarted = new Promise<void>((resolve) => {
+    markRoomReadStarted = resolve;
+  });
+  const roomReadLanded = new Promise<void>((resolve) => {
+    releaseRoomRead = resolve;
+  });
+  let deleteAttempts = 0;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: {
+      ...getDefaultPersistenceConfig(),
+      emptyRoomTtlMs: 5_000,
+    },
+    roomStore: {
+      ...baseRoomStore,
+      async getRoom(code, caller) {
+        if (holdRoomRead) {
+          markRoomReadStarted();
+          await roomReadLanded;
+        }
+        return baseRoomStore.getRoom(code, caller);
+      },
+      async deleteExpiredRoom(code, deleteTime) {
+        deleteAttempts += 1;
+        return baseRoomStore.deleteExpiredRoom(code, deleteTime);
+      },
+    },
+    activeRooms: createActiveRoomRegistry(),
+    generateToken: () => "token-1234567890",
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMCL",
+  });
+
+  const owner = createSession("owner");
+  const { room } = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+  currentTime += 5_001;
+
+  holdRoomRead = true;
+  const read = service.getRoomStateByCode(room.code);
+  await roomReadStarted;
+  await service.close();
+  releaseRoomRead();
+
+  assert.equal(await read, null);
+  assert.equal(deleteAttempts, 0);
+  assert.ok(await baseRoomStore.getRoom(room.code));
 });
 
 test("a room that stopped being expired is served, not collected", async () => {

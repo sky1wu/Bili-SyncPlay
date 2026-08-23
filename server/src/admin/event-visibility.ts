@@ -17,6 +17,7 @@
 const HIDDEN_SYSTEM_EVENTS = new Set([
   "admin_audit_appends_abandoned_at_shutdown",
   "admin_audit_log_append_failed",
+  "admin_action_service_close_unfinished",
   "admin_command_bus_close_unfinished",
   "admin_command_bus_command_failed",
   "admin_command_bus_connection_reset",
@@ -38,6 +39,7 @@ const HIDDEN_SYSTEM_EVENTS = new Set([
   "room_event_published",
   "room_index_reconcile_abandoned_at_shutdown",
   "room_reaper_sweep_abandoned_at_shutdown",
+  "room_service_close_unfinished",
   "room_store_close_unfinished",
   "runtime_index_reaper_failed",
   "runtime_index_sessions_reaped",

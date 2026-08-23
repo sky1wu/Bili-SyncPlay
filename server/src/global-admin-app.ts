@@ -83,6 +83,7 @@ export async function createGlobalAdminServer(
     httpServer,
     metricsHttpServer,
     runtimeIndexReaper,
+    closeAdminActionService,
     closeAdminServices,
   } = await createSharedAdminHttpBootstrap({
     securityConfig,
@@ -133,6 +134,8 @@ export async function createGlobalAdminServer(
             runtimeStore,
             adminCommandBus,
             roomEventBus,
+            closeAdminActionService,
+            closeRoomService: roomService.close,
             closeAdminServices,
           }),
         ],

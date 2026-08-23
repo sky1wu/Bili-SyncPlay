@@ -930,7 +930,14 @@ do NOT compose, and that is the part that decides which connection gets which:
   `null` on the deadline (an expired room reads as absent either way);
   `closeRoom` / `expireRoom` refuse to report a completed action they cannot
   confirm and return 503 `room_delete_unconfirmed`, while the effect logs its
-  own late outcome. `redis-store-command-bounds.test.ts` holds the mechanical
+  own late outcome. That ownership extends through shutdown: the admin action
+  service first closes deletion admission, then drains accepted action handlers
+  before the delete-plus-follow-ups chains they may create. The room service
+  likewise closes lazy-delete admission, then drains lazy deletions before any
+  runtime teardown they create, all while the room store, runtime store and
+  event bus remain open. Each owner has one explicit budget and reports what
+  remains instead of letting a later dependency close silently cut the effect
+  off. `redis-store-command-bounds.test.ts` holds the mechanical
   half: with a command hung, both deletes must be left UNANSWERED — no
   classification table can see a cap that quietly reappears inside the store. Atomic
   `evictMemberToken` is different: the admin executor caps only its own wait and

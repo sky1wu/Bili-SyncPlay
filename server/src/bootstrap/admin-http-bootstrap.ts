@@ -69,6 +69,7 @@ export async function createSharedAdminHttpBootstrap(args: {
   httpServer: HttpServer;
   metricsHttpServer: HttpServer | undefined;
   runtimeIndexReaper: ReturnType<typeof createRuntimeIndexReaper>;
+  closeAdminActionService: () => Promise<void>;
   closeAdminServices: () => Promise<void>;
 }> {
   const securityPolicy = createSecurityPolicy(args.securityConfig);
@@ -92,7 +93,11 @@ export async function createSharedAdminHttpBootstrap(args: {
       }),
   });
 
-  const { adminRouter, close: closeAdminServices } = await createAdminServices({
+  const {
+    adminRouter,
+    closeAdminActionService,
+    close: closeAdminServices,
+  } = await createAdminServices({
     securityConfig: args.securityConfig,
     persistenceConfig: args.persistenceConfig,
     roomStore: args.roomStore,
@@ -140,6 +145,7 @@ export async function createSharedAdminHttpBootstrap(args: {
     httpServer,
     metricsHttpServer,
     runtimeIndexReaper,
+    closeAdminActionService,
     closeAdminServices,
   };
 }

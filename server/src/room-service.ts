@@ -79,6 +79,12 @@ export const DEFAULT_RUNTIME_TEARDOWN_CONFIRM_TIMEOUT_MS = 5_000;
  */
 export const DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS = 5_000;
 
+/**
+ * Leaves one second inside the shutdown step for reporting and dependency close
+ * hand-off. The delete and teardown pacers share this one budget below.
+ */
+export const DEFAULT_ROOM_SERVICE_CLOSE_BUDGET_MS = 4_000;
+
 type ServiceErrorReason =
   | "room_not_found"
   | "join_token_invalid"
@@ -218,6 +224,8 @@ export function createRoomService(options: {
   runtimeTeardownConfirmationTimeoutMs?: number;
   /** How long a reader waits for an expired room's collection to confirm. */
   roomDeleteConfirmationTimeoutMs?: number;
+  /** Shared by late persisted-room deletions and runtime teardown effects. */
+  closeBudgetMs?: number;
 }): {
   createRoomForSession: (
     session: Session,
@@ -275,6 +283,7 @@ export function createRoomService(options: {
   ) => Promise<ReturnType<typeof roomStateOf> | null>;
   deleteExpiredRooms: (currentTime?: number) => Promise<ExpiredRoomSweepCounts>;
   teardownRoomRuntime: (code: string) => Promise<void>;
+  close: () => Promise<void>;
 } {
   const { config, persistence, roomStore, generateToken, logEvent } = options;
   const runtimeStoreOption = options.runtimeStore ?? options.activeRooms;
@@ -294,6 +303,10 @@ export function createRoomService(options: {
     initialDelayMs: roomDeleteConfirmationTimeoutMs,
     maxDelayMs: roomDeleteConfirmationTimeoutMs,
   });
+  const closeBudgetMs =
+    options.closeBudgetMs ?? DEFAULT_ROOM_SERVICE_CLOSE_BUDGET_MS;
+  let closing = false;
+  let closePromise: Promise<void> | null = null;
   const playbackAuthorityByRoom = new Map<string, PlaybackAuthority>();
 
   if (!runtimeStoreOption) {
@@ -871,6 +884,12 @@ export function createRoomService(options: {
       return null;
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
+      // `close()` may have run while the room read above was in flight. Do not
+      // admit a new lazy-delete effect after its shutdown snapshot; an expired
+      // room already reads as absent, and a later process/reaper can collect it.
+      if (closing) {
+        return null;
+      }
       let outcome: RoomDeleteOutcome;
       try {
         outcome = await roomDeleteConfirmationPacer.capAttempt(
@@ -911,6 +930,34 @@ export function createRoomService(options: {
       return null;
     }
     return room;
+  }
+
+  async function closeRoomService(): Promise<void> {
+    const deadline = performance.now() + closeBudgetMs;
+    const remainingBudgetMs = (): number =>
+      Math.max(deadline - performance.now(), 0);
+
+    // Drain the outer delete chain first. A delete that settles here may start
+    // a runtime teardown only after its Redis outcome arrives, so taking both
+    // pacer snapshots together would let that nested effect escape shutdown.
+    await roomDeleteConfirmationPacer.settleTracked(remainingBudgetMs());
+    const remaining = remainingBudgetMs();
+    if (remaining > 0) {
+      await runtimeTeardownConfirmationPacer.settleTracked(remaining);
+    }
+
+    const pendingRoomDeletions = roomDeleteConfirmationPacer.trackedCount();
+    const pendingRuntimeTeardowns =
+      runtimeTeardownConfirmationPacer.trackedCount();
+    if (pendingRoomDeletions > 0 || pendingRuntimeTeardowns > 0) {
+      logEvent("room_service_close_unfinished", {
+        provider: persistence.provider,
+        pendingRoomDeletions,
+        pendingRuntimeTeardowns,
+        budgetMs: closeBudgetMs,
+        result: "timeout",
+      });
+    }
   }
 
   function getPlaybackAuthority(roomCode: string): PlaybackAuthority | null {
@@ -1626,6 +1673,14 @@ export function createRoomService(options: {
   }
 
   return {
+    close() {
+      if (!closePromise) {
+        // Close lazy-delete admission before the drain takes its first snapshot.
+        closing = true;
+        closePromise = closeRoomService();
+      }
+      return closePromise;
+    },
     /**
      * Tear down a deleted room's runtime state, guarded and retried.
      *

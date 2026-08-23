@@ -313,6 +313,7 @@ export async function createSyncServer(
     httpServer,
     metricsHttpServer,
     runtimeIndexReaper,
+    closeAdminActionService,
     closeAdminServices,
   } = await createSharedAdminHttpBootstrap({
     securityConfig,
@@ -530,6 +531,8 @@ export async function createSyncServer(
             runtimeStoreStepName: "close_shared_runtime_store",
             adminCommandBus,
             roomEventBus,
+            closeAdminActionService,
+            closeRoomService: roomService.close,
             closeAdminServices,
           }),
         ],

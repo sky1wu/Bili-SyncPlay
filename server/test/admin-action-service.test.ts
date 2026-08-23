@@ -79,8 +79,9 @@ function createService(options: {
   publishRoomDeleted?: (roomCode: string) => Promise<void>;
   auditLogService?: ReturnType<typeof createAuditLogService>;
   maxFanoutConcurrency?: number;
-  logEvent?: (name: string) => void;
+  logEvent?: (name: string, data?: Record<string, unknown>) => void;
   roomDeleteConfirmTimeoutMs?: number;
+  closeBudgetMs?: number;
 }) {
   const auditLogService = options.auditLogService ?? createAuditLogService();
   return createAdminActionService({
@@ -127,10 +128,11 @@ function createService(options: {
     getRoomStateByCode: async () => null,
     publishRoomStateUpdate: async () => {},
     publishRoomDeleted: options.publishRoomDeleted ?? (async () => {}),
-    logEvent: (name) => options.logEvent?.(name),
+    logEvent: (name, data) => options.logEvent?.(name, data),
     now: () => 10_000,
     maxFanoutConcurrency: options.maxFanoutConcurrency,
     roomDeleteConfirmTimeoutMs: options.roomDeleteConfirmTimeoutMs,
+    closeBudgetMs: options.closeBudgetMs,
   });
 }
 
@@ -434,8 +436,16 @@ test("a capped room deletion still completes its follow-ups when the command lan
   const published: string[] = [];
   let torndown = false;
   let releaseDelete!: () => void;
+  let markPublishStarted!: () => void;
+  let releasePublish!: () => void;
   const deleteLanded = new Promise<void>((resolve) => {
     releaseDelete = resolve;
+  });
+  const publishStarted = new Promise<void>((resolve) => {
+    markPublishStarted = resolve;
+  });
+  const publishLanded = new Promise<void>((resolve) => {
+    releasePublish = resolve;
   });
   const service = createService({
     sessionsByRoom: [],
@@ -453,8 +463,11 @@ test("a capped room deletion still completes its follow-ups when the command lan
     },
     publishRoomDeleted: async (roomCode) => {
       published.push(roomCode);
+      markPublishStarted();
+      await publishLanded;
     },
     roomDeleteConfirmTimeoutMs: 20,
+    closeBudgetMs: 1_000,
   });
 
   const closing = service.closeRoom(ACTOR, "ROOM01", "shutdown");
@@ -470,13 +483,142 @@ test("a capped room deletion still completes its follow-ups when the command lan
   assert.equal(torndown, false);
   assert.deepEqual(published, []);
 
-  // The effect owns the follow-ups, so a delete that lands after the deadline
-  // still tears the runtime state down and still sends the one `room_deleted`
-  // nobody repeats.
+  // Shutdown drains the effect owner before closing its stores or event bus.
+  // Releasing only the delete is not enough: close waits through every
+  // follow-up in the same chain, including the one-shot publish.
+  let serviceClosed = false;
+  const closingService = service.close().then(() => {
+    serviceClosed = true;
+  });
   releaseDelete();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await publishStarted;
+  assert.equal(serviceClosed, false);
   assert.equal(torndown, true);
   assert.deepEqual(published, ["ROOM01"]);
+  releasePublish();
+  await closingService;
+  assert.equal(serviceClosed, true);
+});
+
+test("admin action service reports deletion effects left at shutdown", async () => {
+  let releaseDelete!: () => void;
+  const deleteLanded = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  const events: string[] = [];
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("closeRoom has no sessions to disconnect");
+    },
+    deleteRoom: async () => {
+      await deleteLanded;
+      return "deleted";
+    },
+    roomDeleteConfirmTimeoutMs: 5,
+    closeBudgetMs: 5,
+    logEvent: (event) => events.push(event),
+  });
+
+  await assert.rejects(
+    () => service.closeRoom(ACTOR, "ROOM01", "shutdown"),
+    (error: unknown) =>
+      error instanceof AdminActionError &&
+      error.code === "room_delete_unconfirmed",
+  );
+  await service.close();
+
+  assert.ok(events.includes("admin_action_service_close_unfinished"));
+  releaseDelete();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("admin action shutdown gates admission and drains accepted deletion handlers", async () => {
+  let markRoomReadStarted!: () => void;
+  let releaseRoomRead!: () => void;
+  const roomReadStarted = new Promise<void>((resolve) => {
+    markRoomReadStarted = resolve;
+  });
+  const roomReadLanded = new Promise<void>((resolve) => {
+    releaseRoomRead = resolve;
+  });
+  const deleted: string[] = [];
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("closeRoom has no sessions to disconnect");
+    },
+    getRoom: async (roomCode) => {
+      markRoomReadStarted();
+      await roomReadLanded;
+      return createRoom(roomCode);
+    },
+    deleteRoom: async (room) => {
+      deleted.push(room.code);
+      return "deleted";
+    },
+    closeBudgetMs: 1_000,
+  });
+
+  // Accepted before close, but still before the deletion pacer when shutdown
+  // starts. The handler owner must keep the later-created delete in the drain.
+  const action = service.closeRoom(ACTOR, "ROOM01", "shutdown");
+  await roomReadStarted;
+  let serviceClosed = false;
+  const closingService = service.close().then(() => {
+    serviceClosed = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(serviceClosed, false);
+
+  releaseRoomRead();
+  await Promise.all([action, closingService]);
+  assert.deepEqual(deleted, ["ROOM01"]);
+
+  await assert.rejects(
+    () => service.expireRoom(ACTOR, "ROOM02", "shutdown"),
+    (error: unknown) =>
+      error instanceof AdminActionError &&
+      error.code === "admin_action_service_closed",
+  );
+});
+
+test("admin action shutdown reports accepted deletion handlers left behind", async () => {
+  let markRoomReadStarted!: () => void;
+  let releaseRoomRead!: () => void;
+  const roomReadStarted = new Promise<void>((resolve) => {
+    markRoomReadStarted = resolve;
+  });
+  const roomReadLanded = new Promise<void>((resolve) => {
+    releaseRoomRead = resolve;
+  });
+  const reports: Record<string, unknown>[] = [];
+  const service = createService({
+    sessionsByRoom: [],
+    requestAdminCommand: async () => {
+      throw new Error("closeRoom has no sessions to disconnect");
+    },
+    getRoom: async (roomCode) => {
+      markRoomReadStarted();
+      await roomReadLanded;
+      return createRoom(roomCode);
+    },
+    closeBudgetMs: 5,
+    logEvent: (event, data) => {
+      if (event === "admin_action_service_close_unfinished" && data) {
+        reports.push(data);
+      }
+    },
+  });
+
+  const action = service.closeRoom(ACTOR, "ROOM01", "shutdown");
+  await roomReadStarted;
+  await service.close();
+
+  assert.equal(reports[0]?.pendingHandlers, 1);
+  assert.equal(reports[0]?.pendingRoomDeletions, 0);
+  releaseRoomRead();
+  await action;
 });
 
 test("a capped room deletion that turns out superseded runs nothing by code", async () => {

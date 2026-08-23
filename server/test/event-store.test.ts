@@ -360,6 +360,7 @@ test("bounded shutdown plumbing events are hidden alongside their siblings", asy
   // Leaving them visible puts shutdown-degraded noise in the operator's default
   // event feed exactly when Redis is stalled and it is longest.
   const hidden = [
+    "admin_action_service_close_unfinished",
     "admin_command_bus_close_unfinished",
     "admin_command_consumer_close_unfinished",
     "node_heartbeat_abandoned_at_shutdown",
@@ -367,6 +368,7 @@ test("bounded shutdown plumbing events are hidden alongside their siblings", asy
     "room_event_bus_close_unfinished",
     "room_index_reconcile_abandoned_at_shutdown",
     "room_reaper_sweep_abandoned_at_shutdown",
+    "room_service_close_unfinished",
     "room_store_close_unfinished",
     "runtime_store_close_unfinished",
   ];
