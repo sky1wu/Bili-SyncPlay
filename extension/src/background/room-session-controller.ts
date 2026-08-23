@@ -1,4 +1,5 @@
 import type {
+  ErrorCode,
   RoomMember,
   RoomState,
   ServerMessage,
@@ -22,8 +23,29 @@ import {
 } from "./room-manager";
 import { localizeServerError } from "../shared/i18n";
 import { resolvePlaybackAnchorAtMs } from "./clock-sync";
+import { getReconnectDelayMs } from "./socket-manager";
 
 type JoinAttemptResult = "joined" | "failed" | "timeout";
+type JoinErrorDisposition = "retry" | "retry-without-member-token" | "terminal";
+const JOIN_ERROR_DISPOSITIONS = {
+  origin_not_allowed: "terminal",
+  room_not_found: "terminal",
+  join_token_invalid: "terminal",
+  member_token_invalid: "retry-without-member-token",
+  not_in_room: "terminal",
+  rate_limited: "retry",
+  invalid_message: "terminal",
+  payload_too_large: "terminal",
+  room_full: "terminal",
+  room_resolution_unconfirmed: "retry",
+  unsupported_protocol_version: "terminal",
+  internal_error: "retry",
+} as const satisfies Record<ErrorCode, JoinErrorDisposition>;
+type JoinRetryTarget = {
+  source: "pending" | "stored";
+  roomCode: string;
+  joinToken: string;
+};
 type PendingMemberDelta = {
   type: "joined" | "left";
   roomCode: string;
@@ -88,6 +110,7 @@ export function createRoomSessionController(args: {
    */
   getMonotonicNow?: () => number;
   bootstrapRoomStateTimeoutMs?: number;
+  getJoinRetryDelayMs?: (attempt: number) => number;
 }): RoomSessionController {
   let pendingJoinAttemptResolvers: Array<(result: JoinAttemptResult) => void> =
     [];
@@ -96,9 +119,26 @@ export function createRoomSessionController(args: {
   let bootstrapRoomStateGeneration = 0;
   let bootstrapRoomStateTimer: ReturnType<typeof globalThis.setTimeout> | null =
     null;
+  let pendingJoinRetryTimer: ReturnType<typeof globalThis.setTimeout> | null =
+    null;
+  let pendingJoinRetryAttempt = 0;
   const bootstrapRoomStateTimeoutMs =
     args.bootstrapRoomStateTimeoutMs ?? DEFAULT_BOOTSTRAP_ROOM_STATE_TIMEOUT_MS;
   const monotonicNow = () => args.getMonotonicNow?.() ?? performance.now();
+  const resolveJoinRetryDelayMs =
+    args.getJoinRetryDelayMs ?? getReconnectDelayMs;
+
+  function clearJoinRetryTimer(): void {
+    if (pendingJoinRetryTimer !== null) {
+      globalThis.clearTimeout(pendingJoinRetryTimer);
+      pendingJoinRetryTimer = null;
+    }
+  }
+
+  function resetJoinRetry(): void {
+    pendingJoinRetryAttempt = 0;
+    clearJoinRetryTimer();
+  }
 
   function clearPendingMemberDeltas(): void {
     pendingMemberDeltas = [];
@@ -177,7 +217,7 @@ export function createRoomSessionController(args: {
     ) {
       return true;
     }
-    if (!args.roomSessionState.pendingJoinRequestSent) {
+    if (!hasJoinRequestOnCurrentSocket()) {
       return false;
     }
     return (
@@ -305,7 +345,8 @@ export function createRoomSessionController(args: {
     targetRoomCode: string,
     targetJoinToken: string,
   ): void {
-    args.roomSessionState.pendingJoinRequestSent = true;
+    args.roomSessionState.pendingJoinRequestGeneration =
+      args.connectionState.socketGeneration;
     args.sendToServer({
       type: "room:join",
       payload: {
@@ -318,6 +359,90 @@ export function createRoomSessionController(args: {
         protocolVersion: PROTOCOL_VERSION,
       },
     });
+  }
+
+  function hasJoinRequestOnCurrentSocket(): boolean {
+    return (
+      args.roomSessionState.pendingJoinRequestGeneration !== null &&
+      args.roomSessionState.pendingJoinRequestGeneration ===
+        args.connectionState.socketGeneration
+    );
+  }
+
+  function getJoinRetryTarget(): JoinRetryTarget | null {
+    if (
+      args.roomSessionState.pendingJoinRoomCode &&
+      args.roomSessionState.pendingJoinToken
+    ) {
+      return {
+        source: "pending",
+        roomCode: args.roomSessionState.pendingJoinRoomCode,
+        joinToken: args.roomSessionState.pendingJoinToken,
+      };
+    }
+    if (args.roomSessionState.roomCode && args.roomSessionState.joinToken) {
+      return {
+        source: "stored",
+        roomCode: args.roomSessionState.roomCode,
+        joinToken: args.roomSessionState.joinToken,
+      };
+    }
+    return null;
+  }
+
+  function isCurrentJoinRetryTarget(target: JoinRetryTarget): boolean {
+    const current = getJoinRetryTarget();
+    return (
+      current?.source === target.source &&
+      current.roomCode === target.roomCode &&
+      current.joinToken === target.joinToken
+    );
+  }
+
+  function scheduleJoinRetryAfterTransientError(errorCode: ErrorCode): boolean {
+    if (!hasJoinRequestOnCurrentSocket()) {
+      return false;
+    }
+    const target = getJoinRetryTarget();
+    if (!target) {
+      return false;
+    }
+
+    // The server has answered this connection's attempt. Release its ownership;
+    // the target was persisted before the first send, so either the timer, a
+    // reconnect, or a restarted worker can issue the exact same join intent.
+    args.roomSessionState.pendingJoinRequestGeneration = null;
+    args.log(
+      "background",
+      `Retrying ${target.source} join for ${target.roomCode} after ${errorCode}`,
+    );
+    pendingJoinRetryAttempt += 1;
+    const retryDelayMs = resolveJoinRetryDelayMs(pendingJoinRetryAttempt);
+    args.log(
+      "background",
+      `Join retry for ${target.roomCode} scheduled in ${retryDelayMs}ms`,
+    );
+    // A reconnect can re-issue the intent before the previous timer fires. Its
+    // next transient response replaces that schedule, so keep exactly one
+    // retry timer for the intent.
+    clearJoinRetryTimer();
+    const retryTimer = globalThis.setTimeout(() => {
+      pendingJoinRetryTimer = null;
+      if (
+        args.connectionState.connected &&
+        !hasJoinRequestOnCurrentSocket() &&
+        isCurrentJoinRetryTarget(target)
+      ) {
+        sendJoinRequest(target.roomCode, target.joinToken);
+        args.notifyAll();
+      }
+    }, retryDelayMs);
+    pendingJoinRetryTimer = retryTimer;
+    const timerControls = retryTimer as {
+      unref?: () => void;
+    };
+    timerControls?.unref?.();
+    return true;
   }
 
   function settlePendingJoinAttempt(result: JoinAttemptResult): void {
@@ -358,10 +483,12 @@ export function createRoomSessionController(args: {
     const receivedAtMs = monotonicNow();
     switch (message.type) {
       case "room:created":
+        resetJoinRetry();
         clearPendingMemberDeltas();
         startWaitingForBootstrapRoomState();
         args.roomSessionState.pendingJoinRoomCode = null;
         args.roomSessionState.pendingJoinToken = null;
+        args.roomSessionState.pendingJoinRequestGeneration = null;
         args.roomSessionState.roomCode = message.payload.roomCode;
         args.roomSessionState.joinToken = message.payload.joinToken;
         args.roomSessionState.memberToken = message.payload.memberToken;
@@ -373,6 +500,7 @@ export function createRoomSessionController(args: {
         args.notifyAll();
         return;
       case "room:joined":
+        resetJoinRetry();
         clearPendingMemberDeltasExceptRoom(message.payload.roomCode);
         startWaitingForBootstrapRoomState();
         args.roomSessionState.roomCode = message.payload.roomCode;
@@ -381,7 +509,7 @@ export function createRoomSessionController(args: {
           args.roomSessionState.joinToken;
         args.roomSessionState.memberToken = message.payload.memberToken;
         args.roomSessionState.memberId = message.payload.memberId;
-        args.roomSessionState.pendingJoinRequestSent = false;
+        args.roomSessionState.pendingJoinRequestGeneration = null;
         args.roomSessionState.pendingJoinRoomCode = null;
         args.roomSessionState.pendingJoinToken = null;
         args.connectionState.lastError = null;
@@ -415,25 +543,42 @@ export function createRoomSessionController(args: {
           message.payload.member,
         );
         return;
-      case "error":
+      case "error": {
         args.connectionState.lastError = localizeServerError(
           message.payload.code,
           message.payload.message,
         );
+        const joinErrorDisposition = hasJoinRequestOnCurrentSocket()
+          ? JOIN_ERROR_DISPOSITIONS[message.payload.code]
+          : null;
+        if (joinErrorDisposition === "retry-without-member-token") {
+          // The durable room/join intent is still valid; only the reconnect
+          // identity was rejected. Drop that credential before the retry so the
+          // server can issue a fresh member identity, including after restart.
+          args.roomSessionState.memberToken = null;
+          await args.persistState();
+        }
         if (
-          args.roomSessionState.pendingJoinRoomCode &&
-          (message.payload.code === "room_not_found" ||
-            message.payload.code === "join_token_invalid" ||
-            message.payload.code === "invalid_message" ||
-            message.payload.code === "unsupported_protocol_version")
+          (joinErrorDisposition === "retry" ||
+            joinErrorDisposition === "retry-without-member-token") &&
+          scheduleJoinRetryAfterTransientError(message.payload.code)
         ) {
+          args.logServerError(message.payload.code, message.payload.message);
+          args.notifyAll();
+          return;
+        }
+        if (
+          joinErrorDisposition === "terminal" &&
+          args.roomSessionState.pendingJoinRoomCode
+        ) {
+          resetJoinRetry();
           args.log(
             "background",
             `Join failed for room ${args.roomSessionState.pendingJoinRoomCode}`,
           );
           stopWaitingForBootstrapRoomState();
           settlePendingJoinAttempt("failed");
-          args.roomSessionState.pendingJoinRequestSent = false;
+          args.roomSessionState.pendingJoinRequestGeneration = null;
           args.roomSessionState.pendingJoinRoomCode = null;
           args.roomSessionState.pendingJoinToken = null;
           args.roomSessionState.roomCode = null;
@@ -442,13 +587,14 @@ export function createRoomSessionController(args: {
           args.roomSessionState.memberId = null;
           args.roomSessionState.roomState = null;
           await args.persistState();
+          args.logServerError(message.payload.code, message.payload.message);
+          args.notifyAll();
+          return;
         }
         if (
+          joinErrorDisposition === "terminal" &&
           args.roomSessionState.roomCode &&
-          !args.roomSessionState.pendingJoinRoomCode &&
-          (message.payload.code === "room_not_found" ||
-            message.payload.code === "join_token_invalid" ||
-            message.payload.code === "unsupported_protocol_version")
+          !args.roomSessionState.pendingJoinRoomCode
         ) {
           await clearCurrentRoomContext(
             `server rejected stored room context: ${message.payload.code}`,
@@ -457,13 +603,17 @@ export function createRoomSessionController(args: {
           args.logServerError(message.payload.code, message.payload.message);
           return;
         }
-        if (message.payload.code === "member_token_invalid") {
+        if (
+          message.payload.code === "member_token_invalid" &&
+          joinErrorDisposition !== "retry-without-member-token"
+        ) {
           args.roomSessionState.memberToken = null;
           await args.persistState();
         }
         args.logServerError(message.payload.code, message.payload.message);
         args.notifyAll();
         return;
+      }
       case "sync:pong":
         return;
     }
@@ -660,6 +810,7 @@ export function createRoomSessionController(args: {
     reason: string,
     errorMessage: string | null = null,
   ): Promise<void> {
+    resetJoinRetry();
     clearPendingMemberDeltas();
     stopWaitingForBootstrapRoomState();
     args.log("background", `Clearing current room context (${reason})`);
@@ -671,7 +822,7 @@ export function createRoomSessionController(args: {
     args.roomSessionState.pendingCreateRoom = false;
     args.roomSessionState.pendingJoinRoomCode = null;
     args.roomSessionState.pendingJoinToken = null;
-    args.roomSessionState.pendingJoinRequestSent = false;
+    args.roomSessionState.pendingJoinRequestGeneration = null;
     args.shareState.lastOpenedSharedUrl = null;
     args.connectionState.lastError = errorMessage;
     args.resetReconnectState();
@@ -681,6 +832,7 @@ export function createRoomSessionController(args: {
   }
 
   async function requestCreateRoom(): Promise<void> {
+    resetJoinRetry();
     args.resetReconnectState();
     clearPendingMemberDeltas();
     stopWaitingForBootstrapRoomState();
@@ -691,6 +843,7 @@ export function createRoomSessionController(args: {
     args.roomSessionState.roomState = null;
     args.roomSessionState.pendingJoinRoomCode = null;
     args.roomSessionState.pendingJoinToken = null;
+    args.roomSessionState.pendingJoinRequestGeneration = null;
     args.resetRoomLifecycleTransientState(
       "create-room",
       "create room requested",
@@ -716,13 +869,14 @@ export function createRoomSessionController(args: {
     roomCode: string,
     joinToken: string,
   ): Promise<void> {
+    resetJoinRetry();
     args.resetReconnectState();
     clearPendingMemberDeltas();
     stopWaitingForBootstrapRoomState();
     args.roomSessionState.pendingCreateRoom = false;
     args.roomSessionState.pendingJoinRoomCode = roomCode.trim().toUpperCase();
     args.roomSessionState.pendingJoinToken = joinToken.trim();
-    args.roomSessionState.pendingJoinRequestSent = false;
+    args.roomSessionState.pendingJoinRequestGeneration = null;
     args.log(
       "background",
       `Popup requested join for ${args.roomSessionState.pendingJoinRoomCode}`,
@@ -741,7 +895,7 @@ export function createRoomSessionController(args: {
       args.connectionState.connected &&
       args.roomSessionState.pendingJoinRoomCode &&
       args.roomSessionState.pendingJoinToken &&
-      !args.roomSessionState.pendingJoinRequestSent
+      !hasJoinRequestOnCurrentSocket()
     ) {
       sendJoinRequest(
         args.roomSessionState.pendingJoinRoomCode,
@@ -751,6 +905,7 @@ export function createRoomSessionController(args: {
   }
 
   async function requestLeaveRoom(): Promise<void> {
+    resetJoinRetry();
     clearPendingMemberDeltas();
     stopWaitingForBootstrapRoomState();
     args.log(
@@ -772,7 +927,7 @@ export function createRoomSessionController(args: {
     args.roomSessionState.roomState = null;
     args.roomSessionState.pendingJoinRoomCode = null;
     args.roomSessionState.pendingJoinToken = null;
-    args.roomSessionState.pendingJoinRequestSent = false;
+    args.roomSessionState.pendingJoinRequestGeneration = null;
     args.resetRoomLifecycleTransientState("leave-room", "leave room requested");
     args.shareState.lastOpenedSharedUrl = null;
     args.roomSessionState.pendingCreateRoom = false;

@@ -8,8 +8,8 @@
 
 | 常量                       | 位置                                    | 当前值 | 含义                                              |
 | -------------------------- | --------------------------------------- | ------ | ------------------------------------------------- |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
-| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `4`    | 服务端当前使用的版本                              |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
+| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`    | 服务端当前使用的版本                              |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`    | 服务端仍接受的最老客户端版本                      |
 
 客户端在 `room:create` / `room:join` 的 payload 中携带 `protocolVersion`；低于 `MIN_PROTOCOL_VERSION` 的客户端会被以 `unsupported_protocol_version` 错误码拒绝。未携带 `protocolVersion` 的旧客户端按 `server/src/messages.ts` 中的兼容策略处理。
@@ -102,7 +102,13 @@
 
 ## 错误码（`ErrorCode`）
 
-`origin_not_allowed`、`room_not_found`、`join_token_invalid`、`member_token_invalid`、`not_in_room`、`rate_limited`、`invalid_message`、`payload_too_large`、`room_full`、`unsupported_protocol_version`、`internal_error`
+`origin_not_allowed`、`room_not_found`、`join_token_invalid`、`member_token_invalid`、`not_in_room`、`rate_limited`、`invalid_message`、`payload_too_large`、`room_full`、`room_resolution_unconfirmed`、`unsupported_protocol_version`、`internal_error`
+
+`room_resolution_unconfirmed`（协议 v5+）表示一次临时性的加入结果：服务端读到了
+已过期的房间快照，但其守卫删除尚未确认房间最终是被删除还是被另一节点恢复。客户端
+必须保留同一份加入意图，并按连接重试的退避节奏重试。服务端会复用同一个进行中的
+回收效果，因此重试只等待原始结果，不会再发起一次删除。为保持兼容，旧版加入客户端
+仍收到 v5 之前的终态 `room_not_found`。
 
 常见错误码对应的开发者侧现象见[故障排查](../development.zh-CN.md#故障排查)。
 

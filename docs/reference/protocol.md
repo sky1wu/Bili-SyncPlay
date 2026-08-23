@@ -8,8 +8,8 @@
 
 | Constant                   | Location                                | Value | Meaning                                                      |
 | -------------------------- | --------------------------------------- | ----- | ------------------------------------------------------------ |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`   | Version sent by the extension in `room:create` / `room:join` |
-| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `4`   | Version the server currently speaks                          |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`   | Version sent by the extension in `room:create` / `room:join` |
+| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`   | Version the server currently speaks                          |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`   | Oldest client version the server still accepts               |
 
 Clients send `protocolVersion` inside the `room:create` / `room:join` payload; the server rejects clients below `MIN_PROTOCOL_VERSION` with the `unsupported_protocol_version` error code. Legacy clients that omit `protocolVersion` are treated according to the server's compatibility policy in `server/src/messages.ts`.
@@ -105,7 +105,15 @@ Receivers subtract it from the message's local arrival time to get the anchor th
 
 ## Error Codes (`ErrorCode`)
 
-`origin_not_allowed`, `room_not_found`, `join_token_invalid`, `member_token_invalid`, `not_in_room`, `rate_limited`, `invalid_message`, `payload_too_large`, `room_full`, `unsupported_protocol_version`, `internal_error`
+`origin_not_allowed`, `room_not_found`, `join_token_invalid`, `member_token_invalid`, `not_in_room`, `rate_limited`, `invalid_message`, `payload_too_large`, `room_full`, `room_resolution_unconfirmed`, `unsupported_protocol_version`, `internal_error`
+
+`room_resolution_unconfirmed` (protocol v5+) is a transient join result: the
+server found an expired room snapshot but its guarded collection has not yet
+confirmed whether the room was deleted or revived. A client must preserve the
+exact join intent and retry it with the connection retry backoff. The server
+reuses the same in-flight collection effect, so retries wait for the original
+outcome instead of issuing another delete. Older join clients receive the
+pre-v5 terminal `room_not_found` result for compatibility.
 
 The developer-facing symptoms for the common codes are listed in the [troubleshooting section](../development.md#troubleshooting).
 

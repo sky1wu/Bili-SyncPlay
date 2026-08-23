@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getDefaultSecurityConfig } from "../src/app.js";
 import { createMessageHandler } from "../src/message-handler.js";
+import { CURRENT_PROTOCOL_VERSION } from "../src/messages.js";
 import { RoomServiceError } from "../src/room-service.js";
 import { createSessionRateLimitState } from "../src/rate-limit.js";
 import type { AttachedSession, SecurityConfig, Session } from "../src/types.js";
@@ -102,6 +103,72 @@ test("message handler rejects detached sessions before processing", async () => 
     ),
     /Detached session cannot process client message/,
   );
+});
+
+test("message handler exposes retryable room resolution only to clients that implement it", async () => {
+  async function run(protocolVersion: number) {
+    const errors: Array<{ code: string; message: string }> = [];
+    const handler = createMessageHandler({
+      config: CONFIG,
+      roomService: {
+        async createRoomForSession() {
+          throw new Error("unreachable");
+        },
+        async joinRoomForSession() {
+          throw new RoomServiceError(
+            "room_resolution_unconfirmed",
+            "Internal server error.",
+            "room_resolution_unconfirmed",
+          );
+        },
+        async leaveRoomForSession() {
+          return { room: null };
+        },
+        async shareVideoForSession() {
+          throw new Error("unreachable");
+        },
+        async updatePlaybackForSession() {
+          throw new Error("unreachable");
+        },
+        async updateProfileForSession() {
+          throw new Error("unreachable");
+        },
+        async getRoomStateForSession() {
+          throw new Error("unreachable");
+        },
+      },
+      logEvent() {},
+      send() {},
+      sendError(_socket, code, message) {
+        errors.push({ code, message });
+      },
+      async publishRoomEvent() {},
+      instanceId: "node-a",
+    });
+
+    await handler.handleClientMessage(
+      createSession(`client-${protocolVersion}`),
+      {
+        type: "room:join",
+        payload: {
+          roomCode: "ROOM01",
+          joinToken: "join-token-1",
+          protocolVersion,
+        },
+      },
+    );
+    return errors;
+  }
+
+  assert.deepEqual(await run(5), [
+    {
+      code: "room_resolution_unconfirmed",
+      message: "Internal server error.",
+    },
+  ]);
+  assert.deepEqual(await run(4), [
+    { code: "room_not_found", message: "Room not found." },
+  ]);
 });
 
 test("message handler creates a room and sends bootstrap state to the creator", async () => {
@@ -964,7 +1031,7 @@ test("message handler accepts room:create without protocolVersion (legacy client
   assert.ok(events.includes("room_created"));
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:created");
-  assert.equal(sent[0].serverProtocolVersion, 4);
+  assert.equal(sent[0].serverProtocolVersion, CURRENT_PROTOCOL_VERSION);
   assert.equal(sent[1].type, "room:state");
 });
 
@@ -1157,21 +1224,22 @@ test("message handler accepts room:join with matching protocolVersion and return
     payload: {
       roomCode: "ROOM01",
       joinToken: "join-token-1",
-      protocolVersion: 4,
+      protocolVersion: CURRENT_PROTOCOL_VERSION,
     },
   });
 
   assert.equal(sent.length, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 4);
+  assert.equal(sent[0].serverProtocolVersion, CURRENT_PROTOCOL_VERSION);
   assert.equal(sent[1].type, "room:state");
 });
 
 test("message handler accepts room:join from a still-supported older protocol version", async () => {
   // v2 clients (below CURRENT but >= MIN) stay in the compatibility window: the
   // server accepts them and advertises its CURRENT version. The v3 `naturalEnd`
-  // playback flag and the v4 `room:state.playbackAgeMs` are both additive, so
-  // these older clients simply ignore them.
+  // playback flag and the v4 `room:state.playbackAgeMs` are additive. The v5
+  // retryable room-resolution result is gated at the server boundary, so these
+  // older clients remain inside the compatibility window too.
   const sent: Array<{ type: string; serverProtocolVersion?: number }> = [];
   const session = createSession("older-joiner");
 
@@ -1246,7 +1314,7 @@ test("message handler accepts room:join from a still-supported older protocol ve
 
   assert.equal(session.protocolVersion, 2);
   assert.equal(sent[0].type, "room:joined");
-  assert.equal(sent[0].serverProtocolVersion, 4);
+  assert.equal(sent[0].serverProtocolVersion, CURRENT_PROTOCOL_VERSION);
   assert.equal(sent[1].type, "room:state");
 });
 

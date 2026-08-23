@@ -67,7 +67,9 @@ export function createServerUrlController(args: {
 
       if (
         args.roomSessionState.roomCode ||
-        args.roomSessionState.pendingCreateRoom
+        args.roomSessionState.pendingCreateRoom ||
+        (args.roomSessionState.pendingJoinRoomCode &&
+          args.roomSessionState.pendingJoinToken)
       ) {
         await args.connect();
       }

@@ -13,6 +13,8 @@ export interface PersistedBackgroundSnapshot {
   memberId: string | null;
   displayName: string | null;
   roomState: RoomState | null;
+  pendingJoinRoomCode: string | null;
+  pendingJoinToken: string | null;
   serverUrl: string | null;
   pageShareButtonEnabled: boolean;
 }
@@ -26,6 +28,8 @@ export async function loadPersistedBackgroundSnapshot(): Promise<PersistedBackgr
     memberId: persisted.memberId,
     displayName: persisted.displayName,
     roomState: persisted.roomState,
+    pendingJoinRoomCode: persisted.pendingJoinRoomCode,
+    pendingJoinToken: persisted.pendingJoinToken,
     serverUrl: persisted.serverUrl ?? null,
     pageShareButtonEnabled: persisted.pageShareButtonEnabled,
   };
@@ -40,6 +44,8 @@ export async function persistBackgroundState(
     memberToken: state.room.memberToken,
     memberId: state.room.memberId,
     roomState: state.room.roomState,
+    pendingJoinRoomCode: state.room.pendingJoinRoomCode,
+    pendingJoinToken: state.room.pendingJoinToken,
   });
 }
 

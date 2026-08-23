@@ -1,4 +1,4 @@
-import type { ClientMessage } from "@bili-syncplay/protocol";
+import type { ClientMessage, ErrorCode } from "@bili-syncplay/protocol";
 import type { WebSocket } from "ws";
 import { performance } from "node:perf_hooks";
 import type {
@@ -18,6 +18,7 @@ import {
   UNSUPPORTED_PROTOCOL_VERSION_MESSAGE,
   MIN_PROTOCOL_VERSION,
   CURRENT_PROTOCOL_VERSION,
+  ROOM_NOT_FOUND_MESSAGE,
 } from "./messages.js";
 import { createPendingResyncQueue } from "./pending-resync-queue.js";
 import { RoomServiceError, type LeaveRoomReason } from "./room-service.js";
@@ -37,6 +38,7 @@ const CLOSE_CODE_JOIN_ROLLBACK_FAILED = 1011;
  * client anyway. The rollback keeps running, ordered on the session's key.
  */
 const JOIN_ROLLBACK_TIMEOUT_MS = 5_000;
+const ROOM_RESOLUTION_RETRY_PROTOCOL_VERSION = 5;
 
 export function createMessageHandler(options: {
   config: {
@@ -1309,7 +1311,23 @@ export function createMessageHandler(options: {
       }
     } catch (error) {
       if (error instanceof RoomServiceError) {
-        sendError(socket, error.code, error.message);
+        let code: ErrorCode = error.code;
+        let errorMessage = error.message;
+        if (
+          code === "room_resolution_unconfirmed" &&
+          message.type === "room:join" &&
+          (session.protocolVersion ?? MIN_PROTOCOL_VERSION) <
+            ROOM_RESOLUTION_RETRY_PROTOCOL_VERSION
+        ) {
+          // Older clients cannot retry this additive third outcome: their join
+          // state machine only knows success or terminal failure and would stay
+          // pending forever on an unknown/transient code. Preserve the pre-v5
+          // behaviour for them; v5+ clients keep the join intent and retry the
+          // same server-side collection effect.
+          code = "room_not_found";
+          errorMessage = ROOM_NOT_FOUND_MESSAGE;
+        }
+        sendError(socket, code, errorMessage);
         if (error.reason === "internal_error") {
           logEvent("room_persist_failed", {
             sessionId: session.id,

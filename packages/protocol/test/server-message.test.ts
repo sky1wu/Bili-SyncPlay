@@ -463,6 +463,19 @@ test("rejects error when payload shape is invalid", () => {
   );
 });
 
+test("accepts the retryable room-resolution error", () => {
+  assert.equal(
+    isServerMessage({
+      type: "error",
+      payload: {
+        code: "room_resolution_unconfirmed",
+        message: "Internal server error.",
+      },
+    }),
+    true,
+  );
+});
+
 test("accepts a valid sync:pong message", () => {
   assert.equal(
     isServerMessage({

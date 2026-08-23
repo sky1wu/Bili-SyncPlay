@@ -7,6 +7,8 @@ export interface PersistedState {
   memberId: string | null;
   displayName: string | null;
   roomState: RoomState | null;
+  pendingJoinRoomCode: string | null;
+  pendingJoinToken: string | null;
   serverUrl: string | null;
   pageShareButtonEnabled: boolean;
 }
@@ -17,6 +19,8 @@ interface StoredSession {
   memberToken: string | null;
   memberId: string | null;
   roomState: RoomState | null;
+  pendingJoinRoomCode?: string | null;
+  pendingJoinToken?: string | null;
 }
 
 interface StoredProfile {
@@ -36,6 +40,8 @@ export interface PersistedSessionState {
   memberToken: string | null;
   memberId: string | null;
   roomState: RoomState | null;
+  pendingJoinRoomCode: string | null;
+  pendingJoinToken: string | null;
 }
 
 export interface PersistedProfileState {
@@ -61,6 +67,8 @@ export async function loadState(): Promise<PersistedState> {
     memberToken: session.memberToken,
     memberId: session.memberId,
     roomState: session.roomState,
+    pendingJoinRoomCode: session.pendingJoinRoomCode,
+    pendingJoinToken: session.pendingJoinToken,
     displayName: profile.displayName,
     serverUrl: profile.serverUrl,
     pageShareButtonEnabled: profile.pageShareButtonEnabled,
@@ -79,6 +87,9 @@ export async function loadSessionState(): Promise<PersistedSessionState> {
     memberToken: sessionResult[SESSION_KEY]?.memberToken ?? null,
     memberId: sessionResult[SESSION_KEY]?.memberId ?? null,
     roomState: sessionResult[SESSION_KEY]?.roomState ?? null,
+    pendingJoinRoomCode:
+      sessionResult[SESSION_KEY]?.pendingJoinRoomCode ?? null,
+    pendingJoinToken: sessionResult[SESSION_KEY]?.pendingJoinToken ?? null,
   };
 }
 
@@ -106,6 +117,8 @@ export async function saveSessionState(
       memberToken: value.memberToken,
       memberId: value.memberId,
       roomState: value.roomState,
+      pendingJoinRoomCode: value.pendingJoinRoomCode,
+      pendingJoinToken: value.pendingJoinToken,
     },
   });
 }

@@ -73,9 +73,11 @@ export const DEFAULT_RUNTIME_TEARDOWN_CONFIRM_TIMEOUT_MS = 5_000;
  * How long a reader waits for an expired room's collection to confirm.
  *
  * Its own constant, not the teardown's: this one bounds a READ that found an
- * expired room, and giving up on it costs nothing (an expired room reads as
- * absent either way), while the teardown's bounds a request that is waiting to
- * know whether cleanup happened. Two behaviours, two constants (#271).
+ * expired room. If the bound wins, the read fails retryably rather than
+ * claiming the room is absent: the guarded delete may still answer
+ * `superseded`, which means another node kept that room alive. The teardown's
+ * constant instead bounds a request waiting to know whether cleanup happened.
+ * Two behaviours, two constants (#271).
  */
 export const DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS = 5_000;
 
@@ -92,6 +94,7 @@ type ServiceErrorReason =
   | "not_in_room"
   | "room_full"
   | "invalid_message"
+  | "room_resolution_unconfirmed"
   | "internal_error";
 
 export class RoomServiceError extends Error {
@@ -105,11 +108,28 @@ export class RoomServiceError extends Error {
   }
 }
 
-class RoomDeleteConfirmationTimeoutError extends Error {
-  constructor(readonly timeoutMs: number) {
+type RoomExpiryResolutionUnconfirmedTrigger =
+  "delete_timeout" | "service_closing" | "still_expired_after_superseded";
+
+class RoomExpiryResolutionUnconfirmedError extends RoomServiceError {
+  constructor(
+    roomCode: string,
+    readonly trigger: RoomExpiryResolutionUnconfirmedTrigger,
+    timeoutMs?: number,
+  ) {
     super(
-      `Expired room collection did not confirm within ${timeoutMs}ms; its real effect is still tracked.`,
+      "room_resolution_unconfirmed",
+      INTERNAL_SERVER_ERROR_MESSAGE,
+      "room_resolution_unconfirmed",
+      {
+        roomCode,
+        reason: "room_expiry_resolution_unconfirmed",
+        trigger,
+        confirmation: "unconfirmed",
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      },
     );
+    this.name = "RoomExpiryResolutionUnconfirmedError";
   }
 }
 
@@ -308,6 +328,10 @@ export function createRoomService(options: {
   let closing = false;
   let closePromise: Promise<void> | null = null;
   const playbackAuthorityByRoom = new Map<string, PlaybackAuthority>();
+  const expiredRoomCollectionEffects = new Map<
+    string,
+    Promise<RoomDeleteOutcome>
+  >();
 
   if (!runtimeStoreOption) {
     throw new Error("RuntimeStore is required");
@@ -864,11 +888,10 @@ export function createRoomService(options: {
     // instant and the next pass dies on this path instead, and leaving it out
     // would make reclamations look like they trail room creations forever.
     //
-    // Only the caller whose delete actually removed the record counts it.
-    // Concurrent readers all see the same expired snapshot and all reach this
-    // delete — and the reaper's sweep can be one of them — so counting every
-    // arrival would meter one room several times, which is the exact defect
-    // this counter exists to remove (#254 review).
+    // Only the effect whose delete actually removed the record counts it. Lazy
+    // readers now share one effect below, but the reaper's sweep can still race
+    // it; counting an `already_deleted` arrival would meter one room twice,
+    // which is the exact defect this counter exists to remove (#254 review).
     if (outcome === "deleted") {
       options.metricsCollector?.recordRoomsExpiredDeleted(1);
     }
@@ -878,6 +901,36 @@ export function createRoomService(options: {
     return outcome;
   }
 
+  function getOrStartExpiredRoomCollection(
+    code: string,
+  ): Promise<RoomDeleteOutcome> {
+    const existing = expiredRoomCollectionEffects.get(code);
+    if (existing) {
+      return existing;
+    }
+
+    // One real, shutdown-tracked delete effect per room code while its guarded
+    // outcome is still unknown. Retries cap only their waits on this promise;
+    // they must add neither another tracked wrapper nor another Redis delete.
+    const effect = roomDeleteConfirmationPacer.trackCall(
+      collectExpiredRoom(code),
+    );
+    expiredRoomCollectionEffects.set(code, effect);
+    void effect.then(
+      () => {
+        if (expiredRoomCollectionEffects.get(code) === effect) {
+          expiredRoomCollectionEffects.delete(code);
+        }
+      },
+      () => {
+        if (expiredRoomCollectionEffects.get(code) === effect) {
+          expiredRoomCollectionEffects.delete(code);
+        }
+      },
+    );
+    return effect;
+  }
+
   async function resolveRoom(code: string): Promise<PersistedRoom | null> {
     const room = await roomStore.getRoom(code);
     if (!room) {
@@ -885,33 +938,39 @@ export function createRoomService(options: {
     }
     if (room.expiresAt !== null && room.expiresAt <= now()) {
       // `close()` may have run while the room read above was in flight. Do not
-      // admit a new lazy-delete effect after its shutdown snapshot; an expired
-      // room already reads as absent, and a later process/reaper can collect it.
+      // admit a new lazy-delete effect after its shutdown snapshot, but do not
+      // call the room absent either: another node may already have revived the
+      // stale snapshot. The caller keeps its session and may retry elsewhere.
       if (closing) {
-        return null;
+        throw new RoomExpiryResolutionUnconfirmedError(code, "service_closing");
       }
       let outcome: RoomDeleteOutcome;
       try {
-        outcome = await roomDeleteConfirmationPacer.capAttempt(
-          collectExpiredRoom(code),
+        outcome = await roomDeleteConfirmationPacer.capWait(
+          getOrStartExpiredRoomCollection(code),
           roomDeleteConfirmationTimeoutMs,
           () =>
-            new RoomDeleteConfirmationTimeoutError(
+            new RoomExpiryResolutionUnconfirmedError(
+              code,
+              "delete_timeout",
               roomDeleteConfirmationTimeoutMs,
             ),
         );
       } catch (error) {
-        if (error instanceof RoomDeleteConfirmationTimeoutError) {
+        if (
+          error instanceof RoomExpiryResolutionUnconfirmedError &&
+          error.trigger === "delete_timeout"
+        ) {
           // The wait ended; the effect did not. It still holds the delete and
-          // everything a successful one owes, so this reader simply answers what
-          // an expired room has always answered.
+          // everything a successful one owes. The final result can still be
+          // `superseded`, so this reader must preserve its session and fail
+          // retryably instead of claiming confirmed absence.
           logEvent("room_expiry_delete_unconfirmed", {
             roomCode: code,
             provider: persistence.provider,
             result: "timeout",
             confirmation: "unconfirmed",
           });
-          return null;
         }
         throw error;
       }
@@ -919,11 +978,20 @@ export function createRoomService(options: {
         // The code no longer carries the expired record this read decided
         // against: an update cleared its expiry, or a different room took the
         // code. Answered from a fresh read rather than from the snapshot that is
-        // now known to be stale; a room that reads as expired AGAIN is left to
-        // the sweep instead of looping back into this branch.
+        // now known to be stale. A room that reads as expired AGAIN remains an
+        // unconfirmed resolution instead of looping back into another delete.
         const fresh = await roomStore.getRoom(code);
-        if (!fresh || (fresh.expiresAt !== null && fresh.expiresAt <= now())) {
+        if (!fresh) {
           return null;
+        }
+        if (fresh.expiresAt !== null && fresh.expiresAt <= now()) {
+          // The guard declined the old delete, but this later snapshot has now
+          // expired too. No delete has confirmed this room absent; let the
+          // caller retry rather than collapsing a still-present record to null.
+          throw new RoomExpiryResolutionUnconfirmedError(
+            code,
+            "still_expired_after_superseded",
+          );
         }
         return fresh;
       }
@@ -2419,14 +2487,12 @@ export function createRoomService(options: {
         memberToken,
         messageType,
       );
-      const persistedRoom = await resolveRoom(access.persistedRoom.code);
-      if (!persistedRoom) {
-        throw new RoomServiceError(
-          "room_not_found",
-          ROOM_NOT_FOUND_MESSAGE,
-          "room_not_found",
-        );
-      }
+      // Authentication and room resolution are one snapshot. Resolving again
+      // opens a second confirmed-absence branch that bypasses the session
+      // cleanup owned by `requireJoinedRoomSession`; it can also return a state
+      // assembled from two different room lifetimes. A later request observes
+      // any deletion through the same authoritative entry point.
+      const persistedRoom = access.persistedRoom;
       return roomStateFromSessions(
         persistedRoom,
         await runtimeStore.listClusterSessionsByRoom(persistedRoom.code),

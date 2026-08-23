@@ -89,7 +89,12 @@ export interface RoomSessionState {
   pendingCreateRoom: boolean;
   pendingJoinRoomCode: string | null;
   pendingJoinToken: string | null;
-  pendingJoinRequestSent: boolean;
+  /**
+   * Socket generation that owns the in-flight join request. A new connection
+   * has a different generation and can therefore resend the durable join intent
+   * without waiting for the dead socket's close event to mutate shared state.
+   */
+  pendingJoinRequestGeneration: number | null;
   /**
    * True while connected but the (re)join handshake has not yet delivered an
    * authoritative `room:state` for the current session. During this window the
@@ -180,7 +185,7 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       pendingCreateRoom: false,
       pendingJoinRoomCode: null,
       pendingJoinToken: null,
-      pendingJoinRequestSent: false,
+      pendingJoinRequestGeneration: null,
       awaitingFreshRoomState: false,
       pendingSharedVideo: null,
       pendingSharedPlayback: null,

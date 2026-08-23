@@ -17,6 +17,8 @@ function createState(): BootstrapMutableState {
     memberId: null,
     displayName: null,
     roomState: null,
+    pendingJoinRoomCode: null,
+    pendingJoinToken: null,
     serverUrl: DEFAULT_SERVER_URL,
     pageShareButtonEnabled: true,
     lastError: null,
@@ -34,6 +36,8 @@ function createPersistedSnapshot(
     memberId: null,
     displayName: null,
     roomState: null,
+    pendingJoinRoomCode: null,
+    pendingJoinToken: null,
     serverUrl: null,
     pageShareButtonEnabled: true,
     ...overrides,
@@ -113,6 +117,32 @@ test("bootstrap reconnects when persisted serverUrl is valid", async () => {
   assert.equal(state.serverUrl, "ws://localhost:8787");
   assert.equal(state.pageShareButtonEnabled, true);
   assert.equal(state.lastError, null);
+});
+
+test("bootstrap restores and reconnects an explicit join intent", async () => {
+  const state = createState();
+  let connectCalls = 0;
+
+  await bootstrapBackground({
+    state,
+    loadPersistedBackgroundSnapshot: async () =>
+      createPersistedSnapshot({
+        pendingJoinRoomCode: "ROOM05",
+        pendingJoinToken: "join-token-5",
+        serverUrl: "ws://localhost:8787",
+      }),
+    connect: () => {
+      connectCalls += 1;
+    },
+    log: () => {},
+    broadcastPopupState: () => {},
+    addTabRemovedListener: () => {},
+  });
+
+  assert.equal(state.roomCode, null);
+  assert.equal(state.pendingJoinRoomCode, "ROOM05");
+  assert.equal(state.pendingJoinToken, "join-token-5");
+  assert.equal(connectCalls, 1);
 });
 
 test("bootstrap restores the persisted page share button setting", async () => {

@@ -13,7 +13,7 @@ test("background state store exposes stable mutable state and patch semantics", 
     },
     room: {
       roomCode: "ROOM01",
-      pendingJoinRequestSent: true,
+      pendingJoinRequestGeneration: 3,
     },
     settings: {
       pageShareButtonEnabled: false,
@@ -25,7 +25,7 @@ test("background state store exposes stable mutable state and patch semantics", 
   assert.equal(nextState.connection.connected, true);
   assert.equal(nextState.connection.serverUrl, "ws://localhost:9999");
   assert.equal(nextState.room.roomCode, "ROOM01");
-  assert.equal(nextState.room.pendingJoinRequestSent, true);
+  assert.equal(nextState.room.pendingJoinRequestGeneration, 3);
   assert.equal(nextState.share.sharedTabId, null);
   assert.equal(nextState.settings.pageShareButtonEnabled, false);
 });

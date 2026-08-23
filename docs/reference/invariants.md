@@ -926,8 +926,17 @@ do NOT compose, and that is the part that decides which connection gets which:
   answers the caller, the effect keeps the outcome its follow-ups need.** So the
   store declares `boundedByOuterCaller`, each caller builds delete-plus-
   follow-ups as ONE chain and caps only its own WAIT, and a delete that lands
-  late still counts, still tears down, still broadcasts. `resolveRoom` answers
-  `null` on the deadline (an expired room reads as absent either way);
+  late still counts, still tears down, still broadcasts. `resolveRoom` preserves
+  a third outcome: on the deadline it fails retryably and leaves the session
+  untouched, because the late guard may still answer `superseded`; only a
+  confirmed absent room answers `null`. Join clients receive the dedicated
+  `room_resolution_unconfirmed` result and resend the exact join intent. That
+  intent lives in session storage across an MV3 worker restart, while the
+  in-flight marker names its WebSocket generation so a replacement connection
+  can resend without waiting for the old socket's close. Those retries share
+  the one in-flight collection effect for the room code: the effect enters the
+  shutdown tracker once, and request deadlines cap only their own waits—never
+  another tracked wrapper or another underlying Redis delete.
   `closeRoom` / `expireRoom` refuse to report a completed action they cannot
   confirm and return 503 `room_delete_unconfirmed`, while the effect logs its
   own late outcome. That ownership extends through shutdown: the admin action

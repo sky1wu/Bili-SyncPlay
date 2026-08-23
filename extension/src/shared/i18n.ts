@@ -287,6 +287,7 @@ export function localizeServerError(
       return t("serverErrorInvalidMessage");
     case "unsupported_protocol_version":
       return t("serverErrorUnsupportedProtocolVersion");
+    case "room_resolution_unconfirmed":
     case "internal_error":
       return t("serverErrorInternal");
     default:

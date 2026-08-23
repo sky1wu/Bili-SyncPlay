@@ -10,6 +10,8 @@ export interface BootstrapMutableState {
   memberId: string | null;
   displayName: string | null;
   roomState: RoomState | null;
+  pendingJoinRoomCode: string | null;
+  pendingJoinToken: string | null;
   serverUrl: string;
   pageShareButtonEnabled: boolean;
   lastError: string | null;
@@ -31,14 +33,20 @@ export async function bootstrapBackground(args: {
   args.state.memberId = persisted.memberId;
   args.state.displayName = persisted.displayName;
   args.state.roomState = persisted.roomState;
+  args.state.pendingJoinRoomCode = persisted.pendingJoinRoomCode;
+  args.state.pendingJoinToken = persisted.pendingJoinToken;
   args.state.pageShareButtonEnabled = persisted.pageShareButtonEnabled;
 
   const persistedServerUrl = resolvePersistedServerUrl(persisted.serverUrl);
   args.state.serverUrl = persistedServerUrl.serverUrl;
   args.state.lastError = persistedServerUrl.lastError;
-  if (args.state.roomCode && persistedServerUrl.shouldAutoConnect) {
+  const hasRestorableJoinIntent = Boolean(
+    args.state.roomCode ||
+    (args.state.pendingJoinRoomCode && args.state.pendingJoinToken),
+  );
+  if (hasRestorableJoinIntent && persistedServerUrl.shouldAutoConnect) {
     args.connect();
-  } else if (args.state.roomCode && persistedServerUrl.lastError) {
+  } else if (hasRestorableJoinIntent && persistedServerUrl.lastError) {
     args.log(
       "background",
       `Skipped reconnect because persisted server URL is invalid: ${args.state.serverUrl}`,

@@ -89,6 +89,7 @@ function createHarness(options: { withProbeFetch?: boolean } = {}) {
   runtimeState.room.roomCode = "ROOM01";
   const clearPendingLocalShareReasons: string[] = [];
   const adminResets: string[] = [];
+  const joinRequests: Array<{ roomCode: string; joinToken: string }> = [];
 
   const controller = createSocketController({
     connectionState: runtimeState.connection,
@@ -105,7 +106,11 @@ function createHarness(options: { withProbeFetch?: boolean } = {}) {
     },
     getPendingLocalShareGeneration: () =>
       runtimeState.share.pendingLocalShareGeneration,
-    sendJoinRequest: () => {},
+    sendJoinRequest: (roomCode, joinToken) => {
+      runtimeState.room.pendingJoinRequestGeneration =
+        runtimeState.connection.socketGeneration;
+      joinRequests.push({ roomCode, joinToken });
+    },
     sendToServer: () => {},
     handleServerMessage: async () => {},
     // Returning null skips the connection-check / healthcheck fetches so the
@@ -128,6 +133,7 @@ function createHarness(options: { withProbeFetch?: boolean } = {}) {
     controller,
     clearPendingLocalShareReasons,
     adminResets,
+    joinRequests,
   };
 }
 
@@ -307,6 +313,47 @@ test("a superseded socket close keeps a direct-send marker owned by a newer conn
 
     assert.deepEqual(harness.clearPendingLocalShareReasons, []);
     assert.equal(harness.runtimeState.connection.socket, secondSocket);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a replacement socket resends an explicit join still owned by the dying connection", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+    harness.runtimeState.room.roomCode = null;
+    harness.runtimeState.room.pendingJoinRoomCode = "ROOM05";
+    harness.runtimeState.room.pendingJoinToken = "join-token-5";
+
+    await harness.controller.connect();
+    const firstSocket = createdSockets[0];
+    firstSocket.readyState = FakeWebSocket.OPEN;
+    firstSocket.emit("open", {});
+    assert.deepEqual(harness.joinRequests, [
+      { roomCode: "ROOM05", joinToken: "join-token-5" },
+    ]);
+    assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 1);
+
+    // A reconnect may replace a CLOSING socket before its close event arrives.
+    // The old request belongs to generation 1, so generation 2 must resend the
+    // same durable intent without waiting for that late close to clear a boolean.
+    firstSocket.readyState = FakeWebSocket.CLOSING;
+    await harness.controller.connect();
+    const replacementSocket = createdSockets[1];
+    replacementSocket.readyState = FakeWebSocket.OPEN;
+    replacementSocket.emit("open", {});
+
+    assert.deepEqual(harness.joinRequests, [
+      { roomCode: "ROOM05", joinToken: "join-token-5" },
+      { roomCode: "ROOM05", joinToken: "join-token-5" },
+    ]);
+    assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 2);
+
+    firstSocket.emit("close", closeEvent());
+    assert.equal(harness.runtimeState.room.pendingJoinRequestGeneration, 2);
   } finally {
     harness?.controller.clearReconnectTimer();
     globals.restore();

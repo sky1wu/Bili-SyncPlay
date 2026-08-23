@@ -38,6 +38,8 @@ export function createMessageController(args: {
     displayName: string | null;
     roomState: RoomState | null;
     awaitingFreshRoomState: boolean;
+    pendingJoinRoomCode: string | null;
+    pendingJoinToken: string | null;
   };
   settingsState: {
     pageShareButtonEnabled: boolean;
@@ -154,7 +156,12 @@ export function createMessageController(args: {
         return;
       case "popup:get-state":
         args.diagnosticsController.maybeLogPopupStateRequest();
-        if (args.roomSessionState.roomCode && !args.connectionState.connected) {
+        if (
+          (args.roomSessionState.roomCode ||
+            (args.roomSessionState.pendingJoinRoomCode &&
+              args.roomSessionState.pendingJoinToken)) &&
+          !args.connectionState.connected
+        ) {
           void args.socketController.connect();
         }
         sendResponse(args.popupStateController.popupState());

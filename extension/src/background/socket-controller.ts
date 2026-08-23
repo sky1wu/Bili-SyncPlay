@@ -281,7 +281,7 @@ export function createSocketController(args: {
       } else if (
         args.roomSessionState.pendingJoinRoomCode &&
         args.roomSessionState.pendingJoinToken &&
-        !args.roomSessionState.pendingJoinRequestSent
+        args.roomSessionState.pendingJoinRequestGeneration !== socketGeneration
       ) {
         args.roomSessionState.awaitingFreshRoomState = true;
         args.sendJoinRequest(
@@ -443,6 +443,8 @@ export function createSocketController(args: {
         reconnectTimer: args.connectionState.reconnectTimer,
         roomCode: args.roomSessionState.roomCode,
         pendingCreateRoom: args.roomSessionState.pendingCreateRoom,
+        pendingJoinRoomCode: args.roomSessionState.pendingJoinRoomCode,
+        pendingJoinToken: args.roomSessionState.pendingJoinToken,
       })
     ) {
       return;
