@@ -996,19 +996,22 @@ do NOT compose, and that is the part that decides which connection gets which:
   version says "unchanged since I judged it empty". Each half has its own
   failing probe, because each fails a different way.
 
-  `updateRoom` has neither property. Its CAS compares the
-  whole previous body, so nothing it writes late can corrupt anything — but it
-  is reached from six request handlers whose successes owe six different
-  follow-ups, and three of those are not self-superseding: a join's seating, an
-  admin action's audit record, and the revival of an expiring room. Discarding
-  that last one leaves precisely the memberless, never-expiring room the reaper
-  cannot collect. A cap inside the store would answer all six by throwing the
-  outcome away, which is the same misplacement the guarded deletes were moved
-  out of — so `updateRoom` stays, and a bound for it would have to be six
-  caller-side effect chains, not one store-side cap. Recorded here because the
-  attempt was made and reverted (#277 review): the criterion is not "is this
-  write conditional" but "does the cap sit with the owner of what its success
-  owes".
+  `updateRoom` had neither property for a long time, and the record of that is
+  worth keeping because it is what the criterion was learned from. Its CAS
+  compares the whole previous body, so nothing it writes late can corrupt
+  anything — but it is reached from seven request handlers, and four of their
+  successes owe something nobody else repeats: a join's revival of an expiring
+  room, an admin video clear's audit record and broadcast, and the two writes
+  whose effects must outlive their request. A cap inside the store answers all
+  of them by throwing the outcome away, which is the same misplacement the
+  guarded deletes were moved out of — so an earlier attempt to cap it was
+  reverted, and **the criterion is not "is this write conditional" but "does the
+  cap sit with the owner of what its success owes"**.
+
+  What let it take the cap in the end was not a different answer to that
+  question but each of those callers answering it: two NAME a caller-side
+  deadline and keep their effect, two REPORT what they could not confirm (the
+  admin video clear does both), and the rest supersede themselves. The cap came last, and only then.
 
   `createRoom` left the list by satisfying the second half, not the first. Its
   `SET NX` guards EXISTENCE, not identity, so a landing that arrives after the
