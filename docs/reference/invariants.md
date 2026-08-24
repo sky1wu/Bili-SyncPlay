@@ -892,6 +892,14 @@ do NOT compose, and that is the part that decides which connection gets which:
   reason to retry rather than to give up (#301). Which guard applies is a
   property of the CALL, again.
 
+  A debt is a unique RECORD, not just a room code, and both directions compare
+  that identity. The reaper snapshots one and then awaits its write; in that
+  window the same room can be rejoined, emptied again, and owe a NEWER debt
+  naming a later state — so settling by code alone wipes it, and a failed
+  drain writing its stale debt back sends every later attempt at a version
+  nothing matches. The same rule `pendingRuntimeTeardowns` lives by, and the
+  ledger is the only trail these rooms have.
+
   What it does not cover, stated rather than papered over: a debt lives in this
   process, so a node that dies between the failed compensation and the next
   sweep forgets it. `pendingRuntimeTeardowns` has the same property. Making it

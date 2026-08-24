@@ -665,6 +665,165 @@ test("the reaper drains a leave that could not make its room collectable", async
   assert.equal(await roomStore.getRoom(created.room.code), null);
 });
 
+test("a stale drain does not wipe a newer debt for the same room", async () => {
+  // A debt is a unique RECORD, not just a room code. The reaper snapshots one
+  // and then awaits its write; in that window the same room can be rejoined,
+  // emptied again, and owe a NEWER debt naming a later state. Settling by code
+  // alone would wipe it — and the ledger is the only trail these rooms have
+  // (#277 review).
+  let currentTime = 1_000;
+  let expiryWriteFails = true;
+  let holdDrain: Promise<void> | null = null;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt === undefined) {
+          return roomStore.updateRoom(code, expected, patch, options);
+        }
+        if (holdDrain) {
+          // The drain's write, held open while a newer debt is recorded.
+          const held = holdDrain;
+          holdDrain = null;
+          await held;
+          return roomStore.updateRoom(code, expected, patch, options);
+        }
+        if (expiryWriteFails) {
+          throw new Error("expiry write failed");
+        }
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMST",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+
+  // The drain picks up that debt and stalls on its write.
+  let releaseDrain: (() => void) | undefined;
+  holdDrain = new Promise<void>((resolve) => {
+    releaseDrain = resolve;
+  });
+  currentTime += 1_000;
+  const draining = service.deleteExpiredRooms(currentTime);
+
+  // Meanwhile the room is rejoined, emptied again, and owes a NEWER debt: the
+  // rejoin moves the version, so the stale write in flight will conflict.
+  const latecomer = createSession("latecomer");
+  await service.joinRoomForSession(
+    latecomer,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.leaveRoomForSession(latecomer);
+
+  releaseDrain?.();
+  await draining;
+
+  // The stale conflict must not have settled the newer debt: the next sweep
+  // still finds it and makes the room collectable.
+  expiryWriteFails = false;
+  currentTime += 1_000;
+  await service.deleteExpiredRooms(currentTime);
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt,
+    currentTime,
+    "a stale drain wiped the newer debt",
+  );
+});
+
+test("a drain that failed does not put its stale debt back over a newer one", async () => {
+  // The other direction of the same rule: when the drain's write FAILS it keeps
+  // the debt — but a newer one may have replaced it meanwhile, naming a later
+  // state of the same room. Writing the stale one back would send every later
+  // drain at a version nothing matches, and the debt would be dropped as a
+  // conflict (#277 review).
+  let currentTime = 1_000;
+  let expiryWriteFails = true;
+  let holdDrain: Promise<void> | null = null;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt === undefined) {
+          return roomStore.updateRoom(code, expected, patch, options);
+        }
+        if (holdDrain) {
+          const held = holdDrain;
+          holdDrain = null;
+          await held;
+          // The drain's write does not merely conflict: it fails outright, so
+          // the effect keeps its debt.
+          throw new Error("expiry write failed");
+        }
+        if (expiryWriteFails) {
+          throw new Error("expiry write failed");
+        }
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMRB2",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+
+  let releaseDrain: (() => void) | undefined;
+  holdDrain = new Promise<void>((resolve) => {
+    releaseDrain = resolve;
+  });
+  currentTime += 1_000;
+  const draining = service.deleteExpiredRooms(currentTime);
+
+  const latecomer = createSession("latecomer");
+  await service.joinRoomForSession(
+    latecomer,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+  await service.leaveRoomForSession(latecomer);
+
+  releaseDrain?.();
+  await draining;
+
+  // The newer debt must still be the one on file: the next sweep pays it.
+  expiryWriteFails = false;
+  currentTime += 1_000;
+  await service.deleteExpiredRooms(currentTime);
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt,
+    currentTime,
+    "a failed drain wrote its stale debt back over the newer one",
+  );
+});
+
 test("a debt is not paid onto a room somebody came back to", async () => {
   // Occupancy is never consulted, because the write's own guard answers it: a
   // join clears `expiresAt` and moves the version, so an expiry pinned to the
