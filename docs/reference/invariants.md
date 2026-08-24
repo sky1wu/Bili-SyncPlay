@@ -889,7 +889,21 @@ do NOT compose, and that is the part that decides which connection gets which:
   mirror on the tracked promise and is right to: nobody compensates a kick by
   restoring the identity, so its late apply is the intended end state. **The
   question is not "is this write capped" but "does anyone undo it when told it
-  failed".** The standalone
+  failed".**
+
+  What the guard does NOT make atomic, deliberately: a revocation that lands
+  late while the compensation's own `addMember` then fails leaves Redis without
+  the token binding and this node's mirror with it, so that member cannot
+  reclaim the same `memberId` on a reconnect. Two commands are two commands, and
+  the same connection guarantees ORDER, not that the second one runs. This is
+  not a state the cap introduced — a rejected command may have executed too, so
+  every `revokeMemberToken` rejection has always been able to reach it. It is
+  accepted because the loss is one `memberId` in a room its owner asked to
+  leave, weighed against `room:leave` hanging on a stalled Redis with nothing
+  counting down, which is the defect #277 exists for. Making the pair atomic
+  would put a compensating effect lifecycle in `room-service` for that; if it is
+  ever built, it belongs to whoever is fixing the reconnect identity, not to a
+  bound (#277 review). The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
   had no production callers, so #277 removed them. **A write leaves this list by
   becoming CONDITIONAL, never by re-arguing #237**: a guarded write's late
