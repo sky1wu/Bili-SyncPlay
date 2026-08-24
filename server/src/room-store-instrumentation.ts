@@ -56,8 +56,8 @@ export function instrumentRoomStore(
       // Every parameter forwarded by name: a wrapper that declares fewer than
       // the type it is assigned to still typechecks, and silently drops the
       // ones it left out (AGENTS.md).
-      (code, expectedVersion, patch, expectedJoinToken) =>
-        roomStore.updateRoom(code, expectedVersion, patch, expectedJoinToken),
+      (code, expectedVersion, patch, options) =>
+        roomStore.updateRoom(code, expectedVersion, patch, options),
     ),
     deleteRoom: measure("delete_room", (expected) =>
       roomStore.deleteRoom(expected),

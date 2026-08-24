@@ -923,9 +923,12 @@ do NOT compose, and that is the part that decides which connection gets which:
   **A version is not an identity**: every new room starts at version 0, so a
   rollback holding version 0 matches a REPLACEMENT that took the freed code
   exactly, and would expire it out from under an owner already told their
-  creation succeeded. `updateRoom` therefore takes an optional
-  `expectedJoinToken`, compared in the same read that produces its CAS guard —
-  a check-then-act would leave the window open again. The recycling regression
+  creation succeeded. `updateRoom`'s guard is therefore a
+  `RoomUpdateGuard`: a version, or the room INSTANCE (`{ joinToken }`), compared
+  in the same read that produces its CAS guard — a check-then-act would leave
+  the window open again. A SHAPE rather than a nullable version, so "skip the
+  version check" cannot be asked for without saying which room is meant; that
+  combination would write to whatever holds the code. The recycling regression
   used to bump the replacement to version 1 before asserting, which is why the
   hole survived #237 and #301.
   It also stops trying other codes — a store that is not answering will not
@@ -942,12 +945,34 @@ do NOT compose, and that is the part that decides which connection gets which:
   (`DEFAULT_ROOM_ROLLBACK_CONFIRM_TIMEOUT_MS`, not the Redis liveness backstop
   and not the delete's), the effect keeps going, and `closeRoomService` drains
   it inside the same shutdown budget as the delete chain and the runtime
-  teardowns, reporting `pendingRoomRollbacks`. The rollback can also be REFUSED
-  before it issues, when the create that owes it took the last admission slot
-  and still holds it; that is reported as residue and given no reserved
-  capacity, because admission's value is being one number bounding ioredis's
-  queue and a second class inside it would not shrink the queue that caused the
-  refusal.
+  teardowns, reporting `pendingRoomRollbacks`.
+
+  Splitting the wait is only half of it: **an effect that keeps going must not
+  be built out of capped calls.** The rollback's own read took the store's
+  request cap, which ENDS the call at the first timeout — the CAS was then
+  never issued, and a create that landed late stayed behind exactly as before.
+  So `updateRoom` takes a `boundedBy` declaration, a NAMED caller-side deadline
+  rather than a boolean, and that call runs admitted but uncapped like the
+  guarded deletes. Which bound applies is a property of the CALL, as everywhere
+  else here. `close()` gates it too: an effect admitted after the shutdown
+  snapshot is one nobody waits for and nobody reports, so a rollback that would
+  start while `closing` is refused and logged instead — the same rule the lazy
+  delete follows one function over.
+
+  Pinning the rollback by INSTANCE rather than by version is what collapsed the
+  rest of it. the rollback passes `{ joinToken }` instead of a version — the
+  same reason `deleteRoom` pins that way: an admin
+  touching the still-memberless room moves its version, and a version-exact
+  guard would decline the very change that makes the rollback matter. With the
+  store answering `not_found` for a code that changed hands, the loop's re-read,
+  its identity re-check and its false-alarm reasoning all disappear; what is
+  left is a bounded number of attempts against a live byte-CAS conflict.
+
+  The rollback can still be REFUSED before it issues, when the create that owes
+  it took the last admission slot and still holds it; that is reported as
+  residue and given no reserved capacity, because admission's value is being one
+  number bounding ioredis's queue and a second class inside it would not shrink
+  the queue that caused the refusal.
 
   The room store's delete left the same list the same way, in TWO guarded forms
   because the guard is a property of the CALL, not of the method. `deleteRoom`

@@ -1391,14 +1391,21 @@ export async function createRedisRoomStore(
     },
     async updateRoom(
       code,
-      expectedVersion,
+      expected,
       patch,
-      expectedJoinToken,
+      options,
     ): Promise<RoomUpdateResult> {
       const key = roomKey(code);
-      // The read half is capped like any other read; the CAS below is the one
-      // unconditional durable write left for its own derivation.
-      const rawRoom = await boundCommand("update_room", () => redis.get(key));
+      // A caller that bounds its own wait and keeps the effect takes admission
+      // WITHOUT the cap, like the guarded deletes. Capping its read would end
+      // the call at the first timeout and the CAS would never be issued — the
+      // effect would die exactly where it is supposed to outlive the stall
+      // (#277 review). Everyone else keeps the request cap on the read; the
+      // CAS below is the one unconditional durable write left for its own
+      // derivation.
+      const bound =
+        options?.boundedBy === undefined ? boundCommand : admitCommand;
+      const rawRoom = await bound("update_room", () => redis.get(key));
       if (rawRoom === null) {
         return { ok: false, reason: "not_found" };
       }
@@ -1406,19 +1413,16 @@ export async function createRedisRoomStore(
       if (!currentRoom) {
         return { ok: false, reason: "not_found" };
       }
-      if (
-        expectedJoinToken !== undefined &&
-        currentRoom.joinToken !== expectedJoinToken
-      ) {
-        // A different room holds this code now. Ahead of the version check on
-        // purpose: a replacement is at version 0 too, so the version would say
-        // nothing. The bytes checked here are the ones the CAS guards on, so a
-        // record that changes after this read declines rather than slipping
-        // through.
+      // Checked against the bytes the CAS below guards on, so a record that
+      // changes after this read declines rather than slipping through.
+      if (typeof expected === "number") {
+        if (currentRoom.version !== expected) {
+          return { ok: false, reason: "version_conflict" };
+        }
+      } else if (currentRoom.joinToken !== expected.joinToken) {
+        // A different room holds this code now. The version could not have said
+        // so: a replacement starts at 0 like every other new room.
         return { ok: false, reason: "not_found" };
-      }
-      if (currentRoom.version !== expectedVersion) {
-        return { ok: false, reason: "version_conflict" };
       }
 
       const nextRoom: PersistedRoom = {
@@ -1427,16 +1431,29 @@ export async function createRedisRoomStore(
         version: currentRoom.version + 1,
       };
 
-      const result = await redis.eval(
-        UPDATE_ROOM_CAS_LUA,
-        2,
-        key,
-        roomsByExpiryKey,
-        rawRoom,
-        serializeRoom(nextRoom),
-        expiryScore(nextRoom),
-        code,
-      );
+      const result = await (options?.boundedBy === undefined
+        ? redis.eval(
+            UPDATE_ROOM_CAS_LUA,
+            2,
+            key,
+            roomsByExpiryKey,
+            rawRoom,
+            serializeRoom(nextRoom),
+            expiryScore(nextRoom),
+            code,
+          )
+        : admitCommand("update_room_cas", () =>
+            redis.eval(
+              UPDATE_ROOM_CAS_LUA,
+              2,
+              key,
+              roomsByExpiryKey,
+              rawRoom,
+              serializeRoom(nextRoom),
+              expiryScore(nextRoom),
+              code,
+            ),
+          ));
 
       if (result === "not_found") {
         return { ok: false, reason: "not_found" };

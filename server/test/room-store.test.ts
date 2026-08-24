@@ -78,9 +78,8 @@ test("an update pinned to a room instance declines a code that changed hands", a
   assert.deepEqual(
     await store.updateRoom(
       ours.code,
-      ours.version,
+      { joinToken: ours.joinToken },
       { expiresAt: 999 },
-      ours.joinToken,
     ),
     { ok: false, reason: "not_found" },
   );
@@ -94,9 +93,8 @@ test("an update pinned to a room instance declines a code that changed hands", a
   });
   const expired = await store.updateRoom(
     mine.code,
-    mine.version,
+    { joinToken: mine.joinToken },
     { expiresAt: 999 },
-    mine.joinToken,
   );
   assert.equal(expired.ok, true);
 });

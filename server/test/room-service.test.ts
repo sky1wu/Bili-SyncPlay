@@ -302,16 +302,11 @@ test("room service restores member state when empty-room expiry scheduling fails
   });
   const failingRoomStore: RoomStore = {
     ...roomStore,
-    async updateRoom(code, expectedVersion, patch, expectedJoinToken) {
+    async updateRoom(code, expected, patch, options) {
       if (patch.expiresAt !== undefined) {
         throw new Error("expiry write failed");
       }
-      return roomStore.updateRoom(
-        code,
-        expectedVersion,
-        patch,
-        expectedJoinToken,
-      );
+      return roomStore.updateRoom(code, expected, patch, options);
     },
   };
   const service = createRoomService({
@@ -473,7 +468,7 @@ test("room service skips leave recovery when room is concurrently deleted", asyn
   // catch block's existence check.
   const concurrentDeleteRoomStore: RoomStore = {
     ...roomStore,
-    async updateRoom(code, expectedVersion, patch, expectedJoinToken) {
+    async updateRoom(code, expected, patch, options) {
       if (patch.expiresAt !== undefined) {
         // Delete the room so the catch block's getRoom check sees the room is gone.
         const existing = await roomStore.getRoom(code);
@@ -482,12 +477,7 @@ test("room service skips leave recovery when room is concurrently deleted", asyn
         }
         throw new Error("expiry write failed");
       }
-      return roomStore.updateRoom(
-        code,
-        expectedVersion,
-        patch,
-        expectedJoinToken,
-      );
+      return roomStore.updateRoom(code, expected, patch, options);
     },
   };
   const service = createRoomService({
@@ -554,16 +544,11 @@ test("room service skips leave recovery when socket is already closed", async ()
   });
   const failingRoomStore: RoomStore = {
     ...roomStore,
-    async updateRoom(code, expectedVersion, patch, expectedJoinToken) {
+    async updateRoom(code, expected, patch, options) {
       if (patch.expiresAt !== undefined) {
         throw new Error("expiry write failed");
       }
-      return roomStore.updateRoom(
-        code,
-        expectedVersion,
-        patch,
-        expectedJoinToken,
-      );
+      return roomStore.updateRoom(code, expected, patch, options);
     },
   };
   const service = createRoomService({
@@ -4920,7 +4905,7 @@ test("rolls an unstamped room back over a concurrent update of the same record",
     persistence: getDefaultPersistenceConfig(),
     roomStore: {
       ...roomStore,
-      async updateRoom(code, expectedVersion, patch, expectedJoinToken) {
+      async updateRoom(code, expected, patch, options) {
         if (!raced) {
           raced = true;
           // An admin touches the still-memberless room between our create and
@@ -4932,12 +4917,7 @@ test("rolls an unstamped room back over a concurrent update of the same record",
             lastActiveAt: 2_000,
           });
         }
-        return await roomStore.updateRoom(
-          code,
-          expectedVersion,
-          patch,
-          expectedJoinToken,
-        );
+        return await roomStore.updateRoom(code, expected, patch, options);
       },
     },
     activeRooms: {
@@ -5013,29 +4993,25 @@ test("reports the residue when the rollback keeps losing the version race", asyn
 });
 
 test("does not report a rollback whose room was replaced on the last attempt", async () => {
+  // Giving up is a report, and a report about a room that has since been
+  // replaced is a false alarm. The rollback no longer re-reads to find that
+  // out: pinned by INSTANCE, the store answers `not_found` for a code that
+  // changed hands — including on the attempt that would otherwise have been
+  // the last (#277 review).
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const runtime = createInMemoryRuntimeStore(() => 1_000);
   const events: string[] = [];
-  // Only the rollback calls `updateRoom` here, so this counts its attempts.
-  let conflicts = 0;
+  let attempts = 0;
   const service = createRoomService({
     config: getDefaultSecurityConfig(),
     persistence: getDefaultPersistenceConfig(),
     roomStore: {
       ...roomStore,
       async updateRoom() {
-        conflicts += 1;
-        return { ok: false, reason: "version_conflict" };
-      },
-      async getRoom(code, caller) {
-        const current = await roomStore.getRoom(code, caller);
-        if (!current || conflicts < 3) {
-          return current;
-        }
-        // Our room is deleted and the code is reused, and the conflict that
-        // exposes it is the LAST one. Giving up without looking would report an
-        // orphan that no longer exists.
-        return { ...current, joinToken: "replacement-token" };
+        attempts += 1;
+        return attempts < 3
+          ? { ok: false, reason: "version_conflict" }
+          : { ok: false, reason: "not_found" };
       },
     },
     activeRooms: {
@@ -5061,6 +5037,7 @@ test("does not report a rollback whose room was replaced on the last attempt", a
     /internal server error/i,
   );
 
+  assert.equal(attempts, 3);
   assert.ok(!events.includes("room_rollback_failed"));
 });
 
@@ -5292,6 +5269,77 @@ test("answers the creator when its orphan rollback goes unconfirmed", async () =
   await patient.close();
 });
 
+test("refuses an orphan rollback admitted after the shutdown snapshot", async () => {
+  // A session handler may keep running past the drain timeout, so a create can
+  // still be in flight when `close()` returns. An effect admitted then is one
+  // nobody waits for and nobody reports — refused for the same reason a lazy
+  // delete is, and said out loud instead (#277 review).
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const events: { name: string; error?: unknown }[] = [];
+  let releaseCreate: (() => void) | undefined;
+  const createHeld = new Promise<void>((resolve) => {
+    releaseCreate = resolve;
+  });
+  let rollbackAttempts = 0;
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      async createRoom(input) {
+        await roomStore.createRoom(input);
+        await createHeld;
+        throw new RedisStoreUnavailableError(
+          "room",
+          "create_room",
+          "timeout",
+          "Redis room store command went unanswered.",
+        );
+      },
+      async updateRoom(code, expectedVersion, patch, options) {
+        rollbackAttempts += 1;
+        return await roomStore.updateRoom(
+          code,
+          expectedVersion,
+          patch,
+          options,
+        );
+      },
+    },
+    activeRooms: createInMemoryRuntimeStore(() => 1_000),
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name, payload) => {
+      events.push({
+        name,
+        error: (payload as { error?: unknown } | undefined)?.error,
+      });
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMSC",
+    roomRollbackConfirmationTimeoutMs: 5,
+    closeBudgetMs: 5,
+  });
+
+  const creating = service
+    .createRoomForSession(createSession("owner"), "Alice")
+    .catch(() => undefined);
+  await service.close();
+  releaseCreate?.();
+  await creating;
+
+  assert.equal(rollbackAttempts, 0);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.name === "room_rollback_failed" &&
+        event.error === "service_closing",
+    ),
+  );
+});
+
 test("waits for an orphan rollback that lands inside the close budget", async () => {
   // The half a "still pending" assertion cannot make: with no drain, `close()`
   // returns before the effect lands and the count is still 1 either way. Here
@@ -5313,14 +5361,9 @@ test("waits for an orphan rollback that lands inside the close budget", async ()
           "Redis room store command went unanswered.",
         );
       },
-      async updateRoom(code, expectedVersion, patch, expectedJoinToken) {
+      async updateRoom(code, expected, patch, options) {
         await new Promise((resolve) => setTimeout(resolve, 50));
-        return await roomStore.updateRoom(
-          code,
-          expectedVersion,
-          patch,
-          expectedJoinToken,
-        );
+        return await roomStore.updateRoom(code, expected, patch, options);
       },
     },
     activeRooms: createInMemoryRuntimeStore(() => 1_000),
@@ -5421,14 +5464,9 @@ test("does not roll back a create that admission refused before issuing it", asy
           "Redis room store refused create_room.",
         );
       },
-      async updateRoom(code, expectedVersion, patch, expectedJoinToken) {
+      async updateRoom(code, expected, patch, options) {
         updateRoomCalls += 1;
-        return await roomStore.updateRoom(
-          code,
-          expectedVersion,
-          patch,
-          expectedJoinToken,
-        );
+        return await roomStore.updateRoom(code, expected, patch, options);
       },
     },
     activeRooms: runtime,

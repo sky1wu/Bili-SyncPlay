@@ -947,18 +947,16 @@ test("redis room update applies the patch, bumps version, and rejects stale writ
     assert.deepEqual(
       await store.updateRoom(
         room.code,
-        replacement.version,
+        { joinToken: room.joinToken },
         { expiresAt: 900 },
-        room.joinToken,
       ),
       { ok: false, reason: "not_found" },
     );
     assert.equal((await store.getRoom("CASRM1"))?.expiresAt, null);
     const pinned = await store.updateRoom(
       replacement.code,
-      replacement.version,
+      { joinToken: replacement.joinToken },
       { expiresAt: 900 },
-      replacement.joinToken,
     );
     assert.equal(pinned.ok, true);
   } finally {

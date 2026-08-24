@@ -1310,10 +1310,30 @@ export function createRoomService(options: {
    * in it. What an operator needs is the room code, which the log carries.
    */
   async function expireOrphanedRoom(
-    target: { code: string; joinToken: string; version: number },
+    target: { code: string; joinToken: string },
     reason: string,
     session: Session,
   ): Promise<void> {
+    // `close()` may have run while the create that owes this rollback was
+    // still in flight — a session handler is allowed to keep going past the
+    // drain timeout. An effect admitted after the shutdown snapshot is one
+    // nobody waits for and nobody reports, so it is refused here for the same
+    // reason a lazy delete is, and said out loud instead (#277 review).
+    if (closing) {
+      logEvent(
+        "room_rollback_failed",
+        {
+          sessionId: session.id,
+          roomCode: target.code,
+          provider: persistence.provider,
+          result: "error",
+          reason,
+          error: "service_closing",
+        },
+        { level: "error" },
+      );
+      return;
+    }
     // Two lifetimes, like every other bounded effect here: the request stops
     // waiting on its own deadline, the rollback keeps going. It has to, because
     // its write half is `updateRoom`'s CAS — deliberately uncapped in the store
@@ -1351,67 +1371,65 @@ export function createRoomService(options: {
 
   /** The rollback itself. Reports its own residue and never rejects. */
   async function runOrphanExpiry(
-    target: { code: string; joinToken: string; version: number },
+    target: { code: string; joinToken: string },
     reason: string,
     session: Session,
   ): Promise<void> {
-    let rollbackResidue: string | null = null;
+    // Every path out of the block below either returns or names a residue, so
+    // there is no initial value to be shadowed.
+    let rollbackResidue: string;
     try {
-      let expectedVersion = target.version;
-      // Attempts against a live conflict, not a retry schedule: a losing CAS
-      // re-reads to the current version immediately, and only a concurrent
-      // writer on this same record can make it lose again.
-      for (let attempt = 0; ; attempt += 1) {
+      // Attempts against a live conflict, not a retry schedule. There is no
+      // re-read between them any more: pinning by INSTANCE instead of by
+      // version made the loop's other job disappear — the store answers
+      // `not_found` for a code that changed hands, so a conflict can now mean
+      // only that a concurrent writer changed the body between the store's own
+      // read and its CAS, and the next attempt reads the new one.
+      for (
+        let attempt = 0;
+        attempt < ROOM_ROLLBACK_MAX_ATTEMPTS;
+        attempt += 1
+      ) {
         const rollback = await roomStore.updateRoom(
           target.code,
-          expectedVersion,
+          // The INSTANCE, not the version we created at: an admin can touch
+          // this still-memberless room, and a version-exact guard would decline
+          // the very change that makes the rollback matter — the same reason
+          // `deleteRoom` pins this way. A replacement that took the code is at
+          // version 0 too, so the version could not name our room anyway
+          // (#277 review).
+          { joinToken: target.joinToken },
           { expiresAt: now() },
-          // The version alone does not name our room: a replacement that took
-          // this code is at version 0 too, and expiring THAT one would hit an
-          // owner already told their creation succeeded (#277 review).
-          target.joinToken,
+          {
+            boundedBy:
+              "room-service: orphan rollback confirmation deadline (the request stops waiting; this effect does not)",
+          },
         );
+        // `not_found` covers both "already collected" and "a different room
+        // holds this code" — neither owes us anything.
         if (rollback.ok || rollback.reason === "not_found") {
-          break;
+          return;
         }
-        // Re-read on EVERY conflict, the last one included: giving up is a
-        // report, and a report about a room that has since been replaced is a
-        // false alarm. A different room under this code owes us nothing, and
-        // one that is already expired is already collectable.
-        const current = await roomStore.getRoom(target.code);
-        if (
-          !current ||
-          current.joinToken !== target.joinToken ||
-          current.expiresAt !== null
-        ) {
-          break;
-        }
-        if (attempt + 1 >= ROOM_ROLLBACK_MAX_ATTEMPTS) {
-          rollbackResidue = "version_conflict";
-          break;
-        }
-        expectedVersion = current.version;
       }
+      rollbackResidue = "version_conflict";
     } catch (rollbackError) {
       rollbackResidue =
         rollbackError instanceof Error
           ? rollbackError.message
           : String(rollbackError);
     }
-    if (rollbackResidue !== null) {
-      logEvent(
-        "room_rollback_failed",
-        {
-          sessionId: session.id,
-          roomCode: target.code,
-          provider: persistence.provider,
-          result: "error",
-          reason,
-          error: rollbackResidue,
-        },
-        { level: "error" },
-      );
-    }
+    logEvent(
+      "room_rollback_failed",
+      {
+        sessionId: session.id,
+        roomCode: target.code,
+        provider: persistence.provider,
+        result: "error",
+        reason,
+        error: rollbackResidue,
+      },
+      { level: "error" },
+    );
   }
 
   async function withVersionRetry<T = PersistedRoom>(
@@ -2025,7 +2043,7 @@ export function createRoomService(options: {
           // did not is free — the rollback reads `not_found` and stops.
           if (error.reason !== "admission") {
             await expireOrphanedRoom(
-              { code: roomCode, joinToken, version: 0 },
+              { code: roomCode, joinToken },
               "room_create_unconfirmed",
               session,
             );

@@ -255,7 +255,15 @@ before changing the code it describes.
   single caller expires the room it may have built (`expireOrphanedRoom`,
   identified by the code and joinToken it generated first) and stops trying
   other codes; only a `timeout` is compensated, since `admission` proves no
-  command was issued. `markRoomGeneration` compares the creator's
+  command was issued. That compensation is a second lifetime in its own right —
+  and **an effect that keeps going must not be built out of capped calls**: a
+  capped read ends the call at the first timeout and its write is never issued,
+  so `updateRoom` takes a NAMED `boundedBy` and that call runs admitted but
+  uncapped. It is also gated on `closing`, because an effect admitted after the
+  shutdown snapshot is one nobody waits for. Pinning it by INSTANCE
+  (`RoomUpdateGuard`'s `{ joinToken }` form, `deleteRoom`'s guard) deleted
+  the re-read, the identity re-check and the false-alarm reasoning the
+  version-pinned loop needed. `markRoomGeneration` compares the creator's
   pin, and that pin belongs to the REQUEST — re-reading it inside the store
   would reopen the hole, since a read answered late pins the successor's value
   and waves the stale stamp through. The room delete left as a PAIR, because
