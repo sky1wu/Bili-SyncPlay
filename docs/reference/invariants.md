@@ -955,6 +955,17 @@ do NOT compose, and that is the part that decides which connection gets which:
   the leave caps its own wait on its own constant while the effect keeps going,
   because there, landing late is exactly the wanted outcome.
 
+  That effect is ONE CAS pinned to the version the leave judged empty against,
+  deliberately not a `withVersionRetry` loop. **For this write a version
+  conflict is not "retry with a fresher version", it is "the premise changed".**
+  Emptiness cannot be part of the CAS — membership lives in the other store —
+  so the version read alongside the shared-view emptiness check IS the premise,
+  and a retry loop launders a conflict into a newer version and writes the old
+  expiry over a room a join has just revived. That is #237's hazard (the reaper
+  deleting a room that still has members) re-entered through the back door, and
+  a deadline that lets the effect outlive its request is what makes the window
+  wide enough to hit (#277 review).
+
   `updateRoom` has neither property. Its CAS compares the
   whole previous body, so nothing it writes late can corrupt anything — but it
   is reached from six request handlers whose successes owe six different

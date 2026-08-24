@@ -441,6 +441,80 @@ test("a leave answers when the emptied room's expiry write never does", async ()
   await service.close();
 });
 
+test("a late expiry schedule does not land on a room somebody rejoined", async () => {
+  // The interleaving the deadline opens up: the leave stops waiting, and while
+  // its write is still out somebody joins and revives the room. The write is
+  // pinned to the version this leave judged EMPTY against, so it declines — a
+  // retry loop would have read the newer version and written the old expiry
+  // over a live room, which the reaper then deletes (#237's hazard, re-entered
+  // through the back door) (#277 review).
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  let releaseExpiryWrite: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseExpiryWrite = resolve;
+  });
+  const baseService = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMRJ",
+  });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt === undefined || patch.expiresAt === null) {
+          return roomStore.updateRoom(code, expected, patch, options);
+        }
+        await held;
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 2;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    roomExpiryScheduleConfirmationTimeoutMs: 20,
+  });
+
+  const owner = createSession("owner");
+  const created = await baseService.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+
+  // Somebody joins while the expiry write is still out; the join clears the
+  // expiry and moves the version.
+  const latecomer = createSession("latecomer");
+  await baseService.joinRoomForSession(
+    latecomer,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  releaseExpiryWrite?.();
+  await service.close();
+
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt,
+    null,
+    "a late expiry write landed on a room that had been rejoined",
+  );
+  assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
+});
+
 test("a failed empty-room expiry schedule leaves the leave alone", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();

@@ -1863,22 +1863,30 @@ export function createRoomService(options: {
       // That is also why the store call declares `boundedBy` rather than taking
       // the request cap: a capped read would END the effect at the first
       // timeout and the CAS would never be issued (#277).
-      const scheduleExpiry = (): Promise<PersistedRoom | null> =>
-        withVersionRetry(roomCode, async (room) => {
-          const result = await roomStore.updateRoom(
-            roomCode,
-            room.version,
-            { expiresAt, lastActiveAt: now() },
-            {
-              boundedBy:
-                "room-service: empty-room expiry scheduling deadline (the leave stops waiting; this effect does not)",
-            },
-          );
-          if (!result.ok) {
-            return null;
-          }
-          return result.room;
-        });
+      //
+      // ONE attempt, pinned to the version this leave judged empty against —
+      // deliberately NOT `withVersionRetry`. For this write a version conflict
+      // is not "try again with a fresher version", it is "the premise changed":
+      // the room was judged empty from the shared view at `persistedRoom`, and
+      // anything that moved it since may have put somebody back in. A retry
+      // loop launders that into a newer version and writes the old expiry over
+      // a room a join has just revived — the reaper then deletes a room that
+      // still has members, which is the #237 hazard the shared-view read exists
+      // to prevent, re-entered through the back door. Emptiness cannot be part
+      // of the CAS (membership lives in the other store), so the version this
+      // leave read IS the premise, and declining is the whole answer (#277).
+      const scheduleExpiry = async (): Promise<PersistedRoom | null> => {
+        const result = await roomStore.updateRoom(
+          roomCode,
+          persistedRoom.version,
+          { expiresAt, lastActiveAt: now() },
+          {
+            boundedBy:
+              "room-service: empty-room expiry scheduling deadline (the leave stops waiting; this effect does not)",
+          },
+        );
+        return result.ok ? result.room : null;
+      };
       const updatedRoom = closing
         ? // An effect admitted after the shutdown snapshot is one nobody waits
           // for and nobody drains, so it is refused here and said out loud
