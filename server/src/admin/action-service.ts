@@ -21,6 +21,7 @@ import type {
 } from "../room-store.js";
 import type { RuntimeStore } from "../runtime-store.js";
 import { createConcurrencyLimiter } from "../concurrency-limiter.js";
+import { RedisStoreUnavailableError } from "../redis-store-unavailable.js";
 import { createRetryPacer } from "../retry-pacer.js";
 
 /** Leave half the bus's reply capacity for concurrent single-admin actions. */
@@ -610,16 +611,57 @@ export function createAdminActionService(options: {
       roomCode: string,
       reason?: string,
     ) {
-      await updateRoomWithRetry(
-        roomCode,
-        async (room) =>
-          await options.roomStore.updateRoom(room.code, room.version, {
-            sharedVideo: null,
-            playback: null,
-            expiresAt: null,
-            lastActiveAt: now(),
-          }),
-      );
+      try {
+        await updateRoomWithRetry(
+          roomCode,
+          async (room) =>
+            await options.roomStore.updateRoom(room.code, room.version, {
+              sharedVideo: null,
+              playback: null,
+              expiresAt: null,
+              lastActiveAt: now(),
+            }),
+        );
+      } catch (error) {
+        // The write is capped, so it can answer this action while still
+        // landing later. An unconfirmed action is NOT a completed one — the
+        // video may yet be cleared — so it is never audited as `ok`. But it is
+        // audited: an accountability record owes the attempt and its outcome,
+        // and "unknown" is an outcome (#267, #277). Same shape as an
+        // unconfirmed room deletion.
+        // Only the CAS, for the same reason: `updateRoom` caps its read half
+        // too, and a timeout there means the write was never issued. Auditing
+        // that as an unconfirmed action would record a "may have happened"
+        // about something that provably did not.
+        if (
+          !(error instanceof RedisStoreUnavailableError) ||
+          error.reason !== "timeout" ||
+          error.operationName !== "update_room_cas"
+        ) {
+          throw error;
+        }
+        options.logEvent("admin_room_video_clear_unconfirmed", {
+          roomCode,
+          result: "timeout",
+          confirmation: "unconfirmed",
+          actor: actor.username,
+        });
+        writeAudit(
+          actor,
+          "clear_room_video",
+          "room",
+          roomCode,
+          { reason, confirmation: "unconfirmed" },
+          "rejected",
+          "room_video_clear_unconfirmed",
+        );
+        throw new AdminActionError(
+          503,
+          "room_video_clear_unconfirmed",
+          "Clearing the room's video was not confirmed before the deadline.",
+          { roomCode },
+        );
+      }
       await options.publishRoomStateUpdate(roomCode);
       options.logEvent("admin_room_video_cleared", {
         roomCode,

@@ -608,6 +608,146 @@ test("a late expiry schedule does not land on a room somebody rejoined", async (
   assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
 });
 
+test("a join reports the revival it could not confirm", async () => {
+  // The join's write is capped like any other request command, so it can answer
+  // while still landing. When it was REVIVING a room — the room was counting
+  // down and this join was what kept it alive — a late landing leaves it alive
+  // with nobody seated: the one shape no expiry sweep collects. Reported, not
+  // compensated, the same trade the leave's own expiry write takes (#277).
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const events: string[] = [];
+  const baseService = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMJR",
+  });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt === null) {
+          throw new RedisStoreUnavailableError(
+            "room",
+            "update_room_cas",
+            "timeout",
+            "Redis room store command went unanswered.",
+          );
+        }
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 2;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => currentTime,
+  });
+
+  // The room is left empty, so it is counting down: the next join revives it.
+  const owner = createSession("owner");
+  const created = await baseService.createRoomForSession(owner, "Alice");
+  await baseService.leaveRoomForSession(owner);
+  assert.notEqual(
+    (await roomStore.getRoom(created.room.code))?.expiresAt,
+    null,
+  );
+
+  const latecomer = createSession("latecomer");
+  await assert.rejects(
+    service.joinRoomForSession(
+      latecomer,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+    ),
+  );
+
+  assert.ok(events.includes("room_join_revive_unconfirmed"));
+});
+
+test("a join whose read timed out reports nothing: the write never issued", async () => {
+  // The other polarity. `updateRoom` caps its READ half too, and a timeout
+  // there means the CAS was never issued — confirmed not to have happened, not
+  // possibly late. Reporting it would be a false alarm on the one line an
+  // operator acts on (#277 review).
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const events: string[] = [];
+  const baseService = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMJR2",
+  });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt === null) {
+          throw new RedisStoreUnavailableError(
+            "room",
+            "update_room",
+            "timeout",
+            "Redis room store command went unanswered.",
+          );
+        }
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 2;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => currentTime,
+  });
+
+  const owner = createSession("owner");
+  const created = await baseService.createRoomForSession(owner, "Alice");
+  await baseService.leaveRoomForSession(owner);
+
+  const latecomer = createSession("latecomer");
+  await assert.rejects(
+    service.joinRoomForSession(
+      latecomer,
+      created.room.code,
+      created.room.joinToken,
+      "Bob",
+    ),
+  );
+
+  assert.ok(!events.includes("room_join_revive_unconfirmed"));
+});
+
 test("a failed empty-room expiry schedule leaves the leave alone", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();

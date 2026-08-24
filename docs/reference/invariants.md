@@ -862,9 +862,21 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: one write — the room store's `updateRoom`.** Not
-  #237's trade: it is conditional, and that turns out not to be enough. See
-  below. Everything else on both connections took a bound.
+- **Nothing is left unbounded on either connection.** `updateRoom` was the
+  last, and it did NOT leave by re-arguing #237: its CAS has always been
+  conditional on the whole previous body. It left once every caller whose
+  SUCCESS owes a follow-up nobody else repeats had said so — the orphan
+  rollback and the leave's expiry scheduling NAME their own deadline (and run
+  admitted but uncapped, because a capped read would end the effect at its first
+  timeout), the join REPORTS the revival it could not confirm, and the admin
+  video clear AUDITS an unconfirmed outcome rather than claiming one. What
+  remains discards its result safely, because the next share, playback or
+  profile write supersedes it.
+
+  **Conditionality made a late landing safe to HAVE happened; it never
+  discharged what the write's SUCCESS owed** — and the way to discharge that
+  turned out not to be a cap in a different place, but each caller saying what
+  its own success owes. Two name a deadline, two report, three supersede.
 
   `revokeMemberToken` was the last to leave, and it left the way the others
   did — by its GUARD becoming mandatory. Its script only ends the identity

@@ -672,11 +672,10 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
   僵住，靠的正是这份沉默。它们的信号还是调用方的那些：`room_reaper_sweep_timeout` →
   `room_reaper_sweep_stalled`、`node_heartbeat_failed`。
 
-仍有一个持久写按设计不设上限：房间存储的 `updateRoom`。它是有条件的，迟到落地不可能破坏任何
-东西，但它被六个请求处理器调用，六份成功后续各不相同——把上限放进 store 等于用「丢弃结果」去
-答复这六个调用方，而那份结果正是它们的后续所需要的。运行时存储现在一个都不剩：`room:leave`
-的吊销在守卫变成必填之后拿到了请求路径上限，所以僵死的 Redis 会用
-`redis_runtime_store_operation_failed reason=timeout` 答复一次离房，而不再把连接一直挂着。
+已经没有不设上限的持久写。`updateRoom` 是最后一个：加入若无法确认「复活一间正在过期的房」，
+会记 `room_join_revive_unconfirmed`（该房间可能已变成无成员且无过期时间，任何 reaper 都不回收）；
+管理端清空视频若无法确认，返回 503，并以 `rejected` + `room_video_clear_unconfirmed` 写入审计，
+而不是记成一次已完成的动作。
 
 把房间腾空的离房，会在「离开已经完成之后」给房间排期过期，因此这个写单独上报：落地时是
 `room_expiry_scheduled`（由效果发出，可能晚于请求），离房停止等待时是

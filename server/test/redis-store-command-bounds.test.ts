@@ -739,6 +739,12 @@ const ROOM_REQUEST_PATH: Record<
   countRooms: (store) =>
     store.countRooms({ keyword: "", includeExpired: true }),
   isReady: (store) => store.isReady(),
+  // Both halves capped by default. A call that NAMES its caller's deadline is
+  // exempt from even the read cap — see the test further down.
+  updateRoom: (store) =>
+    store.updateRoom(PROBE_ROOM.code, PROBE_ROOM.version, {
+      lastActiveAt: PROBE_ROOM.lastActiveAt + 1,
+    }),
   createRoom: (store) =>
     store.createRoom({
       code: "ROOM01",
@@ -793,10 +799,19 @@ const ROOM_BOUNDED_ELSEWHERE: Record<string, string> = {
  * exactly the memberless never-expiring room the reaper cannot collect.
  * Capping inside the store would answer all six by throwing that outcome away.
  */
-const ROOM_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
-  updateRoom:
-    "conditional, but its success owes follow-ups six callers own; a cap here would discard them. A call that NAMES its caller's deadline is exempt from even the read cap — see the test below",
-};
+/**
+ * Empty, and it stays a table rather than becoming a deleted concept: a room
+ * store write added later must still declare itself, and "there are none right
+ * now" is the claim this makes mechanical.
+ *
+ * `updateRoom` was the last to leave, and not by re-arguing #237 — its CAS was
+ * always conditional on the whole previous body. It left once every caller
+ * whose SUCCESS owes a follow-up nobody else repeats had said so: two name
+ * their own deadline, the join reports the revival it could not confirm, and
+ * the admin video clear audits an unconfirmed outcome. The rest discard their
+ * result safely, because the next write of the same kind supersedes it.
+ */
+const ROOM_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {};
 
 test("every room store method is classified by what bounds its commands", async () => {
   await withRoomStore(null, async (store) => {

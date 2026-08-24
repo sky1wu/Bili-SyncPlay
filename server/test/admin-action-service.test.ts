@@ -7,6 +7,7 @@ import {
 } from "../src/admin/action-service.js";
 import { createAuditLogService } from "../src/admin/audit-log.js";
 import type { AdminSession } from "../src/admin/types.js";
+import { RedisStoreUnavailableError } from "../src/redis-store-unavailable.js";
 import type { RoomStore } from "../src/room-store.js";
 import type { AttachedSession, PersistedRoom, Session } from "../src/types.js";
 
@@ -78,6 +79,7 @@ function createService(options: {
   deleteRuntimeRoom?: (roomCode: string) => void;
   publishRoomDeleted?: (roomCode: string) => Promise<void>;
   auditLogService?: ReturnType<typeof createAuditLogService>;
+  updateRoom?: RoomStore["updateRoom"];
   maxFanoutConcurrency?: number;
   logEvent?: (name: string, data?: Record<string, unknown>) => void;
   roomDeleteConfirmTimeoutMs?: number;
@@ -93,9 +95,11 @@ function createService(options: {
           ? await options.getRoom(roomCode)
           : createRoom(roomCode);
       },
-      updateRoom: async () => {
-        throw new Error("updateRoom should not be called in this test");
-      },
+      updateRoom:
+        options.updateRoom ??
+        (async () => {
+          throw new Error("updateRoom should not be called in this test");
+        }),
       deleteRoom: options.deleteRoom ?? (async () => "deleted"),
       deleteExpiredRoom: async () => {
         throw new Error("deleteExpiredRoom should not be called in this test");
@@ -188,6 +192,80 @@ test("admin action service maps stale_target command results to 409", async () =
       return true;
     },
   );
+});
+
+test("admin action service audits a video clear it could not confirm", async () => {
+  // The write is capped, so it can answer this action while still landing. An
+  // unconfirmed action is never audited as `ok` — the video may yet be cleared
+  // — but it IS audited: an accountability record owes the attempt and its
+  // outcome, and "unknown" is an outcome (#267, #277).
+  const auditLogService = createAuditLogService();
+  const service = createService({
+    auditLogService,
+    requestAdminCommand: async () => {
+      throw new Error("no command should be issued for a video clear");
+    },
+    updateRoom: async () => {
+      throw new RedisStoreUnavailableError(
+        "room",
+        "update_room_cas",
+        "timeout",
+        "Redis room store command went unanswered.",
+      );
+    },
+  });
+
+  await assert.rejects(
+    () => service.clearRoomVideo(ACTOR, "ROOM01", "cleanup"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.code, "room_video_clear_unconfirmed");
+      return true;
+    },
+  );
+
+  const auditLogs = await auditLogService.query({
+    action: "clear_room_video",
+    page: 1,
+    pageSize: 10,
+  });
+  assert.equal(auditLogs.total, 1);
+  assert.equal(auditLogs.items[0]?.result, "rejected");
+  assert.equal(auditLogs.items[0]?.reason, "room_video_clear_unconfirmed");
+});
+
+test("admin action service does not audit a clear whose read timed out", async () => {
+  // The other polarity: `updateRoom` caps its READ half too, and a timeout
+  // there means the CAS was never issued. Auditing that as unconfirmed records
+  // a "may have happened" about something that provably did not (#277 review).
+  const auditLogService = createAuditLogService();
+  const service = createService({
+    auditLogService,
+    requestAdminCommand: async () => {
+      throw new Error("no command should be issued for a video clear");
+    },
+    updateRoom: async () => {
+      throw new RedisStoreUnavailableError(
+        "room",
+        "update_room",
+        "timeout",
+        "Redis room store command went unanswered.",
+      );
+    },
+  });
+
+  await assert.rejects(
+    () => service.clearRoomVideo(ACTOR, "ROOM01", "cleanup"),
+    (error: unknown) => error instanceof RedisStoreUnavailableError,
+  );
+
+  const auditLogs = await auditLogService.query({
+    action: "clear_room_video",
+    page: 1,
+    pageSize: 10,
+  });
+  assert.equal(auditLogs.total, 0);
 });
 
 test("admin action service audits an unconfirmed kick that may still land", async () => {
