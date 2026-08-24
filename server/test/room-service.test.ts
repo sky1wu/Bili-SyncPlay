@@ -376,7 +376,7 @@ test("a revocation that stood is not undone when the removal then fails", async 
   assert.ok(events.includes("room_persist_failed"));
 });
 
-test("room service restores member state when empty-room expiry scheduling fails", async () => {
+test("a failed empty-room expiry schedule leaves the leave alone", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();
   const events: Array<{ event: string; data: Record<string, unknown> }> = [];
@@ -428,31 +428,28 @@ test("room service restores member state when empty-room expiry scheduling fails
   const owner = createSession("owner");
   const created = await baseService.createRoomForSession(owner, "Alice");
 
-  await assert.rejects(
-    service.leaveRoomForSession(owner),
-    (error: unknown) =>
-      error instanceof Error && error.message === "Internal server error.",
-  );
+  // The leave stands. What failed is the ROOM's bookkeeping — scheduling the
+  // expiry of a room nobody is in — and the member was removed and the session
+  // cleared long before that write. Undoing all of it used to put a member back
+  // into a room they had successfully left, and left the room body saying
+  // "expiring" while it had an occupant again: the one shape neither collect
+  // path can judge, because membership lives in the other store (#277).
+  await service.leaveRoomForSession(owner);
 
-  assert.equal(owner.roomCode, created.room.code);
-  assert.equal(owner.memberId, "owner");
-  assert.equal(owner.memberToken, created.memberToken);
-  assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
+  assert.equal(owner.roomCode, null);
+  assert.equal(owner.memberId, null);
+  assert.equal(activeRooms.getRoom(created.room.code), null);
+  assert.ok(!events.some((entry) => entry.event === "room_leave_recovered"));
 
+  // Exactly one thing is left wrong, and it is reported: the room may now be a
+  // memberless record with no expiry, which no reaper collects.
   const persisted = await roomStore.getRoom(created.room.code);
   assert.equal(persisted?.expiresAt, null);
   assert.ok(
     events.some(
       (entry) =>
-        entry.event === "room_leave_recovered" &&
-        entry.data.reason === "leave_room_persist_failed",
-    ),
-  );
-  assert.ok(
-    events.some(
-      (entry) =>
-        entry.event === "room_persist_failed" &&
-        entry.data.reason === "leave_room_persist_failed",
+        entry.event === "room_leave_orphan_possible" &&
+        entry.data.reason === "leave_room_expiry_schedule_failed",
     ),
   );
 });
@@ -561,21 +558,24 @@ test("room service skips leave recovery when room is concurrently deleted", asyn
   const owner = createSession("owner");
   await baseService.createRoomForSession(owner, "Alice");
 
-  // Make updateRoom fail on expiry writes and delete the room from persistence
-  // after the failed attempt to simulate concurrent deletion before the
-  // catch block's existence check.
+  // Driven from the room read that follows the removal, not from the expiry
+  // write: a failed expiry schedule no longer reaches the catch at all, because
+  // it is not a reason to undo a leave that already happened (#277). The read
+  // deletes the room and then fails, so the catch's existence check sees it
+  // gone — concurrent deletion, from the recovery's point of view.
+  let roomReads = 0;
   const concurrentDeleteRoomStore: RoomStore = {
     ...roomStore,
-    async updateRoom(code, expected, patch, options) {
-      if (patch.expiresAt !== undefined) {
-        // Delete the room so the catch block's getRoom check sees the room is gone.
+    async getRoom(code, caller) {
+      roomReads += 1;
+      if (roomReads === 1) {
         const existing = await roomStore.getRoom(code);
         if (existing) {
           await roomStore.deleteRoom(existing);
         }
-        throw new Error("expiry write failed");
+        throw new Error("room read failed");
       }
-      return roomStore.updateRoom(code, expected, patch, options);
+      return roomStore.getRoom(code, caller);
     },
   };
   const service = createRoomService({
@@ -640,13 +640,12 @@ test("room service skips leave recovery when socket is already closed", async ()
     now: () => 1_000,
     createRoomCode: () => "ROOM01",
   });
+  // Driven from the room read that follows the removal: a failed expiry
+  // schedule no longer reaches the catch (#277).
   const failingRoomStore: RoomStore = {
     ...roomStore,
-    async updateRoom(code, expected, patch, options) {
-      if (patch.expiresAt !== undefined) {
-        throw new Error("expiry write failed");
-      }
-      return roomStore.updateRoom(code, expected, patch, options);
+    async getRoom() {
+      throw new Error("room read failed");
     },
   };
   const service = createRoomService({

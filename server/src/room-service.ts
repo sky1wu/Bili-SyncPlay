@@ -1821,6 +1821,11 @@ export function createRoomService(options: {
       }
 
       const expiresAt = now() + persistence.emptyRoomTtlMs;
+      // Never rethrown, and that is the point: a conflict, a store error and a
+      // deadline all mean the same thing here — the room's expiry was not
+      // scheduled — and none of them is a reason to undo a leave that already
+      // happened.
+      let expiryScheduleError: unknown;
       const updatedRoom = await withVersionRetry(roomCode, async (room) => {
         const result = await roomStore.updateRoom(roomCode, room.version, {
           expiresAt,
@@ -1830,23 +1835,52 @@ export function createRoomService(options: {
           return null;
         }
         return result.room;
+      }).catch((error: unknown) => {
+        expiryScheduleError = error;
+        return null;
       });
 
-      if (!updatedRoom) {
-        throw new RoomServiceError(
-          "internal_error",
-          INTERNAL_SERVER_ERROR_MESSAGE,
-          "internal_error",
-          { roomCode, reason: "leave_room_expiry_schedule_failed" },
+      if (updatedRoom) {
+        logEvent("room_expiry_scheduled", {
+          roomCode,
+          version: updatedRoom.version,
+          expiresAt,
+          result: "ok",
+        });
+      } else {
+        // The LEAVE is already done: the member was removed and
+        // `clearSessionRoom` ran long before this write. What failed is the
+        // ROOM's bookkeeping — scheduling the expiry of a room nobody is in.
+        //
+        // Throwing here used to undo all of it, because `restoreLeaveState` in
+        // the catch re-seats the member. That put a member back into a room
+        // they had successfully left, and left the room body saying "expiring"
+        // while it had an occupant again — the one shape neither collect path
+        // can judge, since membership lives in the other store and no write
+        // spans both. Reporting the room that may now be an orphan keeps the
+        // leave that succeeded and leaves exactly one thing wrong instead of
+        // two (#277).
+        logEvent(
+          "room_leave_orphan_possible",
+          {
+            sessionId: session.id,
+            roomCode,
+            remoteAddress: session.remoteAddress,
+            origin: session.origin,
+            provider: persistence.provider,
+            reason: "leave_room_expiry_schedule_failed",
+            ...(expiryScheduleError === undefined
+              ? {}
+              : {
+                  error:
+                    expiryScheduleError instanceof Error
+                      ? expiryScheduleError.message
+                      : String(expiryScheduleError),
+                }),
+          },
+          { level: "error" },
         );
       }
-
-      logEvent("room_expiry_scheduled", {
-        roomCode,
-        version: updatedRoom.version,
-        expiresAt,
-        result: "ok",
-      });
 
       logEvent("room_left", {
         sessionId: session.id,
@@ -1858,7 +1892,10 @@ export function createRoomService(options: {
         result: "ok",
       });
 
-      return { room: updatedRoom, memberRemoved: removal.removed };
+      return {
+        room: updatedRoom ?? persistedRoom,
+        memberRemoved: removal.removed,
+      };
     } catch (error) {
       const reason =
         error instanceof RoomServiceError &&
