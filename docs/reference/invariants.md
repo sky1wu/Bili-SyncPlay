@@ -892,24 +892,29 @@ do NOT compose, and that is the part that decides which connection gets which:
   reason to retry rather than to give up (#301). Which guard applies is a
   property of the CALL, again.
 
-  **A debt is a room CODE to look at again, not a state to compare against.**
-  Carrying the state a room was left in looks like it should answer "is this
-  still owed", and cannot: versions from two rooms sharing a recycled code are
-  not comparable, and a bump that changes nothing about emptiness — an admin
-  clearing the video writes `expiresAt: null` too — is indistinguishable from a
-  join. Four review rounds went into making a remembered state behave, and the
-  question was the wrong one: **the room's state now is answered by reading it
-  now**, every tick, from scratch. That also leaves nothing for a stale writer
-  to corrupt, so the identity checks and the version ordering those rounds added
-  are gone with it.
+  **A debt names the state its producer judged empty, and the drain retries
+  exactly that write.** Nothing re-reads the room to judge it fresh, and that is
+  a deliberate reversal: a fresh read can land between a join's ROOM write and
+  its RUNTIME write, see the new version with an empty member table, and
+  schedule an expiry on a room being joined — handing the next sweep a room with
+  members. The version the producer held declines against that join instead.
+  Closing the fresh-read window properly means serialising with the join lock,
+  which the leave does not do either; that window is `main`'s, not this
+  ledger's.
 
-  The drain's three terminal answers are facts about the RECORD — gone, or
-  already carrying an expiry — and a conflict is not one of them: something
-  raced the judgement, so the next tick reads the room again rather than
-  guessing what it was. Occupancy is read too, for the one room in hand, and it
-  only decides whether to WRITE: a room somebody is in may be emptied again a
-  moment later, so it is never a discharge. An expiry somebody else scheduled is
-  left exactly as they scheduled it.
+  Debts are keyed by INSTANCE (`code:joinToken`), which is what makes the
+  version usable at all: two rooms sharing a recycled code are separate entries,
+  so nothing compares versions across instances, and a replacement at version 0
+  cannot be refused in favour of an older instance's higher one. Within one
+  instance the later state wins rather than the later writer — a leave records
+  only once its own expiry write has failed, and that write can outlive the
+  request.
+
+  A conflict SETTLES a debt, and the cost is stated rather than hidden: a write
+  that moves the version while leaving the room uncollectable — an admin
+  clearing the video writes `expiresAt: null` too — loses that debt. It is
+  reported (`room_orphan_debt_superseded`), and losing a reported debt is
+  deliberately preferred over ever touching a room mid-join.
 
   What it does not cover, stated rather than papered over: a debt lives in this
   process, so a node that dies between the failed compensation and the next

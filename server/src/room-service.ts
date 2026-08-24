@@ -696,27 +696,61 @@ export function createRoomService(options: {
    * debt is settled either way. Pinning the instance alone is NOT enough, and
    * assuming it was is what this pass got wrong first (#277 review).
    */
+  type OrphanDebt = { code: string; joinToken: string; version: number | null };
   /**
-   * Room codes this node left memberless without an expiry.
+   * Rooms this node left memberless without an expiry, by INSTANCE.
    *
    * `expiresAt === null` keeps a record out of every expiry sweep, so a room
    * left that way is one no reaper can reach. Three writes can leave one — a
    * create that answered late, a generation stamp rolled back and unwritable, a
-   * leave whose expiry scheduling failed — and each already compensates, and
-   * each compensation can itself fail.
+   * leave whose expiry scheduling failed — each already compensates, and each
+   * compensation can itself fail. A LEDGER, not a scan: the producer knows
+   * which room it broke at the moment it breaks it.
    *
-   * A LEDGER, not a scan: the producer knows which room it broke at the moment
-   * it breaks it. And a SET OF CODES, not a set of states — which is the
-   * correction four review rounds bought. Carrying the version a room was left
-   * in looks like it should say "is this debt still owed", and cannot: versions
-   * from two rooms sharing a recycled code are not comparable, and a bump that
-   * changes nothing about emptiness (an admin clearing the video writes
-   * `expiresAt: null` too) is indistinguishable from a join. **The question is
-   * about the room's state now, so it is answered by reading it now** — every
-   * tick, from scratch. That leaves nothing for a stale writer to corrupt: an
-   * entry is just "look at this code again".
+   * Keyed by `code:joinToken`, and that is what makes the version usable: two
+   * rooms sharing a recycled code are different entries, so nothing ever
+   * compares versions across instances (#277 review). Within one instance the
+   * later version wins, and `null` — the creation-era debt for a room nobody
+   * joined — is the earliest state there is.
+   *
+   * A debt carries the state its producer JUDGED EMPTY, and the drain retries
+   * exactly that write. Nothing re-reads the room to decide: a fresh read can
+   * land between a join's room write and its runtime write, and would then
+   * schedule an expiry on a room being joined — handing the next sweep a room
+   * with members. The version the producer held declines against that join
+   * instead. A conflict therefore SETTLES the debt: the room moved on, which is
+   * almost always somebody giving it an expiry or reviving it. The exception is
+   * a write that moves the version while leaving the room uncollectable (an
+   * admin clearing the video writes `expiresAt: null` too) — that debt is lost,
+   * reported, and deliberately preferred over ever touching a room mid-join.
    */
-  const pendingOrphanExpiries = new Set<string>();
+  const pendingOrphanDebts = new Map<string, OrphanDebt>();
+  const orphanDebtKey = (code: string, joinToken: string): string =>
+    `${code}:${joinToken}`;
+
+  function rememberOrphanDebt(debt: OrphanDebt): void {
+    const key = orphanDebtKey(debt.code, debt.joinToken);
+    const current = pendingOrphanDebts.get(key);
+    // Both writers can be late — a leave records only once its expiry write has
+    // failed, and an effect keeps a debt long after it snapshotted one — so the
+    // later state wins rather than the later writer.
+    if (
+      current !== undefined &&
+      (debt.version === null ||
+        (current.version !== null && debt.version <= current.version))
+    ) {
+      return;
+    }
+    pendingOrphanDebts.set(key, debt);
+  }
+
+  /** Forget one, only while the ledger still holds the one acted on. */
+  function settleOrphanDebt(debt: OrphanDebt): void {
+    const key = orphanDebtKey(debt.code, debt.joinToken);
+    if (pendingOrphanDebts.get(key)?.version === debt.version) {
+      pendingOrphanDebts.delete(key);
+    }
+  }
 
   const runtimeTeardownEffects = new Map<
     string,
@@ -1399,7 +1433,11 @@ export function createRoomService(options: {
     // nobody waits for and nobody reports, so it is refused here for the same
     // reason a lazy delete is, and said out loud instead (#277 review).
     if (closing) {
-      pendingOrphanExpiries.add(target.code);
+      rememberOrphanDebt({
+        code: target.code,
+        joinToken: target.joinToken,
+        version: target.version ?? null,
+      });
       logEvent(
         "room_rollback_failed",
         {
@@ -1451,40 +1489,19 @@ export function createRoomService(options: {
 
   /** The rollback itself. Reports its own residue and never rejects. */
   /**
-   * Re-judge each owed room from its record, and give it an expiry if it is
-   * still the shape nothing can collect.
+   * Retry each owed write exactly as its producer issued it.
    *
-   * Every answer comes from a fresh read, so nothing here depends on what the
-   * ledger remembered beyond "look at this code again". The three terminal
-   * outcomes are facts about the RECORD; occupancy only decides whether to
-   * write, and never settles a debt — a room somebody is in may be emptied
-   * again a moment later, and re-judging next tick costs one read.
+   * No room read and no occupancy read: the debt already names the state its
+   * producer judged empty, and the guard on that state is what keeps this out
+   * of a room somebody is joining.
    */
-  async function drainPendingOrphanExpiries(
-    currentTime: number,
-  ): Promise<void> {
-    for (const code of [...pendingOrphanExpiries]) {
-      const room = await roomStore.getRoom(code, "maintenance_pass");
-      if (!room) {
-        // Gone, or never there. Nothing to make collectable.
-        pendingOrphanExpiries.delete(code);
-        continue;
-      }
-      if (room.expiresAt !== null) {
-        // Somebody gave it one — this leave, a later one, or an admin.
-        pendingOrphanExpiries.delete(code);
-        continue;
-      }
-      const activeRoom = await resolveActiveRoom(code);
-      if ((activeRoom?.members.size ?? 0) > 0) {
-        continue;
-      }
+  async function drainOrphanDebts(currentTime: number): Promise<void> {
+    for (const debt of [...pendingOrphanDebts.values()]) {
       const result = await roomStore.updateRoom(
-        code,
-        // The instance AND the version this judgement was made from: anything
-        // that moved the record since may have put somebody back in, and a
-        // recycled code starts over at version 0.
-        { joinToken: room.joinToken, version: room.version },
+        debt.code,
+        debt.version === null
+          ? { joinToken: debt.joinToken }
+          : { joinToken: debt.joinToken, version: debt.version },
         { expiresAt: currentTime },
         {
           boundedBy:
@@ -1492,10 +1509,24 @@ export function createRoomService(options: {
         },
       );
       if (result.ok || result.reason === "not_found") {
-        pendingOrphanExpiries.delete(code);
+        settleOrphanDebt(debt);
+        continue;
       }
-      // A conflict settles nothing: something raced this judgement, and the
-      // next tick reads the room again rather than guessing what it was.
+      // The room moved on. Almost always somebody gave it an expiry or revived
+      // it; the exception — a bump that leaves it uncollectable — loses this
+      // debt, which is said out loud rather than paid onto a room whose state
+      // this node no longer knows.
+      settleOrphanDebt(debt);
+      logEvent(
+        "room_orphan_debt_superseded",
+        {
+          roomCode: debt.code,
+          provider: persistence.provider,
+          result: "skipped",
+          reason: "room_moved_on",
+        },
+        { level: "error" },
+      );
     }
   }
 
@@ -1539,7 +1570,11 @@ export function createRoomService(options: {
         // `not_found` covers both "already collected" and "a different room
         // holds this code" — neither owes us anything.
         if (rollback.ok || rollback.reason === "not_found") {
-          pendingOrphanExpiries.delete(target.code);
+          settleOrphanDebt({
+            code: target.code,
+            joinToken: target.joinToken,
+            version: target.version ?? null,
+          });
           return;
         }
       }
@@ -1553,7 +1588,11 @@ export function createRoomService(options: {
     // The room is memberless and still has no expiry, so nothing will ever
     // reach it again on its own. Remembered rather than only reported, and
     // drained by the reaper.
-    pendingOrphanExpiries.add(target.code);
+    rememberOrphanDebt({
+      code: target.code,
+      joinToken: target.joinToken,
+      version: target.version ?? null,
+    });
     logEvent(
       "room_rollback_failed",
       {
@@ -2010,7 +2049,11 @@ export function createRoomService(options: {
           scheduleError = error;
         }
         if (scheduled) {
-          pendingOrphanExpiries.delete(roomCode);
+          settleOrphanDebt({
+            code: roomCode,
+            joinToken: persistedRoom.joinToken,
+            version: persistedRoom.version,
+          });
           logEvent("room_expiry_scheduled", {
             roomCode,
             version: scheduled.version,
@@ -2035,7 +2078,11 @@ export function createRoomService(options: {
         // Remembered as well as reported: the room is memberless and still has
         // no expiry, so no sweep will ever reach it on its own. The reaper
         // drains the ledger.
-        pendingOrphanExpiries.add(roomCode);
+        rememberOrphanDebt({
+          code: roomCode,
+          joinToken: persistedRoom.joinToken,
+          version: persistedRoom.version,
+        });
         logEvent(
           "room_leave_orphan_possible",
           {
@@ -2064,7 +2111,11 @@ export function createRoomService(options: {
         // An effect admitted after the shutdown snapshot is one nobody waits
         // for and nobody drains, so it is refused here — the same rule the
         // lazy delete follows — and reported as the orphan risk it is.
-        pendingOrphanExpiries.add(roomCode);
+        rememberOrphanDebt({
+          code: roomCode,
+          joinToken: persistedRoom.joinToken,
+          version: persistedRoom.version,
+        });
         logEvent(
           "room_leave_orphan_possible",
           {
@@ -3038,13 +3089,13 @@ export function createRoomService(options: {
       // strand them with nothing able to name them again. This drain is
       // secondary and retried every tick.
       try {
-        await drainPendingOrphanExpiries(currentTime);
+        await drainOrphanDebts(currentTime);
       } catch (error) {
         logEvent("room_persist_failed", {
           provider: persistence.provider,
           result: "error",
           reason: "pending_orphan_expiry_drain_failed",
-          pendingCount: pendingOrphanExpiries.size,
+          pendingCount: pendingOrphanDebts.size,
           error: error instanceof Error ? error.message : String(error),
         });
       }
