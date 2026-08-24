@@ -376,6 +376,71 @@ test("a revocation that stood is not undone when the removal then fails", async 
   assert.ok(events.includes("room_persist_failed"));
 });
 
+test("a leave answers when the emptied room's expiry write never does", async () => {
+  // The bound this whole slice exists for: `updateRoom`'s CAS is uncapped in
+  // the store, so a leave that simply awaited it hung forever on a stalled
+  // Redis. The leave stops waiting on its OWN deadline; the write keeps going,
+  // because landing late is exactly the wanted outcome — the room really is
+  // empty and really should expire (#277).
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const events: string[] = [];
+  const baseService = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMEX",
+  });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      // The CAS that never comes back.
+      updateRoom: (code, expected, patch, options) =>
+        patch.expiresAt === undefined
+          ? roomStore.updateRoom(code, expected, patch, options)
+          : new Promise(() => undefined),
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 2;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    // The only small one, so a wait built on a sibling's deadline would fail
+    // here instead of passing on a value that happens to be small too.
+    roomExpiryScheduleConfirmationTimeoutMs: 20,
+    roomDeleteConfirmationTimeoutMs: 30_000,
+    roomRollbackConfirmationTimeoutMs: 30_000,
+  });
+
+  const owner = createSession("owner");
+  const created = await baseService.createRoomForSession(owner, "Alice");
+
+  const answered = await settleWithin(
+    service.leaveRoomForSession(owner).catch(() => undefined),
+    500,
+  );
+  assert.equal(answered, true, "the leave must not wait on the expiry write");
+
+  // Reported, not silently turned into success: the room may now be a
+  // memberless record with no expiry.
+  assert.ok(events.includes("room_leave_orphan_possible"));
+  assert.equal((await roomStore.getRoom(created.room.code))?.expiresAt, null);
+  await service.close();
+});
+
 test("a failed empty-room expiry schedule leaves the leave alone", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();

@@ -96,6 +96,18 @@ export const DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS = 5_000;
 export const DEFAULT_ROOM_ROLLBACK_CONFIRM_TIMEOUT_MS = 5_000;
 
 /**
+ * How long a leave waits to learn whether the room it emptied was scheduled to
+ * expire.
+ *
+ * Its own constant, derived from what THIS caller can promise: the leave has
+ * already happened by the time this write is issued, so the wait bounds a piece
+ * of bookkeeping, not the departure. Same magnitude as its siblings today, and
+ * separate from them for the same reason #271 gave — a deadline belongs to one
+ * behaviour, not to a number.
+ */
+export const DEFAULT_ROOM_EXPIRY_SCHEDULE_CONFIRM_TIMEOUT_MS = 5_000;
+
+/**
  * Leaves one second inside the shutdown step for reporting and dependency close
  * hand-off. The delete and teardown pacers share this one budget below.
  */
@@ -272,6 +284,8 @@ export function createRoomService(options: {
   roomDeleteConfirmationTimeoutMs?: number;
   /** How long a creator waits for its orphan rollback to confirm. */
   roomRollbackConfirmationTimeoutMs?: number;
+  /** How long a leave waits for the emptied room's expiry to be scheduled. */
+  roomExpiryScheduleConfirmationTimeoutMs?: number;
   /** Shared by late persisted-room deletions and runtime teardown effects. */
   closeBudgetMs?: number;
 }): {
@@ -357,6 +371,13 @@ export function createRoomService(options: {
   const roomRollbackConfirmationPacer = createRetryPacer({
     initialDelayMs: roomRollbackConfirmationTimeoutMs,
     maxDelayMs: roomRollbackConfirmationTimeoutMs,
+  });
+  const roomExpiryScheduleConfirmationTimeoutMs =
+    options.roomExpiryScheduleConfirmationTimeoutMs ??
+    DEFAULT_ROOM_EXPIRY_SCHEDULE_CONFIRM_TIMEOUT_MS;
+  const roomExpiryScheduleConfirmationPacer = createRetryPacer({
+    initialDelayMs: roomExpiryScheduleConfirmationTimeoutMs,
+    maxDelayMs: roomExpiryScheduleConfirmationTimeoutMs,
   });
   const closeBudgetMs =
     options.closeBudgetMs ?? DEFAULT_ROOM_SERVICE_CLOSE_BUDGET_MS;
@@ -1064,9 +1085,17 @@ export function createRoomService(options: {
     if (remainingForRollbacks > 0) {
       await roomRollbackConfirmationPacer.settleTracked(remainingForRollbacks);
     }
+    const remainingForExpirySchedules = remainingBudgetMs();
+    if (remainingForExpirySchedules > 0) {
+      await roomExpiryScheduleConfirmationPacer.settleTracked(
+        remainingForExpirySchedules,
+      );
+    }
 
     const pendingRoomDeletions = roomDeleteConfirmationPacer.trackedCount();
     const pendingRoomRollbacks = roomRollbackConfirmationPacer.trackedCount();
+    const pendingRoomExpirySchedules =
+      roomExpiryScheduleConfirmationPacer.trackedCount();
     // The debt ledger is the source of truth, not the request confirmation
     // pacer. A fast rejection or guarded skip leaves no tracked request, but its
     // ownerless ledger entry is still the only trail to runtime state whose
@@ -1075,13 +1104,15 @@ export function createRoomService(options: {
     if (
       pendingRoomDeletions > 0 ||
       pendingRuntimeTeardownCount > 0 ||
-      pendingRoomRollbacks > 0
+      pendingRoomRollbacks > 0 ||
+      pendingRoomExpirySchedules > 0
     ) {
       logEvent("room_service_close_unfinished", {
         provider: persistence.provider,
         pendingRoomDeletions,
         pendingRuntimeTeardowns: pendingRuntimeTeardownCount,
         pendingRoomRollbacks,
+        pendingRoomExpirySchedules,
         budgetMs: closeBudgetMs,
         result: "timeout",
       });
@@ -1826,19 +1857,46 @@ export function createRoomService(options: {
       // scheduled — and none of them is a reason to undo a leave that already
       // happened.
       let expiryScheduleError: unknown;
-      const updatedRoom = await withVersionRetry(roomCode, async (room) => {
-        const result = await roomStore.updateRoom(roomCode, room.version, {
-          expiresAt,
-          lastActiveAt: now(),
+      // Two lifetimes: the leave stops waiting on its own deadline, the write
+      // keeps going. It has to keep going — landing late is exactly the wanted
+      // outcome here, since the room really is empty and really should expire.
+      // That is also why the store call declares `boundedBy` rather than taking
+      // the request cap: a capped read would END the effect at the first
+      // timeout and the CAS would never be issued (#277).
+      const scheduleExpiry = (): Promise<PersistedRoom | null> =>
+        withVersionRetry(roomCode, async (room) => {
+          const result = await roomStore.updateRoom(
+            roomCode,
+            room.version,
+            { expiresAt, lastActiveAt: now() },
+            {
+              boundedBy:
+                "room-service: empty-room expiry scheduling deadline (the leave stops waiting; this effect does not)",
+            },
+          );
+          if (!result.ok) {
+            return null;
+          }
+          return result.room;
         });
-        if (!result.ok) {
-          return null;
-        }
-        return result.room;
-      }).catch((error: unknown) => {
-        expiryScheduleError = error;
-        return null;
-      });
+      const updatedRoom = closing
+        ? // An effect admitted after the shutdown snapshot is one nobody waits
+          // for and nobody drains, so it is refused here and said out loud
+          // below — the same rule the lazy delete follows.
+          null
+        : await roomExpiryScheduleConfirmationPacer
+            .capWait(
+              roomExpiryScheduleConfirmationPacer.trackCall(scheduleExpiry()),
+              roomExpiryScheduleConfirmationTimeoutMs,
+              () =>
+                new Error(
+                  `Room ${roomCode} expiry scheduling went unconfirmed for ${roomExpiryScheduleConfirmationTimeoutMs}ms.`,
+                ),
+            )
+            .catch((error: unknown) => {
+              expiryScheduleError = error;
+              return null;
+            });
 
       if (updatedRoom) {
         logEvent("room_expiry_scheduled", {
