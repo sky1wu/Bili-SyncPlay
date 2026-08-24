@@ -661,6 +661,64 @@ test("the sweep collects a room that would never expire and has nobody in it", a
   assert.equal(await roomStore.getRoom("ROOMNE"), null);
 });
 
+test("a failing never-expiring sweep does not strand what the expiry sweep deleted", async () => {
+  // The sweep before it is DESTRUCTIVE: those rooms are already gone from
+  // Redis, so a throw between the delete and its follow-ups would strand their
+  // runtime state, their reclamation count and their `room_deleted` broadcast
+  // with nothing able to name them again. The new judgement is secondary and
+  // retried every tick, so it runs last and reports its own failure (#277
+  // review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createInMemoryRuntimeStore(() => currentTime);
+  const events: string[] = [];
+  const teardowns: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      listNeverExpiringRooms: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    activeRooms: {
+      ...activeRooms,
+      deleteRoom: async (code: string, expectedGeneration: string | null) => {
+        teardowns.push(code);
+        return activeRooms.deleteRoom(code, expectedGeneration);
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => currentTime,
+  });
+
+  const doomed = await roomStore.createRoom({
+    code: "ROOMDM",
+    joinToken: "doomed-join-token",
+    createdAt: currentTime,
+  });
+  await roomStore.updateRoom(doomed.code, doomed.version, {
+    expiresAt: currentTime + 1,
+  });
+  currentTime += 2;
+
+  const counts = await service.deleteExpiredRooms(currentTime);
+
+  // The destructive sweep's own results were consumed before anything else
+  // could throw.
+  assert.equal(counts.deletedRooms, 1);
+  assert.deepEqual(teardowns, ["ROOMDM"]);
+  // And the secondary judgement's failure is reported rather than swallowed.
+  assert.ok(events.includes("room_persist_failed"));
+});
+
 test("the never-expiring sweep rotates so an orphan behind live rooms is reached", async () => {
   // The set holds EVERY room without an expiry, which is every live room. A
   // fixed prefix of it is dominated by rooms that are perfectly fine, so a

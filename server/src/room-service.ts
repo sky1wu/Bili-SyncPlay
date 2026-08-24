@@ -2969,7 +2969,6 @@ export function createRoomService(options: {
 
     async deleteExpiredRooms(currentTime = now()) {
       const swept = await roomStore.deleteExpiredRooms(currentTime);
-      await collectNeverExpiringOrphans(currentTime);
       // Only rooms this pass actually deleted. NOT the orphaned index entries
       // beside them — those never had a room behind them, so metering them
       // would put this counter back out of step with room creations, which is
@@ -3018,6 +3017,25 @@ export function createRoomService(options: {
           });
         }
       }
+      // LAST, and swallowing its own failure — for the same reason the
+      // acknowledgement above does. Everything before this point consumed the
+      // results of a DESTRUCTIVE sweep: those rooms are already gone from
+      // Redis, so a throw between the delete and its follow-ups would strand
+      // their runtime state, their reclamation count and their `room_deleted`
+      // broadcast with no later pass able to name them again. This judgement is
+      // secondary and retried every tick, so its failure is reported and never
+      // allowed to overwrite a sweep that landed (#277 review).
+      try {
+        await collectNeverExpiringOrphans(currentTime);
+      } catch (error) {
+        logEvent("room_persist_failed", {
+          provider: persistence.provider,
+          result: "error",
+          reason: "never_expiring_sweep_failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
       return {
         deletedRooms: swept.deletedRoomCodes.length,
         orphanedIndexEntries: swept.orphanedIndexCodes.length,

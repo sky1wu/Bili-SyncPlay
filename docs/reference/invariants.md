@@ -882,7 +882,12 @@ do NOT compose, and that is the part that decides which connection gets which:
   the index holds every room without an expiry, which is every live room, so a
   fixed prefix of it is dominated by rooms that are perfectly fine and an orphan
   behind them would be starved — the cap that keeps the fan-out bounded is also
-  what makes a cursor necessary (#277 review).
+  what makes a cursor necessary (#277 review). It also runs LAST in the tick and
+  swallows its own failure: the expiry sweep before it is DESTRUCTIVE, and a
+  throw between that delete and the follow-ups it owes — the runtime teardown,
+  the reclamation count, the `room_deleted` broadcast — would strand them with
+  nothing able to name those rooms again. **A step that can fail does not belong
+  between an irreversible action and the consumption of its result.**
 
 - **Still open, deliberately: one write — the room store's `updateRoom`.** Not
   #237's trade: it is conditional, and that turns out not to be enough. See
