@@ -959,6 +959,20 @@ test("redis room update applies the patch, bumps version, and rejects stale writ
       { expiresAt: 900 },
     );
     assert.equal(pinned.ok, true);
+
+    // Pinned to BOTH, for a caller whose write may reach Redis long after it
+    // read: the same instance, but moved on since (#277 review).
+    assert.deepEqual(
+      await store.updateRoom(
+        replacement.code,
+        {
+          joinToken: replacement.joinToken,
+          version: replacement.version,
+        },
+        { expiresAt: 901 },
+      ),
+      { ok: false, reason: "version_conflict" },
+    );
   } finally {
     await redis.del(`${namespace}:room:CASRM1`);
     await redis.del(`${namespace}:rooms-by-expiry`);

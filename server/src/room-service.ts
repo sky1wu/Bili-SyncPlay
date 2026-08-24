@@ -1883,7 +1883,17 @@ export function createRoomService(options: {
         try {
           const result = await roomStore.updateRoom(
             roomCode,
-            persistedRoom.version,
+            // BOTH: the instance, because this effect may reach Redis long
+            // after the leave stopped waiting and a version alone is not an
+            // identity — a replacement that took the freed code starts at
+            // version 0 like every other new room, and a leave that saw
+            // version 0 is the ordinary case for a room its creator never
+            // joined. And the version, because it is the premise: the room was
+            // judged empty at exactly this state (#277 review).
+            {
+              joinToken: persistedRoom.joinToken,
+              version: persistedRoom.version,
+            },
             { expiresAt, lastActiveAt: now() },
             {
               boundedBy:

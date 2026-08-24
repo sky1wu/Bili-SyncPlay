@@ -49,7 +49,12 @@ export type RoomReadCaller = "request" | "maintenance_pass";
  * What an update is allowed to overwrite.
  *
  * A version, for a caller acting on a state it READ. Or the room INSTANCE, for
- * a caller acting on a room it CREATED — the same guard {@link
+ * a caller acting on a room it CREATED — optionally WITH a version, for a
+ * caller whose write may reach Redis long after it read: a version alone is not
+ * an identity, so an effect that outlives its request can otherwise match a
+ * replacement that took the freed code and happens to sit at the same version
+ * (every new room starts at 0). Both together say "this room, unchanged since I
+ * judged it" (#277 review). Or the room INSTANCE alone — the same guard {@link
  * RoomStore.deleteRoom} uses, and for the same reason: an admin touching a
  * still-memberless room moves its version, so a version-exact guard would
  * decline the very change that calls for the action. The instance form is a
@@ -67,7 +72,7 @@ export type RoomReadCaller = "request" | "maintenance_pass";
  * that changes underneath it declines — the guard is checked in that same read,
  * never check-then-act.
  */
-export type RoomUpdateGuard = number | { joinToken: string };
+export type RoomUpdateGuard = number | { joinToken: string; version?: number };
 
 export type RoomUpdateOptions = {
   /**
@@ -284,6 +289,11 @@ export function createInMemoryRoomStore(
         // A different room holds this code now, so nothing of this caller's is
         // here to update.
         return { ok: false, reason: "not_found" };
+      } else if (
+        expected.version !== undefined &&
+        currentRoom.version !== expected.version
+      ) {
+        return { ok: false, reason: "version_conflict" };
       }
 
       const nextRoom: PersistedRoom = {

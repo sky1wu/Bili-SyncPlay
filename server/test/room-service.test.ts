@@ -457,6 +457,83 @@ test("a leave answers on its own deadline and the write still reports itself", a
   assert.equal((await roomStore.getRoom(created.room.code))?.expiresAt, 6_000);
 });
 
+test("a late expiry schedule does not land on a room that recycled the code", async () => {
+  // A version is not an identity. This effect can reach Redis long after the
+  // leave stopped waiting, and a replacement that took the freed code starts at
+  // version 0 — exactly the version a leave sees for a room its creator never
+  // joined. Pinning the version alone would match it and hand the reaper a room
+  // that has members (#277 review).
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  let releaseExpiryWrite: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseExpiryWrite = resolve;
+  });
+  const baseService = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMRC2",
+  });
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt === undefined || patch.expiresAt === null) {
+          return roomStore.updateRoom(code, expected, patch, options);
+        }
+        await held;
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 2;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => 1_000,
+    roomExpiryScheduleConfirmationTimeoutMs: 20,
+  });
+
+  const owner = createSession("owner");
+  const created = await baseService.createRoomForSession(owner, "Alice");
+  assert.equal(created.room.version, 0);
+  await service.leaveRoomForSession(owner);
+
+  // The room is collected and the code handed out again while the write is
+  // still out. The replacement is at version 0, just like the one that left.
+  const original = await roomStore.getRoom(created.room.code);
+  assert.ok(original);
+  await roomStore.deleteRoom(original);
+  const replacement = await roomStore.createRoom({
+    code: created.room.code,
+    joinToken: "replacement-tok",
+    createdAt: 2_000,
+  });
+  assert.equal(replacement.version, created.room.version);
+
+  releaseExpiryWrite?.();
+  await service.close();
+
+  const current = await roomStore.getRoom(created.room.code);
+  assert.equal(current?.joinToken, "replacement-tok");
+  assert.equal(
+    current?.expiresAt,
+    null,
+    "a late expiry write landed on the room that recycled the code",
+  );
+});
+
 test("a late expiry schedule does not land on a room somebody rejoined", async () => {
   // The interleaving the deadline opens up: the leave stops waiting, and while
   // its write is still out somebody joins and revives the room. The write is

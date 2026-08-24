@@ -966,6 +966,16 @@ do NOT compose, and that is the part that decides which connection gets which:
   a deadline that lets the effect outlive its request is what makes the window
   wide enough to hit (#277 review).
 
+  That same width is why it pins the INSTANCE as well as the version. **A
+  version is not an identity** — the rule the orphan rollback already lives by —
+  and it bites harder here: an effect that outlives its request can reach Redis
+  after the room was collected and the code handed out again, and a replacement
+  starts at version 0, which is exactly the version a leave sees for a room its
+  creator never joined. So `RoomUpdateGuard`'s instance form carries an optional
+  `version`, and this caller passes both: the instance says "this room", the
+  version says "unchanged since I judged it empty". Each half has its own
+  failing probe, because each fails a different way.
+
   `updateRoom` has neither property. Its CAS compares the
   whole previous body, so nothing it writes late can corrupt anything — but it
   is reached from six request handlers whose successes owe six different
