@@ -904,6 +904,18 @@ do NOT compose, and that is the part that decides which connection gets which:
   unconditionally for joins. Two writes on one identity, one guarded and one
   not, is the shape to look for.
 
+  **And a guarded write's LOCAL mirror follows the shared answer, never leads
+  it.** `addMember` may apply locally first because a claim needs no permission;
+  `restoreMember` may not, because the successor it must not displace can be
+  seated on another node — invisible locally, so the local mirror would always
+  say yes. It reports whether the seat was given back, and both the Redis
+  store's own mirror and `createMirroredRuntimeStore`'s local store apply only
+  on a confirmed yes; a failure or a timeout counts as a decline, because
+  re-seating without a yes is the outcome that cannot be undone. The caller
+  follows the same answer: a leave whose seat moved on logs
+  `room_leave_recovery_skipped reason=member_seat_taken` instead of claiming a
+  recovery it did not get.
+
   What remains NOT atomic, deliberately: a revocation that lands
   late while the compensation's own `restoreMember` then fails leaves Redis without
   the token binding and this node's mirror with it, so that member cannot

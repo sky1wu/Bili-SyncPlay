@@ -593,12 +593,25 @@ export function createRoomService(options: {
     // successor may have reconnected onto another node while our own leave was
     // still waiting on Redis, and an unconditional re-seat would overwrite the
     // binding they are using (#277 review).
-    runtimeStore.restoreMember(
+    const reseated = await runtimeStore.restoreMember(
       args.snapshot.roomCode,
       args.snapshot.memberId,
       args.session,
       args.snapshot.memberToken,
     );
+    if (!reseated) {
+      // The identity moved on while this leave was failing. Reporting it as a
+      // recovery would name a seat this session does not have; the same skip
+      // the other unrecoverable shapes take.
+      logEvent("room_leave_recovery_skipped", {
+        sessionId: args.session.id,
+        roomCode: args.roomCode,
+        remoteAddress: args.session.remoteAddress,
+        origin: args.session.origin,
+        reason: "member_seat_taken",
+      });
+      return;
+    }
     restoreJoinedSession(args.session, args.snapshot);
     // Swallowed here alone: this runs while an earlier failure is being
     // compensated, and letting the barrier's own rejection escape would replace

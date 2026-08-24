@@ -141,9 +141,26 @@ export function createMirroredRuntimeStore(
       localRuntimeStore.addMember,
       sharedRuntimeStore.addMember,
     ),
-    restoreMember: (code, memberId, session, memberToken) => {
-      localRuntimeStore.restoreMember(code, memberId, session, memberToken);
-      sharedRuntimeStore.restoreMember(code, memberId, session, memberToken);
+    // Shared first, and the local apply rides on its answer: only the shared
+    // view can see a successor seated on another node, so a local mirror that
+    // led here would re-arm a departed session `requireMemberToken` then lets
+    // act on the room (#277 review).
+    restoreMember: async (code, memberId, session, memberToken) => {
+      const applied = await sharedRuntimeStore.restoreMember(
+        code,
+        memberId,
+        session,
+        memberToken,
+      );
+      if (!applied) {
+        return false;
+      }
+      return localRuntimeStore.restoreMember(
+        code,
+        memberId,
+        session,
+        memberToken,
+      );
     },
     findMemberIdByToken: readLocal(localRuntimeStore.findMemberIdByToken),
     isMemberTokenBlocked: readLocal(localRuntimeStore.isMemberTokenBlocked),

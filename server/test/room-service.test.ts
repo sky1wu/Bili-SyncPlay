@@ -327,6 +327,10 @@ test("a failed leave does not restore a member whose seat changed hands", async 
     successor,
     "the compensation took the seat back from its successor",
   );
+  // And it is not reported as a recovery: this session did not get its seat
+  // back, so `room_leave_recovered` would name one it does not have.
+  assert.ok(events.includes("room_leave_recovery_skipped"));
+  assert.ok(!events.includes("room_leave_recovered"));
 });
 
 test("room service restores member state when empty-room expiry scheduling fails", async () => {
@@ -1272,7 +1276,7 @@ test("room service flushes pending runtime store writes before exposing updated 
       return activeRooms.removeMember(code, memberId, session);
     },
     restoreMember(code, memberId, session, memberToken) {
-      activeRooms.restoreMember(code, memberId, session, memberToken);
+      return activeRooms.restoreMember(code, memberId, session, memberToken);
     },
     revokeMemberToken(code, memberId, session) {
       activeRooms.revokeMemberToken(code, memberId, session);

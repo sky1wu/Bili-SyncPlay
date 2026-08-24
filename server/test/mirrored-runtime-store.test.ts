@@ -38,6 +38,47 @@ function createSession(id: string): Session {
   };
 }
 
+test("mirrored runtime store does not re-seat locally when the shared restore declines", async () => {
+  // Only the shared view can see a successor seated on another node, so a local
+  // mirror that led here would re-arm a departed session — and
+  // `requireMemberToken` reads exactly this mirror, so that session would pass
+  // authentication and act on the room beside its successor (#277 review).
+  const local = createInMemoryRuntimeStore();
+  const shared = createInMemoryRuntimeStore();
+  const departed = createSession("session-departed");
+  const successor = createSession("session-successor");
+
+  // The seat is held by the successor in the shared view, and by the departed
+  // session in this node's mirror — the split the compensation runs into.
+  shared.addMember("ROOMMS", "member-ms", successor, "token-ms");
+  local.addMember("ROOMMS", "member-ms", departed, "token-ms");
+  local.removeMember("ROOMMS", "member-ms", departed);
+
+  const store = createMirroredRuntimeStore(local, shared);
+  assert.equal(
+    await store.restoreMember("ROOMMS", "member-ms", departed, "token-ms"),
+    false,
+  );
+  assert.equal(local.getRoom("ROOMMS")?.members.get("member-ms"), undefined);
+  assert.equal(
+    shared.getRoom("ROOMMS")?.members.get("member-ms"),
+    successor,
+    "the shared seat must stay with its successor",
+  );
+
+  // The control: with the seat still its own, the compensation does apply.
+  const owner = createSession("session-owner");
+  shared.addMember("ROOMMC", "member-mc", owner, "token-mc");
+  shared.removeMember("ROOMMC", "member-mc", owner);
+  local.addMember("ROOMMC", "member-mc", owner, "token-mc");
+  local.removeMember("ROOMMC", "member-mc", owner);
+  assert.equal(
+    await store.restoreMember("ROOMMC", "member-mc", owner, "token-mc"),
+    true,
+  );
+  assert.equal(local.getRoom("ROOMMC")?.members.get("member-mc"), owner);
+});
+
 test("mirrored runtime store leaves the local mirror untouched when the shared revoke fails", async () => {
   const local = createInMemoryRuntimeStore();
   const shared = createInMemoryRuntimeStore();

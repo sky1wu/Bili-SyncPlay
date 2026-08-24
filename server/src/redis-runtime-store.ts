@@ -1859,13 +1859,12 @@ export async function createRedisRuntimeStore(
       memberToken: string,
     ) {
       ensurePendingCapacity("restore_member");
-      // Local first, like `addMember`: the compensation exists so this node's
-      // session keeps working, and Redis stays the authority for identity
-      // resolution either way. The guard lives in the SHARED write, because the
-      // successor this must not overwrite may be seated on another node and is
-      // therefore invisible to the local mirror.
-      localRuntimeStore.restoreMember(code, memberId, session, memberToken);
-      void trackOperation(
+      // NOT local-first, unlike `addMember`. A join CLAIMS the seat, so its
+      // local mirror can lead; this one is GUARDED, and the successor it must
+      // not displace may be seated on another node — invisible here, so the
+      // local mirror would always say yes. The shared answer decides both
+      // stores, the way a revocation's does (#277 review).
+      return trackOperation(
         "restore_member",
         redis.eval(
           RESTORE_MEMBER_LUA,
@@ -1877,7 +1876,16 @@ export async function createRedisRuntimeStore(
           session.id,
           memberToken,
         ),
-      );
+      ).then((applied) => {
+        // `trackOperation` answers `undefined` for a failure or a timeout, and
+        // that is the same answer as a decline here: without a confirmed yes,
+        // re-arming the departed session is the outcome that cannot be undone.
+        if (Number(applied) !== 1) {
+          return false;
+        }
+        localRuntimeStore.restoreMember(code, memberId, session, memberToken);
+        return true;
+      });
     },
     async findMemberIdByToken(code: string, memberToken: string) {
       // Redis is the ONLY authority here. Falling back to the local mirror on a

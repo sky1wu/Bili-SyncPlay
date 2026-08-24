@@ -131,16 +131,22 @@ export type RuntimeStore = {
    * onto another node in the meantime, which is the very thing
    * {@link RuntimeStore.revokeMemberToken}'s guard exists to prevent (#277).
    *
-   * The local mirror is updated first, like `addMember`: the point of the
-   * compensation is that this node's session keeps working, and Redis stays the
-   * authority for identity resolution either way.
+   * Returns whether the seat was given back, and the LOCAL mirror follows that
+   * answer rather than being applied first. `addMember` may apply locally first
+   * because a join claims unconditionally; this one is guarded, and the
+   * successor it must not displace may be seated on ANOTHER node — invisible to
+   * the local mirror, which would therefore always say yes. Re-seating locally
+   * on that non-answer re-arms a socket whose client has already reconnected
+   * elsewhere: `requireMemberToken` reads this mirror, so the departed session
+   * would pass authentication and act on the room alongside its successor
+   * (#277 review).
    */
   restoreMember: (
     code: string,
     memberId: string,
     session: Session,
     memberToken: string,
-  ) => void;
+  ) => boolean | Promise<boolean>;
   findMemberIdByToken: (code: string, memberToken: string) => string | null;
   /**
    * Evict a member: block their token AND end their identity, as ONE commit.
@@ -524,9 +530,10 @@ export function createInMemoryRuntimeStore(
     restoreMember(code, memberId, session, memberToken) {
       pruneExpiredMemberTokens(code);
       if (!restoreMemberInRoom(rooms, code, memberId, session, memberToken)) {
-        return;
+        return false;
       }
       memberTokenExpiryByRoom.get(code)?.delete(memberId);
+      return true;
     },
     findMemberIdByToken(code, memberToken) {
       pruneExpiredMemberTokens(code);

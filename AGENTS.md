@@ -253,7 +253,10 @@ before changing the code it describes.
   leave's recovery re-seats through the guarded `restoreMember`, never the
   unconditional `addMember` a JOIN uses, or a cap-driven compensation overwrites
   the binding of a successor who reconnected onto another node. Two writes on
-  one identity, one guarded and one not, is the shape to look for.
+  one identity, one guarded and one not, is the shape to look for. A guarded
+  write's LOCAL mirror follows the shared answer instead of leading it, since
+  the successor it must not displace is invisible locally — a failure or a
+  timeout counts as a decline.
   `updateRoom` is CONDITIONAL and still stays, which
   is the correction this round bought: **conditionality makes a late landing
   safe to HAVE happened; it does not discharge what the write's SUCCESS owes,

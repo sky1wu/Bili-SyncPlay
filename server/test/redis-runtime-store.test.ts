@@ -1318,11 +1318,14 @@ test("redis runtime store declines a restore of a member who changed hands", asy
     assert.equal(await redis.hget(membersKey, "member-restore"), newSession.id);
 
     // The stale node's leave failed and compensates.
-    store.restoreMember(
-      "ROOMRS",
-      "member-restore",
-      oldSession,
-      "token-restore",
+    assert.equal(
+      await store.restoreMember(
+        "ROOMRS",
+        "member-restore",
+        oldSession,
+        "token-restore",
+      ),
+      false,
     );
     await store.flush?.();
 
@@ -1331,16 +1334,22 @@ test("redis runtime store declines a restore of a member who changed hands", asy
       newSession.id,
       "a restore overwrote the binding its successor is using",
     );
+    // The answer is what the local mirror follows — proved where the two views
+    // can actually differ, in `mirrored-runtime-store.test.ts`. One store
+    // playing both nodes cannot show that here.
 
     // The control: with the seat still its own, the restore does apply.
     await store.revokeMemberToken("ROOMRS", "member-restore", newSession);
     await store.flush?.();
     await redis.hdel(membersKey, "member-restore");
-    store.restoreMember(
-      "ROOMRS",
-      "member-restore",
-      oldSession,
-      "token-restore",
+    assert.equal(
+      await store.restoreMember(
+        "ROOMRS",
+        "member-restore",
+        oldSession,
+        "token-restore",
+      ),
+      true,
     );
     await store.flush?.();
     assert.equal(await redis.hget(membersKey, "member-restore"), oldSession.id);
@@ -1352,6 +1361,59 @@ test("redis runtime store declines a restore of a member who changed hands", asy
     await redis.del(membersKey);
     await redis.quit();
     await store.close();
+  }
+});
+
+test("redis runtime store keeps a declined restore out of its own mirror", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // Two stores on one key prefix are two nodes, which is what it takes to show
+  // this: the successor is seated on B and is invisible to A's mirror, so only
+  // the shared answer can tell A not to re-seat. A mirror that led would put
+  // the departed session back into A's member view — its broadcasts, its
+  // `resolveJoinTargetState`, and the guards on its own later writes
+  // (#277 review).
+  const keyPrefix = createKeyPrefix();
+  const nodeA = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const nodeB = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const departed = createSession("session-a-departed");
+  departed.memberId = "member-two-node";
+  departed.memberToken = "token-two-node";
+  const successor = createSession("session-b-successor");
+  successor.memberId = "member-two-node";
+  successor.memberToken = "token-two-node";
+
+  try {
+    nodeA.addMember("ROOMTN", "member-two-node", departed, "token-two-node");
+    await nodeA.flush?.();
+    nodeA.removeMember("ROOMTN", "member-two-node", departed);
+    await nodeA.flush?.();
+
+    // The client reconnects onto B and reclaims the identity.
+    nodeB.addMember("ROOMTN", "member-two-node", successor, "token-two-node");
+    await nodeB.flush?.();
+
+    // A's leave failed and compensates, still believing it owns the seat.
+    assert.equal(
+      await nodeA.restoreMember(
+        "ROOMTN",
+        "member-two-node",
+        departed,
+        "token-two-node",
+      ),
+      false,
+    );
+    assert.equal(
+      nodeA.getOrCreateRoom("ROOMTN").members.get("member-two-node"),
+      undefined,
+      "a declined restore re-seated the departed session on its own node",
+    );
+  } finally {
+    await nodeA.close();
+    await nodeB.close();
   }
 });
 
