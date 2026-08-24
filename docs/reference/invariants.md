@@ -892,19 +892,24 @@ do NOT compose, and that is the part that decides which connection gets which:
   reason to retry rather than to give up (#301). Which guard applies is a
   property of the CALL, again.
 
-  A debt is a unique RECORD, not just a room code, and the ledger lives behind a
-  door that will not let a caller forget it. Settling compares the identity —
-  only what was acted on may be removed, because the reaper snapshots a debt and
-  then awaits its write, and in that window the same room can be rejoined,
-  emptied again, and owe a NEWER one. Recording compares the ORDER instead: a
-  debt names the state a room was left in, so the later version wins and a stale
-  writer is simply ignored. **Both writers can be late** — a leave records only
-  once its expiry write has failed, and the effect that could not pay a debt
-  keeps it long after it snapshotted one — which is why "who is writing" is the
-  wrong question and "which state does this name" is the right one. Trying to
-  answer it by role first put an unconditional `set` on two of the four writers,
-  and then refused a genuinely newer debt; the door plus the ordering answers
-  both with one line, and there is no raw `set` left to get wrong.
+  **A debt is a room CODE to look at again, not a state to compare against.**
+  Carrying the state a room was left in looks like it should answer "is this
+  still owed", and cannot: versions from two rooms sharing a recycled code are
+  not comparable, and a bump that changes nothing about emptiness — an admin
+  clearing the video writes `expiresAt: null` too — is indistinguishable from a
+  join. Four review rounds went into making a remembered state behave, and the
+  question was the wrong one: **the room's state now is answered by reading it
+  now**, every tick, from scratch. That also leaves nothing for a stale writer
+  to corrupt, so the identity checks and the version ordering those rounds added
+  are gone with it.
+
+  The drain's three terminal answers are facts about the RECORD — gone, or
+  already carrying an expiry — and a conflict is not one of them: something
+  raced the judgement, so the next tick reads the room again rather than
+  guessing what it was. Occupancy is read too, for the one room in hand, and it
+  only decides whether to WRITE: a room somebody is in may be emptied again a
+  moment later, so it is never a discharge. An expiry somebody else scheduled is
+  left exactly as they scheduled it.
 
   What it does not cover, stated rather than papered over: a debt lives in this
   process, so a node that dies between the failed compensation and the next

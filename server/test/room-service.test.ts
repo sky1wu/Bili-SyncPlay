@@ -824,6 +824,174 @@ test("a drain that failed does not put its stale debt back over a newer one", as
   );
 });
 
+test("a debt is discharged by an expiry somebody else wrote, not overwritten", async () => {
+  // The terminal facts are about the RECORD: an expiry is an expiry, whoever
+  // set it. Rewriting it to this tick's clock would collect the room earlier
+  // than whoever scheduled it intended (#277 review).
+  let currentTime = 1_000;
+  let expiryWriteFails = true;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt !== undefined && expiryWriteFails) {
+          throw new Error("expiry write failed");
+        }
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMEQ",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+
+  // Somebody else schedules it, further out than this tick's clock.
+  const current = await roomStore.getRoom(created.room.code);
+  assert.ok(current);
+  await roomStore.updateRoom(current.code, current.version, {
+    expiresAt: 90_000,
+  });
+
+  expiryWriteFails = false;
+  currentTime += 1_000;
+  await service.deleteExpiredRooms(currentTime);
+
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt,
+    90_000,
+    "the drain overwrote an expiry somebody else had scheduled",
+  );
+});
+
+test("a debt survives a version bump that left the room uncollectable", async () => {
+  // A version bump is not a discharge. An admin clearing the video writes
+  // `expiresAt: null` too, so the room is still the shape nothing collects —
+  // treating the conflict as terminal dropped the debt and stranded it. Every
+  // answer now comes from reading the room, not from comparing versions
+  // (#277 review).
+  let currentTime = 1_000;
+  let expiryWriteFails = true;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt !== undefined && expiryWriteFails) {
+          throw new Error("expiry write failed");
+        }
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMVB",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
+
+  // Something bumps the version without giving the room an expiry — an admin
+  // clearing its video does exactly this.
+  const current = await roomStore.getRoom(created.room.code);
+  assert.ok(current);
+  await roomStore.updateRoom(current.code, current.version, {
+    sharedVideo: null,
+    expiresAt: null,
+  });
+
+  expiryWriteFails = false;
+  currentTime += 1_000;
+  await service.deleteExpiredRooms(currentTime);
+
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt,
+    currentTime,
+    "a version bump discharged a debt the room still owed",
+  );
+});
+
+test("a debt outlives a recycled code and is judged on what is there now", async () => {
+  // Versions from two rooms sharing a code are not comparable — a replacement
+  // starts over at 0. Nothing compares them any more: the drain reads the room
+  // that is there now and judges THAT (#277 review).
+  let currentTime = 1_000;
+  let expiryWriteFails = true;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt !== undefined && expiryWriteFails) {
+          throw new Error("expiry write failed");
+        }
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMRC3",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  // Move the first room off version 0 so a replacement cannot be mistaken for
+  // it by version alone.
+  await service.leaveRoomForSession(owner);
+
+  // The code is recycled by a room that is itself an orphan, at version 0.
+  const stale = await roomStore.getRoom(created.room.code);
+  assert.ok(stale);
+  await roomStore.deleteRoom(stale);
+  const replacement = await roomStore.createRoom({
+    code: created.room.code,
+    joinToken: "replacement-tok",
+    createdAt: currentTime,
+  });
+  assert.equal(replacement.version, 0);
+
+  expiryWriteFails = false;
+  currentTime += 1_000;
+  await service.deleteExpiredRooms(currentTime);
+
+  const now = await roomStore.getRoom(created.room.code);
+  assert.equal(now?.joinToken, "replacement-tok");
+  assert.equal(
+    now?.expiresAt,
+    currentTime,
+    "the debt was judged against a version instead of the room that is there",
+  );
+});
+
 test("a debt is not paid onto a room somebody came back to", async () => {
   // Occupancy is never consulted, because the write's own guard answers it: a
   // join clears `expiresAt` and moves the version, so an expiry pinned to the
