@@ -940,7 +940,43 @@ do NOT compose, and that is the part that decides which connection gets which:
   decides where the cap may sit. Every write that took one has ONE caller owning
   ONE follow-up: the guarded deletes keep the reclamation count, the runtime
   teardown and the `room_deleted` broadcast; `markRoomGeneration`'s creator
-  rolls its room back. `updateRoom` has neither property. Its CAS compares the
+  rolls its room back.
+
+  One of those six left by a route none of the others could take: **a failed
+  piece of BOOKKEEPING is not a reason to undo the operation it belongs to.**
+  `room:leave` schedules the emptied room's expiry after the member is already
+  removed and the session already cleared. Throwing on that write sent the leave
+  into `restoreLeaveState`, which re-seated a member who had successfully left —
+  and left the room body saying "expiring" while it had an occupant again, the
+  one shape NEITHER collect path can judge, since membership lives in the other
+  store and no write spans both. The failure is now reported
+  (`room_leave_orphan_possible`) and the leave stands: one thing wrong instead
+  of two. That is what makes the write DISCARDABLE, and only then boundable —
+  the leave caps its own wait on its own constant while the effect keeps going,
+  because there, landing late is exactly the wanted outcome.
+
+  That effect is ONE CAS pinned to the version the leave judged empty against,
+  deliberately not a `withVersionRetry` loop. **For this write a version
+  conflict is not "retry with a fresher version", it is "the premise changed".**
+  Emptiness cannot be part of the CAS — membership lives in the other store —
+  so the version read alongside the shared-view emptiness check IS the premise,
+  and a retry loop launders a conflict into a newer version and writes the old
+  expiry over a room a join has just revived. That is #237's hazard (the reaper
+  deleting a room that still has members) re-entered through the back door, and
+  a deadline that lets the effect outlive its request is what makes the window
+  wide enough to hit (#277 review).
+
+  That same width is why it pins the INSTANCE as well as the version. **A
+  version is not an identity** — the rule the orphan rollback already lives by —
+  and it bites harder here: an effect that outlives its request can reach Redis
+  after the room was collected and the code handed out again, and a replacement
+  starts at version 0, which is exactly the version a leave sees for a room its
+  creator never joined. So `RoomUpdateGuard`'s instance form carries an optional
+  `version`, and this caller passes both: the instance says "this room", the
+  version says "unchanged since I judged it empty". Each half has its own
+  failing probe, because each fails a different way.
+
+  `updateRoom` has neither property. Its CAS compares the
   whole previous body, so nothing it writes late can corrupt anything — but it
   is reached from six request handlers whose successes owe six different
   follow-ups, and three of those are not self-superseding: a join's seating, an

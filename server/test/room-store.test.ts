@@ -85,6 +85,33 @@ test("an update pinned to a room instance declines a code that changed hands", a
   );
   assert.equal((await store.getRoom("BBBBBB"))?.expiresAt, null);
 
+  // Pinned to BOTH: the same instance, but moved on since the caller read it.
+  const moving = await store.createRoom({
+    code: "DDDDDD",
+    joinToken: "join-token-moving",
+    createdAt: 400,
+  });
+  await store.updateRoom(moving.code, moving.version, { lastActiveAt: 500 });
+  assert.deepEqual(
+    await store.updateRoom(
+      moving.code,
+      { joinToken: moving.joinToken, version: moving.version },
+      { expiresAt: 999 },
+    ),
+    { ok: false, reason: "version_conflict" },
+  );
+  // The instance alone would have let it through.
+  assert.equal(
+    (
+      await store.updateRoom(
+        moving.code,
+        { joinToken: moving.joinToken },
+        { expiresAt: 999 },
+      )
+    ).ok,
+    true,
+  );
+
   // And the same pin lets the instance that IS ours through.
   const mine = await store.createRoom({
     code: "CCCCCC",

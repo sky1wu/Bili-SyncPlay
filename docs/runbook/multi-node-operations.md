@@ -757,6 +757,14 @@ revocation took the request cap once its session guard became mandatory, so a
 stalled Redis answers a leave with `redis_runtime_store_operation_failed
 reason=timeout` instead of holding the connection open.
 
+A leave that empties a room schedules its expiry after the departure is already
+complete, so that write is reported on its own: `room_expiry_scheduled` when it
+lands (from the effect, which may outlive the request),
+`room_expiry_schedule_unconfirmed` when the leave stopped waiting, and
+`room_leave_orphan_possible` when it definitively did not get scheduled — the
+last one names a room that may now be memberless with no expiry, which no reaper
+collects. A leave itself never fails for this reason any more.
+
 `createRoom` left that list in #277 as well, and it is the one write whose late
 landing is not harmless: `SET NX` guards the code's existence, not the room's
 identity, so a create that lands after its caller gave up leaves a memberless,

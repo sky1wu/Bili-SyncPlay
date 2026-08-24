@@ -1423,6 +1423,13 @@ export async function createRedisRoomStore(
         // A different room holds this code now. The version could not have said
         // so: a replacement starts at 0 like every other new room.
         return { ok: false, reason: "not_found" };
+      } else if (
+        expected.version !== undefined &&
+        currentRoom.version !== expected.version
+      ) {
+        // Same room, moved on. Only a caller that pins BOTH asks this, and it
+        // asks because its write may reach Redis long after it read.
+        return { ok: false, reason: "version_conflict" };
       }
 
       const nextRoom: PersistedRoom = {
