@@ -376,15 +376,20 @@ test("a revocation that stood is not undone when the removal then fails", async 
   assert.ok(events.includes("room_persist_failed"));
 });
 
-test("a leave answers when the emptied room's expiry write never does", async () => {
-  // The bound this whole slice exists for: `updateRoom`'s CAS is uncapped in
-  // the store, so a leave that simply awaited it hung forever on a stalled
-  // Redis. The leave stops waiting on its OWN deadline; the write keeps going,
-  // because landing late is exactly the wanted outcome — the room really is
-  // empty and really should expire (#277).
+test("a leave answers on its own deadline and the write still reports itself", async () => {
+  // Two facts, two lines, and the second one is the effect's. The leave stops
+  // waiting on its OWN deadline — `updateRoom`'s CAS is uncapped in the store,
+  // so a leave that simply awaited it hung forever on a stalled Redis. After
+  // that a late answer reaches nobody through the returned promise, so the
+  // effect owns the last word: without it the timeout line would stand as the
+  // final statement about a room whose expiry did get scheduled (#266, #277).
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();
   const events: string[] = [];
+  let releaseExpiryWrite: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseExpiryWrite = resolve;
+  });
   const baseService = createRoomService({
     config: getDefaultSecurityConfig(),
     persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
@@ -403,11 +408,13 @@ test("a leave answers when the emptied room's expiry write never does", async ()
     persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
     roomStore: {
       ...roomStore,
-      // The CAS that never comes back.
-      updateRoom: (code, expected, patch, options) =>
-        patch.expiresAt === undefined
-          ? roomStore.updateRoom(code, expected, patch, options)
-          : new Promise(() => undefined),
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt === undefined || patch.expiresAt === null) {
+          return roomStore.updateRoom(code, expected, patch, options);
+        }
+        await held;
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
     },
     activeRooms,
     generateToken: (() => {
@@ -434,11 +441,20 @@ test("a leave answers when the emptied room's expiry write never does", async ()
   );
   assert.equal(answered, true, "the leave must not wait on the expiry write");
 
-  // Reported, not silently turned into success: the room may now be a
-  // memberless record with no expiry.
-  assert.ok(events.includes("room_leave_orphan_possible"));
+  // The WAIT ended — said as its own fact, and not as the room's.
+  assert.ok(events.includes("room_expiry_schedule_unconfirmed"));
+  assert.ok(!events.includes("room_expiry_scheduled"));
   assert.equal((await roomStore.getRoom(created.room.code))?.expiresAt, null);
+
+  // Now the write lands. The effect reports it, long after its caller left.
+  releaseExpiryWrite?.();
   await service.close();
+
+  assert.ok(
+    events.includes("room_expiry_scheduled"),
+    "the effect must report its own outcome after the wait ended",
+  );
+  assert.equal((await roomStore.getRoom(created.room.code))?.expiresAt, 6_000);
 });
 
 test("a late expiry schedule does not land on a room somebody rejoined", async () => {

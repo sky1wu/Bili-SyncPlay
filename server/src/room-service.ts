@@ -1852,17 +1852,19 @@ export function createRoomService(options: {
       }
 
       const expiresAt = now() + persistence.emptyRoomTtlMs;
-      // Never rethrown, and that is the point: a conflict, a store error and a
-      // deadline all mean the same thing here — the room's expiry was not
-      // scheduled — and none of them is a reason to undo a leave that already
-      // happened.
-      let expiryScheduleError: unknown;
-      // Two lifetimes: the leave stops waiting on its own deadline, the write
-      // keeps going. It has to keep going — landing late is exactly the wanted
-      // outcome here, since the room really is empty and really should expire.
-      // That is also why the store call declares `boundedBy` rather than taking
-      // the request cap: a capped read would END the effect at the first
-      // timeout and the CAS would never be issued (#277).
+      // The EFFECT owns its terminal report, independently of whoever is
+      // waiting. The leave stops waiting on its own deadline, and after that a
+      // late answer reaches nobody through the returned promise — so a write
+      // that finally lands, or finally fails, would leave the timeout line
+      // standing as the last word about a room whose expiry did get scheduled
+      // (#266, #277 review). Its sibling `runOrphanExpiry` reports from inside
+      // the effect for the same reason.
+      //
+      // Two lifetimes: the write keeps going, and it SHOULD — landing late is
+      // exactly the wanted outcome here, since the room really is empty and
+      // really should expire. That is also why the store call declares
+      // `boundedBy` rather than taking the request cap: a capped read would END
+      // the effect at the first timeout and the CAS would never be issued.
       //
       // ONE attempt, pinned to the version this leave judged empty against —
       // deliberately NOT `withVersionRetry`. For this write a version conflict
@@ -1876,51 +1878,38 @@ export function createRoomService(options: {
       // of the CAS (membership lives in the other store), so the version this
       // leave read IS the premise, and declining is the whole answer (#277).
       const scheduleExpiry = async (): Promise<PersistedRoom | null> => {
-        const result = await roomStore.updateRoom(
-          roomCode,
-          persistedRoom.version,
-          { expiresAt, lastActiveAt: now() },
-          {
-            boundedBy:
-              "room-service: empty-room expiry scheduling deadline (the leave stops waiting; this effect does not)",
-          },
-        );
-        return result.ok ? result.room : null;
-      };
-      const updatedRoom = closing
-        ? // An effect admitted after the shutdown snapshot is one nobody waits
-          // for and nobody drains, so it is refused here and said out loud
-          // below — the same rule the lazy delete follows.
-          null
-        : await roomExpiryScheduleConfirmationPacer
-            .capWait(
-              roomExpiryScheduleConfirmationPacer.trackCall(scheduleExpiry()),
-              roomExpiryScheduleConfirmationTimeoutMs,
-              () =>
-                new Error(
-                  `Room ${roomCode} expiry scheduling went unconfirmed for ${roomExpiryScheduleConfirmationTimeoutMs}ms.`,
-                ),
-            )
-            .catch((error: unknown) => {
-              expiryScheduleError = error;
-              return null;
-            });
-
-      if (updatedRoom) {
-        logEvent("room_expiry_scheduled", {
-          roomCode,
-          version: updatedRoom.version,
-          expiresAt,
-          result: "ok",
-        });
-      } else {
-        // The LEAVE is already done: the member was removed and
+        let scheduled: PersistedRoom | null = null;
+        let scheduleError: unknown;
+        try {
+          const result = await roomStore.updateRoom(
+            roomCode,
+            persistedRoom.version,
+            { expiresAt, lastActiveAt: now() },
+            {
+              boundedBy:
+                "room-service: empty-room expiry scheduling deadline (the leave stops waiting; this effect does not)",
+            },
+          );
+          scheduled = result.ok ? result.room : null;
+        } catch (error) {
+          scheduleError = error;
+        }
+        if (scheduled) {
+          logEvent("room_expiry_scheduled", {
+            roomCode,
+            version: scheduled.version,
+            expiresAt,
+            result: "ok",
+          });
+          return scheduled;
+        }
+        // The LEAVE itself is already done: the member was removed and
         // `clearSessionRoom` ran long before this write. What failed is the
         // ROOM's bookkeeping — scheduling the expiry of a room nobody is in.
         //
-        // Throwing here used to undo all of it, because `restoreLeaveState` in
-        // the catch re-seats the member. That put a member back into a room
-        // they had successfully left, and left the room body saying "expiring"
+        // Throwing used to undo all of it, because `restoreLeaveState` in the
+        // catch re-seats the member. That put a member back into a room they
+        // had successfully left, and left the room body saying "expiring"
         // while it had an occupant again — the one shape neither collect path
         // can judge, since membership lives in the other store and no write
         // spans both. Reporting the room that may now be an orphan keeps the
@@ -1935,17 +1924,64 @@ export function createRoomService(options: {
             origin: session.origin,
             provider: persistence.provider,
             reason: "leave_room_expiry_schedule_failed",
-            ...(expiryScheduleError === undefined
+            ...(scheduleError === undefined
               ? {}
               : {
                   error:
-                    expiryScheduleError instanceof Error
-                      ? expiryScheduleError.message
-                      : String(expiryScheduleError),
+                    scheduleError instanceof Error
+                      ? scheduleError.message
+                      : String(scheduleError),
                 }),
           },
           { level: "error" },
         );
+        return null;
+      };
+
+      let updatedRoom: PersistedRoom | null = null;
+      if (closing) {
+        // An effect admitted after the shutdown snapshot is one nobody waits
+        // for and nobody drains, so it is refused here — the same rule the
+        // lazy delete follows — and reported as the orphan risk it is.
+        logEvent(
+          "room_leave_orphan_possible",
+          {
+            sessionId: session.id,
+            roomCode,
+            remoteAddress: session.remoteAddress,
+            origin: session.origin,
+            provider: persistence.provider,
+            reason: "leave_room_expiry_schedule_failed",
+            error: "service_closing",
+          },
+          { level: "error" },
+        );
+      } else {
+        updatedRoom = await roomExpiryScheduleConfirmationPacer
+          .capWait(
+            roomExpiryScheduleConfirmationPacer.trackCall(scheduleExpiry()),
+            roomExpiryScheduleConfirmationTimeoutMs,
+            () =>
+              new Error(
+                `Room ${roomCode} expiry scheduling went unconfirmed for ${roomExpiryScheduleConfirmationTimeoutMs}ms.`,
+              ),
+          )
+          // Only the WAIT ended. Said as its own fact, and never as the
+          // room's: the effect above is still out and owns the last word.
+          .catch(() => {
+            logEvent(
+              "room_expiry_schedule_unconfirmed",
+              {
+                sessionId: session.id,
+                roomCode,
+                provider: persistence.provider,
+                result: "timeout",
+                timeoutMs: roomExpiryScheduleConfirmationTimeoutMs,
+              },
+              { level: "error" },
+            );
+            return null;
+          });
       }
 
       logEvent("room_left", {
