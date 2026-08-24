@@ -240,11 +240,30 @@ before changing the code it describes.
   cannot be recreated. Thus a newer generation's success or a live persisted
   room supersedes older effects whose late skip/failure must not retain or
   resurrect the debt.
-  Still open on purpose: the three durable writes, where
-  #237's trade holds because their effects — unlike a lock's or a dedup slot's
-  — do not expire. A write leaves that list by becoming CONDITIONAL, never by
-  re-arguing #237: a guarded write's late landing is a no-op, so the answer its
-  caller was given cannot be wrong. `markRoomGeneration` compares the creator's
+  Still open on purpose: two writes, for two different reasons.
+  `revokeMemberToken` is #237's trade — its effect, unlike a lock's or a dedup
+  slot's, does not expire. `updateRoom` is CONDITIONAL and still stays, which
+  is the correction this round bought: **conditionality makes a late landing
+  safe to HAVE happened; it does not discharge what the write's SUCCESS owes,
+  and the cap must sit with whoever owns that.** Every write that took a cap
+  has ONE caller owning ONE follow-up; `updateRoom` is reached from six request
+  handlers, three of whose follow-ups are not self-superseding (a join's
+  seating, an audit record, the revival of an expiring room), so a store-side
+  cap would answer all six by discarding the outcome — the same misplacement
+  the deletes were moved out of. `createRoom` left the list by the second half
+  alone: `SET NX` guards EXISTENCE, so a late landing is NOT a no-op, but its
+  single caller expires the room it may have built (`expireOrphanedRoom`,
+  identified by the code and joinToken it generated first) and stops trying
+  other codes; only a `timeout` is compensated, since `admission` proves no
+  command was issued. That compensation is a second lifetime in its own right —
+  and **an effect that keeps going must not be built out of capped calls**: a
+  capped read ends the call at the first timeout and its write is never issued,
+  so `updateRoom` takes a NAMED `boundedBy` and that call runs admitted but
+  uncapped. It is also gated on `closing`, because an effect admitted after the
+  shutdown snapshot is one nobody waits for. Pinning it by INSTANCE
+  (`RoomUpdateGuard`'s `{ joinToken }` form, `deleteRoom`'s guard) deleted
+  the re-read, the identity re-check and the false-alarm reasoning the
+  version-pinned loop needed. `markRoomGeneration` compares the creator's
   pin, and that pin belongs to the REQUEST — re-reading it inside the store
   would reopen the hole, since a read answered late pins the successor's value
   and waves the stale stamp through. The room delete left as a PAIR, because

@@ -672,9 +672,21 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
   僵住，靠的正是这份沉默。它们的信号还是调用方的那些：`room_reaper_sweep_timeout` →
   `room_reaper_sweep_stalled`、`node_heartbeat_failed`。
 
-仍有三个持久写按设计不设上限：运行时存储经 `trackAwaitedOperation` 的一个（吊销），
-以及房间存储的 `createRoom` 与 `updateRoom`。它们的副作用不会自行过期，所以 #237 的
-规则仍适用：一个可能是错的答复比一个慢的答复更糟。
+仍有两个持久写按设计不设上限，理由并不相同。运行时存储经 `trackAwaitedOperation` 的那一个
+（吊销）适用 #237 的规则：它的副作用不会自行过期，所以一个可能是错的答复比一个慢的答复更糟。
+房间存储的 `updateRoom` 是有条件的，迟到落地不可能破坏任何东西，但它被六个请求处理器调用，
+六份成功后续各不相同——把上限放进 store 等于用「丢弃结果」去答复这六个调用方，而那份结果正是
+它们的后续所需要的。
+
+`createRoom` 在 #277 中同样离开了这份名单，而且它是唯一一个「迟到落地并非无害」的写：
+`SET NX` 守的是代号是否存在，而不是房间的身份，所以一次在调用方放弃之后才落地的建房，会留下
+一间没有成员、也永不过期的房。因此建房方会在上报之前把它可能建出来的那间房过期掉，并且不再
+换别的代号重试。房间存储僵死时，预期会看到
+`room_persist_failed reason=room_create_unconfirmed`，外加两条之一，它们点名的房间代号需要
+运维手工过期或删除：补偿被拒或写丢是 `room_rollback_failed`，建房方不再等待它是
+`room_rollback_unconfirmed`——后一种情况下回滚仍在继续，关服时若还有没落地的，
+`room_service_close_unfinished` 会带上 `pendingRoomRollbacks`。建房本身被 `admission` 拒绝时
+不做回滚：它证明了这条命令根本没有发出去。
 
 generation 写在 #277 中因为变成「以建房方所 pin 的值为条件」而离开了这份名单，现在像其他
 命令一样在请求路径上答复调用方。删房也以同样方式离开，且是一对有守卫的形态：`deleteRoom`
@@ -741,8 +753,7 @@ generation 写在 #277 中因为变成「以建房方所 pin 的值为条件」�
   之后房间存储与运行时存储的**请求路径也在这份名单里**——它们会打 `reason=timeout` 并答复
   调用方。僵住的踢人会返回 `status=error, confirmation=unconfirmed`，其完整踢出效果仍在
   进行中；封禁截止时间只会向后推进，所以可以安全重试。
-  仍然**保持沉默**的是上面点名的三个持久写；从外面看，就是一次永远不返回的吊销、
-  建房或房间体更新。运行时删房不同：generation 守卫为必填，请求等待到期会记录
+  仍然**保持沉默**的是上面点名的两个写；从外面看，就是一次永远不返回的吊销或房间体更新。运行时删房不同：generation 守卫为必填，请求等待到期会记录
   `room_runtime_cleanup_unconfirmed`，每个房间 generation 唯一一条真实效果继续完成本地镜像
   收敛；同一效果的等待者共用一条独立于 Redis liveness 常量的确认期限。重试债只在创建最新
   的精确 generation 效果时授予 owner，复用效果的等待者不能转移它，并且在房间读取 `await`

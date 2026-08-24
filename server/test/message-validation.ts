@@ -716,11 +716,16 @@ test("applies shared video playback atomically when video:share includes playbac
   const baseStore = createInMemoryRoomStore();
   const roomStore: RoomStore = {
     ...baseStore,
-    async updateRoom(code, expectedVersion, patch) {
+    async updateRoom(code, expectedVersion, patch, expectedJoinToken) {
       if (patch.sharedVideo) {
         await new Promise((resolve) => setTimeout(resolve, 80));
       }
-      return await baseStore.updateRoom(code, expectedVersion, patch);
+      return await baseStore.updateRoom(
+        code,
+        expectedVersion,
+        patch,
+        expectedJoinToken,
+      );
     },
   };
 

@@ -824,15 +824,18 @@ export async function createRedisRoomStore(
     // reading the silence they derive their bounds from (#277). That is why the
     // choice is per CALL — the two passes reach the very same helpers.
     //
-    // What this does NOT resolve: the two unconditional durable writes,
-    // `createRoom` and `updateRoom`. Capping either tells a caller it failed
-    // while the write may still land, which is #237's trade. The guarded
-    // deletes are different: admission may safely refuse them before issue,
-    // while their eventual outcome remains owned by the outer caller.
+    // What this does NOT resolve: `updateRoom`'s CAS. Its guard is the whole
+    // previous body, so a late landing cannot corrupt anything — but a cap
+    // there would answer six different request handlers by discarding an
+    // outcome each of them owes something to, and three of those follow-ups
+    // are not self-superseding. Conditionality is what makes a late landing
+    // safe to HAVE happened; it does not discharge what the write's SUCCESS
+    // owes, and that is the property the cap's placement has to respect
+    // (#277).
     (createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, room-service's expired-room collection deadline and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the two durable writes",
+        "boundCommand's cap on the request path, room-service's expired-room collection deadline and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT updateRoom's CAS",
     }) as RedisRoomStoreClient);
   const {
     orphanedRoomCodesKey,
@@ -1348,14 +1351,23 @@ export async function createRedisRoomStore(
   return {
     async createRoom(input) {
       const room = createPersistedRoom(input);
-      const created = await redis.eval(
-        CREATE_ROOM_LUA,
-        2,
-        roomKey(room.code),
-        roomsByExpiryKey,
-        serializeRoom(room),
-        expiryScore(room),
-        room.code,
+      // Capped like every other request command. This is the write whose guard
+      // pins EXISTENCE rather than identity, so unlike the CAS and the two
+      // deletes its late landing is NOT a no-op: it builds a memberless,
+      // never-expiring room under a code its caller has stopped using, which
+      // is the one shape the reaper never collects. The cap is therefore paid
+      // for by the caller, which owns the compensation — `createRoomForSession`
+      // expires the room it may have created before it reports (#277).
+      const created = await boundCommand("create_room", () =>
+        redis.eval(
+          CREATE_ROOM_LUA,
+          2,
+          roomKey(room.code),
+          roomsByExpiryKey,
+          serializeRoom(room),
+          expiryScore(room),
+          room.code,
+        ),
       );
       if (created === "index_failed") {
         throw new Error(
@@ -1377,11 +1389,23 @@ export async function createRedisRoomStore(
         code,
       );
     },
-    async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
+    async updateRoom(
+      code,
+      expected,
+      patch,
+      options,
+    ): Promise<RoomUpdateResult> {
       const key = roomKey(code);
-      // The read half is capped like any other read; the CAS below is one of
-      // the two unconditional durable writes left for its own derivation.
-      const rawRoom = await boundCommand("update_room", () => redis.get(key));
+      // A caller that bounds its own wait and keeps the effect takes admission
+      // WITHOUT the cap, like the guarded deletes. Capping its read would end
+      // the call at the first timeout and the CAS would never be issued — the
+      // effect would die exactly where it is supposed to outlive the stall
+      // (#277 review). Everyone else keeps the request cap on the read; the
+      // CAS below is the one unconditional durable write left for its own
+      // derivation.
+      const bound =
+        options?.boundedBy === undefined ? boundCommand : admitCommand;
+      const rawRoom = await bound("update_room", () => redis.get(key));
       if (rawRoom === null) {
         return { ok: false, reason: "not_found" };
       }
@@ -1389,8 +1413,16 @@ export async function createRedisRoomStore(
       if (!currentRoom) {
         return { ok: false, reason: "not_found" };
       }
-      if (currentRoom.version !== expectedVersion) {
-        return { ok: false, reason: "version_conflict" };
+      // Checked against the bytes the CAS below guards on, so a record that
+      // changes after this read declines rather than slipping through.
+      if (typeof expected === "number") {
+        if (currentRoom.version !== expected) {
+          return { ok: false, reason: "version_conflict" };
+        }
+      } else if (currentRoom.joinToken !== expected.joinToken) {
+        // A different room holds this code now. The version could not have said
+        // so: a replacement starts at 0 like every other new room.
+        return { ok: false, reason: "not_found" };
       }
 
       const nextRoom: PersistedRoom = {
@@ -1399,16 +1431,29 @@ export async function createRedisRoomStore(
         version: currentRoom.version + 1,
       };
 
-      const result = await redis.eval(
-        UPDATE_ROOM_CAS_LUA,
-        2,
-        key,
-        roomsByExpiryKey,
-        rawRoom,
-        serializeRoom(nextRoom),
-        expiryScore(nextRoom),
-        code,
-      );
+      const result = await (options?.boundedBy === undefined
+        ? redis.eval(
+            UPDATE_ROOM_CAS_LUA,
+            2,
+            key,
+            roomsByExpiryKey,
+            rawRoom,
+            serializeRoom(nextRoom),
+            expiryScore(nextRoom),
+            code,
+          )
+        : admitCommand("update_room_cas", () =>
+            redis.eval(
+              UPDATE_ROOM_CAS_LUA,
+              2,
+              key,
+              roomsByExpiryKey,
+              rawRoom,
+              serializeRoom(nextRoom),
+              expiryScore(nextRoom),
+              code,
+            ),
+          ));
 
       if (result === "not_found") {
         return { ok: false, reason: "not_found" };

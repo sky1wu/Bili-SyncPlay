@@ -33,7 +33,7 @@ import {
   type RedisRoomStoreClient,
 } from "../src/redis-room-store.js";
 import { RedisStoreUnavailableError } from "../src/redis-store-unavailable.js";
-import type { RoomReadCaller } from "../src/room-store.js";
+import { createPersistedRoom, type RoomReadCaller } from "../src/room-store.js";
 import type { RuntimeReadCaller } from "../src/runtime-store.js";
 import { settleWithin } from "../src/retry-pacer.js";
 
@@ -469,6 +469,17 @@ test("a runtime command that is merely slow is not judged dead", async () => {
   }
 });
 
+/**
+ * What the probe's GET answers with. A real body, so an update gets past its
+ * read half and reaches the CAS the probes below have to hang.
+ */
+const PROBE_ROOM = createPersistedRoom({
+  code: "ROOM01",
+  joinToken: "probe-join-token",
+  createdAt: 1_700_000_000_000,
+});
+const PROBE_ROOM_BODY = JSON.stringify(PROBE_ROOM);
+
 function createRoomStoreProbeClient(
   commands: ProbeCommands,
 ): RedisRoomStoreClient {
@@ -476,7 +487,7 @@ function createRoomStoreProbeClient(
     async connect() {},
     async quit() {},
     disconnect() {},
-    get: () => commands.next<string | null>(null),
+    get: () => commands.next<string | null>(PROBE_ROOM_BODY),
     scan: () => commands.next<[string, string[]]>(["0", []]),
     zscan: () => commands.next<[string, string[]]>(["0", []]),
     zcard: () => commands.next(0),
@@ -538,6 +549,12 @@ const ROOM_REQUEST_PATH: Record<
   countRooms: (store) =>
     store.countRooms({ keyword: "", includeExpired: true }),
   isReady: (store) => store.isReady(),
+  createRoom: (store) =>
+    store.createRoom({
+      code: "ROOM01",
+      joinToken: "probe-join-token",
+      createdAt: 1_700_000_000_000,
+    }),
 };
 
 const ROOM_CALLER_CHOSEN: Record<
@@ -569,10 +586,26 @@ const ROOM_BOUNDED_ELSEWHERE: Record<string, string> = {
   close: "quitWithin, inside the shutdown step's budget",
 };
 
+/**
+ * The one write still left unbounded, and the reason is NOT that it is
+ * unconditional — its CAS compares the whole previous body, so a late landing
+ * cannot corrupt anything.
+ *
+ * Conditionality is what makes a late landing safe to HAVE happened. It does
+ * not discharge what the write's SUCCESS owes, and that is what decides where
+ * a cap may sit (#277 review): the three writes that took a cap each had ONE
+ * caller owning ONE follow-up — `createRoom`'s creator expires the room it may
+ * have built, and each guarded delete's caller keeps the reclamation count,
+ * the runtime teardown and the `room_deleted` broadcast. `updateRoom` is
+ * reached from six request handlers whose successes owe six different things,
+ * three of them not self-superseding: a join's seating, an admin action's
+ * audit record, and the revival of an expiring room — which, discarded, leaves
+ * exactly the memberless never-expiring room the reaper cannot collect.
+ * Capping inside the store would answer all six by throwing that outcome away.
+ */
 const ROOM_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
-  createRoom:
-    "#237's trade: the write may land after the caller is told it did not",
-  updateRoom: "read half capped; the CAS is #237's trade",
+  updateRoom:
+    "conditional, but its success owes follow-ups six callers own; a cap here would discard them. A call that NAMES its caller's deadline is exempt from even the read cap — see the test below",
 };
 
 test("every room store method is classified by what bounds its commands", async () => {
@@ -814,6 +847,78 @@ test("both guarded deletes are left unanswered, so their callers can own the eff
       { settleBootstrap: true },
     );
   }
+});
+
+test("an update that names its caller's deadline is left unanswered", async () => {
+  // The half that a cap on the request path cannot express. `expireOrphanedRoom`
+  // bounds its own WAIT and keeps the effect, so its update must NOT be capped
+  // here: a capped read ENDS the call at the first timeout, the CAS is never
+  // issued, and the orphan it exists to expire stays behind (#277 review).
+  const boundedByCaller = (store: RoomStoreUnderTest): Promise<unknown> =>
+    store.updateRoom(
+      PROBE_ROOM.code,
+      { joinToken: PROBE_ROOM.joinToken },
+      { lastActiveAt: PROBE_ROOM.lastActiveAt + 1 },
+      { boundedBy: "a test that owns the wait" },
+    );
+
+  // Per COMMAND, like the request-path sweep and for the same reason inverted:
+  // hanging only the first would pass a store that capped the CAS, because the
+  // call never reaches it.
+  const issued = await withRoomStore(
+    null,
+    async (store, commands) => {
+      const before = commands.issuedCount();
+      await boundedByCaller(store).catch(() => undefined);
+      return { first: before, total: commands.issuedCount() };
+    },
+    { settleBootstrap: true },
+  );
+  assert.equal(
+    issued.total - issued.first,
+    2,
+    "the probe must reach the CAS, not stop at the read",
+  );
+
+  for (let hangAt = issued.first; hangAt < issued.total; hangAt += 1) {
+    await withRoomStore(
+      hangAt,
+      async (store) => {
+        const answered = await settleWithin(
+          boundedByCaller(store).catch(() => undefined),
+          OBSERVATION_MS,
+        );
+        assert.equal(
+          answered,
+          false,
+          `an update bounded by its caller answered on its own with command #${hangAt} unanswered`,
+        );
+      },
+      { settleBootstrap: true },
+    );
+  }
+
+  // And the same call without that declaration still takes the request cap, so
+  // the exemption is a property of the CALL and not of the method.
+  await withRoomStore(
+    issued.first,
+    async (store) => {
+      const answered = await settleWithin(
+        store
+          .updateRoom(PROBE_ROOM.code, PROBE_ROOM.version, {
+            lastActiveAt: PROBE_ROOM.lastActiveAt + 1,
+          })
+          .catch(() => undefined),
+        OBSERVATION_MS,
+      );
+      assert.equal(
+        answered,
+        true,
+        "an undeclared update must still answer its caller's read",
+      );
+    },
+    { settleBootstrap: true },
+  );
 });
 
 test("the room reaper's orphan acknowledgement is left unanswered too", async () => {

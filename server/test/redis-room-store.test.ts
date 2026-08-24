@@ -934,6 +934,31 @@ test("redis room update applies the patch, bumps version, and rejects stale writ
       throw new Error("Expected update of a missing room to be rejected.");
     }
     assert.equal(missing.reason, "not_found");
+
+    // Pinned to the instance: a code that changed hands is reported as absent,
+    // and the version cannot say so on its own because a replacement starts at
+    // 0 (#277 review). Checked in the same read the CAS guards on.
+    assert.equal(await store.deleteRoom(updated.room), "deleted");
+    const replacement = await store.createRoom({
+      code: "CASRM1",
+      joinToken: "join-token-other0",
+      createdAt: 2,
+    });
+    assert.deepEqual(
+      await store.updateRoom(
+        room.code,
+        { joinToken: room.joinToken },
+        { expiresAt: 900 },
+      ),
+      { ok: false, reason: "not_found" },
+    );
+    assert.equal((await store.getRoom("CASRM1"))?.expiresAt, null);
+    const pinned = await store.updateRoom(
+      replacement.code,
+      { joinToken: replacement.joinToken },
+      { expiresAt: 900 },
+    );
+    assert.equal(pinned.ok, true);
   } finally {
     await redis.del(`${namespace}:room:CASRM1`);
     await redis.del(`${namespace}:rooms-by-expiry`);

@@ -862,11 +862,12 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: three durable writes.** One runtime-store write
-  through `trackAwaitedOperation` (`revokeMemberToken`) and the room store's
-  `createRoom` and `updateRoom` stay uncapped,
-  because #237 settled that an answer which can be wrong is worse than a slow
-  one and their effects do not expire on their own. The standalone
+- **Still open, deliberately: two writes, for two different reasons.** One
+  runtime-store write through `trackAwaitedOperation` (`revokeMemberToken`)
+  stays uncapped because #237 settled that an answer which can be wrong is
+  worse than a slow one and its effect does not expire on its own. The room
+  store's `updateRoom` stays for a different reason, below: it is conditional,
+  and that is not enough. The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
   had no production callers, so #277 removed them. **A write leaves this list by
   becoming CONDITIONAL, never by re-arguing #237**: a guarded write's late
@@ -890,6 +891,88 @@ do NOT compose, and that is the part that decides which connection gets which:
   re-reads, compares the join token to see whether the record is still ours, and
   re-CASes within its own bounded attempt count. Only what it truly could not
   expire is reported.
+
+  **Conditionality is what makes a late landing safe to HAVE happened. It does
+  not discharge what the write's SUCCESS owes** — and that second half is what
+  decides where the cap may sit. Every write that took one has ONE caller owning
+  ONE follow-up: the guarded deletes keep the reclamation count, the runtime
+  teardown and the `room_deleted` broadcast; `markRoomGeneration`'s creator
+  rolls its room back. `updateRoom` has neither property. Its CAS compares the
+  whole previous body, so nothing it writes late can corrupt anything — but it
+  is reached from six request handlers whose successes owe six different
+  follow-ups, and three of those are not self-superseding: a join's seating, an
+  admin action's audit record, and the revival of an expiring room. Discarding
+  that last one leaves precisely the memberless, never-expiring room the reaper
+  cannot collect. A cap inside the store would answer all six by throwing the
+  outcome away, which is the same misplacement the guarded deletes were moved
+  out of — so `updateRoom` stays, and a bound for it would have to be six
+  caller-side effect chains, not one store-side cap. Recorded here because the
+  attempt was made and reverted (#277 review): the criterion is not "is this
+  write conditional" but "does the cap sit with the owner of what its success
+  owes".
+
+  `createRoom` left the list by satisfying the second half, not the first. Its
+  `SET NX` guards EXISTENCE, not identity, so a landing that arrives after the
+  cap answered is NOT a no-op: it builds a room under a code its caller has
+  already given up — no members, no `expiresAt`, the one shape the reaper never
+  collects, and no later read reconciles it because nobody holds that code. What
+  makes the cap payable is that it has exactly ONE caller, and that caller
+  already owns the compensation: `createRoomForSession` expires the room it may
+  have created, through the same `expireOrphanedRoom` an unstamped room takes,
+  identified by the code and `joinToken` it generated before issuing the write.
+  **A version is not an identity**: every new room starts at version 0, so a
+  rollback holding version 0 matches a REPLACEMENT that took the freed code
+  exactly, and would expire it out from under an owner already told their
+  creation succeeded. `updateRoom`'s guard is therefore a
+  `RoomUpdateGuard`: a version, or the room INSTANCE (`{ joinToken }`), compared
+  in the same read that produces its CAS guard — a check-then-act would leave
+  the window open again. A SHAPE rather than a nullable version, so "skip the
+  version check" cannot be asked for without saying which room is meant; that
+  combination would write to whatever holds the code. The recycling regression
+  used to bump the replacement to version 1 before asserting, which is why the
+  hole survived #237 and #301.
+  It also stops trying other codes — a store that is not answering will not
+  answer the next one, and each further attempt would leave another orphan. Only
+  a `timeout` is compensated: an `admission` refusal is the one answer on this
+  connection that proves no command was issued, so rolling back there would
+  write over a room that does not exist and report a residue that never was.
+
+  **The compensation is itself a second lifetime, and missing that is what would
+  have made the cap worthless.** Its write half is `updateRoom`'s CAS, which the
+  store leaves uncapped — so a creator that simply awaited the rollback would
+  hang on the compensation instead of on the create, and `createRoom`'s cap
+  would bound nothing. The request bounds its WAIT on its own constant
+  (`DEFAULT_ROOM_ROLLBACK_CONFIRM_TIMEOUT_MS`, not the Redis liveness backstop
+  and not the delete's), the effect keeps going, and `closeRoomService` drains
+  it inside the same shutdown budget as the delete chain and the runtime
+  teardowns, reporting `pendingRoomRollbacks`.
+
+  Splitting the wait is only half of it: **an effect that keeps going must not
+  be built out of capped calls.** The rollback's own read took the store's
+  request cap, which ENDS the call at the first timeout — the CAS was then
+  never issued, and a create that landed late stayed behind exactly as before.
+  So `updateRoom` takes a `boundedBy` declaration, a NAMED caller-side deadline
+  rather than a boolean, and that call runs admitted but uncapped like the
+  guarded deletes. Which bound applies is a property of the CALL, as everywhere
+  else here. `close()` gates it too: an effect admitted after the shutdown
+  snapshot is one nobody waits for and nobody reports, so a rollback that would
+  start while `closing` is refused and logged instead — the same rule the lazy
+  delete follows one function over.
+
+  Pinning the rollback by INSTANCE rather than by version is what collapsed the
+  rest of it. the rollback passes `{ joinToken }` instead of a version — the
+  same reason `deleteRoom` pins that way: an admin
+  touching the still-memberless room moves its version, and a version-exact
+  guard would decline the very change that makes the rollback matter. With the
+  store answering `not_found` for a code that changed hands, the loop's re-read,
+  its identity re-check and its false-alarm reasoning all disappear; what is
+  left is a bounded number of attempts against a live byte-CAS conflict.
+
+  The rollback can still be REFUSED before it issues, when the create that owes
+  it took the last admission slot and still holds it; that is reported as
+  residue and given no reserved capacity, because admission's value is being one
+  number bounding ioredis's queue and a second class inside it would not shrink
+  the queue that caused the refusal.
 
   The room store's delete left the same list the same way, in TWO guarded forms
   because the guard is a property of the CALL, not of the method. `deleteRoom`

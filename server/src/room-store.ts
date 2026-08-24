@@ -45,6 +45,45 @@ export type RoomDeleteOutcome = "deleted" | "already_deleted" | "superseded";
 /** Chooses whether this read owns its deadline or is inside a maintenance pass. */
 export type RoomReadCaller = "request" | "maintenance_pass";
 
+/**
+ * What an update is allowed to overwrite.
+ *
+ * A version, for a caller acting on a state it READ. Or the room INSTANCE, for
+ * a caller acting on a room it CREATED — the same guard {@link
+ * RoomStore.deleteRoom} uses, and for the same reason: an admin touching a
+ * still-memberless room moves its version, so a version-exact guard would
+ * decline the very change that calls for the action. The instance form is a
+ * SHAPE rather than a nullable version so that "no version check" cannot be
+ * asked for without saying which room is meant — that combination would write
+ * to whatever holds the code (#277 review).
+ *
+ * A version alone does not identify a room: codes are recycled and every new
+ * room starts at version 0, so a CAS on version 0 succeeds against a
+ * replacement that took the code after ours was deleted. A record under this
+ * code carrying a different `joinToken` is reported as `not_found`, because
+ * nothing of the caller's is there.
+ *
+ * Either way the write is a CAS on the body the store just read, so a record
+ * that changes underneath it declines — the guard is checked in that same read,
+ * never check-then-act.
+ */
+export type RoomUpdateGuard = number | { joinToken: string };
+
+export type RoomUpdateOptions = {
+  /**
+   * NAMES the caller-side deadline that bounds this call, for a caller that
+   * bounds its own wait and keeps the effect.
+   *
+   * Without it the read half takes the store's request cap, which ENDS the
+   * call at the first timeout — the CAS is then never issued, so an effect
+   * meant to outlive a stall dies with it and whatever it was compensating
+   * stays behind (#277 review). A named string rather than a boolean, for the
+   * same reason `createBoundedRedisClient` demands one: "this one is bounded"
+   * was believed about paths nobody had to write the deadline down for.
+   */
+  boundedBy?: string;
+};
+
 /** A durable handoff naming one discovery of an orphaned room-index entry. */
 export type OrphanedIndexClaim = {
   code: string;
@@ -76,8 +115,9 @@ export type RoomStore = {
   ) => Promise<PersistedRoom | null>;
   updateRoom: (
     code: string,
-    expectedVersion: number,
+    expected: RoomUpdateGuard,
     patch: PersistedRoomPatch,
+    options?: RoomUpdateOptions,
   ) => Promise<RoomUpdateResult>;
   /**
    * Removes the room INSTANCE the caller read, whatever state it is in now.
@@ -231,13 +271,19 @@ export function createInMemoryRoomStore(
       const room = rooms.get(code);
       return room ? cloneRoom(room) : null;
     },
-    async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
+    async updateRoom(code, expected, patch): Promise<RoomUpdateResult> {
       const currentRoom = rooms.get(code);
       if (!currentRoom) {
         return { ok: false, reason: "not_found" };
       }
-      if (currentRoom.version !== expectedVersion) {
-        return { ok: false, reason: "version_conflict" };
+      if (typeof expected === "number") {
+        if (currentRoom.version !== expected) {
+          return { ok: false, reason: "version_conflict" };
+        }
+      } else if (currentRoom.joinToken !== expected.joinToken) {
+        // A different room holds this code now, so nothing of this caller's is
+        // here to update.
+        return { ok: false, reason: "not_found" };
       }
 
       const nextRoom: PersistedRoom = {
