@@ -748,10 +748,24 @@ on the background passes**, on purpose:
   `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`.
 
-Three persistent writes remain uncapped by design: the runtime store's one
-write through `trackAwaitedOperation` (revoke) and the room store's
-`createRoom` and `updateRoom`. Their effects do not expire, so #237's rule
-still applies: an answer that may be wrong is worse than a slow one.
+Two persistent writes remain uncapped by design, for two different reasons.
+The runtime store's one write through `trackAwaitedOperation` (revoke) is
+#237's rule: its effect does not expire, so an answer that may be wrong is
+worse than a slow one. The room store's `updateRoom` is conditional and could
+not corrupt anything by landing late, but it is reached from six request
+handlers whose successes owe six different follow-ups — a cap inside the store
+would answer all six by discarding the outcome those follow-ups need.
+
+`createRoom` left that list in #277 as well, and it is the one write whose late
+landing is not harmless: `SET NX` guards the code's existence, not the room's
+identity, so a create that lands after its caller gave up leaves a memberless,
+never-expiring room. The creator therefore expires what it may have built
+before reporting, and stops trying further codes. Expect
+`room_persist_failed reason=room_create_unconfirmed` on a stalled room store,
+and `room_rollback_failed` if that compensation could not be written either —
+the second one names a room code an operator has to expire or delete by hand.
+An `admission` refusal takes no rollback: it proves the command was never
+issued.
 
 The generation stamp left that list in #277 by becoming conditional on the pin
 its creator read, so it now answers on the request path like any other command.
@@ -843,9 +857,8 @@ incident:
   `reason=timeout` and answer their caller. A stalled kick returns
   `status=error, confirmation=unconfirmed`; its complete kick effect remains
   outstanding. Retry is safe because the block deadline only moves later. What
-  still stays **silent** is the three durable writes named above; a revoke, a
-  room create or a room-body update that never returns is what that looks like
-  from outside. Runtime room teardown is different: its generation guard
+  still stays **silent** is the two writes named above; a revoke or a room-body
+  update that never returns is what that looks like from outside. Runtime room teardown is different: its generation guard
   is mandatory, requests stop waiting with
   `room_runtime_cleanup_unconfirmed`, and one real effect per room generation
   continues through local-mirror settlement. Waiters on the exact effect share

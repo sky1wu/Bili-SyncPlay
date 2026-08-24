@@ -78,6 +78,21 @@ export type RoomStore = {
     code: string,
     expectedVersion: number,
     patch: PersistedRoomPatch,
+    /**
+     * Pins the room INSTANCE, not just its state.
+     *
+     * A version alone does not identify a room: codes are recycled and every
+     * new room starts at version 0, so a CAS on version 0 succeeds against a
+     * replacement that took the code after ours was deleted — expiring a room
+     * whose owner was already told their creation succeeded. Callers holding a
+     * room they created rather than one they just read pass the `joinToken`
+     * they generated; a record under this code carrying a different one is
+     * reported as `not_found`, because nothing of the caller's is there.
+     *
+     * Checked in the same read that produces the CAS guard, so it is not a
+     * check-then-act: if the record changes after that read, the CAS declines.
+     */
+    expectedJoinToken?: string,
   ) => Promise<RoomUpdateResult>;
   /**
    * Removes the room INSTANCE the caller read, whatever state it is in now.
@@ -231,9 +246,23 @@ export function createInMemoryRoomStore(
       const room = rooms.get(code);
       return room ? cloneRoom(room) : null;
     },
-    async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
+    async updateRoom(
+      code,
+      expectedVersion,
+      patch,
+      expectedJoinToken,
+    ): Promise<RoomUpdateResult> {
       const currentRoom = rooms.get(code);
       if (!currentRoom) {
+        return { ok: false, reason: "not_found" };
+      }
+      if (
+        expectedJoinToken !== undefined &&
+        currentRoom.joinToken !== expectedJoinToken
+      ) {
+        // A different room holds this code now. Ahead of the version check on
+        // purpose: a replacement is at version 0 too, so the version would say
+        // nothing.
         return { ok: false, reason: "not_found" };
       }
       if (currentRoom.version !== expectedVersion) {

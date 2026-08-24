@@ -57,6 +57,50 @@ test("room store persists create, update, delete, and expiry behaviors", async (
   assert.equal(await store.getRoom(createdRoom.code), null);
 });
 
+test("an update pinned to a room instance declines a code that changed hands", async () => {
+  // The version is not an identity: every new room starts at 0, so a caller
+  // holding the room it CREATED — the rollback of an unstamped or unconfirmed
+  // room — would otherwise expire a replacement whose owner was already told
+  // their creation succeeded (#277 review).
+  const store = createInMemoryRoomStore({ now: () => 123 });
+  const ours = await store.createRoom({
+    code: "BBBBBB",
+    joinToken: "join-token-ours00",
+    createdAt: 100,
+  });
+  assert.equal(await store.deleteRoom(ours), "deleted");
+  await store.createRoom({
+    code: "BBBBBB",
+    joinToken: "join-token-theirs",
+    createdAt: 200,
+  });
+
+  assert.deepEqual(
+    await store.updateRoom(
+      ours.code,
+      ours.version,
+      { expiresAt: 999 },
+      ours.joinToken,
+    ),
+    { ok: false, reason: "not_found" },
+  );
+  assert.equal((await store.getRoom("BBBBBB"))?.expiresAt, null);
+
+  // And the same pin lets the instance that IS ours through.
+  const mine = await store.createRoom({
+    code: "CCCCCC",
+    joinToken: "join-token-mine000",
+    createdAt: 300,
+  });
+  const expired = await store.updateRoom(
+    mine.code,
+    mine.version,
+    { expiresAt: 999 },
+    mine.joinToken,
+  );
+  assert.equal(expired.ok, true);
+});
+
 test("roomStateOf serializes persisted room state with active members", () => {
   const session = {
     id: "member-1",

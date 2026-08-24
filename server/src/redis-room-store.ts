@@ -824,15 +824,18 @@ export async function createRedisRoomStore(
     // reading the silence they derive their bounds from (#277). That is why the
     // choice is per CALL — the two passes reach the very same helpers.
     //
-    // What this does NOT resolve: the two unconditional durable writes,
-    // `createRoom` and `updateRoom`. Capping either tells a caller it failed
-    // while the write may still land, which is #237's trade. The guarded
-    // deletes are different: admission may safely refuse them before issue,
-    // while their eventual outcome remains owned by the outer caller.
+    // What this does NOT resolve: `updateRoom`'s CAS. Its guard is the whole
+    // previous body, so a late landing cannot corrupt anything — but a cap
+    // there would answer six different request handlers by discarding an
+    // outcome each of them owes something to, and three of those follow-ups
+    // are not self-superseding. Conditionality is what makes a late landing
+    // safe to HAVE happened; it does not discharge what the write's SUCCESS
+    // owes, and that is the property the cap's placement has to respect
+    // (#277).
     (createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, room-service's expired-room collection deadline and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT the two durable writes",
+        "boundCommand's cap on the request path, room-service's expired-room collection deadline and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT updateRoom's CAS",
     }) as RedisRoomStoreClient);
   const {
     orphanedRoomCodesKey,
@@ -1348,14 +1351,23 @@ export async function createRedisRoomStore(
   return {
     async createRoom(input) {
       const room = createPersistedRoom(input);
-      const created = await redis.eval(
-        CREATE_ROOM_LUA,
-        2,
-        roomKey(room.code),
-        roomsByExpiryKey,
-        serializeRoom(room),
-        expiryScore(room),
-        room.code,
+      // Capped like every other request command. This is the write whose guard
+      // pins EXISTENCE rather than identity, so unlike the CAS and the two
+      // deletes its late landing is NOT a no-op: it builds a memberless,
+      // never-expiring room under a code its caller has stopped using, which
+      // is the one shape the reaper never collects. The cap is therefore paid
+      // for by the caller, which owns the compensation — `createRoomForSession`
+      // expires the room it may have created before it reports (#277).
+      const created = await boundCommand("create_room", () =>
+        redis.eval(
+          CREATE_ROOM_LUA,
+          2,
+          roomKey(room.code),
+          roomsByExpiryKey,
+          serializeRoom(room),
+          expiryScore(room),
+          room.code,
+        ),
       );
       if (created === "index_failed") {
         throw new Error(
@@ -1377,16 +1389,32 @@ export async function createRedisRoomStore(
         code,
       );
     },
-    async updateRoom(code, expectedVersion, patch): Promise<RoomUpdateResult> {
+    async updateRoom(
+      code,
+      expectedVersion,
+      patch,
+      expectedJoinToken,
+    ): Promise<RoomUpdateResult> {
       const key = roomKey(code);
-      // The read half is capped like any other read; the CAS below is one of
-      // the two unconditional durable writes left for its own derivation.
+      // The read half is capped like any other read; the CAS below is the one
+      // unconditional durable write left for its own derivation.
       const rawRoom = await boundCommand("update_room", () => redis.get(key));
       if (rawRoom === null) {
         return { ok: false, reason: "not_found" };
       }
       const currentRoom = parseRoom(rawRoom, code);
       if (!currentRoom) {
+        return { ok: false, reason: "not_found" };
+      }
+      if (
+        expectedJoinToken !== undefined &&
+        currentRoom.joinToken !== expectedJoinToken
+      ) {
+        // A different room holds this code now. Ahead of the version check on
+        // purpose: a replacement is at version 0 too, so the version would say
+        // nothing. The bytes checked here are the ones the CAS guards on, so a
+        // record that changes after this read declines rather than slipping
+        // through.
         return { ok: false, reason: "not_found" };
       }
       if (currentRoom.version !== expectedVersion) {

@@ -51,8 +51,13 @@ export function instrumentRoomStore(
     getRoom: measure("get_room", (code, caller) =>
       roomStore.getRoom(code, caller),
     ),
-    updateRoom: measure("update_room", (code, expectedVersion, patch) =>
-      roomStore.updateRoom(code, expectedVersion, patch),
+    updateRoom: measure(
+      "update_room",
+      // Every parameter forwarded by name: a wrapper that declares fewer than
+      // the type it is assigned to still typechecks, and silently drops the
+      // ones it left out (AGENTS.md).
+      (code, expectedVersion, patch, expectedJoinToken) =>
+        roomStore.updateRoom(code, expectedVersion, patch, expectedJoinToken),
     ),
     deleteRoom: measure("delete_room", (expected) =>
       roomStore.deleteRoom(expected),

@@ -538,6 +538,12 @@ const ROOM_REQUEST_PATH: Record<
   countRooms: (store) =>
     store.countRooms({ keyword: "", includeExpired: true }),
   isReady: (store) => store.isReady(),
+  createRoom: (store) =>
+    store.createRoom({
+      code: "ROOM01",
+      joinToken: "probe-join-token",
+      createdAt: 1_700_000_000_000,
+    }),
 };
 
 const ROOM_CALLER_CHOSEN: Record<
@@ -569,10 +575,26 @@ const ROOM_BOUNDED_ELSEWHERE: Record<string, string> = {
   close: "quitWithin, inside the shutdown step's budget",
 };
 
+/**
+ * The one write still left unbounded, and the reason is NOT that it is
+ * unconditional — its CAS compares the whole previous body, so a late landing
+ * cannot corrupt anything.
+ *
+ * Conditionality is what makes a late landing safe to HAVE happened. It does
+ * not discharge what the write's SUCCESS owes, and that is what decides where
+ * a cap may sit (#277 review): the three writes that took a cap each had ONE
+ * caller owning ONE follow-up — `createRoom`'s creator expires the room it may
+ * have built, and each guarded delete's caller keeps the reclamation count,
+ * the runtime teardown and the `room_deleted` broadcast. `updateRoom` is
+ * reached from six request handlers whose successes owe six different things,
+ * three of them not self-superseding: a join's seating, an admin action's
+ * audit record, and the revival of an expiring room — which, discarded, leaves
+ * exactly the memberless never-expiring room the reaper cannot collect.
+ * Capping inside the store would answer all six by throwing that outcome away.
+ */
 const ROOM_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
-  createRoom:
-    "#237's trade: the write may land after the caller is told it did not",
-  updateRoom: "read half capped; the CAS is #237's trade",
+  updateRoom:
+    "conditional, but its success owes follow-ups six callers own; a cap here would discard them",
 };
 
 test("every room store method is classified by what bounds its commands", async () => {

@@ -29,6 +29,7 @@ import {
   type RoomStore,
 } from "./room-store.js";
 import { createRetryPacer } from "./retry-pacer.js";
+import { RedisStoreUnavailableError } from "./redis-store-unavailable.js";
 import type { RuntimeReadCaller, RuntimeStore } from "./runtime-store.js";
 import { sharedVideoOwnerChangedOnLeave } from "./shared-video-owner.js";
 import { hasAttachedSocket } from "./types.js";
@@ -1240,6 +1241,96 @@ export function createRoomService(options: {
     return { session, persistedRoom, activeRoom };
   }
 
+  /**
+   * Make a memberless room we may have created collectable again.
+   *
+   * Expiring rather than deleting: `updateRoom` is the only conditional
+   * primitive the store has, and a room marked expired is collected by the
+   * reaper and can never be mistaken for a live one. A delete by code would
+   * remove whatever holds the code by now — between the failure and this line
+   * an admin can expire our still-memberless room and another request can take
+   * the code, and its owner was already told their creation succeeded
+   * (#237 review).
+   *
+   * What it prevents is a PERMANENT orphan: no members and no `expiresAt` is
+   * exactly what the reaper never collects, so failing to write it holds the
+   * code and the room total until an operator intervenes.
+   *
+   * Both callers reach it because a write MAY have landed, not because one
+   * did: the generation stamp that was declined or capped, and a `createRoom`
+   * that stopped answering. The identity check below is what makes that safe —
+   * a room under this code whose `joinToken` is not ours is not ours to expire.
+   *
+   * A conflict is not by itself evidence that there is nothing to collect. It
+   * only says the record moved since we created it — which is true both when
+   * the code changed hands (nothing of ours survives) and when an admin merely
+   * touched OUR still-memberless room (the orphan is still there). The two are
+   * told apart by re-reading, never assumed.
+   */
+  async function expireOrphanedRoom(
+    target: { code: string; joinToken: string; version: number },
+    reason: string,
+    session: Session,
+  ): Promise<void> {
+    let rollbackResidue: string | null = null;
+    try {
+      let expectedVersion = target.version;
+      // Attempts against a live conflict, not a retry schedule: a losing CAS
+      // re-reads to the current version immediately, and only a concurrent
+      // writer on this same record can make it lose again.
+      for (let attempt = 0; ; attempt += 1) {
+        const rollback = await roomStore.updateRoom(
+          target.code,
+          expectedVersion,
+          { expiresAt: now() },
+          // The version alone does not name our room: a replacement that took
+          // this code is at version 0 too, and expiring THAT one would hit an
+          // owner already told their creation succeeded (#277 review).
+          target.joinToken,
+        );
+        if (rollback.ok || rollback.reason === "not_found") {
+          break;
+        }
+        // Re-read on EVERY conflict, the last one included: giving up is a
+        // report, and a report about a room that has since been replaced is a
+        // false alarm. A different room under this code owes us nothing, and
+        // one that is already expired is already collectable.
+        const current = await roomStore.getRoom(target.code);
+        if (
+          !current ||
+          current.joinToken !== target.joinToken ||
+          current.expiresAt !== null
+        ) {
+          break;
+        }
+        if (attempt + 1 >= ROOM_ROLLBACK_MAX_ATTEMPTS) {
+          rollbackResidue = "version_conflict";
+          break;
+        }
+        expectedVersion = current.version;
+      }
+    } catch (rollbackError) {
+      rollbackResidue =
+        rollbackError instanceof Error
+          ? rollbackError.message
+          : String(rollbackError);
+    }
+    if (rollbackResidue !== null) {
+      logEvent(
+        "room_rollback_failed",
+        {
+          sessionId: session.id,
+          roomCode: target.code,
+          provider: persistence.provider,
+          result: "error",
+          reason,
+          error: rollbackResidue,
+        },
+        { level: "error" },
+      );
+    }
+  }
+
   async function withVersionRetry<T = PersistedRoom>(
     roomCode: string,
     action: (room: PersistedRoom) => Promise<T | null>,
@@ -1797,6 +1888,8 @@ export function createRoomService(options: {
 
       const createdAt = now();
       let room: PersistedRoom | null = null;
+      /** Set when the loop stopped because the store stopped answering. */
+      let createResidue: RedisStoreUnavailableError | null = null;
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const roomCode = nextRoomCode();
         // Room codes are recycled, so a code is only safe to hand out once no
@@ -1817,24 +1910,56 @@ export function createRoomService(options: {
         if (dirty) {
           continue;
         }
+        // Held so a create that stops answering can still be identified: the
+        // room it may build is fully determined by this code and this token.
+        const joinToken = generateToken();
         try {
           room = await roomStore.createRoom({
             code: roomCode,
-            joinToken: generateToken(),
+            joinToken,
             createdAt,
             ownerMemberId: session.id,
             ownerDisplayName: session.displayName,
           });
           break;
-        } catch {
+        } catch (error) {
           room = null;
+          if (!(error instanceof RedisStoreUnavailableError)) {
+            // The code was taken, or the index write failed. Another code can
+            // still work, which is what this loop is for.
+            continue;
+          }
+          // The store is not answering, so no other code will fare better —
+          // and this is the write whose late landing is not a no-op. Expiring
+          // what may exist is the same compensation an unstamped room gets, for
+          // the same reason: no members and no `expiresAt` is precisely what
+          // the reaper never collects (#277).
+          //
+          // Stated as "unless admission refused it", not "if it timed out":
+          // refusal is the one answer here that PROVES no command was issued,
+          // so it is the exception that has to be named. Any other way of not
+          // answering leaves a write that may land, and compensating one that
+          // did not is free — the rollback reads `not_found` and stops.
+          if (error.reason !== "admission") {
+            await expireOrphanedRoom(
+              { code: roomCode, joinToken, version: 0 },
+              "room_create_unconfirmed",
+              session,
+            );
+          }
+          createResidue = error;
+          break;
         }
       }
       if (!room) {
         logEvent("room_persist_failed", {
           sessionId: session.id,
           result: "error",
-          reason: "room_create_conflict",
+          reason:
+            createResidue === null
+              ? "room_create_conflict"
+              : "room_create_unconfirmed",
+          ...(createResidue === null ? {} : { error: createResidue.message }),
         });
         throw new RoomServiceError(
           "internal_error",
@@ -1863,82 +1988,11 @@ export function createRoomService(options: {
         reason: string,
         error?: unknown,
       ): Promise<never> => {
-        // CAS on the version we just created, not a delete by code. Between the
-        // failure and this line an admin can expire the (still memberless) room
-        // and another request can take the code — deleting by code would then
-        // remove the replacement out from under its owner, who had already been
-        // told the creation succeeded (#237 review).
-        //
-        // Expiring rather than deleting: `updateRoom` is the only conditional
-        // primitive the store has, and a room marked expired is collected by the
-        // reaper and can never be mistaken for a live one.
-        //
-        // What the rollback prevents is a PERMANENT orphan: a room with no
-        // members and no `expiresAt` is exactly what the reaper never collects,
-        // so failing to write it holds the code and the room total until an
-        // operator intervenes. Until #277 only a Redis error could reach this
-        // path and the failure was swallowed; capping the stamp makes it
-        // reachable by a timeout and by a lost code too, so what the rollback
-        // could not do is now said out loud.
-        //
-        // A conflict is not by itself evidence that there is nothing to
-        // collect. It only says the record moved since we created it — which is
-        // true both when the code changed hands (nothing of ours survives) and
-        // when an admin merely touched OUR still-memberless room (the orphan is
-        // still there). The two are told apart by re-reading, never assumed.
-        let rollbackResidue: string | null = null;
-        try {
-          let expectedVersion = persistedRoom.version;
-          // Attempts against a live conflict, not a retry schedule: a losing
-          // CAS re-reads to the current version immediately, and only a
-          // concurrent writer on this same record can make it lose again.
-          for (let attempt = 0; ; attempt += 1) {
-            const rollback = await roomStore.updateRoom(
-              persistedRoom.code,
-              expectedVersion,
-              { expiresAt: now() },
-            );
-            if (rollback.ok || rollback.reason === "not_found") {
-              break;
-            }
-            // Re-read on EVERY conflict, the last one included: giving up is a
-            // report, and a report about a room that has since been replaced is
-            // a false alarm. A different room under this code owes us nothing,
-            // and one that is already expired is already collectable.
-            const current = await roomStore.getRoom(persistedRoom.code);
-            if (
-              !current ||
-              current.joinToken !== persistedRoom.joinToken ||
-              current.expiresAt !== null
-            ) {
-              break;
-            }
-            if (attempt + 1 >= ROOM_ROLLBACK_MAX_ATTEMPTS) {
-              rollbackResidue = "version_conflict";
-              break;
-            }
-            expectedVersion = current.version;
-          }
-        } catch (rollbackError) {
-          rollbackResidue =
-            rollbackError instanceof Error
-              ? rollbackError.message
-              : String(rollbackError);
-        }
-        if (rollbackResidue !== null) {
-          logEvent(
-            "room_rollback_failed",
-            {
-              sessionId: session.id,
-              roomCode: persistedRoom.code,
-              provider: persistence.provider,
-              result: "error",
-              reason,
-              error: rollbackResidue,
-            },
-            { level: "error" },
-          );
-        }
+        // Until #277 only a Redis error could reach this path and the failure
+        // was swallowed; capping the stamp made it reachable by a timeout and
+        // by a lost code too, so what the rollback could not do is now said
+        // out loud by `expireOrphanedRoom`.
+        await expireOrphanedRoom(persistedRoom, reason, session);
         logEvent("room_persist_failed", {
           sessionId: session.id,
           roomCode: persistedRoom.code,
