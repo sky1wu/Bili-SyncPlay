@@ -992,13 +992,16 @@ export function createRoomService(options: {
     // perfectly fine, and an orphan behind them would never be looked at
     // (#277 review). A short batch means the end: start over next tick.
     const chunk = options.neverExpiringSweepChunk ?? NEVER_EXPIRING_SWEEP_CHUNK;
-    const candidates = await roomStore.listNeverExpiringRooms(
+    const page = await roomStore.listNeverExpiringRooms(
       chunk,
       neverExpiringSweepOffset,
     );
+    // Advanced by what the INDEX named, not by what survived the filters: a
+    // full page that yielded nothing usable is still a full page, and resetting
+    // on it would read the same prefix forever (#277 review).
     neverExpiringSweepOffset =
-      candidates.length < chunk ? 0 : neverExpiringSweepOffset + chunk;
-    const abandoned = candidates.filter(
+      page.scanned < chunk ? 0 : neverExpiringSweepOffset + chunk;
+    const abandoned = page.rooms.filter(
       (room) => currentTime - room.lastActiveAt >= NEVER_EXPIRING_GRACE_MS,
     );
     if (abandoned.length === 0) {

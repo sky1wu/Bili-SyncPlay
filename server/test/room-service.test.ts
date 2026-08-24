@@ -719,6 +719,45 @@ test("a failing never-expiring sweep does not strand what the expiry sweep delet
   assert.ok(events.includes("room_persist_failed"));
 });
 
+test("the never-expiring cursor advances past a page the bodies filtered out", async () => {
+  // The index is a hint, the body is the truth — and a full page that yielded
+  // nothing usable is still a full page. A cursor advanced by what survived the
+  // filters would reset here and read this same prefix forever, starving every
+  // orphan behind it (#277 review).
+  const currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createInMemoryRuntimeStore(() => currentTime);
+  const offsets: number[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore: {
+      ...roomStore,
+      async listNeverExpiringRooms(limit, offset) {
+        offsets.push(offset);
+        // A full page the bodies rejected: the index named `limit` codes and
+        // none of them turned out to be a candidate.
+        return offset === 0
+          ? { rooms: [], scanned: limit }
+          : await roomStore.listNeverExpiringRooms(limit, offset);
+      },
+    },
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: (() => undefined) satisfies LogEvent,
+    now: () => currentTime,
+    neverExpiringSweepChunk: 1,
+  });
+
+  await service.deleteExpiredRooms(currentTime);
+  await service.deleteExpiredRooms(currentTime);
+
+  assert.deepEqual(offsets, [0, 1], "the cursor reset on a full page");
+});
+
 test("the never-expiring sweep rotates so an orphan behind live rooms is reached", async () => {
   // The set holds EVERY room without an expiry, which is every live room. A
   // fixed prefix of it is dominated by rooms that are perfectly fine, so a

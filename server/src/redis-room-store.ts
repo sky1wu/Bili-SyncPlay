@@ -1499,7 +1499,7 @@ export async function createRedisRoomStore(
             limit,
           ),
       );
-      const rooms = await Promise.all(
+      const bodies = await Promise.all(
         codes.map((code) =>
           // The same waiting limiter every listing uses: admission is a refusal
           // boundary and must never be reachable by ordinary fan-out (#277).
@@ -1511,7 +1511,20 @@ export async function createRedisRoomStore(
           ),
         ),
       );
-      return rooms.filter((room): room is PersistedRoom => room !== null);
+      return {
+        // What the INDEX named, not what the bodies confirmed: a full page that
+        // yielded nothing usable is still a full page, and a cursor advanced by
+        // the filtered count would reset and read this prefix forever.
+        scanned: codes.length,
+        // The body decides, never the score. The index can drift from the
+        // bodies — that drift is why `reconcileRoomIndex` exists — so a room
+        // whose record carries a real `expiresAt` is not a candidate no matter
+        // what the index says about it (#277 review).
+        rooms: bodies.filter(
+          (room): room is PersistedRoom =>
+            room !== null && room.expiresAt === null,
+        ),
+      };
     },
     deleteRoom(expected) {
       // Pinned by `joinToken`, and by nothing else: a recycled code always

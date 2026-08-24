@@ -887,7 +887,13 @@ do NOT compose, and that is the part that decides which connection gets which:
   throw between that delete and the follow-ups it owes — the runtime teardown,
   the reclamation count, the `room_deleted` broadcast — would strand them with
   nothing able to name those rooms again. **A step that can fail does not belong
-  between an irreversible action and the consumption of its result.**
+  between an irreversible action and the consumption of its result.** And the
+  page it works from separates what the INDEX named from what the BODIES
+  confirmed: a score can drift from the record (that drift is why
+  `reconcileRoomIndex` exists), so the body decides whether a room is a
+  candidate — while the cursor advances by the raw page, because a full page
+  that yielded nothing usable is still a full page and resetting on it reads the
+  same prefix forever.
 
 - **Still open, deliberately: one write — the room store's `updateRoom`.** Not
   #237's trade: it is conditional, and that turns out not to be enough. See

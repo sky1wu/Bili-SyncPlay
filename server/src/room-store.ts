@@ -72,6 +72,21 @@ export type RoomReadCaller = "request" | "maintenance_pass";
  * that changes underneath it declines — the guard is checked in that same read,
  * never check-then-act.
  */
+/**
+ * One page of never-expiring candidates.
+ *
+ * `scanned` counts what the INDEX named, `rooms` what the bodies confirmed —
+ * and the two are separate on purpose. The index is a hint that can drift from
+ * the bodies (that drift is why `reconcileRoomIndex` exists), so a score alone
+ * never makes a room a candidate; and a page that was full but yielded nothing
+ * usable is still a full page, so a cursor advanced by `rooms.length` would
+ * reset to the start and read the same prefix forever (#277 review).
+ */
+export type NeverExpiringRoomPage = {
+  rooms: PersistedRoom[];
+  scanned: number;
+};
+
 export type RoomUpdateGuard = number | { joinToken: string; version?: number };
 
 export type RoomUpdateOptions = {
@@ -157,7 +172,7 @@ export type RoomStore = {
   listNeverExpiringRooms: (
     limit: number,
     offset: number,
-  ) => Promise<PersistedRoom[]>;
+  ) => Promise<NeverExpiringRoomPage>;
   deleteRoom: (expected: PersistedRoom) => Promise<RoomDeleteOutcome>;
   /**
    * Removes the room under this code only while it is still expired.
@@ -327,11 +342,20 @@ export function createInMemoryRoomStore(
       rooms.set(code, nextRoom);
       return { ok: true, room: cloneRoom(nextRoom) };
     },
-    async listNeverExpiringRooms(limit, offset): Promise<PersistedRoom[]> {
-      const all = Array.from(rooms.values())
-        .filter((room) => room.expiresAt === null)
-        .sort((left, right) => left.code.localeCompare(right.code));
-      return all.slice(offset, offset + limit).map(cloneRoom);
+    async listNeverExpiringRooms(
+      limit,
+      offset,
+    ): Promise<NeverExpiringRoomPage> {
+      const all = Array.from(rooms.values()).sort((left, right) =>
+        left.code.localeCompare(right.code),
+      );
+      const page = all.slice(offset, offset + limit);
+      return {
+        scanned: page.length,
+        rooms: page
+          .filter((room) => room.expiresAt === null)
+          .map((room) => cloneRoom(room)),
+      };
     },
     async deleteRoom(expected): Promise<RoomDeleteOutcome> {
       const room = rooms.get(expected.code);
