@@ -862,9 +862,29 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: one write — the room store's `updateRoom`.** Not
-  #237's trade: it is conditional, and that turns out not to be enough. See
-  below. Everything else on both connections took a bound.
+- **Nothing is left unbounded on either connection.** `updateRoom` was the
+  last, and it did NOT leave by re-arguing #237: its CAS has always been
+  conditional on the whole previous body. It left once every caller whose
+  SUCCESS owes a follow-up nobody else repeats had said so — the orphan
+  rollback and the leave's expiry scheduling NAME their own deadline (and run
+  admitted but uncapped, because a capped read would end the effect at its first
+  timeout), the join REPORTS the revival it could not confirm, and the admin
+  video clear NAMES its own deadline too — its success owes TWO things nobody
+  else repeats, the audit record AND the `room_state_updated` broadcast, so the
+  write keeps running past the wait and the effect owns both. An unconfirmed
+  clear is audited as unconfirmed rather than claimed as done. It also goes
+  through the SAME shutdown gate the deletions do rather than a hand-copy of
+  their shape: **every action that starts a room effect belongs behind one
+  gate**, because an effect admitted after the shutdown snapshot is one nobody
+  waits for and nobody drains — and copying an effect's shape by hand is how a
+  part of it gets left out, twice in a row here. What
+  remains discards its result safely, because the next share, playback or
+  profile write supersedes it.
+
+  **Conditionality made a late landing safe to HAVE happened; it never
+  discharged what the write's SUCCESS owed** — and the way to discharge that
+  turned out not to be a cap in a different place, but each caller saying what
+  its own success owes. Two name a deadline, two report, three supersede.
 
   `revokeMemberToken` was the last to leave, and it left the way the others
   did — by its GUARD becoming mandatory. Its script only ends the identity
@@ -976,19 +996,22 @@ do NOT compose, and that is the part that decides which connection gets which:
   version says "unchanged since I judged it empty". Each half has its own
   failing probe, because each fails a different way.
 
-  `updateRoom` has neither property. Its CAS compares the
-  whole previous body, so nothing it writes late can corrupt anything — but it
-  is reached from six request handlers whose successes owe six different
-  follow-ups, and three of those are not self-superseding: a join's seating, an
-  admin action's audit record, and the revival of an expiring room. Discarding
-  that last one leaves precisely the memberless, never-expiring room the reaper
-  cannot collect. A cap inside the store would answer all six by throwing the
-  outcome away, which is the same misplacement the guarded deletes were moved
-  out of — so `updateRoom` stays, and a bound for it would have to be six
-  caller-side effect chains, not one store-side cap. Recorded here because the
-  attempt was made and reverted (#277 review): the criterion is not "is this
-  write conditional" but "does the cap sit with the owner of what its success
-  owes".
+  `updateRoom` had neither property for a long time, and the record of that is
+  worth keeping because it is what the criterion was learned from. Its CAS
+  compares the whole previous body, so nothing it writes late can corrupt
+  anything — but it is reached from seven request handlers, and four of their
+  successes owe something nobody else repeats: a join's revival of an expiring
+  room, an admin video clear's audit record and broadcast, and the two writes
+  whose effects must outlive their request. A cap inside the store answers all
+  of them by throwing the outcome away, which is the same misplacement the
+  guarded deletes were moved out of — so an earlier attempt to cap it was
+  reverted, and **the criterion is not "is this write conditional" but "does the
+  cap sit with the owner of what its success owes"**.
+
+  What let it take the cap in the end was not a different answer to that
+  question but each of those callers answering it: two NAME a caller-side
+  deadline and keep their effect, two REPORT what they could not confirm (the
+  admin video clear does both), and the rest supersede themselves. The cap came last, and only then.
 
   `createRoom` left the list by satisfying the second half, not the first. Its
   `SET NX` guards EXISTENCE, not identity, so a landing that arrives after the

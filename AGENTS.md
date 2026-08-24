@@ -240,7 +240,7 @@ before changing the code it describes.
   cannot be recreated. Thus a newer generation's success or a live persisted
   room supersedes older effects whose late skip/failure must not retain or
   resurrect the debt.
-  Still open on purpose: ONE write, the room store's `updateRoom`. Every other
+  Nothing is left unbounded on either connection. Every other
   write on both connections took a bound, `revokeMemberToken` last — by its
   session guard becoming mandatory, which an earlier slice made possible by
   moving the kick to `evictMemberToken` and leaving the session-less path with
@@ -255,15 +255,13 @@ before changing the code it describes.
   there is nothing to compensate. **A compensation that needs its own guard, its
   own ordering and its own late outcome is a signal that the operation it
   compensates is in the wrong place.**
-  `updateRoom` is CONDITIONAL and still stays, which
-  is the correction this round bought: **conditionality makes a late landing
-  safe to HAVE happened; it does not discharge what the write's SUCCESS owes,
-  and the cap must sit with whoever owns that.** Every write that took a cap
-  has ONE caller owning ONE follow-up; `updateRoom` is reached from six request
-  handlers, three of whose follow-ups are not self-superseding (a join's
-  seating, an audit record, the revival of an expiring room), so a store-side
-  cap would answer all six by discarding the outcome — the same misplacement
-  the deletes were moved out of. `createRoom` left the list by the second half
+  `updateRoom` was the last to take one, and the way it got there is the rule
+  worth keeping: **conditionality makes a late landing safe to HAVE happened; it
+  does not discharge what the write's SUCCESS owes.** What discharges that is
+  not a cap in a different place but each caller saying what its own success
+  owes — two NAME a caller-side deadline (and run admitted but uncapped), two
+  REPORT what they could not confirm (a join's revival, an admin video clear's
+  audit record), and three supersede themselves. `createRoom` left the list by the second half
   alone: `SET NX` guards EXISTENCE, so a late landing is NOT a no-op, but its
   single caller expires the room it may have built (`expireOrphanedRoom`,
   identified by the code and joinToken it generated first) and stops trying

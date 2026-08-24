@@ -748,14 +748,13 @@ on the background passes**, on purpose:
   `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`.
 
-One persistent write remains uncapped by design: the room store's
-`updateRoom`. It is conditional and could not corrupt anything by landing late,
-but it is reached from six request handlers whose successes owe six different
-follow-ups — a cap inside the store would answer all six by discarding the
-outcome those follow-ups need. The runtime store now has none: `room:leave`'s
-revocation took the request cap once its session guard became mandatory, so a
-stalled Redis answers a leave with `redis_runtime_store_operation_failed
-reason=timeout` instead of holding the connection open.
+No persistent write is left uncapped. `updateRoom` was the last: a join that
+could not confirm reviving an expiring room logs `room_join_revive_unconfirmed`
+(the room may now be memberless with no expiry, which no reaper collects), and
+an admin video clear that could not confirm returns 503 and is audited as
+`rejected` with `room_video_clear_unconfirmed` rather than as a completed
+action — its write keeps running, and when it lands the broadcast goes out and
+`admin_room_video_clear_late_completed` records it.
 
 A leave that empties a room schedules its expiry after the departure is already
 complete, so that write is reported on its own: `room_expiry_scheduled` when it

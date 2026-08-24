@@ -824,18 +824,17 @@ export async function createRedisRoomStore(
     // reading the silence they derive their bounds from (#277). That is why the
     // choice is per CALL — the two passes reach the very same helpers.
     //
-    // What this does NOT resolve: `updateRoom`'s CAS. Its guard is the whole
-    // previous body, so a late landing cannot corrupt anything — but a cap
-    // there would answer six different request handlers by discarding an
-    // outcome each of them owes something to, and three of those follow-ups
-    // are not self-superseding. Conditionality is what makes a late landing
-    // safe to HAVE happened; it does not discharge what the write's SUCCESS
-    // owes, and that is the property the cap's placement has to respect
-    // (#277).
+    // Nothing on this connection is left without one. `updateRoom`'s CAS was
+    // the last, and it took the ordinary request cap only once every caller
+    // whose SUCCESS owes an unrepeatable follow-up had said so — by naming its
+    // own deadline here, or by reporting the outcome it could not confirm.
+    // Conditionality made a late landing safe to HAVE happened; it never
+    // discharged what the write's success owed, and that is what the placement
+    // had to respect (#277).
     (createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, room-service's expired-room collection deadline and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass; NOT updateRoom's CAS",
+        "boundCommand's cap on the request path, room-service's expired-room collection deadline, its orphan rollback and empty-room expiry scheduling deadlines, and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass",
     }) as RedisRoomStoreClient);
   const {
     orphanedRoomCodesKey,
@@ -1438,16 +1437,27 @@ export async function createRedisRoomStore(
         version: currentRoom.version + 1,
       };
 
+      // Capped by default, like the read half above. What made that safe is not
+      // a new argument about #237 — the CAS has always been conditional on the
+      // whole previous body — but that every caller whose SUCCESS owes a
+      // follow-up nobody else repeats now says so: the orphan rollback and the
+      // leave's expiry scheduling name their own deadline below, the join
+      // reports the revival it may have left unconfirmed, and the admin video
+      // clear audits an unconfirmed outcome. What is left discards its result
+      // safely, because the next share, playback or profile write supersedes it
+      // (#277).
       const result = await (options?.boundedBy === undefined
-        ? redis.eval(
-            UPDATE_ROOM_CAS_LUA,
-            2,
-            key,
-            roomsByExpiryKey,
-            rawRoom,
-            serializeRoom(nextRoom),
-            expiryScore(nextRoom),
-            code,
+        ? boundCommand("update_room_cas", () =>
+            redis.eval(
+              UPDATE_ROOM_CAS_LUA,
+              2,
+              key,
+              roomsByExpiryKey,
+              rawRoom,
+              serializeRoom(nextRoom),
+              expiryScore(nextRoom),
+              code,
+            ),
           )
         : admitCommand("update_room_cas", () =>
             redis.eval(

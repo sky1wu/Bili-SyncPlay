@@ -78,6 +78,9 @@ function createService(options: {
   deleteRuntimeRoom?: (roomCode: string) => void;
   publishRoomDeleted?: (roomCode: string) => Promise<void>;
   auditLogService?: ReturnType<typeof createAuditLogService>;
+  updateRoom?: RoomStore["updateRoom"];
+  publishRoomStateUpdate?: () => Promise<void>;
+  roomVideoClearConfirmTimeoutMs?: number;
   maxFanoutConcurrency?: number;
   logEvent?: (name: string, data?: Record<string, unknown>) => void;
   roomDeleteConfirmTimeoutMs?: number;
@@ -93,9 +96,11 @@ function createService(options: {
           ? await options.getRoom(roomCode)
           : createRoom(roomCode);
       },
-      updateRoom: async () => {
-        throw new Error("updateRoom should not be called in this test");
-      },
+      updateRoom:
+        options.updateRoom ??
+        (async () => {
+          throw new Error("updateRoom should not be called in this test");
+        }),
       deleteRoom: options.deleteRoom ?? (async () => "deleted"),
       deleteExpiredRoom: async () => {
         throw new Error("deleteExpiredRoom should not be called in this test");
@@ -126,7 +131,8 @@ function createService(options: {
     requestAdminCommand: options.requestAdminCommand,
     auditLogService,
     getRoomStateByCode: async () => null,
-    publishRoomStateUpdate: async () => {},
+    publishRoomStateUpdate: options.publishRoomStateUpdate ?? (async () => {}),
+    roomVideoClearConfirmTimeoutMs: options.roomVideoClearConfirmTimeoutMs,
     publishRoomDeleted: options.publishRoomDeleted ?? (async () => {}),
     logEvent: (name, data) => options.logEvent?.(name, data),
     now: () => 10_000,
@@ -188,6 +194,120 @@ test("admin action service maps stale_target command results to 409", async () =
       return true;
     },
   );
+});
+
+test("admin action service audits a video clear it could not confirm", async () => {
+  // The action's SUCCESS owes two things nobody else repeats — the audit record
+  // AND the `room_state_updated` broadcast — so its write keeps running past
+  // this wait rather than having its outcome discarded. An unconfirmed action
+  // is never audited as `ok`, but it IS audited: "unknown" is an outcome
+  // (#267, #277 review).
+  const auditLogService = createAuditLogService();
+  let published = 0;
+  const service = createService({
+    auditLogService,
+    requestAdminCommand: async () => {
+      throw new Error("no command should be issued for a video clear");
+    },
+    // Never answers: the wait ends, the effect does not.
+    updateRoom: () => new Promise(() => undefined),
+    publishRoomStateUpdate: async () => {
+      published += 1;
+    },
+    roomVideoClearConfirmTimeoutMs: 20,
+  });
+
+  await assert.rejects(
+    () => service.clearRoomVideo(ACTOR, "ROOM01", "cleanup"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.code, "room_video_clear_unconfirmed");
+      return true;
+    },
+  );
+
+  const auditLogs = await auditLogService.query({
+    action: "clear_room_video",
+    page: 1,
+    pageSize: 10,
+  });
+  assert.equal(auditLogs.total, 1);
+  assert.equal(auditLogs.items[0]?.result, "rejected");
+  assert.equal(auditLogs.items[0]?.reason, "room_video_clear_unconfirmed");
+  // The broadcast is owed to the effect, not to this waiter — and the effect
+  // has not landed, so nobody has been told anything yet.
+  assert.equal(published, 0);
+});
+
+test("a video clear is refused once the service is closing", async () => {
+  // Every action that STARTS a room effect goes through one gate: an effect
+  // admitted after the shutdown snapshot is one nobody waits for and nobody
+  // drains, and the room store or event bus it needs is closed right after
+  // (#277 review). Hand-copying the deletion effect's shape is what left this
+  // action outside it.
+  let updateRoomCalls = 0;
+  const service = createService({
+    requestAdminCommand: async () => {
+      throw new Error("no command should be issued for a video clear");
+    },
+    updateRoom: async () => {
+      updateRoomCalls += 1;
+      throw new Error("updateRoom should not be reached while closing");
+    },
+  });
+
+  await service.close();
+
+  await assert.rejects(
+    () => service.clearRoomVideo(ACTOR, "ROOM01", "cleanup"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.code, "admin_action_service_closed");
+      return true;
+    },
+  );
+  assert.equal(updateRoomCalls, 0);
+});
+
+test("a video clear that lands late still broadcasts the new state", async () => {
+  // The half a 503 cannot express. The write keeps running past the wait, and
+  // a cleared video nobody was told about leaves every connected client showing
+  // and syncing the old one (#277 review).
+  const auditLogService = createAuditLogService();
+  let published = 0;
+  let releaseWrite: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseWrite = resolve;
+  });
+  const service = createService({
+    auditLogService,
+    requestAdminCommand: async () => {
+      throw new Error("no command should be issued for a video clear");
+    },
+    updateRoom: async (code, expected, patch) => {
+      await held;
+      return {
+        ok: true,
+        room: { ...createRoom(code), ...patch, version: 1 },
+      };
+    },
+    publishRoomStateUpdate: async () => {
+      published += 1;
+    },
+    roomVideoClearConfirmTimeoutMs: 20,
+  });
+
+  await assert.rejects(() =>
+    service.clearRoomVideo(ACTOR, "ROOM01", "cleanup"),
+  );
+  assert.equal(published, 0);
+
+  releaseWrite?.();
+  await service.close();
+
+  assert.equal(published, 1, "a late clear never told anybody");
 });
 
 test("admin action service audits an unconfirmed kick that may still land", async () => {

@@ -43,10 +43,27 @@ export class AdminActionError extends Error {
 /** Default deadline for an admin action's wait on its room deletion. */
 export const DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS = 5_000;
 
+/**
+ * Default deadline for an admin action's wait on clearing a room's video.
+ *
+ * Its own constant, not the deletion's: a deadline is derived from what ITS
+ * caller can promise, and two behaviours are two constants even when the number
+ * happens to match today (#271).
+ */
+export const DEFAULT_ROOM_VIDEO_CLEAR_CONFIRM_TIMEOUT_MS = 5_000;
+
 /** Leaves shutdown-step time for reporting after draining deletion effects. */
 export const DEFAULT_ADMIN_ACTION_SERVICE_CLOSE_BUDGET_MS = 4_000;
 
 type RoomDeletionAction = "close_room" | "expire_room";
+
+class RoomVideoClearUnconfirmedError extends Error {
+  constructor() {
+    super(
+      "Clearing the room video did not confirm before the deadline; its real effect is still tracked.",
+    );
+  }
+}
 
 class RoomDeletionUnconfirmedError extends Error {
   constructor(readonly timeoutMs: number) {
@@ -92,6 +109,7 @@ export function createAdminActionService(options: {
    * (#277).
    */
   roomDeleteConfirmTimeoutMs?: number;
+  roomVideoClearConfirmTimeoutMs?: number;
   /** How long shutdown waits for deletion effects that outlived requests. */
   closeBudgetMs?: number;
 }) {
@@ -136,13 +154,20 @@ export function createAdminActionService(options: {
   const roomDeleteConfirmTimeoutMs =
     options.roomDeleteConfirmTimeoutMs ??
     DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS;
+  const roomVideoClearConfirmTimeoutMs =
+    options.roomVideoClearConfirmTimeoutMs ??
+    DEFAULT_ROOM_VIDEO_CLEAR_CONFIRM_TIMEOUT_MS;
+  const roomVideoClearPacer = createRetryPacer({
+    initialDelayMs: roomVideoClearConfirmTimeoutMs,
+    maxDelayMs: roomVideoClearConfirmTimeoutMs,
+  });
   const roomDeletionPacer = createRetryPacer({
     initialDelayMs: roomDeleteConfirmTimeoutMs,
     maxDelayMs: roomDeleteConfirmTimeoutMs,
   });
   const closeBudgetMs =
     options.closeBudgetMs ?? DEFAULT_ADMIN_ACTION_SERVICE_CLOSE_BUDGET_MS;
-  const roomDeletionHandlerPacer = createRetryPacer({
+  const roomEffectHandlerPacer = createRetryPacer({
     initialDelayMs: closeBudgetMs,
     maxDelayMs: closeBudgetMs,
   });
@@ -158,25 +183,47 @@ export function createAdminActionService(options: {
     // and create a deletion only afterwards. Drain handlers first, then take a
     // fresh deletion snapshot so that late-created effect stays in this same
     // lifecycle boundary.
-    await roomDeletionHandlerPacer.settleTracked(remainingBudgetMs());
+    await roomEffectHandlerPacer.settleTracked(remainingBudgetMs());
     const remaining = remainingBudgetMs();
     if (remaining > 0) {
       await roomDeletionPacer.settleTracked(remaining);
     }
-    const pendingHandlers = roomDeletionHandlerPacer.trackedCount();
+    const pendingHandlers = roomEffectHandlerPacer.trackedCount();
+    const remainingForVideoClears = remainingBudgetMs();
+    if (remainingForVideoClears > 0) {
+      await roomVideoClearPacer.settleTracked(remainingForVideoClears);
+    }
+
     const pendingRoomDeletions = roomDeletionPacer.trackedCount();
-    if (pendingHandlers > 0 || pendingRoomDeletions > 0) {
+    const pendingRoomVideoClears = roomVideoClearPacer.trackedCount();
+    if (
+      pendingHandlers > 0 ||
+      pendingRoomDeletions > 0 ||
+      pendingRoomVideoClears > 0
+    ) {
       options.logEvent("admin_action_service_close_unfinished", {
         instanceId: options.instanceId,
         pendingHandlers,
         pendingRoomDeletions,
+        pendingRoomVideoClears,
         budgetMs: closeBudgetMs,
         result: "timeout",
       });
     }
   }
 
-  function runRoomDeletionAction<T>(action: () => Promise<T>): Promise<T> {
+  /**
+   * The one gate every action that STARTS a room effect goes through.
+   *
+   * Two things, and they are why hand-copying the shape kept missing one: an
+   * effect admitted after the shutdown snapshot is one nobody waits for and
+   * nobody drains, and a handler can be accepted before `closing` and create
+   * its effect afterwards — so the handler itself is tracked, and the drain
+   * takes a fresh effect snapshot after it. Any action whose success owes a
+   * follow-up its own effect carries belongs here, not just the deletions it
+   * was first written for (#277 review).
+   */
+  function runGuardedRoomEffect<T>(action: () => Promise<T>): Promise<T> {
     if (closing) {
       return Promise.reject(
         new AdminActionError(
@@ -186,7 +233,7 @@ export function createAdminActionService(options: {
         ),
       );
     }
-    return roomDeletionHandlerPacer.trackCall(action());
+    return roomEffectHandlerPacer.trackCall(action());
   }
 
   function writeAudit(
@@ -610,17 +657,98 @@ export function createAdminActionService(options: {
       roomCode: string,
       reason?: string,
     ) {
-      await updateRoomWithRetry(
-        roomCode,
-        async (room) =>
-          await options.roomStore.updateRoom(room.code, room.version, {
-            sharedVideo: null,
-            playback: null,
-            expiresAt: null,
-            lastActiveAt: now(),
-          }),
+      // Two lifetimes, like the room deletion above. This action's SUCCESS owes
+      // two things nobody else repeats — the audit record AND the
+      // `room_state_updated` broadcast — so its write is not one whose outcome
+      // may be discarded: a cleared video that nobody was told about leaves
+      // every connected client showing and syncing the old one until some
+      // unrelated broadcast happens (#277 review). The write therefore NAMES
+      // this deadline and keeps running past it, and the effect owns both
+      // follow-ups.
+      let waiterGaveUp = false;
+      const effect = (async () => {
+        await updateRoomWithRetry(
+          roomCode,
+          async (room) =>
+            await options.roomStore.updateRoom(
+              room.code,
+              room.version,
+              {
+                sharedVideo: null,
+                playback: null,
+                expiresAt: null,
+                lastActiveAt: now(),
+              },
+              {
+                boundedBy:
+                  "admin action service: room video clear confirmation deadline (the request stops waiting; this effect does not)",
+              },
+            ),
+        );
+        await options.publishRoomStateUpdate(roomCode);
+      })().then(
+        () => {
+          if (waiterGaveUp) {
+            options.logEvent("admin_room_video_clear_late_completed", {
+              roomCode,
+              result: "ok",
+              actor: actor.username,
+            });
+          }
+        },
+        (error: unknown) => {
+          if (waiterGaveUp) {
+            options.logEvent("admin_room_video_clear_late_failed", {
+              roomCode,
+              result: "error",
+              actor: actor.username,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          throw error;
+        },
       );
-      await options.publishRoomStateUpdate(roomCode);
+
+      try {
+        await roomVideoClearPacer.capAttempt(
+          effect,
+          roomVideoClearConfirmTimeoutMs,
+          () => {
+            waiterGaveUp = true;
+            return new RoomVideoClearUnconfirmedError();
+          },
+        );
+      } catch (error) {
+        if (!(error instanceof RoomVideoClearUnconfirmedError)) {
+          throw error;
+        }
+        // An unconfirmed action is NOT a completed one — the clear may yet
+        // land, and the effect above still owes it the broadcast. Never
+        // audited as `ok`, but audited: an accountability record owes the
+        // attempt and its outcome, and "unknown" is an outcome (#267).
+        options.logEvent("admin_room_video_clear_unconfirmed", {
+          roomCode,
+          result: "timeout",
+          confirmation: "unconfirmed",
+          actor: actor.username,
+        });
+        writeAudit(
+          actor,
+          "clear_room_video",
+          "room",
+          roomCode,
+          { reason, confirmation: "unconfirmed" },
+          "rejected",
+          "room_video_clear_unconfirmed",
+        );
+        throw new AdminActionError(
+          503,
+          "room_video_clear_unconfirmed",
+          "Clearing the room's video was not confirmed before the deadline.",
+          { roomCode },
+        );
+      }
+
       options.logEvent("admin_room_video_cleared", {
         roomCode,
         result: "ok",
@@ -777,13 +905,18 @@ export function createAdminActionService(options: {
       }
       return closePromise;
     },
+    clearRoomVideo(actor: AdminSession, roomCode: string, reason?: string) {
+      return runGuardedRoomEffect(() =>
+        actions.clearRoomVideo(actor, roomCode, reason),
+      );
+    },
     closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
-      return runRoomDeletionAction(() =>
+      return runGuardedRoomEffect(() =>
         actions.closeRoom(actor, roomCode, reason),
       );
     },
     expireRoom(actor: AdminSession, roomCode: string, reason?: string) {
-      return runRoomDeletionAction(() =>
+      return runGuardedRoomEffect(() =>
         actions.expireRoom(actor, roomCode, reason),
       );
     },

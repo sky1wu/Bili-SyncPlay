@@ -27,6 +27,7 @@ import {
   type RoomDeleteOutcome,
   type RoomReadCaller,
   type RoomStore,
+  type RoomUpdateResult,
 } from "./room-store.js";
 import { createRetryPacer } from "./retry-pacer.js";
 import { RedisStoreUnavailableError } from "./redis-store-unavailable.js";
@@ -1608,10 +1609,48 @@ export function createRoomService(options: {
         return { room: latestRoom, joinTargetState };
       }
 
-      const result = await roomStore.updateRoom(args.roomCode, room.version, {
-        ...(room.expiresAt === null ? {} : { expiresAt: null }),
-        lastActiveAt: currentTime,
-      });
+      const revives = room.expiresAt !== null;
+      let result: RoomUpdateResult;
+      try {
+        result = await roomStore.updateRoom(args.roomCode, room.version, {
+          ...(revives ? { expiresAt: null } : {}),
+          lastActiveAt: currentTime,
+        });
+      } catch (error) {
+        // The write is capped like any other request command, so it can answer
+        // this join while still landing later. When it was REVIVING a room —
+        // the room was counting down and this join was what kept it alive — a
+        // late landing leaves it alive with nobody seated: memberless and with
+        // no `expiresAt`, the one shape no expiry sweep collects.
+        //
+        // Reported, not compensated, and that is the same trade the leave's own
+        // expiry write takes: undoing it means writing the countdown back, and
+        // by then the room may belong to a join that DID succeed. The condition
+        // is an operator-visible one that predates these bounds (#277).
+        // Only the CAS. `updateRoom` caps its read half too, and a timeout
+        // THERE means the write was never issued — confirmed not to have
+        // happened, not possibly late. Reporting a revival that provably did
+        // not occur is a false alarm on the one line an operator would act on.
+        if (
+          revives &&
+          error instanceof RedisStoreUnavailableError &&
+          error.reason === "timeout" &&
+          error.operationName === "update_room_cas"
+        ) {
+          logEvent(
+            "room_join_revive_unconfirmed",
+            {
+              sessionId: args.session.id,
+              roomCode: args.roomCode,
+              provider: persistence.provider,
+              result: "timeout",
+              reason: "join_room_revive_unconfirmed",
+            },
+            { level: "error" },
+          );
+        }
+        throw error;
+      }
       if (!result.ok) {
         return null;
       }
