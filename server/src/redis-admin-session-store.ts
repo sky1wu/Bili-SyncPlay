@@ -9,6 +9,7 @@ import {
   RedisCommandAdmissionError,
 } from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
+import type { RedisConnectionReporting } from "./redis-connection-error.js";
 
 const DEFAULT_ADMIN_SESSION_KEY_PREFIX = "bsp:admin:session:";
 
@@ -153,6 +154,14 @@ export async function createRedisAdminSessionStore(
      * `stallDropThreshold` failures.
      */
     onConnectionDropped?: (info: { consecutiveFailures: number }) => void;
+    /**
+     * Who this store's own connection reports socket failures to, and as
+     * which node.
+     *
+     * Only read when this store opens its own connection; an injected
+     * client carries whatever listener its creator attached (#280).
+     */
+    connection?: RedisConnectionReporting;
     redisClient?: RedisAdminSessionStoreClient;
   } = {},
 ): Promise<AdminSessionStore & { close: () => Promise<void> }> {
@@ -165,9 +174,11 @@ export async function createRedisAdminSessionStore(
     // response (measured, #277 review). Nothing here is large — one `HGETALL` of a handful of
     // fields — so the backstop cannot be tripped by a legitimately slow read the
     // way an admin console query might be.
-    (createBoundedRedisClient(redisUrl, {
-      bound: "command_timeout",
-    }) as RedisAdminSessionStoreClient);
+    (createBoundedRedisClient(
+      redisUrl,
+      { bound: "command_timeout" },
+      { component: "admin_session_store", ...options.connection },
+    ) as RedisAdminSessionStoreClient);
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const keyPrefix = options.keyPrefix ?? DEFAULT_ADMIN_SESSION_KEY_PREFIX;

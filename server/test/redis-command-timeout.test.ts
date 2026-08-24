@@ -284,9 +284,11 @@ test("a timed-out command stays queued and keeps later replies aligned", async (
 
 test("a backstopped reset retires timed-out commands instead of replaying them", async () => {
   const fixture = await startSilentRedis();
-  const client = createBoundedRedisClient(fixture.url, {
-    bound: "command_timeout",
-  });
+  const client = createBoundedRedisClient(
+    fixture.url,
+    { bound: "command_timeout" },
+    { component: "room_store", logEvent: () => undefined },
+  );
   // Production uses five seconds; shortening the same option keeps this a fast
   // test of the reset/reconnect mechanism rather than the timeout magnitude.
   client.options.commandTimeout = TEST_COMMAND_TIMEOUT_MS;

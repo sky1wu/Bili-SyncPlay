@@ -1,5 +1,9 @@
 import type { LogEvent, LogLevel } from "./types.js";
-import { createDiagnosisThrottle } from "./diagnosis-throttle.js";
+import {
+  createDiagnosisThrottle,
+  type DiagnosisThrottle,
+} from "./diagnosis-throttle.js";
+import { REDIS_CONNECTION_ERROR_EVENT } from "./redis-connection-error.js";
 import type { GlobalEventStore } from "./admin/global-event-store.js";
 import type { MetricsCollector } from "./admin/metrics.js";
 import type { RuntimeStore } from "./runtime-store.js";
@@ -28,6 +32,21 @@ const EVENT_STORE_BACKPRESSURE_EVENTS = new Set([
 const HIGH_VOLUME_EXCLUDED_EVENTS = new Set(["node_heartbeat_sent"]);
 
 /**
+ * A connection-level Redis failure, which must not be reported INTO Redis.
+ *
+ * The event store is on the far side of the very dependency the report is
+ * about: every connection in this server is opened against one `REDIS_URL`, so
+ * the append issued to describe a broken socket is issued over the same
+ * deployment that just broke it — and for the event store's OWN connection the
+ * report is reflexive outright. An append that fails is shed by design (#264),
+ * which means the console entry would be missing exactly when it matters, so
+ * the store is not where this signal lives. stdout and
+ * `events_total{event="redis_connection_error"}` are, and both survive the
+ * outage (#266, #280).
+ */
+const REDIS_TRANSPORT_EXCLUDED_EVENTS = new Set([REDIS_CONNECTION_ERROR_EVENT]);
+
+/**
  * An event-store outage is one failure no matter how many log lines happen
  * while it lasts. Reporting every rejected append turns the logger into an
  * error-line amplifier, so repeat diagnoses get one line per minute (#268).
@@ -44,7 +63,8 @@ const MAX_TRACKED_APPEND_FAILURE_REASONS = 32;
 function isExcludedFromEventStore(event: string): boolean {
   return (
     HIGH_VOLUME_EXCLUDED_EVENTS.has(event) ||
-    EVENT_STORE_BACKPRESSURE_EVENTS.has(event)
+    EVENT_STORE_BACKPRESSURE_EVENTS.has(event) ||
+    REDIS_TRANSPORT_EXCLUDED_EVENTS.has(event)
   );
 }
 
@@ -98,8 +118,12 @@ export type StructuredLoggerOptions = {
   metricsCollector?: Pick<MetricsCollector, "recordEvent">;
   logLevel?: LogLevel;
   sampling?: Record<string, number>;
-  /** Injectable monotonic clock for append-failure throttle tests. */
-  appendFailureNow?: () => number;
+  /**
+   * Injectable monotonic clock for the throttles below — the append-failure
+   * one and every `throttleKey` line — so tests do not pay an interval in
+   * wall-clock time.
+   */
+  diagnosisNow?: () => number;
 };
 
 export function createStructuredLogger(
@@ -112,7 +136,7 @@ export function createStructuredLogger(
     metricsCollector,
     logLevel = "info",
     sampling = {},
-    appendFailureNow = () => performance.now(),
+    diagnosisNow = () => performance.now(),
   } = options;
 
   const threshold = LEVEL_PRIORITY[logLevel];
@@ -120,8 +144,37 @@ export function createStructuredLogger(
   const appendFailureThrottle = createDiagnosisThrottle({
     intervalMs: APPEND_FAILURE_REPORT_INTERVAL_MS,
     maxTrackedDiagnoses: MAX_TRACKED_APPEND_FAILURE_REASONS,
-    now: appendFailureNow,
+    now: diagnosisNow,
   });
+  /**
+   * One throttle per (interval, cap), because both are the caller's constants
+   * and diagnoses paced differently would otherwise share one window — the cap
+   * included, since a caller that sized it for its own vocabulary must not
+   * inherit a smaller one from whoever asked first.
+   *
+   * Unbounded on purpose, and this is the one place that is safe: the keys are
+   * constants written in code, a finite vocabulary — unlike the diagnoses
+   * inside each throttle, which come from implementations outside the logger
+   * and are bounded for exactly that reason (#268).
+   */
+  const lineThrottles = new Map<string, DiagnosisThrottle>();
+  const allowThrottledLine = (
+    key: string,
+    intervalMs: number,
+    maxTracked: number,
+  ): boolean => {
+    const throttleKey = `${intervalMs}:${maxTracked}`;
+    let throttle = lineThrottles.get(throttleKey);
+    if (throttle === undefined) {
+      throttle = createDiagnosisThrottle({
+        intervalMs,
+        maxTrackedDiagnoses: maxTracked,
+        now: diagnosisNow,
+      });
+      lineThrottles.set(throttleKey, throttle);
+    }
+    return throttle.allow(key);
+  };
   const emitLine = (line: string) => {
     (writeLine ?? console.log)(line);
   };
@@ -175,6 +228,22 @@ export function createStructuredLogger(
         sampleCounters.set(event, nextCounter);
         shouldWriteStdout = (nextCounter - 1) % sampleRate === 0;
       }
+    }
+
+    if (
+      shouldWriteStdout &&
+      eventOptions?.throttleKey !== undefined &&
+      eventOptions.throttleIntervalMs !== undefined &&
+      eventOptions.throttleMaxTracked !== undefined
+    ) {
+      // The LINE only. Everything below this block runs whatever the throttle
+      // says, so the counter still answers "how much" while stdout answers
+      // "what is broken" once per interval (#266).
+      shouldWriteStdout = allowThrottledLine(
+        eventOptions.throttleKey,
+        eventOptions.throttleIntervalMs,
+        eventOptions.throttleMaxTracked,
+      );
     }
 
     if (shouldWriteStdout) {

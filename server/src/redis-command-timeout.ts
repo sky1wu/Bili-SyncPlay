@@ -114,6 +114,12 @@
 import { Redis } from "ioredis";
 import { settleWithin } from "./retry-pacer.js";
 import type { ClosableRedisConnection } from "./redis-graceful-close.js";
+import {
+  createRedisConnectionErrorListener,
+  logRedisConnectionErrorToStdout,
+  type RedisConnectionIdentity,
+} from "./redis-connection-error.js";
+import type { LogEvent } from "./types.js";
 
 /**
  * How long a command may go unanswered before the connection is presumed dead.
@@ -156,6 +162,17 @@ export type RedisCommandBound =
   | { readonly bound: "caller"; readonly boundedBy: string };
 
 /**
+ * Which connection this is, and where its socket-level failures are reported.
+ *
+ * `logEvent` is optional only because a store constructed directly with a URL
+ * has no logger to give — the real-Redis suite does that. The identity is not:
+ * a report that cannot say which of nine connections broke is not a report.
+ */
+export type RedisConnectionOptions = RedisConnectionIdentity & {
+  readonly logEvent?: LogEvent;
+};
+
+/**
  * The one place `new Redis` is called.
  *
  * `server/test/redis-client-bounds.test.ts` enforces that, which is what turns
@@ -165,8 +182,9 @@ export type RedisCommandBound =
 export function createBoundedRedisClient(
   redisUrl: string,
   bound: RedisCommandBound,
+  connection: RedisConnectionOptions,
 ): Redis {
-  return new Redis(redisUrl, {
+  const client = new Redis(redisUrl, {
     lazyConnect: true,
     // Retries, not patience: this caps how often ioredis re-queues a command
     // across reconnects, and says nothing about how long an accepted command
@@ -194,6 +212,20 @@ export function createBoundedRedisClient(
         }
       : {}),
   });
+  // Attached here, and required here, for the reason the bound is: a listener
+  // is a property of the CONNECTION, and leaving it to call sites left seven of
+  // nine without one. Without a listener ioredis prints `[ioredis] Unhandled
+  // error event` to bare stdout, which is not structured, not counted, and not
+  // in the event stream — so a connection-level outage was invisible on every
+  // monitoring surface (#280).
+  client.on(
+    "error",
+    createRedisConnectionErrorListener(
+      connection,
+      connection.logEvent ?? logRedisConnectionErrorToStdout,
+    ),
+  );
+  return client;
 }
 
 /**

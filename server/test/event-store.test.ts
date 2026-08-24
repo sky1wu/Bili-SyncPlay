@@ -326,6 +326,9 @@ test("in-memory event store hides system events by default and can include them 
     timestamp: "2026-03-26T12:00:00.000Z",
     data: { roomCode: "ROOM01", result: "ok" },
   });
+  // Deliberately a name the code no longer emits: the stream still holds the
+  // ones written before its listener was replaced, and this set filters
+  // persisted history rather than what the code can still produce (#280).
   await store.append({
     event: "room_event_bus_error",
     timestamp: "2026-03-26T12:00:01.000Z",

@@ -1313,6 +1313,38 @@ do NOT compose, and that is the part that decides which connection gets which:
   message-slot rollback follows the same ordering rule: report the cleanup
   failure, but preserve the business error that triggered it.
 
+- **A connection with no `error` listener reports to nobody.** ioredis falls
+  back to printing `[ioredis] Unhandled error event` on bare stdout, which is
+  not structured, not counted, and not in the event stream — so the whole
+  connection layer was invisible on every monitoring surface, and the
+  2026-08-11 Redis restart had to be diagnosed from the host's journal (#280).
+  The listener is a property of the CONNECTION, exactly like its bound, so it
+  is attached where the bound is declared: `createBoundedRedisClient`, the one
+  place `new Redis` is called. Leaving it to call sites is what left seven of
+  nine without one. Three things follow from where the report goes.
+  **The counter is unconditional and the LINE is throttled** — ioredis emits one
+  `error` per reconnect attempt (nine inside 1.3 seconds that morning), and a
+  burst is one fact, but a throttled count cannot tell nine failures from nine
+  million (#266). That split is why the throttle sits in the logger next to the
+  counter, as `throttleKey`, rather than becoming a second hand-rolled copy in
+  front of it. **The key is per connection AND per code**: a reconnect loop
+  repeats one code, while a node that reaches Redis on one connection and not
+  another is a different incident that must not hide behind the first one's
+  window — and each half of a pub/sub pair carries its own role for the same
+  reason. **Which node the connection belongs to is part of that identity**, and
+  it travels as ONE bundled value with the logger: carrying it as a second,
+  separately-optional option let the admin process's own bootstrap pass the
+  logger and forget the node, because "the bootstrap wraps its logger" is the
+  same per-call-site responsibility the listener itself used to be. Bundled,
+  that half-omission is not expressible. **The event store is not where this signal lives.** Every connection
+  here is opened against one `REDIS_URL`, so an append describing a broken
+  socket is issued over the deployment that just broke, and for the event
+  store's own connection it is reflexive outright; a failing append is shed by
+  design (#264), so the console entry would be missing exactly when it matters.
+  stdout and `events_total{event="redis_connection_error"}` both survive the
+  outage, which is what makes them the report. `room_event_bus_error` was the
+  one hand-written copy of this listener and was removed with it.
+
 ## Test fixtures must not cast past the checker
 
 Every package's `test/**` is inside `npm run typecheck` — otherwise a signature

@@ -22,6 +22,7 @@ import type {
   MetricsCollector,
 } from "./metrics.js";
 import type { RuntimeEvent } from "./types.js";
+import type { RedisConnectionReporting } from "../redis-connection-error.js";
 
 const DEFAULT_EVENT_STREAM_KEY = "bsp:events";
 const DEFAULT_EVENT_COUNTS_KEY = "bsp:event_counts";
@@ -365,6 +366,14 @@ export type RedisEventStoreOptions = {
   legacyCountsKey?: string;
   windowIndexKeyPrefix?: string;
   maxLen?: number;
+  /**
+   * Who this store's own connection reports socket failures to, and as
+   * which node.
+   *
+   * Only read when this store opens its own connection; an injected
+   * client carries whatever listener its creator attached (#280).
+   */
+  connection?: RedisConnectionReporting;
   redisClient?: RedisEventStoreClient;
   appendTimeoutMs?: number;
   maxPendingAppends?: number;
@@ -423,11 +432,15 @@ export async function createRedisEventStore(
     // chain that freezes and sheds cheaply into one that grinds a command per
     // timeout while letting every poll back onto the connection. Bounding was
     // never the gap here; the chain bounds the append, the read and the close.
-    (createBoundedRedisClient(redisUrl, {
-      bound: "caller",
-      boundedBy:
-        "append-chain: APPEND_TIMEOUT_MS per write, READ_COMMAND_TIMEOUT_MS per read, CLOSE_APPEND_SETTLE_TIMEOUT_MS on close",
-    }) as RedisEventStoreClient);
+    (createBoundedRedisClient(
+      redisUrl,
+      {
+        bound: "caller",
+        boundedBy:
+          "append-chain: APPEND_TIMEOUT_MS per write, READ_COMMAND_TIMEOUT_MS per read, CLOSE_APPEND_SETTLE_TIMEOUT_MS on close",
+      },
+      { component: "event_store", ...options.connection },
+    ) as RedisEventStoreClient);
   const streamKey = options.streamKey ?? DEFAULT_EVENT_STREAM_KEY;
   const countsKey = options.countsKey ?? DEFAULT_EVENT_COUNTS_KEY;
   const legacyCountsKey =

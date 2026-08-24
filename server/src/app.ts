@@ -121,15 +121,6 @@ export async function createSyncServer(
           error: error instanceof Error ? error.message : String(error),
         });
       },
-      onRoomEventBusConnectionError: (writeLog, role, error) => {
-        writeLog("room_event_bus_error", {
-          busRole: role,
-          instanceId: persistenceConfig.instanceId,
-          provider: persistenceConfig.roomEventBusProvider,
-          result: "error",
-          error: error instanceof Error ? error.message : String(error),
-        });
-      },
       onRoomEventBusInvalidMessage: (writeLog, payload) => {
         writeLog("room_event_bus_invalid_message", {
           instanceId: persistenceConfig.instanceId,

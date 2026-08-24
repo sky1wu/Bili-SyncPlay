@@ -12,6 +12,7 @@ import {
   type RedisPubSubClientPair,
 } from "./redis-pubsub-client.js";
 import type { RoomEventBus, RoomEventBusMessage } from "./room-event-bus.js";
+import type { RedisConnectionReporting } from "./redis-connection-error.js";
 
 const DEFAULT_ROOM_EVENT_CHANNEL = "bsp:room-events";
 
@@ -78,10 +79,6 @@ export async function createRedisRoomEventBus(
   redisUrl: string,
   options: {
     channel?: string;
-    onConnectionError?: (
-      role: "publisher" | "subscriber",
-      error: unknown,
-    ) => void;
     onInvalidMessage?: (payload: string) => void;
     onHandlerError?: (message: RoomEventBusMessage, error: unknown) => void;
     /** Commands admitted here keep their slot until the real Redis reply. */
@@ -90,6 +87,14 @@ export async function createRedisRoomEventBus(
     subscriptionTimeoutMs?: number;
     closeQuitTimeoutMs?: number;
     onCloseUnfinished?: (info: RedisQuitReport<RoomEventBusClientRole>) => void;
+    /**
+     * Who this store's own connection reports socket failures to, and as
+     * which node.
+     *
+     * Only read when this store opens its own connection; an injected
+     * client carries whatever listener its creator attached (#280).
+     */
+    connection?: RedisConnectionReporting;
     redisClients?: RedisPubSubClientPair;
     metricsCollector?: Pick<
       MetricsCollector,
@@ -106,11 +111,15 @@ export async function createRedisRoomEventBus(
     // connection backstop would instead settle the publisher and turn "one
     // publish, retried when it answers" into one publish per timeout (#242,
     // #271 review).
-    createRedisPubSubClientPair(redisUrl, {
-      bound: "caller",
-      boundedBy:
-        "room-event publish admission tracks real replies; startWithin bounds the initial SUBSCRIBE",
-    });
+    createRedisPubSubClientPair(
+      redisUrl,
+      {
+        bound: "caller",
+        boundedBy:
+          "room-event publish admission tracks real replies; startWithin bounds the initial SUBSCRIBE",
+      },
+      { component: "room_event_bus", ...options.connection },
+    );
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;
   const channel = options.channel ?? DEFAULT_ROOM_EVENT_CHANNEL;
@@ -126,13 +135,6 @@ export async function createRedisRoomEventBus(
   let subscribed = false;
   let subscriptionOperation: Promise<void> | null = null;
   let closing = false;
-
-  publishClient.on("error", (error) => {
-    options.onConnectionError?.("publisher", error);
-  });
-  subscribeClient.on("error", (error) => {
-    options.onConnectionError?.("subscriber", error);
-  });
 
   // The exemption is about commands; the handshake is not one of them and has
   // no bound of its own without a `commandTimeout` (#271 review).

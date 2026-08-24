@@ -1,8 +1,15 @@
 import {
   createBoundedRedisClient,
   type RedisCommandBound,
+  type RedisConnectionOptions,
 } from "./redis-command-timeout.js";
 import type { ClosableRedisConnection } from "./redis-graceful-close.js";
+import type { RedisConnectionRole } from "./redis-connection-error.js";
+
+/**
+ * A pair's identity minus the role, which the pair itself assigns.
+ */
+export type RedisPubSubConnectionOptions = Omit<RedisConnectionOptions, "role">;
 
 export type RedisMessageListener = (channel: string, payload: string) => void;
 export type RedisReadyListener = () => void;
@@ -51,11 +58,18 @@ export type RedisPubSubClientPair = {
 export function createRedisPubSubClientPair(
   redisUrl: string,
   bound: RedisCommandBound,
+  connection: RedisPubSubConnectionOptions,
 ): RedisPubSubClientPair {
-  const createClient = () =>
-    createBoundedRedisClient(redisUrl, bound) as RedisPubSubClient;
+  const createClient = (role: RedisConnectionRole) =>
+    createBoundedRedisClient(redisUrl, bound, {
+      ...connection,
+      role,
+    }) as RedisPubSubClient;
   return {
-    publisher: createClient(),
-    subscriber: createClient(),
+    // Two connections, two identities: a pair whose publisher is refused and
+    // whose subscriber is fine is a different incident from both being down,
+    // and one report for the pair would hide it (#280).
+    publisher: createClient("publisher"),
+    subscriber: createClient("subscriber"),
   };
 }

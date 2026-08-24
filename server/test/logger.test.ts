@@ -115,7 +115,7 @@ test("structured logger throttles repeated event-store failures by diagnosis", a
     },
     eventStore: store,
     logLevel: "error",
-    appendFailureNow: () => clock,
+    diagnosisNow: () => clock,
   });
 
   logger("room_created", { result: "ok" });
@@ -156,7 +156,7 @@ test("structured logger bounds high-cardinality append-failure diagnoses", async
     },
     eventStore: store,
     logLevel: "error",
-    appendFailureNow: () => clock,
+    diagnosisNow: () => clock,
   });
 
   for (let index = 0; index < 40; index += 1) {
@@ -188,7 +188,7 @@ test("structured logger keeps the overflow cooldown when a tracked slot expires"
     },
     eventStore: store,
     logLevel: "error",
-    appendFailureNow: () => clock,
+    diagnosisNow: () => clock,
   });
 
   logger("room_created", { failureReason: "tracked-0" });
@@ -319,7 +319,7 @@ test("log level inference covers result field and event-name suffix fallbacks", 
   );
   // No result field: fall back to event-name suffix heuristic.
   assert.equal(inferLogLevel("ws_send_failed", {}), "error");
-  assert.equal(inferLogLevel("room_event_bus_error", {}), "error");
+  assert.equal(inferLogLevel("room_event_publish_failed", {}), "error");
   assert.equal(inferLogLevel("admin_room_close_rejected", {}), "warn");
   assert.equal(inferLogLevel("room_created", {}), "info");
 });
@@ -478,7 +478,7 @@ test("every append failure moves the counter, not just the ones that get a line"
     },
     eventStore: store,
     logLevel: "error",
-    appendFailureNow: () => clock,
+    diagnosisNow: () => clock,
     metricsCollector: {
       recordEvent: (event) => {
         recordedEvents.push(event);

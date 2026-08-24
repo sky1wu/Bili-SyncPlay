@@ -21,6 +21,7 @@ import {
   type RoomUpdateResult,
 } from "./room-store.js";
 import type { PersistedRoom } from "./types.js";
+import type { RedisConnectionReporting } from "./redis-connection-error.js";
 
 /**
  * `close_room_store` has the default 5s shutdown budget and, after the room
@@ -798,6 +799,14 @@ export async function createRedisRoomStore(
       quitOutcome: RedisQuitOutcome;
       budgetMs: number;
     }) => void;
+    /**
+     * Who this store's own connection reports socket failures to, and as
+     * which node.
+     *
+     * Only read when this store opens its own connection; an injected
+     * client carries whatever listener its creator attached (#280).
+     */
+    connection?: RedisConnectionReporting;
     redisClient?: RedisRoomStoreClient;
   } = {},
 ): Promise<
@@ -831,11 +840,15 @@ export async function createRedisRoomStore(
     // Conditionality made a late landing safe to HAVE happened; it never
     // discharged what the write's success owed, and that is what the placement
     // had to respect (#277).
-    (createBoundedRedisClient(redisUrl, {
-      bound: "caller",
-      boundedBy:
-        "boundCommand's cap on the request path, room-service's expired-room collection deadline, its orphan rollback and empty-room expiry scheduling deadlines, and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass",
-    }) as RedisRoomStoreClient);
+    (createBoundedRedisClient(
+      redisUrl,
+      {
+        bound: "caller",
+        boundedBy:
+          "boundCommand's cap on the request path, room-service's expired-room collection deadline, its orphan rollback and empty-room expiry scheduling deadlines, and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass",
+      },
+      { component: "room_store", ...options.connection },
+    ) as RedisRoomStoreClient);
   const {
     orphanedRoomCodesKey,
     orphanedRoomQueueKey,

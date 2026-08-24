@@ -12,7 +12,17 @@
  * The `runtime_event_appends_*` lines are absent because they never reach the
  * store to be filtered: `EVENT_STORE_EXCLUDED_EVENTS` in `logger.ts` keeps the
  * event store's own backpressure reports out of the event store (#266 review).
- * If that exclusion is ever lifted, they belong here.
+ * If that exclusion is ever lifted, they belong here. `redis_connection_error`
+ * is absent for the same reason and, unlike those, cannot come back: the report
+ * describes the transport the store is reached over (#280).
+ *
+ * A name that is no longer emitted STAYS. This set filters persisted history at
+ * read time, and records outlive the code that wrote them: the event stream
+ * still holds every `room_event_bus_error` written before that listener was
+ * replaced by the one `createBoundedRedisClient` now gives every connection, so
+ * dropping the name would surface upgrade-old infrastructure noise in the
+ * default admin view. Membership is a property of what the STORE can contain,
+ * not of what the code can still produce (#280 review).
  */
 const HIDDEN_SYSTEM_EVENTS = new Set([
   "admin_audit_appends_abandoned_at_shutdown",
@@ -31,10 +41,10 @@ const HIDDEN_SYSTEM_EVENTS = new Set([
   "node_heartbeat_skipped",
   "redis_runtime_store_operation_failed",
   "room_event_bus_close_unfinished",
-  "room_event_bus_error",
   "room_event_bus_invalid_message",
   "room_event_consumed",
   "room_event_handler_failed",
+  "room_event_bus_error",
   "room_event_publish_failed",
   "room_event_published",
   "room_index_reconcile_abandoned_at_shutdown",
