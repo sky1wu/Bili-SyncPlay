@@ -77,6 +77,32 @@ export function addMemberToRoom(
   return room;
 }
 
+/**
+ * Put a member back after a departure that could not be completed.
+ *
+ * Guarded under the same rule as {@link revokeMemberTokenInRoom} and
+ * {@link shouldRemoveMemberBinding}, and that symmetry is the point: **a
+ * compensation must carry the guard of the thing it compensates.** The leave it
+ * undoes removed the presence and revoked the identity, both conditional on this
+ * session still owning the memberId; an unconditional re-seat would hand the
+ * identity back to a session that has since been replaced — the successor may
+ * have reconnected onto another node while this one's Redis was not answering —
+ * and would then overwrite the binding that successor is using (#277 review).
+ */
+export function restoreMemberInRoom(
+  rooms: Map<string, ActiveRoom>,
+  code: string,
+  memberId: string,
+  session: Session,
+  memberToken: string,
+): ActiveRoom | null {
+  const current = rooms.get(code)?.members.get(memberId) ?? null;
+  if (current && current !== session) {
+    return null;
+  }
+  return addMemberToRoom(rooms, code, memberId, session, memberToken);
+}
+
 export function findMemberIdByTokenEntries(
   entries: Iterable<readonly [string, string]>,
   memberToken: string,

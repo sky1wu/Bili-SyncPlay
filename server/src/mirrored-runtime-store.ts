@@ -141,6 +141,10 @@ export function createMirroredRuntimeStore(
       localRuntimeStore.addMember,
       sharedRuntimeStore.addMember,
     ),
+    restoreMember: (code, memberId, session, memberToken) => {
+      localRuntimeStore.restoreMember(code, memberId, session, memberToken);
+      sharedRuntimeStore.restoreMember(code, memberId, session, memberToken);
+    },
     findMemberIdByToken: readLocal(localRuntimeStore.findMemberIdByToken),
     isMemberTokenBlocked: readLocal(localRuntimeStore.isMemberTokenBlocked),
     tryClaimMessageSlot: readShared(sharedRuntimeStore.tryClaimMessageSlot),

@@ -249,6 +249,11 @@ before changing the code it describes.
   LOCAL MIRROR update belongs on the capped promise, not the tracked one,
   wherever the caller compensates by undoing it (the leave restores; a kick
   does not — hence `evictMemberToken` keeps its mirror on the tracked promise).
+  And **a compensation carries the guard of the thing it compensates**: the
+  leave's recovery re-seats through the guarded `restoreMember`, never the
+  unconditional `addMember` a JOIN uses, or a cap-driven compensation overwrites
+  the binding of a successor who reconnected onto another node. Two writes on
+  one identity, one guarded and one not, is the shape to look for.
   `updateRoom` is CONDITIONAL and still stays, which
   is the correction this round bought: **conditionality makes a late landing
   safe to HAVE happened; it does not discharge what the write's SUCCESS owes,

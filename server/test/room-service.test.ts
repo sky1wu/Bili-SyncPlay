@@ -278,6 +278,57 @@ test("room service refreshes lastActiveAt for active room joins after refresh wi
   assert.equal(persisted?.lastActiveAt, currentTime);
 });
 
+test("a failed leave does not restore a member whose seat changed hands", async () => {
+  // The compensation carries the guard of what it compensates. While this
+  // leave's revocation was in flight the member reconnected — in production
+  // onto another node, whose write this one cannot see — so putting the seat
+  // back unconditionally would take the identity away from the session now
+  // using it (#277 review).
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const events: string[] = [];
+  const successor = createSession("successor");
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      async revokeMemberToken(code, memberId, session) {
+        // The successor claims the seat while this revocation is still out,
+        // and only then does the revocation fail.
+        activeRooms.addMember(code, memberId, successor, "token-1xxxxxxxxxxx");
+        activeRooms.revokeMemberToken(code, memberId, session);
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMHS",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  await assert.rejects(
+    service.leaveRoomForSession(owner),
+    (error: unknown) =>
+      error instanceof Error && error.message === "Internal server error.",
+  );
+
+  assert.equal(
+    activeRooms.getRoom(created.room.code)?.members.get("owner"),
+    successor,
+    "the compensation took the seat back from its successor",
+  );
+});
+
 test("room service restores member state when empty-room expiry scheduling fails", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();
@@ -1219,6 +1270,9 @@ test("room service flushes pending runtime store writes before exposing updated 
     },
     removeMember(code, memberId, session) {
       return activeRooms.removeMember(code, memberId, session);
+    },
+    restoreMember(code, memberId, session, memberToken) {
+      activeRooms.restoreMember(code, memberId, session, memberToken);
     },
     revokeMemberToken(code, memberId, session) {
       activeRooms.revokeMemberToken(code, memberId, session);

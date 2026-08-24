@@ -588,7 +588,12 @@ export function createRoomService(options: {
       return;
     }
 
-    runtimeStore.addMember(
+    // `restoreMember`, not `addMember`: this gives back a seat we failed to
+    // vacate, so it must decline if the memberId has changed hands since — the
+    // successor may have reconnected onto another node while our own leave was
+    // still waiting on Redis, and an unconditional re-seat would overwrite the
+    // binding they are using (#277 review).
+    runtimeStore.restoreMember(
       args.snapshot.roomCode,
       args.snapshot.memberId,
       args.session,

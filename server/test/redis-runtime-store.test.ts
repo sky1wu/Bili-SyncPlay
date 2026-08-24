@@ -1284,6 +1284,77 @@ test("redis runtime store declines a revoke from a session that no longer owns t
   }
 });
 
+test("redis runtime store declines a restore of a member who changed hands", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  // The compensation half of the guard above, and the reason it needs one: a
+  // leave whose revocation went unanswered restores the identity it failed to
+  // vacate, and by then the member may have reconnected onto ANOTHER node. An
+  // unconditional re-seat would put the shared binding back on the departed
+  // session and make the successor's own guarded writes decline — the exact
+  // corruption the revoke's guard prevents, arriving through its compensation
+  // (#277 review).
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, { keyPrefix });
+  const redis = new Redis(REDIS_URL);
+  const oldSession = createSession("session-restore-old");
+  oldSession.memberId = "member-restore";
+  oldSession.memberToken = "token-restore";
+  const newSession = createSession("session-restore-new");
+  newSession.memberId = "member-restore";
+  newSession.memberToken = "token-restore";
+  const membersKey = `${keyPrefix}room:ROOMRS:members`;
+
+  try {
+    store.addMember("ROOMRS", "member-restore", oldSession, "token-restore");
+    await store.flush?.();
+    // The successor claims the seat: a join CLAIMS, so this one is
+    // unconditional and must win.
+    store.addMember("ROOMRS", "member-restore", newSession, "token-restore");
+    await store.flush?.();
+    assert.equal(await redis.hget(membersKey, "member-restore"), newSession.id);
+
+    // The stale node's leave failed and compensates.
+    store.restoreMember(
+      "ROOMRS",
+      "member-restore",
+      oldSession,
+      "token-restore",
+    );
+    await store.flush?.();
+
+    assert.equal(
+      await redis.hget(membersKey, "member-restore"),
+      newSession.id,
+      "a restore overwrote the binding its successor is using",
+    );
+
+    // The control: with the seat still its own, the restore does apply.
+    await store.revokeMemberToken("ROOMRS", "member-restore", newSession);
+    await store.flush?.();
+    await redis.hdel(membersKey, "member-restore");
+    store.restoreMember(
+      "ROOMRS",
+      "member-restore",
+      oldSession,
+      "token-restore",
+    );
+    await store.flush?.();
+    assert.equal(await redis.hget(membersKey, "member-restore"), oldSession.id);
+    assert.equal(
+      await store.findMemberIdByToken("ROOMRS", "token-restore"),
+      "member-restore",
+    );
+  } finally {
+    await redis.del(membersKey);
+    await redis.quit();
+    await store.close();
+  }
+});
+
 test("redis runtime store surfaces a failed member token revocation to the caller", async () => {
   // The kick awaits this and then disconnects the socket and reports success.
   // A revoke that resolves before the write landed — or swallows its failure —

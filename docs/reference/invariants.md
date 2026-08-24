@@ -891,8 +891,21 @@ do NOT compose, and that is the part that decides which connection gets which:
   question is not "is this write capped" but "does anyone undo it when told it
   failed".**
 
-  What the guard does NOT make atomic, deliberately: a revocation that lands
-  late while the compensation's own `addMember` then fails leaves Redis without
+  **A compensation carries the guard of the thing it compensates.** The leave
+  removes presence and revokes identity, both conditional on this session still
+  owning the memberId; its recovery used to put the seat back with a plain
+  `addMember`, which is unconditional because a JOIN legitimately claims a seat.
+  Capping the revocation is what made that asymmetry routine: the caller stops
+  waiting after 5s and compensates, and by the time its write reaches a
+  recovering Redis the member may have reconnected onto another node — whose
+  binding the unguarded re-seat would then overwrite, so the successor's own
+  guarded writes start declining. `restoreMember` is therefore its own
+  primitive, guarded exactly like the revoke, and `addMember` keeps claiming
+  unconditionally for joins. Two writes on one identity, one guarded and one
+  not, is the shape to look for.
+
+  What remains NOT atomic, deliberately: a revocation that lands
+  late while the compensation's own `restoreMember` then fails leaves Redis without
   the token binding and this node's mirror with it, so that member cannot
   reclaim the same `memberId` on a reconnect. Two commands are two commands, and
   the same connection guarantees ORDER, not that the second one runs. This is

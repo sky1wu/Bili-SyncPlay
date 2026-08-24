@@ -505,6 +505,28 @@ return 1
 `;
 
 /**
+ * Re-seat a member the caller failed to remove, but only while nobody else has
+ * taken the memberId.
+ *
+ * The mirror image of {@link REVOKE_MEMBER_TOKEN_LUA}'s guard, and it has to be:
+ * a compensation carries the guard of the thing it compensates. The leave being
+ * undone removed presence and revoked identity under that guard; an
+ * unconditional re-seat would overwrite the binding of a successor who
+ * reconnected onto another node while this one's Redis was not answering (#277
+ * review).
+ */
+const RESTORE_MEMBER_LUA = `
+local bound = redis.call("HGET", KEYS[1], ARGV[1])
+if bound and bound ~= ARGV[2] then
+  return 0
+end
+redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
+redis.call("HSET", KEYS[2], ARGV[1], ARGV[3])
+redis.call("ZREM", KEYS[3], ARGV[1])
+return 1
+`;
+
+/**
  * Evict a member in one commit: block the token and end the identity together.
  *
  * Two independent writes could not be made consistent by ordering alone — once
@@ -1829,6 +1851,33 @@ export async function createRedisRuntimeStore(
           .exec(),
       );
       return room;
+    },
+    restoreMember(
+      code: string,
+      memberId: string,
+      session: Session,
+      memberToken: string,
+    ) {
+      ensurePendingCapacity("restore_member");
+      // Local first, like `addMember`: the compensation exists so this node's
+      // session keeps working, and Redis stays the authority for identity
+      // resolution either way. The guard lives in the SHARED write, because the
+      // successor this must not overwrite may be seated on another node and is
+      // therefore invisible to the local mirror.
+      localRuntimeStore.restoreMember(code, memberId, session, memberToken);
+      void trackOperation(
+        "restore_member",
+        redis.eval(
+          RESTORE_MEMBER_LUA,
+          3,
+          roomMembersKey(keyPrefix, code),
+          roomMemberTokensKey(keyPrefix, code),
+          roomMemberTokenExpiryKey(keyPrefix, code),
+          memberId,
+          session.id,
+          memberToken,
+        ),
+      );
     },
     async findMemberIdByToken(code: string, memberToken: string) {
       // Redis is the ONLY authority here. Falling back to the local mirror on a

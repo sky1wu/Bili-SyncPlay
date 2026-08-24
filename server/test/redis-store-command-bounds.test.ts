@@ -237,6 +237,7 @@ const RUNTIME_BOUNDED_ELSEWHERE: Record<string, string> = {
   markSessionLeftRoom: "durable write queue: withAttemptTimeout per attempt",
   removeMember: "durable write queue: withAttemptTimeout per attempt",
   addMember: "trackOperation's cap at pendingOperationTimeoutMs",
+  restoreMember: "trackOperation's cap at pendingOperationTimeoutMs",
   flush: "its own barrier at pendingOperationTimeoutMs",
   confirmWrites: "the durable write queue it confirms",
   close: "settleWithin and quitWithin, both inside the shutdown step's budget",
