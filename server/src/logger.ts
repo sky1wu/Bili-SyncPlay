@@ -147,24 +147,31 @@ export function createStructuredLogger(
     now: diagnosisNow,
   });
   /**
-   * One throttle per interval, because the interval is the caller's constant
-   * and a diagnosis reported on two schedules would otherwise share one window.
+   * One throttle per (interval, cap), because both are the caller's constants
+   * and diagnoses paced differently would otherwise share one window — the cap
+   * included, since a caller that sized it for its own vocabulary must not
+   * inherit a smaller one from whoever asked first.
    *
    * Unbounded on purpose, and this is the one place that is safe: the keys are
-   * interval constants written in code, a finite vocabulary — unlike the
-   * diagnoses inside each throttle, which come from implementations outside the
-   * logger and are bounded for exactly that reason (#268).
+   * constants written in code, a finite vocabulary — unlike the diagnoses
+   * inside each throttle, which come from implementations outside the logger
+   * and are bounded for exactly that reason (#268).
    */
-  const lineThrottlesByInterval = new Map<number, DiagnosisThrottle>();
-  const allowThrottledLine = (key: string, intervalMs: number): boolean => {
-    let throttle = lineThrottlesByInterval.get(intervalMs);
+  const lineThrottles = new Map<string, DiagnosisThrottle>();
+  const allowThrottledLine = (
+    key: string,
+    intervalMs: number,
+    maxTracked: number,
+  ): boolean => {
+    const throttleKey = `${intervalMs}:${maxTracked}`;
+    let throttle = lineThrottles.get(throttleKey);
     if (throttle === undefined) {
       throttle = createDiagnosisThrottle({
         intervalMs,
-        maxTrackedDiagnoses: MAX_TRACKED_APPEND_FAILURE_REASONS,
+        maxTrackedDiagnoses: maxTracked,
         now: diagnosisNow,
       });
-      lineThrottlesByInterval.set(intervalMs, throttle);
+      lineThrottles.set(throttleKey, throttle);
     }
     return throttle.allow(key);
   };
@@ -226,7 +233,8 @@ export function createStructuredLogger(
     if (
       shouldWriteStdout &&
       eventOptions?.throttleKey !== undefined &&
-      eventOptions.throttleIntervalMs !== undefined
+      eventOptions.throttleIntervalMs !== undefined &&
+      eventOptions.throttleMaxTracked !== undefined
     ) {
       // The LINE only. Everything below this block runs whatever the throttle
       // says, so the counter still answers "how much" while stdout answers
@@ -234,6 +242,7 @@ export function createStructuredLogger(
       shouldWriteStdout = allowThrottledLine(
         eventOptions.throttleKey,
         eventOptions.throttleIntervalMs,
+        eventOptions.throttleMaxTracked,
       );
     }
 

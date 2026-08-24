@@ -183,6 +183,17 @@ export type LogEventOptions = {
   throttleKey?: string;
   /** Required with `throttleKey`; the caller owns the magnitude. */
   throttleIntervalMs?: number;
+  /**
+   * How many distinct keys stay individually tracked; past it they share one
+   * overflow window.
+   *
+   * Required with `throttleKey` for the same reason the interval is: only the
+   * caller knows its own vocabulary. Sizing it too small does not lose the
+   * count, but it does lose WHICH thing broke — and a diagnosis whose identity
+   * falls into the shared bucket is why the key was made specific in the first
+   * place (#280).
+   */
+  throttleMaxTracked?: number;
 };
 
 export type LogEvent = (

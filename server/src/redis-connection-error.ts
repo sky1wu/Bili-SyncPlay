@@ -48,6 +48,22 @@ export type RedisConnectionIdentity = {
 export const REDIS_CONNECTION_ERROR_REPORT_INTERVAL_MS = 60_000;
 
 /**
+ * How many (connection, code) pairs stay individually tracked inside one
+ * window.
+ *
+ * The identity half is bounded by the deployment — seven components, two of
+ * them pub/sub pairs, nine connections in total. The code half is the open one:
+ * a cascading failure walks connections through `ECONNREFUSED`, `ECONNRESET`,
+ * `ETIMEDOUT` and whatever else the socket produces. Sized so every connection
+ * can carry a handful of codes without any of them falling into the shared
+ * overflow bucket, because that bucket is exactly where the report stops
+ * saying WHICH connection broke — the one thing this key exists to say. Past
+ * it the vocabulary really is open-ended, and sharing a window is the honest
+ * answer (#268, #280).
+ */
+export const REDIS_CONNECTION_ERROR_MAX_TRACKED = 64;
+
+/**
  * The error's code, or a stable stand-in.
  *
  * ioredis surfaces Node's socket codes (`ECONNREFUSED`, `ECONNRESET`,
@@ -98,6 +114,7 @@ export function createRedisConnectionErrorListener(
         // different fact that must not be hidden behind the first one's window.
         throttleKey: `${REDIS_CONNECTION_ERROR_EVENT}:${connectionKey}:${code}`,
         throttleIntervalMs: REDIS_CONNECTION_ERROR_REPORT_INTERVAL_MS,
+        throttleMaxTracked: REDIS_CONNECTION_ERROR_MAX_TRACKED,
       },
     );
   };

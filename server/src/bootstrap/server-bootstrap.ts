@@ -60,6 +60,7 @@ import type {
   PersistenceConfig,
   SecurityConfig,
 } from "../types.js";
+import { logRedisConnectionErrorToStdout } from "../redis-connection-error.js";
 
 const DEFAULT_CLOSE_STEP_TIMEOUT_MS = 5_000;
 
@@ -274,18 +275,28 @@ export async function createServerBootstrapContext(
   // binding and therefore use the final logger by the time shutdown runs.
   let logEvent: LogEvent = dependencies.logEvent ?? (() => undefined);
   /**
+   * Where connection reports go until the structured logger exists.
+   *
+   * The placeholder above is a no-op, which is right for everything else — a
+   * shutdown report cannot precede startup — and wrong for exactly this one:
+   * the connections are opened BEFORE the logger, so a Redis that is
+   * unreachable at startup fails inside that window. That is the ECONNREFUSED
+   * case this issue came from, and forwarding it into the no-op would restore
+   * the silence the listener exists to end. Reassigned to the real logger the
+   * moment there is one (#280).
+   */
+  let connectionLogEvent: LogEvent =
+    dependencies.logEvent ?? logRedisConnectionErrorToStdout;
+  /**
    * What every Redis connection this node opens reports its socket-level
    * failures through.
    *
-   * Captures the binding above rather than its current value, for the reason
-   * the close callbacks do: the connections exist before the logger, and a
-   * connection error arriving after startup must reach the real one. A failure
-   * during startup itself still reaches stdout through the fallback logger,
-   * which is the whole point of not letting a connection be built without a
-   * report (#280).
+   * Reads `connectionLogEvent` rather than capturing its value, for the reason
+   * the close callbacks read `logEvent`: a connection error arriving after
+   * startup must reach the real logger, with the counter behind it.
    */
   const logConnectionEvent: LogEvent = (event, data, eventOptions) => {
-    logEvent(
+    connectionLogEvent(
       event,
       { instanceId: persistenceConfig.instanceId, ...data },
       eventOptions,
@@ -500,6 +511,10 @@ export async function createServerBootstrapContext(
         logLevel: dependencies.logLevel,
         sampling: dependencies.logSampling ?? { ...DEFAULT_EVENT_SAMPLING },
       });
+
+  // From here the report has a counter behind it; before it, stdout was the
+  // only surface that existed yet.
+  connectionLogEvent = logEvent;
 
   const purgedStartupSessions =
     (await runtimeStore.purgeSessionsByInstance?.(

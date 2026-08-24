@@ -7,6 +7,7 @@ import { createBoundedRedisClient } from "../src/redis-command-timeout.js";
 import {
   REDIS_CONNECTION_ERROR_EVENT,
   REDIS_CONNECTION_ERROR_REPORT_INTERVAL_MS,
+  logRedisConnectionErrorToStdout,
 } from "../src/redis-connection-error.js";
 import { createStructuredLogger } from "../src/logger.js";
 import type { GlobalEventStore } from "../src/admin/global-event-store.js";
@@ -287,4 +288,126 @@ test("every module that opens a connection hands it the caller's logger", () => 
     [],
     "a module opening its own Redis connection must pass its caller's logEvent",
   );
+});
+
+test("a connection that fails before the logger exists still reports", () => {
+  // The bootstrap opens its Redis connections BEFORE the structured logger
+  // exists, so the placeholder that stands in for it decides whether an
+  // unreachable Redis at startup is reported or silently dropped. Asserted on
+  // the reporter the bootstrap installs for that window rather than on a whole
+  // boot, which needs a Redis to fail against.
+  const writtenLines: string[] = [];
+  const previousLog = console.log;
+  console.log = (line: string) => {
+    writtenLines.push(line);
+  };
+  const client = createBoundedRedisClient(
+    UNREACHABLE_REDIS_URL,
+    { bound: "command_timeout" },
+    { component: "room_store", logEvent: logRedisConnectionErrorToStdout },
+  );
+
+  try {
+    client.emit(
+      "error",
+      Object.assign(new Error("connect ECONNREFUSED"), {
+        code: "ECONNREFUSED",
+      }),
+    );
+    const reported = writtenLines.map(
+      (line) => JSON.parse(line) as { event: string; code: string },
+    );
+    assert.deepEqual(
+      reported.map((entry) => `${entry.event}:${entry.code}`),
+      [`${REDIS_CONNECTION_ERROR_EVENT}:ECONNREFUSED`],
+    );
+  } finally {
+    console.log = previousLog;
+    client.disconnect();
+  }
+});
+
+test("the startup window reporter is the one bootstrap installs", () => {
+  const bootstrapSource = readFileSync(
+    fileURLToPath(
+      new URL("../src/bootstrap/server-bootstrap.ts", import.meta.url),
+    ),
+    "utf8",
+  );
+  // The placeholder `logEvent` is a no-op until the structured logger is built,
+  // and the connections are built first. Forwarding connection reports into it
+  // restores exactly the silence this issue is about, so the window has its own
+  // reporter that is swapped for the real logger once there is one.
+  assert.ok(
+    bootstrapSource.includes(
+      "dependencies.logEvent ?? logRedisConnectionErrorToStdout",
+    ),
+    "connection reports must not start out in the no-op placeholder",
+  );
+  assert.ok(
+    bootstrapSource.includes("connectionLogEvent = logEvent;"),
+    "and must move to the real logger once it exists",
+  );
+});
+
+test("every connection and code a deployment can produce keeps its own line", () => {
+  const writtenLines: string[] = [];
+  const logger = createStructuredLogger({
+    writeLine: (line) => writtenLines.push(line),
+    diagnosisNow: () => 1_000,
+  });
+  const components = [
+    "admin_command_bus",
+    "admin_session_store",
+    "audit_store",
+    "event_store",
+    "room_event_bus",
+    "room_store",
+    "runtime_store",
+  ] as const;
+  const codes = [
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "EPIPE",
+    "ENOTFOUND",
+    "EHOSTUNREACH",
+  ];
+
+  const clients = components.map((component) =>
+    createBoundedRedisClient(
+      UNREACHABLE_REDIS_URL,
+      { bound: "command_timeout" },
+      { component, logEvent: logger },
+    ),
+  );
+
+  try {
+    for (const client of clients) {
+      for (const code of codes) {
+        client.emit("error", Object.assign(new Error(code), { code }));
+      }
+    }
+
+    // 42 distinct (connection, code) pairs inside one window. Past the tracked
+    // cap they share one overflow cooldown, and the report stops saying WHICH
+    // connection broke — the one thing the key exists to say.
+    assert.equal(writtenLines.length, components.length * codes.length);
+    assert.equal(
+      new Set(
+        writtenLines.map((line) => {
+          const parsed = JSON.parse(line) as {
+            component: string;
+            code: string;
+          };
+          return `${parsed.component}:${parsed.code}`;
+        }),
+      ).size,
+      components.length * codes.length,
+    );
+  } finally {
+    for (const client of clients) {
+      client.disconnect();
+    }
+  }
 });
