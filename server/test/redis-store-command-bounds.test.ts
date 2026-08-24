@@ -532,6 +532,108 @@ test("a capped revocation leaves the local mirror alone when it lands late", asy
   }
 });
 
+test("a durable write reports its failure exactly once, whenever it arrives", async () => {
+  // Two reporters watch a bounded durable write: the cap's, and the command's
+  // own terminal report — which exists because a failure arriving after the cap
+  // reaches nobody through the returned promise. Both halves are load-bearing
+  // and they must not overlap: counting a command that does BOTH twice doubles
+  // the failure rate an alert reads, while dropping the terminal report loses a
+  // prompt failure entirely, since a bounded read's rejection is metered by
+  // nobody (#266, #277 review). The log lines are deliberately NOT deduplicated
+  // — the late one is the only one carrying what Redis actually said.
+  const durableWrites: Record<
+    string,
+    (store: RuntimeStoreUnderTest) => Promise<unknown>
+  > = {
+    mark_room_generation: (store) =>
+      Promise.resolve(store.markRoomGeneration("ROOM01", "generation-1", null)),
+    revoke_member_token: (store) =>
+      Promise.resolve(
+        store.revokeMemberToken("ROOM01", "member-probe", PROBE_SESSION),
+      ),
+  };
+
+  for (const [operationName, call] of Object.entries(durableWrites)) {
+    // Late: the cap answers first, the command rejects afterwards.
+    const lateFailures: string[] = [];
+    let rejectEval!: (error: unknown) => void;
+    const heldEval = new Promise<never>((_resolve, reject) => {
+      rejectEval = reject;
+    });
+    const lateStore = await createRedisRuntimeStore("redis://unused", {
+      redisClient: {
+        ...createRuntimeProbeClient(createProbeCommands(null)),
+        eval: () => heldEval,
+      },
+      pendingOperationTimeoutMs: BUDGET_MS,
+      closeQuitTimeoutMs: BUDGET_MS,
+      metricsCollector: {
+        observeRedisRuntimeStoreDuration() {},
+        observeRedisRuntimeStoreFailure(operation) {
+          lateFailures.push(operation);
+        },
+      },
+      onPendingOperationError() {},
+      onCloseUnfinished() {},
+    });
+    try {
+      await assert.rejects(
+        call(lateStore),
+        (error: unknown) =>
+          error instanceof RedisStoreUnavailableError &&
+          error.reason === "timeout",
+      );
+      rejectEval(new Error("redis unavailable"));
+      // Handlers run in attachment order and the store attached its own before
+      // this one, so awaiting here is an ordering guarantee rather than a race.
+      await heldEval.catch(() => undefined);
+      await Promise.resolve();
+
+      assert.deepEqual(
+        lateFailures.filter((operation) => operation === operationName),
+        [operationName],
+        `${operationName} counted its timeout and its late failure separately`,
+      );
+    } finally {
+      await lateStore.close();
+    }
+
+    // Prompt: the command rejects before any cap could fire, so the terminal
+    // report is the ONLY thing that meters it.
+    const promptFailures: string[] = [];
+    const promptStore = await createRedisRuntimeStore("redis://unused", {
+      redisClient: {
+        ...createRuntimeProbeClient(createProbeCommands(null)),
+        eval: async () => {
+          throw new Error("redis unavailable");
+        },
+      },
+      pendingOperationTimeoutMs: BUDGET_MS,
+      closeQuitTimeoutMs: BUDGET_MS,
+      metricsCollector: {
+        observeRedisRuntimeStoreDuration() {},
+        observeRedisRuntimeStoreFailure(operation) {
+          promptFailures.push(operation);
+        },
+      },
+      onPendingOperationError() {},
+      onCloseUnfinished() {},
+    });
+    try {
+      await assert.rejects(call(promptStore), /redis unavailable/);
+      await Promise.resolve();
+
+      assert.deepEqual(
+        promptFailures.filter((operation) => operation === operationName),
+        [operationName],
+        `${operationName} did not meter a failure that arrived promptly`,
+      );
+    } finally {
+      await promptStore.close();
+    }
+  }
+});
+
 test("a runtime command that is merely slow is not judged dead", async () => {
   // The failure the cap must not manufacture: answering late is not the same
   // as not answering, and a bound that cannot tell them apart converts a

@@ -1020,9 +1020,63 @@ export async function createRedisRuntimeStore(
     operationName: string,
     issue: () => Promise<T>,
   ): Promise<T> {
+    return await bindCommand(operationName, issue, false);
+  }
+
+  /**
+   * A bounded DURABLE WRITE: bounded exactly like a read, plus its own terminal
+   * report.
+   *
+   * A read's rejection is handled by the caller it propagates to. A durable
+   * write's may arrive AFTER the cap already answered, when nobody is holding
+   * the promise any more — so the failure is metered and logged here instead.
+   *
+   * Exactly ONCE for the counter, whichever side it arrives on: a command that
+   * times out and THEN rejects would otherwise be counted twice and double the
+   * failure rate an alert reads (#277 review). The logs are not deduplicated —
+   * the counter answers "still happening?", while the late line is the only one
+   * carrying what Redis actually said (#266). `trackOperation` needed the same
+   * flag, and this being its second copy is why it lives in one place.
+   */
+  async function boundDurableWrite<T>(
+    operationName: string,
+    issue: () => Promise<T>,
+  ): Promise<T> {
+    return await bindCommand(operationName, issue, true);
+  }
+
+  async function bindCommand<T>(
+    operationName: string,
+    issue: () => Promise<T>,
+    reportsOwnFailure: boolean,
+  ): Promise<T> {
     ensurePendingCapacity(operationName);
+    let failureCounted = false;
+    const countFailureOnce = (): void => {
+      if (failureCounted) {
+        return;
+      }
+      failureCounted = true;
+      // Bounded still owes a report, and the counter is the half that answers
+      // "still happening?" statelessly (#266).
+      metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
+    };
+    const command = issue();
+    if (reportsOwnFailure) {
+      void command.catch((error: unknown) => {
+        countFailureOnce();
+        logPendingOperationError(
+          {
+            operationName,
+            pendingCount: pendingOperations.size,
+            reason: "failed",
+          },
+          error,
+        );
+      });
+    }
     return await commandPacer.capAttempt(
-      issue(),
+      command,
       pendingOperationTimeoutMs,
       () => {
         const error = new RedisStoreUnavailableError(
@@ -1031,9 +1085,7 @@ export async function createRedisRuntimeStore(
           "timeout",
           `Redis runtime store operation timed out: ${operationName}.`,
         );
-        // Bounded still owes a report, and the counter is the half that answers
-        // "still happening?" statelessly (#266).
-        metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
+        countFailureOnce();
         logPendingOperationError(
           {
             operationName,
@@ -2038,47 +2090,35 @@ export async function createRedisRuntimeStore(
       // session guard is mandatory: a revocation that lands after the cap can
       // only end the identity of the session that asked for it, never the one
       // its successor is using, which was #237's objection (#277).
-      return boundCommand("revoke_member_token", () => {
-        const revoke = redis.eval(
-          REVOKE_MEMBER_TOKEN_LUA,
-          3,
-          roomMembersKey(keyPrefix, code),
-          roomMemberTokensKey(keyPrefix, code),
-          roomMemberTokenExpiryKey(keyPrefix, code),
-          memberId,
-          session.id,
-        );
-        // The cap answers the caller without cancelling this write, so a
-        // failure arriving afterwards reaches nobody through the returned
-        // promise. Reported here instead (#266).
-        void revoke.catch((error: unknown) => {
-          metricsCollector?.observeRedisRuntimeStoreFailure(
-            "revoke_member_token",
-          );
-          logPendingOperationError(
-            {
-              operationName: "revoke_member_token",
-              pendingCount: pendingOperations.size,
-              reason: "failed",
-            },
-            error,
-          );
-        });
-        return revoke;
-        // Durable-first, and on the CAPPED promise rather than the tracked one.
-        // Durable-first because mirroring first left a partial apply behind
-        // when the write failed — the caller saw a rejection while this node
-        // had already dropped the token (#237 review). On the capped promise
-        // because the answer the caller acts on is the capped one: an
-        // unconfirmed leave is compensated by `restoreLeaveState`, and a mirror
-        // update arriving after that restore would delete the token
-        // `requireMemberToken` authenticates every later message against —
-        // leaving the member seated but unable to speak. Redis needs no such
-        // care: the restore's own write is issued after this one on the same
-        // connection, so it lands last and repairs all three keys (#277).
-      }).then(() => {
-        localRuntimeStore.revokeMemberToken(code, memberId, session);
-      });
+      // `boundDurableWrite`, not `boundCommand`: the cap answers the caller
+      // without cancelling this write, so a failure arriving afterwards reaches
+      // nobody through the returned promise and is reported there instead —
+      // once for the counter, however late it comes (#266, #277 review).
+      return (
+        boundDurableWrite("revoke_member_token", () =>
+          redis.eval(
+            REVOKE_MEMBER_TOKEN_LUA,
+            3,
+            roomMembersKey(keyPrefix, code),
+            roomMemberTokensKey(keyPrefix, code),
+            roomMemberTokenExpiryKey(keyPrefix, code),
+            memberId,
+            session.id,
+          ),
+        )
+          // Durable-first, and on the CAPPED promise rather than the tracked one.
+          // Durable-first because mirroring first left a partial apply behind
+          // when the write failed — the caller saw a rejection while this node
+          // had already dropped the token (#237 review). On the capped promise
+          // because the answer the caller acts on is the capped one: this leave
+          // reports failure and leaves the member seated, so a mirror update
+          // arriving afterwards would delete the token `requireMemberToken`
+          // checks every later message against — seated, and unable to speak
+          // (#277).
+          .then(() => {
+            localRuntimeStore.revokeMemberToken(code, memberId, session);
+          })
+      );
     },
     async hasRoomResidue(code: string) {
       // Pruned first, so identities that have merely aged out do not keep the
@@ -2123,34 +2163,19 @@ export async function createRedisRuntimeStore(
       // conditional: room creation is the only caller, nothing else derives a
       // bound from this command's silence, and a stamp that lands after the cap
       // can no longer clobber the code's next occupant (#277).
-      const applied = await boundCommand("mark_room_generation", () => {
-        const stamp = redis.eval(
+      // `boundDurableWrite`, not `boundCommand`: the cap answers the caller
+      // without cancelling this write, so a failure arriving afterwards reaches
+      // nobody through the returned promise and is reported there instead —
+      // once for the counter, however late it comes (#266, #277 review).
+      const applied = await boundDurableWrite("mark_room_generation", () =>
+        redis.eval(
           MARK_ROOM_GENERATION_LUA,
           1,
           roomGenerationKey(keyPrefix, code),
           generation,
           expectedPrevious ?? "",
-        );
-        // The cap answers the caller without cancelling this write, so a
-        // failure that arrives afterwards reaches nobody through the returned
-        // promise. Reported here instead, which is also what keeps the late
-        // half of a capped stamp observable (#266). A prompt failure logs once:
-        // the cap never fired, so there is no `timeout` line beside it.
-        void stamp.catch((error: unknown) => {
-          metricsCollector?.observeRedisRuntimeStoreFailure(
-            "mark_room_generation",
-          );
-          logPendingOperationError(
-            {
-              operationName: "mark_room_generation",
-              pendingCount: pendingOperations.size,
-              reason: "failed",
-            },
-            error,
-          );
-        });
-        return stamp;
-      });
+        ),
+      );
       return Number(applied) === 1;
     },
     deleteRoom(code: string, expectedGeneration: string | null) {

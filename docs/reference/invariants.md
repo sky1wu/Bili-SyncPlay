@@ -902,7 +902,15 @@ do NOT compose, and that is the part that decides which connection gets which:
   `evictMemberToken` keeps its mirror on the tracked promise and is right to:
   nobody undoes a kick, so its late apply is the intended end state. **The
   question is not "is this write capped" but "does anyone undo it when told it
-  failed".** The standalone
+  failed".** A bounded durable write also owes its own terminal report, because
+  a failure arriving after the cap reaches nobody through the returned promise —
+  and both halves must not overlap: `boundDurableWrite` counts ONE failure
+  whichever side answers, while leaving both LOG lines, since only the late one
+  carries what Redis said. Counting both doubles the rate an alert reads;
+  dropping the terminal report loses a prompt failure entirely, because a
+  bounded READ's rejection is metered by nobody. `trackOperation` had needed the
+  same flag, so this being its second copy is why it lives in one place
+  (#266, #277 review). The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
   had no production callers, so #277 removed them. **A write leaves this list by
   becoming CONDITIONAL, never by re-arguing #237**: a guarded write's late
