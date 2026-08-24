@@ -528,7 +528,7 @@ test("redis runtime store keeps the member token when only presence is dropped",
     );
 
     // An explicit leave / kick: identity goes too.
-    await store.revokeMemberToken("ROOMPR", "member-presence");
+    await store.revokeMemberToken("ROOMPR", "member-presence", session);
 
     assert.equal(
       await observer.findMemberIdByToken("ROOMPR", "token-presence"),
@@ -1221,7 +1221,9 @@ test("redis runtime store stops resolving a token revoked on another node", asyn
 
     // They reconnect onto B and then leave / are kicked there. Only B and Redis
     // learn about it — A is never told.
-    await nodeB.revokeMemberToken("ROOMND", "member-roaming");
+    // Pinned to the session Redis still binds the memberId to: the guard is
+    // mandatory, and B is acting for the member A seated.
+    await nodeB.revokeMemberToken("ROOMND", "member-roaming", onA);
     await nodeB.flush?.();
 
     // A must not re-accept it from its own cache: that would undo an explicit
@@ -1299,7 +1301,13 @@ test("redis runtime store surfaces a failed member token revocation to the calle
 
   try {
     await assert.rejects(
-      Promise.resolve(store.revokeMemberToken("ROOMRV", "member-rv")),
+      Promise.resolve(
+        store.revokeMemberToken(
+          "ROOMRV",
+          "member-rv",
+          createSession("session-rv"),
+        ),
+      ),
       /redis unavailable/,
     );
   } finally {
@@ -1387,7 +1395,9 @@ test("redis runtime store leaves the local mirror untouched when a revoke fails"
 
     failEval = true;
     await assert.rejects(
-      Promise.resolve(store.revokeMemberToken("ROOMPT", "member-partial")),
+      Promise.resolve(
+        store.revokeMemberToken("ROOMPT", "member-partial", session),
+      ),
       /redis unavailable/,
     );
 

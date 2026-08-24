@@ -53,7 +53,9 @@ test("mirrored runtime store leaves the local mirror untouched when the shared r
   store.addMember("ROOMMR", "member-mirror", session, "token-mirror");
 
   await assert.rejects(
-    Promise.resolve(store.revokeMemberToken("ROOMMR", "member-mirror")),
+    Promise.resolve(
+      store.revokeMemberToken("ROOMMR", "member-mirror", session),
+    ),
     /shared store unavailable/,
   );
 
@@ -73,7 +75,7 @@ test("mirrored runtime store applies the local revoke once the shared one lands"
   const session = createSession("session-mirror-ok");
 
   store.addMember("ROOMMK", "member-mirror-ok", session, "token-mirror-ok");
-  await store.revokeMemberToken("ROOMMK", "member-mirror-ok");
+  await store.revokeMemberToken("ROOMMK", "member-mirror-ok", session);
 
   // Control for the test above: the reordering must not stop the mirror from
   // being updated on the success path.

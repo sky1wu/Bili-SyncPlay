@@ -862,12 +862,34 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: two writes, for two different reasons.** One
-  runtime-store write through `trackAwaitedOperation` (`revokeMemberToken`)
-  stays uncapped because #237 settled that an answer which can be wrong is
-  worse than a slow one and its effect does not expire on its own. The room
-  store's `updateRoom` stays for a different reason, below: it is conditional,
-  and that is not enough. The standalone
+- **Still open, deliberately: one write — the room store's `updateRoom`.** Not
+  #237's trade: it is conditional, and that turns out not to be enough. See
+  below. Everything else on both connections took a bound.
+
+  `revokeMemberToken` was the last to leave, and it left the way the others
+  did — by its GUARD becoming mandatory. Its script only ends the identity
+  while the session asking still owns the memberId, so a revocation landing
+  after the cap cannot reach the binding a successor is using, which was
+  exactly #237's objection. What made the guard mandatory was not an argument
+  but an earlier slice of #277: the kick — the one caller that meant "whoever
+  holds it now" — had already moved to `evictMemberToken`, leaving the
+  session-less path with no production caller at all, like `blockMemberToken`
+  before it. **A write can become boundable because a DIFFERENT change removed
+  the caller whose needs kept it unbounded**; re-reading the reason on a write
+  is worth as much as re-deriving it.
+
+  It also sharpened where a capped write's LOCAL MIRROR update may run. The
+  revocation applies its mirror on the CAPPED promise, not on the tracked one:
+  the caller acts on the capped answer, and an unconfirmed leave is compensated
+  by `restoreLeaveState`, so a mirror update arriving after that restore would
+  delete the token `requireMemberToken` checks every later message against —
+  leaving the member seated but unable to speak. Redis needs no such care: the
+  restore's own write is issued afterwards on the same connection, so it lands
+  last and repairs all three keys. The sibling `evictMemberToken` keeps its
+  mirror on the tracked promise and is right to: nobody compensates a kick by
+  restoring the identity, so its late apply is the intended end state. **The
+  question is not "is this write capped" but "does anyone undo it when told it
+  failed".** The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
   had no production callers, so #277 removed them. **A write leaves this list by
   becoming CONDITIONAL, never by re-arguing #237**: a guarded write's late

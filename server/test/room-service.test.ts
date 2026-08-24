@@ -1220,8 +1220,8 @@ test("room service flushes pending runtime store writes before exposing updated 
     removeMember(code, memberId, session) {
       return activeRooms.removeMember(code, memberId, session);
     },
-    revokeMemberToken(code, memberId) {
-      activeRooms.revokeMemberToken(code, memberId);
+    revokeMemberToken(code, memberId, session) {
+      activeRooms.revokeMemberToken(code, memberId, session);
     },
     evictMemberToken(code, memberId, memberToken, blockedUntil) {
       activeRooms.evictMemberToken(code, memberId, memberToken, blockedUntil);
@@ -3021,9 +3021,9 @@ test("join admission restores shared previous session when reconnect rollback ha
       shared.removeMember(code, memberId, session);
       return removal;
     },
-    revokeMemberToken: (code, memberId) => {
-      local.revokeMemberToken(code, memberId);
-      shared.revokeMemberToken(code, memberId);
+    revokeMemberToken: (code, memberId, session) => {
+      local.revokeMemberToken(code, memberId, session);
+      shared.revokeMemberToken(code, memberId, session);
     },
     evictMemberToken: (code, memberId, memberToken, blockedUntil) => {
       local.evictMemberToken(code, memberId, memberToken, blockedUntil);
@@ -3118,9 +3118,9 @@ test("join admission does not restore stale reconnect session over newer shared 
       shared.removeMember(code, memberId, session);
       return removal;
     },
-    revokeMemberToken: (code, memberId) => {
-      local.revokeMemberToken(code, memberId);
-      shared.revokeMemberToken(code, memberId);
+    revokeMemberToken: (code, memberId, session) => {
+      local.revokeMemberToken(code, memberId, session);
+      shared.revokeMemberToken(code, memberId, session);
     },
     evictMemberToken: (code, memberId, memberToken, blockedUntil) => {
       local.evictMemberToken(code, memberId, memberToken, blockedUntil);

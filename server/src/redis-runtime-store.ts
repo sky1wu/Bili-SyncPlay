@@ -485,9 +485,18 @@ function deserializeSession(fields: Record<string, string>): Session | null {
  * session as the member, so a node-local check would let that node's explicit
  * leave revoke the identity the new node is actively using (#237 review).
  */
+/**
+ * End a member's identity, but only while the session revoking it still owns
+ * that memberId.
+ *
+ * The guard is not optional: it is what makes a revocation that lands after its
+ * caller stopped waiting harmless, so this write can take the request cap like
+ * any other command (#277). "Whoever holds it now" belongs to the kick, which
+ * has {@link EVICT_MEMBER_LUA}.
+ */
 const REVOKE_MEMBER_TOKEN_LUA = `
 local bound = redis.call("HGET", KEYS[1], ARGV[1])
-if ARGV[2] ~= "" and bound and bound ~= ARGV[2] then
+if bound and bound ~= ARGV[2] then
   return 0
 end
 redis.call("HDEL", KEYS[2], ARGV[1])
@@ -832,25 +841,23 @@ export async function createRedisRuntimeStore(
     // also why the bound has to be chosen per CALL, not per method:
     // `loadSession` is reached from the join path AND from the reaper.
     //
-    // What this does NOT resolve: one durable write through
-    // `trackAwaitedOperation` (`revokeMemberToken`). Capping it
-    // re-opens #237's trade that an answer which can be wrong is worse than a
-    // slow one, and its side effect does not expire on its own the way a
-    // lock or a dedup slot does. The former standalone `blockMemberToken` path
-    // had no production caller and was removed in #277 rather than preserving
-    // another unbounded persistent write. Three writes left that list by
-    // becoming CONDITIONAL rather than by re-arguing #237, since a guarded
-    // write's late landing is a no-op and can no longer be the wrong answer:
+    // Nothing on this connection is left without one. Every write that used to
+    // be here left by becoming CONDITIONAL rather than by re-arguing #237,
+    // since a guarded write's late landing can no longer be the wrong answer:
     // `deleteRoom`, whose generation guard is now mandatory and whose one real
     // per-room effect `room-service` retains through local settlement while
     // capping only a request's wait (maintenance callers still await the
     // effect); `evictMemberToken`, whose caller reports an unconfirmed
-    // deadline; and `markRoomGeneration`, whose script now compares the
-    // creator's pin, which is what let it take the ordinary request-path cap.
+    // deadline; `markRoomGeneration`, whose script compares the creator's pin;
+    // and `revokeMemberToken`, whose session guard became mandatory once the
+    // kick — the caller that meant "whoever holds it now" — moved to
+    // `evictMemberToken`. The former standalone `blockMemberToken` path had no
+    // production caller and was removed in #277 rather than preserving another
+    // unbounded persistent write.
     createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's one remaining durable write",
+        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
@@ -2026,28 +2033,50 @@ export async function createRedisRuntimeStore(
         );
       });
     },
-    revokeMemberToken(code: string, memberId: string, session?: Session) {
-      ensurePendingCapacity("revoke_member_token");
-      // Durable-first: the local mirror is only updated once Redis accepted the
-      // revocation. Mirroring first left a partial apply behind when the write
-      // failed — the caller saw a rejection while this node had already dropped
-      // the token (#237 review).
-      //
-      // Awaited, and rejecting: the kick disconnects the socket and reports
-      // success as soon as this resolves, so resolving before the write landed
-      // would report an eviction while the old token still resolved.
-      return trackAwaitedOperation(
-        "revoke_member_token",
-        redis.eval(
+    revokeMemberToken(code: string, memberId: string, session: Session) {
+      // Bounded like any other request-path command now that the script's
+      // session guard is mandatory: a revocation that lands after the cap can
+      // only end the identity of the session that asked for it, never the one
+      // its successor is using, which was #237's objection (#277).
+      return boundCommand("revoke_member_token", () => {
+        const revoke = redis.eval(
           REVOKE_MEMBER_TOKEN_LUA,
           3,
           roomMembersKey(keyPrefix, code),
           roomMemberTokensKey(keyPrefix, code),
           roomMemberTokenExpiryKey(keyPrefix, code),
           memberId,
-          session?.id ?? "",
-        ),
-      ).then(() => {
+          session.id,
+        );
+        // The cap answers the caller without cancelling this write, so a
+        // failure arriving afterwards reaches nobody through the returned
+        // promise. Reported here instead (#266).
+        void revoke.catch((error: unknown) => {
+          metricsCollector?.observeRedisRuntimeStoreFailure(
+            "revoke_member_token",
+          );
+          logPendingOperationError(
+            {
+              operationName: "revoke_member_token",
+              pendingCount: pendingOperations.size,
+              reason: "failed",
+            },
+            error,
+          );
+        });
+        return revoke;
+        // Durable-first, and on the CAPPED promise rather than the tracked one.
+        // Durable-first because mirroring first left a partial apply behind
+        // when the write failed — the caller saw a rejection while this node
+        // had already dropped the token (#237 review). On the capped promise
+        // because the answer the caller acts on is the capped one: an
+        // unconfirmed leave is compensated by `restoreLeaveState`, and a mirror
+        // update arriving after that restore would delete the token
+        // `requireMemberToken` authenticates every later message against —
+        // leaving the member seated but unable to speak. Redis needs no such
+        // care: the restore's own write is issued after this one on the same
+        // connection, so it lands last and repairs all three keys (#277).
+      }).then(() => {
         localRuntimeStore.revokeMemberToken(code, memberId, session);
       });
     },
