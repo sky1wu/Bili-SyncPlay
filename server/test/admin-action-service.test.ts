@@ -93,7 +93,6 @@ function createService(options: {
           ? await options.getRoom(roomCode)
           : createRoom(roomCode);
       },
-      listNeverExpiringRooms: async () => ({ rooms: [], scanned: 0 }),
       updateRoom: async () => {
         throw new Error("updateRoom should not be called in this test");
       },

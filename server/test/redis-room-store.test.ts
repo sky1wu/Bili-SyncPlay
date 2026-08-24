@@ -889,44 +889,6 @@ test("redis room listing sorts by createdAt without a keyspace scan", async (t) 
   }
 });
 
-test("never-expiring candidates come from the body, not the index score", async (t) => {
-  if (!REDIS_URL) {
-    t.skip("REDIS_URL is not configured.");
-    return;
-  }
-
-  // The index can drift from the bodies — that drift is why
-  // `reconcileRoomIndex` exists — so a `+inf` score alone must never make a
-  // room a candidate: the sweep behind this would expire a room that already
-  // has a real expiry, ahead of its own TTL (#277 review).
-  const namespace = uniqueNamespace("never-expiring");
-  const store = await createRedisRoomStore(REDIS_URL, { namespace });
-  const redis = await connect();
-
-  try {
-    const drifted = await store.createRoom({
-      code: "NEVER1",
-      joinToken: "join-token-123456",
-      createdAt: 1,
-    });
-    const expiring = await store.updateRoom(drifted.code, drifted.version, {
-      expiresAt: 9_000,
-    });
-    assert.equal(expiring.ok, true);
-    // The body now says "expires at 9000"; the index is dragged back to `inf`.
-    await redis.zadd(`${namespace}:rooms-by-expiry`, "inf", drifted.code);
-
-    const page = await store.listNeverExpiringRooms(32, 0);
-    assert.equal(page.scanned, 1, "the index still named it");
-    assert.deepEqual(page.rooms, [], "the body must decide, not the score");
-  } finally {
-    await redis.del(`${namespace}:room:NEVER1`);
-    await redis.del(`${namespace}:rooms-by-expiry`);
-    await redis.quit();
-    await store.close();
-  }
-});
-
 test("redis room update applies the patch, bumps version, and rejects stale writers", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");

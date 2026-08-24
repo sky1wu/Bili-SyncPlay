@@ -608,20 +608,28 @@ test("a late expiry schedule does not land on a room somebody rejoined", async (
   assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
 });
 
-test("the sweep collects a room that would never expire and has nobody in it", async () => {
-  // The shape no reaper could reach: `expiresAt === null` keeps a record out of
-  // every expiry sweep, and it is produced whenever a write meant to make a
-  // memberless room collectable did not land. Three producers each grew their
-  // own cleanup; this pass is what makes those best-effort rather than
-  // load-bearing (#277).
+test("the reaper drains a leave that could not make its room collectable", async () => {
+  // `expiresAt === null` keeps a record out of every expiry sweep, so a room
+  // left that way is one no reaper can ever reach. The producer knows which
+  // room it broke at the moment it breaks it, so the debt is REMEMBERED rather
+  // than searched for afterwards (#277 review).
   let currentTime = 1_000;
+  let expiryWriteFails = true;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });
   const activeRooms = createActiveRoomRegistry();
   const events: string[] = [];
   const service = createRoomService({
     config: getDefaultSecurityConfig(),
-    persistence: getDefaultPersistenceConfig(),
-    roomStore,
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
+    roomStore: {
+      ...roomStore,
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt !== undefined && expiryWriteFails) {
+          throw new Error("expiry write failed");
+        }
+        return roomStore.updateRoom(code, expected, patch, options);
+      },
+    },
     activeRooms,
     generateToken: (() => {
       let id = 0;
@@ -631,115 +639,50 @@ test("the sweep collects a room that would never expire and has nobody in it", a
       events.push(name);
     }) satisfies LogEvent,
     now: () => currentTime,
-    createRoomCode: () => "ROOMNE",
+    createRoomCode: () => "ROOMLD",
   });
 
-  // The orphan: a room with no expiry and nobody in it.
-  const orphan = await roomStore.createRoom({
-    code: "ROOMNE",
-    joinToken: "orphan-join-token",
-    createdAt: currentTime,
-  });
-  assert.equal(orphan.expiresAt, null);
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+  await service.leaveRoomForSession(owner);
 
-  // Inside the grace window it is a race, not evidence: a room is created
-  // before its owner is seated, and a join revives one before it seats anybody.
+  // The leave stands and the room is left uncollectable — reported, and owed.
+  assert.ok(events.includes("room_leave_orphan_possible"));
+  assert.equal((await roomStore.getRoom(created.room.code))?.expiresAt, null);
+
+  // The next sweep pays the debt off. No scan: the ledger names the room.
+  expiryWriteFails = false;
+  currentTime += 1_000;
   await service.deleteExpiredRooms(currentTime);
-  assert.equal((await roomStore.getRoom("ROOMNE"))?.expiresAt, null);
-  assert.ok(!events.includes("room_never_expiring_collected"));
+  assert.equal(
+    (await roomStore.getRoom(created.room.code))?.expiresAt,
+    currentTime,
+  );
 
-  // Past it, the sweep expires it — and expiring is deliberate: the collection
-  // that follows is the ordinary one, with the guards and follow-ups it has.
-  currentTime += 10 * 60_000;
-  await service.deleteExpiredRooms(currentTime);
-  assert.equal((await roomStore.getRoom("ROOMNE"))?.expiresAt, currentTime);
-  assert.ok(events.includes("room_never_expiring_collected"));
-
-  // And the next sweep collects it through the ordinary expiry path.
+  // And it is settled, not retried forever.
   currentTime += 1;
   await service.deleteExpiredRooms(currentTime);
-  assert.equal(await roomStore.getRoom("ROOMNE"), null);
+  assert.equal(await roomStore.getRoom(created.room.code), null);
 });
 
-test("a failing never-expiring sweep does not strand what the expiry sweep deleted", async () => {
-  // The sweep before it is DESTRUCTIVE: those rooms are already gone from
-  // Redis, so a throw between the delete and its follow-ups would strand their
-  // runtime state, their reclamation count and their `room_deleted` broadcast
-  // with nothing able to name them again. The new judgement is secondary and
-  // retried every tick, so it runs last and reports its own failure (#277
-  // review).
+test("a debt is not paid onto a room somebody came back to", async () => {
+  // Occupancy is never consulted, because the write's own guard answers it: a
+  // join clears `expiresAt` and moves the version, so an expiry pinned to the
+  // instance declines against a room that was rejoined (#277 review).
   let currentTime = 1_000;
+  let expiryWriteFails = true;
   const roomStore = createInMemoryRoomStore({ now: () => currentTime });
-  const activeRooms = createInMemoryRuntimeStore(() => currentTime);
-  const events: string[] = [];
-  const teardowns: string[] = [];
+  const activeRooms = createActiveRoomRegistry();
   const service = createRoomService({
     config: getDefaultSecurityConfig(),
-    persistence: getDefaultPersistenceConfig(),
+    persistence: { ...getDefaultPersistenceConfig(), emptyRoomTtlMs: 5_000 },
     roomStore: {
       ...roomStore,
-      listNeverExpiringRooms: async () => {
-        throw new Error("redis unavailable");
-      },
-    },
-    activeRooms: {
-      ...activeRooms,
-      deleteRoom: async (code: string, expectedGeneration: string | null) => {
-        teardowns.push(code);
-        return activeRooms.deleteRoom(code, expectedGeneration);
-      },
-    },
-    generateToken: (() => {
-      let id = 0;
-      return () => `token-${++id}`.padEnd(16, "x");
-    })(),
-    logEvent: ((name) => {
-      events.push(name);
-    }) satisfies LogEvent,
-    now: () => currentTime,
-  });
-
-  const doomed = await roomStore.createRoom({
-    code: "ROOMDM",
-    joinToken: "doomed-join-token",
-    createdAt: currentTime,
-  });
-  await roomStore.updateRoom(doomed.code, doomed.version, {
-    expiresAt: currentTime + 1,
-  });
-  currentTime += 2;
-
-  const counts = await service.deleteExpiredRooms(currentTime);
-
-  // The destructive sweep's own results were consumed before anything else
-  // could throw.
-  assert.equal(counts.deletedRooms, 1);
-  assert.deepEqual(teardowns, ["ROOMDM"]);
-  // And the secondary judgement's failure is reported rather than swallowed.
-  assert.ok(events.includes("room_persist_failed"));
-});
-
-test("the never-expiring cursor advances past a page the bodies filtered out", async () => {
-  // The index is a hint, the body is the truth — and a full page that yielded
-  // nothing usable is still a full page. A cursor advanced by what survived the
-  // filters would reset here and read this same prefix forever, starving every
-  // orphan behind it (#277 review).
-  const currentTime = 1_000;
-  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
-  const activeRooms = createInMemoryRuntimeStore(() => currentTime);
-  const offsets: number[] = [];
-  const service = createRoomService({
-    config: getDefaultSecurityConfig(),
-    persistence: getDefaultPersistenceConfig(),
-    roomStore: {
-      ...roomStore,
-      async listNeverExpiringRooms(limit, offset) {
-        offsets.push(offset);
-        // A full page the bodies rejected: the index named `limit` codes and
-        // none of them turned out to be a candidate.
-        return offset === 0
-          ? { rooms: [], scanned: limit }
-          : await roomStore.listNeverExpiringRooms(limit, offset);
+      async updateRoom(code, expected, patch, options) {
+        if (patch.expiresAt !== undefined && expiryWriteFails) {
+          throw new Error("expiry write failed");
+        }
+        return roomStore.updateRoom(code, expected, patch, options);
       },
     },
     activeRooms,
@@ -749,101 +692,27 @@ test("the never-expiring cursor advances past a page the bodies filtered out", a
     })(),
     logEvent: (() => undefined) satisfies LogEvent,
     now: () => currentTime,
-    neverExpiringSweepChunk: 1,
-  });
-
-  await service.deleteExpiredRooms(currentTime);
-  await service.deleteExpiredRooms(currentTime);
-
-  assert.deepEqual(offsets, [0, 1], "the cursor reset on a full page");
-});
-
-test("the never-expiring sweep rotates so an orphan behind live rooms is reached", async () => {
-  // The set holds EVERY room without an expiry, which is every live room. A
-  // fixed prefix of it is dominated by rooms that are perfectly fine, so a
-  // sweep that never advanced would look at the same healthy rooms forever and
-  // the orphan behind them would be starved (#277 review).
-  let currentTime = 1_000;
-  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
-  const activeRooms = createInMemoryRuntimeStore(() => currentTime);
-  const events: string[] = [];
-  const service = createRoomService({
-    config: getDefaultSecurityConfig(),
-    persistence: getDefaultPersistenceConfig(),
-    roomStore,
-    activeRooms,
-    generateToken: (() => {
-      let id = 0;
-      return () => `token-${++id}`.padEnd(16, "x");
-    })(),
-    logEvent: ((name) => {
-      events.push(name);
-    }) satisfies LogEvent,
-    now: () => currentTime,
-    neverExpiringSweepChunk: 1,
-  });
-
-  // Two rooms without an expiry, in code order. The first is occupied and stays
-  // that way; the orphan sits behind it.
-  const owner = createSession("owner");
-  await activeRooms.registerSession(owner);
-  activeRooms.addMember("ROOMAA", "owner", owner, "token-1xxxxxxxxxxx");
-  owner.roomCode = "ROOMAA";
-  await roomStore.createRoom({
-    code: "ROOMAA",
-    joinToken: "live-join-token",
-    createdAt: currentTime,
-  });
-  await roomStore.createRoom({
-    code: "ROOMBB",
-    joinToken: "orphan-join-token",
-    createdAt: currentTime,
-  });
-
-  currentTime += 10 * 60_000;
-  // First tick sees only the live room and must not collect it.
-  await service.deleteExpiredRooms(currentTime);
-  assert.equal((await roomStore.getRoom("ROOMBB"))?.expiresAt, null);
-  // Second tick has advanced past it and reaches the orphan.
-  await service.deleteExpiredRooms(currentTime);
-  assert.equal((await roomStore.getRoom("ROOMBB"))?.expiresAt, currentTime);
-  assert.equal((await roomStore.getRoom("ROOMAA"))?.expiresAt, null);
-});
-
-test("the sweep leaves a never-expiring room that still has somebody in it", async () => {
-  // Emptiness comes from the cluster session index, which every connection
-  // registers. An occupied room legitimately has no expiry, and collecting it
-  // would hand the reaper a room with members (#277).
-  let currentTime = 1_000;
-  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
-  const activeRooms = createInMemoryRuntimeStore(() => currentTime);
-  const events: string[] = [];
-  const service = createRoomService({
-    config: getDefaultSecurityConfig(),
-    persistence: getDefaultPersistenceConfig(),
-    roomStore,
-    activeRooms,
-    generateToken: (() => {
-      let id = 0;
-      return () => `token-${++id}`.padEnd(16, "x");
-    })(),
-    logEvent: ((name) => {
-      events.push(name);
-    }) satisfies LogEvent,
-    now: () => currentTime,
-    createRoomCode: () => "ROOMOC",
+    createRoomCode: () => "ROOMBK",
   });
 
   const owner = createSession("owner");
-  await activeRooms.registerSession(owner);
   const created = await service.createRoomForSession(owner, "Alice");
-  assert.equal(created.room.expiresAt, null);
+  await service.leaveRoomForSession(owner);
 
-  currentTime += 10 * 60_000;
+  // Somebody comes back before the debt is paid.
+  expiryWriteFails = false;
+  const latecomer = createSession("latecomer");
+  await service.joinRoomForSession(
+    latecomer,
+    created.room.code,
+    created.room.joinToken,
+    "Bob",
+  );
+
+  currentTime += 1_000;
   await service.deleteExpiredRooms(currentTime);
 
   assert.equal((await roomStore.getRoom(created.room.code))?.expiresAt, null);
-  assert.ok(!events.includes("room_never_expiring_collected"));
   assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
 });
 

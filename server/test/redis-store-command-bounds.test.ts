@@ -703,14 +703,12 @@ async function withRoomStore<T>(
      * construction, and its commands are counted like any other.
      */
     settleBootstrap?: boolean;
-    /** Replaces the probe client, for a method whose commands depend on data. */
-    clientFor?: (commands: ProbeCommands) => RedisRoomStoreClient;
   } = {},
 ): Promise<T> {
-  const { settleBootstrap = false, clientFor, ...storeOptions } = options;
+  const { settleBootstrap = false, ...storeOptions } = options;
   const commands = createProbeCommands(hangAt);
   const store = await createRedisRoomStore("redis://unused", {
-    redisClient: (clientFor ?? createRoomStoreProbeClient)(commands),
+    redisClient: createRoomStoreProbeClient(commands),
     commandTimeoutMs: BUDGET_MS,
     closeQuitTimeoutMs: BUDGET_MS,
     ...storeOptions,
@@ -772,8 +770,6 @@ const ROOM_BOUNDED_ELSEWHERE: Record<string, string> = {
   deleteExpiredRoom:
     "room-service: expired-room collection deadline; the effect keeps the outcome its reclamation count and runtime teardown need",
   deleteExpiredRooms: "maintenance-pass: room-reaper's per-tick sweep cap",
-  listNeverExpiringRooms:
-    "maintenance-pass: room-reaper's per-tick sweep cap; the pass derives stalled from this command's silence",
   acknowledgeOrphanedIndexClaims:
     "maintenance-pass: room-reaper's per-tick sweep cap",
   reconcileRoomIndex: "maintenance-pass: room-index-reconciler's per-tick cap",
@@ -1113,53 +1109,6 @@ test("an update that names its caller's deadline is left unanswered", async () =
     },
     { settleBootstrap: true },
   );
-});
-
-test("the never-expiring listing is left unanswered, per command", async () => {
-  // Same rule as the sweep beside it: the room reaper's `maintenance-pass`
-  // derives `stalled` from this command's silence, so a cap here would settle
-  // the call and make that outcome unreachable (#261, #277).
-  //
-  // Per COMMAND, because this one is TWO: the range query, and a body read for
-  // every candidate it names. Hanging only the first would pass a store that
-  // capped the reads behind it (#277 review).
-  const commandsFor = (codes: string[]) => (probe: ProbeCommands) => ({
-    ...createRoomStoreProbeClient(probe),
-    zrangebyscore: () => probe.next<string[]>(codes),
-  });
-
-  const issued = await withRoomStore(
-    null,
-    async (store, commands) => {
-      const before = commands.issuedCount();
-      await store.listNeverExpiringRooms(32, 0).catch(() => undefined);
-      return { first: before, total: commands.issuedCount() };
-    },
-    { settleBootstrap: true, clientFor: commandsFor(["ROOM01"]) },
-  );
-  assert.equal(
-    issued.total - issued.first,
-    2,
-    "the probe must reach the body read, not stop at the range query",
-  );
-
-  for (let hangAt = issued.first; hangAt < issued.total; hangAt += 1) {
-    await withRoomStore(
-      hangAt,
-      async (store) => {
-        const answered = await settleWithin(
-          store.listNeverExpiringRooms(32, 0).catch(() => undefined),
-          OBSERVATION_MS,
-        );
-        assert.equal(
-          answered,
-          false,
-          `listNeverExpiringRooms answered on its own with command #${hangAt} unanswered`,
-        );
-      },
-      { settleBootstrap: true, clientFor: commandsFor(["ROOM01"]) },
-    );
-  }
 });
 
 test("the room reaper's orphan acknowledgement is left unanswered too", async () => {

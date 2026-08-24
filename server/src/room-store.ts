@@ -72,21 +72,6 @@ export type RoomReadCaller = "request" | "maintenance_pass";
  * that changes underneath it declines — the guard is checked in that same read,
  * never check-then-act.
  */
-/**
- * One page of never-expiring candidates.
- *
- * `scanned` counts what the INDEX named, `rooms` what the bodies confirmed —
- * and the two are separate on purpose. The index is a hint that can drift from
- * the bodies (that drift is why `reconcileRoomIndex` exists), so a score alone
- * never makes a room a candidate; and a page that was full but yielded nothing
- * usable is still a full page, so a cursor advanced by `rooms.length` would
- * reset to the start and read the same prefix forever (#277 review).
- */
-export type NeverExpiringRoomPage = {
-  rooms: PersistedRoom[];
-  scanned: number;
-};
-
 export type RoomUpdateGuard = number | { joinToken: string; version?: number };
 
 export type RoomUpdateOptions = {
@@ -151,28 +136,6 @@ export type RoomStore = {
    * record, so a version-exact guard would decline the very action that caused
    * the change.
    */
-  /**
-   * Rooms that will never expire on their own: `expiresAt === null`.
-   *
-   * The shape the reaper cannot judge, because "never expires" is only wrong
-   * when the room is also EMPTY, and membership lives in the runtime store —
-   * no write and no script spans both. So the room store only names the
-   * candidates; whoever has both views decides (#277).
-   *
-   * Capped in count, not in time: this is a maintenance read over a set that
-   * grows with the deployment, and a pass that tried to take all of it at once
-   * would be a fan-out nobody bounded.
-   *
-   * `offset` is what keeps that cap from becoming starvation. The set holds
-   * EVERY room without an expiry, which is every live room — so a fixed
-   * prefix of it is dominated by rooms that are perfectly fine, and an orphan
-   * behind them would never be looked at. The caller rotates through instead
-   * (#277 review).
-   */
-  listNeverExpiringRooms: (
-    limit: number,
-    offset: number,
-  ) => Promise<NeverExpiringRoomPage>;
   deleteRoom: (expected: PersistedRoom) => Promise<RoomDeleteOutcome>;
   /**
    * Removes the room under this code only while it is still expired.
@@ -341,21 +304,6 @@ export function createInMemoryRoomStore(
       };
       rooms.set(code, nextRoom);
       return { ok: true, room: cloneRoom(nextRoom) };
-    },
-    async listNeverExpiringRooms(
-      limit,
-      offset,
-    ): Promise<NeverExpiringRoomPage> {
-      const all = Array.from(rooms.values()).sort((left, right) =>
-        left.code.localeCompare(right.code),
-      );
-      const page = all.slice(offset, offset + limit);
-      return {
-        scanned: page.length,
-        rooms: page
-          .filter((room) => room.expiresAt === null)
-          .map((room) => cloneRoom(room)),
-      };
     },
     async deleteRoom(expected): Promise<RoomDeleteOutcome> {
       const room = rooms.get(expected.code);

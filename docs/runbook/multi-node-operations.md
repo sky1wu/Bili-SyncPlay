@@ -757,12 +757,13 @@ revocation took the request cap once its session guard became mandatory, so a
 stalled Redis answers a leave with `redis_runtime_store_operation_failed
 reason=timeout` instead of holding the connection open.
 
-The room reaper's tick also collects rooms that would never expire and have
-nobody in them — the shape produced whenever one of those writes did not land.
-It expires them (`room_never_expiring_collected`), so the ordinary expiry
-collection takes them on the next pass. A steady trickle of that event means
-one of the writes above is failing; a burst after an incident is the backlog
-draining.
+When one of those writes leaves a room memberless with no expiry, the node that
+did it records the debt and the reaper pays it off on a later tick — there is no
+scan looking for such rooms. `room_leave_orphan_possible` and
+`room_rollback_failed` name a room that is owed one; a steady trickle of either
+means the write behind it is failing. A node that restarts before the next
+sweep forgets its debts, so a burst of those lines around a restart may leave
+rooms that need expiring by hand.
 
 A leave that empties a room schedules its expiry after the departure is already
 complete, so that write is reported on its own: `room_expiry_scheduled` when it

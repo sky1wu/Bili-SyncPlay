@@ -863,37 +863,40 @@ do NOT compose, and that is the part that decides which connection gets which:
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
 - **A room that never expires and has nobody in it is a shape no expiry sweep
-  can reach**, and #277 produces it on purpose: every write meant to make a
-  memberless room collectable can now answer its caller before it lands, so a
-  create that answered late, a generation stamp rolled back and unwritable, and
-  a leave whose expiry scheduling failed all leave one behind. Three producers
-  had each grown their own cleanup, and each cleanup can itself fail. The room
-  reaper's tick now also collects the shape, which is what makes those three
-  best-effort instead of load-bearing. It EXPIRES rather than deletes, so the
-  collection that follows is the ordinary one with the guards and follow-ups it
-  already has. Emptiness comes from the cluster session index — one bounded call
-  per sweep, not one per candidate — and NOT from the member binding a leave
-  consults; the two can disagree only while a write is in flight, which is what
-  the grace window covers. That window is its OWN constant: `emptyRoomTtlMs`
-  answers "how long does an empty room live", this one answers "how long until
-  an unexplained record is evidence rather than a race", and a room is created
-  before its owner is seated. The write is pinned to instance AND version, like
-  every other judgement whose premise was read before it. And the chunk ROTATES:
-  the index holds every room without an expiry, which is every live room, so a
-  fixed prefix of it is dominated by rooms that are perfectly fine and an orphan
-  behind them would be starved — the cap that keeps the fan-out bounded is also
-  what makes a cursor necessary (#277 review). It also runs LAST in the tick and
-  swallows its own failure: the expiry sweep before it is DESTRUCTIVE, and a
-  throw between that delete and the follow-ups it owes — the runtime teardown,
-  the reclamation count, the `room_deleted` broadcast — would strand them with
-  nothing able to name those rooms again. **A step that can fail does not belong
-  between an irreversible action and the consumption of its result.** And the
-  page it works from separates what the INDEX named from what the BODIES
-  confirmed: a score can drift from the record (that drift is why
-  `reconcileRoomIndex` exists), so the body decides whether a room is a
-  candidate — while the cursor advances by the raw page, because a full page
-  that yielded nothing usable is still a full page and resetting on it reads the
-  same prefix forever.
+  can reach**, and bounding the writes produces it: `expiresAt === null` keeps a
+  record out of the expiry index entirely. Three writes can leave one behind — a
+  create that answered late, a generation stamp rolled back and unwritable, a
+  leave whose expiry scheduling failed — and each already compensates, and each
+  compensation can itself fail.
+
+  **The producer knows which room it broke at the moment it breaks it, so the
+  answer is a LEDGER, not a scan.** `pendingOrphanExpiries` records the code and
+  the state it was left in; the reaper drains it the way it already drains
+  `pendingRuntimeTeardowns`, last in the tick and swallowing its own failure. A
+  scan was tried first and is what this note exists to prevent: finding those
+  rooms afterwards means paginating an index that holds every LIVE room,
+  judging bodies against scores that drift from them, joining a second store to
+  ask who is in each one, and carrying a cursor that must not starve, commit
+  early, or reset on a filtered page — every one of which was a defect, and none
+  of which the ledger has.
+
+  Occupancy is never consulted, and not because it does not matter: the VERSION
+  answers it. A debt names the state the room was in, so anything that has
+  touched it since — a join, a share, an admin — moved that version, and the
+  guarded write declines. **Pinning the instance alone is not enough**, which is
+  the correction this cost: a join keeps the `joinToken` and only moves the
+  version. A conflict is therefore terminal for a debt rather than retried: the
+  premise is gone, and the room was revived or given an expiry by somebody else.
+  The generation rollback deliberately keeps the instance-only form, because
+  there a conflict means an admin touched OUR still-memberless room, which is a
+  reason to retry rather than to give up (#301). Which guard applies is a
+  property of the CALL, again.
+
+  What it does not cover, stated rather than papered over: a debt lives in this
+  process, so a node that dies between the failed compensation and the next
+  sweep forgets it. `pendingRuntimeTeardowns` has the same property. Making it
+  survive is the durable-claim shape #258 already built for the orphaned index —
+  not a scan.
 
 - **Still open, deliberately: one write — the room store's `updateRoom`.** Not
   #237's trade: it is conditional, and that turns out not to be enough. See

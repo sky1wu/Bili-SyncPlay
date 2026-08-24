@@ -55,27 +55,6 @@ const MAX_VERSION_RETRIES = 3;
  * room nothing collects, so the two are free to move for different reasons.
  */
 const ROOM_ROLLBACK_MAX_ATTEMPTS = 3;
-
-/**
- * How many never-expiring rooms one sweep may judge.
- *
- * The candidate set grows with the deployment, so the pass takes a chunk rather
- * than all of it: this is an anomaly backlog, and a minute per chunk drains it
- * faster than anything produces it.
- */
-const NEVER_EXPIRING_SWEEP_CHUNK = 32;
-
-/**
- * How long a never-expiring room must have been untouched before a sweep may
- * call it abandoned.
- *
- * Its OWN constant, not `emptyRoomTtlMs`: that one answers "how long does an
- * empty room live", this one answers "how long until an unexplained one is
- * evidence rather than a race". A room is created before its owner is seated,
- * and a join revives a room before it seats anybody — both are windows where
- * the record legitimately looks memberless and never-expiring.
- */
-const NEVER_EXPIRING_GRACE_MS = 10 * 60_000;
 const ROOM_LAST_ACTIVE_WRITE_INTERVAL_MS = 30_000;
 const JOIN_ADMISSION_LOCK_KEY = "join-admission";
 const JOIN_ADMISSION_LOCK_TTL_MS = 30_000;
@@ -307,8 +286,6 @@ export function createRoomService(options: {
   roomRollbackConfirmationTimeoutMs?: number;
   /** How long a leave waits for the emptied room's expiry to be scheduled. */
   roomExpiryScheduleConfirmationTimeoutMs?: number;
-  /** Injectable only so a test can show the rotation in two ticks. */
-  neverExpiringSweepChunk?: number;
   /** Shared by late persisted-room deletions and runtime teardown effects. */
   closeBudgetMs?: number;
 }): {
@@ -404,8 +381,6 @@ export function createRoomService(options: {
   });
   const closeBudgetMs =
     options.closeBudgetMs ?? DEFAULT_ROOM_SERVICE_CLOSE_BUDGET_MS;
-  /** Where the next never-expiring sweep resumes; see the rotation below. */
-  let neverExpiringSweepOffset = 0;
   let closing = false;
   let closePromise: Promise<void> | null = null;
   const playbackAuthorityByRoom = new Map<string, PlaybackAuthority>();
@@ -695,6 +670,36 @@ export function createRoomService(options: {
    * produce this code again (#237 review, #277).
    */
   const pendingRuntimeTeardowns = new Map<string, RuntimeTeardownDebt>();
+  /**
+   * Rooms this node made memberless but could not make COLLECTABLE, by
+   * `joinToken`.
+   *
+   * `expiresAt === null` keeps a record out of every expiry sweep, so a room
+   * left in that state is one no reaper can ever reach. Three writes can leave
+   * it: a create that answered late, a generation stamp rolled back and
+   * unwritable, a leave whose expiry scheduling failed. Each already
+   * compensates, and each compensation can itself fail — which is exactly when
+   * a debt is recorded here.
+   *
+   * A LEDGER, not a scan. The producer knows which room it broke at the moment
+   * it breaks it; searching for it afterwards means paginating an index that
+   * holds every live room, judging bodies against scores that drift, and
+   * joining a second store to ask who is in them — none of which this needs
+   * (#277 review). The reaper drains it the way it already drains
+   * `pendingRuntimeTeardowns`.
+   *
+   * Occupancy is not consulted, because the VERSION answers it. A debt names
+   * the state the room was in when it was left behind, and anything that has
+   * touched it since — a join, a share, an admin — moved that version. So a
+   * conflict is not "retry with a fresher version", it is "the premise is
+   * gone": the room was revived or given an expiry by somebody else, and the
+   * debt is settled either way. Pinning the instance alone is NOT enough, and
+   * assuming it was is what this pass got wrong first (#277 review).
+   */
+  const pendingOrphanExpiries = new Map<
+    string,
+    { joinToken: string; version: number | null }
+  >();
   const runtimeTeardownEffects = new Map<
     string,
     Map<string | null, RuntimeTeardownEffect>
@@ -957,90 +962,6 @@ export function createRoomService(options: {
    * simply not happen once the delete lands late, and each caller would have to
    * grow its own compensation for it (#277 review).
    */
-  /**
-   * Expire rooms that will never expire on their own and have nobody in them.
-   *
-   * The shape no reaper could collect: `expiresAt === null` keeps a record out
-   * of every expiry sweep, and it is produced whenever a write that was
-   * supposed to make a memberless room collectable did not land — a create that
-   * answered late, a generation stamp that was rolled back and could not be
-   * written, a leave whose expiry scheduling failed. Three producers each grew
-   * their own cleanup, and each cleanup can itself fail; this pass is what
-   * makes those best-effort instead of load-bearing (#277).
-   *
-   * It EXPIRES rather than deletes, so the collection that follows is the
-   * ordinary one, with the guards and follow-ups it already has — the
-   * reclamation count, the runtime teardown, the `room_deleted` broadcast.
-   *
-   * Emptiness comes from the CLUSTER SESSION INDEX, which every connection
-   * registers, read ONCE per sweep rather than per candidate — the one shape
-   * that keeps a deployment-sized judgement to a single bounded call. It is not
-   * the member binding a leave consults, and the difference is covered by the
-   * grace window rather than by a second read: the two can disagree only while
-   * a write is in flight, and this pass only judges records nothing has touched
-   * for {@link NEVER_EXPIRING_GRACE_MS}.
-   *
-   * Both reads are bounded by the pass that drives them: `maintenance-pass`
-   * derives `stalled` from their silence, and a cap would make that outcome
-   * unreachable (#261, #277).
-   */
-  async function collectNeverExpiringOrphans(
-    currentTime: number,
-  ): Promise<void> {
-    // Rotating, because the set holds EVERY room without an expiry — which is
-    // every live room. A fixed prefix of it is dominated by rooms that are
-    // perfectly fine, and an orphan behind them would never be looked at
-    // (#277 review). A short batch means the end: start over next tick.
-    const chunk = options.neverExpiringSweepChunk ?? NEVER_EXPIRING_SWEEP_CHUNK;
-    const page = await roomStore.listNeverExpiringRooms(
-      chunk,
-      neverExpiringSweepOffset,
-    );
-    // Advanced by what the INDEX named, not by what survived the filters: a
-    // full page that yielded nothing usable is still a full page, and resetting
-    // on it would read the same prefix forever (#277 review).
-    neverExpiringSweepOffset =
-      page.scanned < chunk ? 0 : neverExpiringSweepOffset + chunk;
-    const abandoned = page.rooms.filter(
-      (room) => currentTime - room.lastActiveAt >= NEVER_EXPIRING_GRACE_MS,
-    );
-    if (abandoned.length === 0) {
-      return;
-    }
-    const occupied = new Set(
-      (await runtimeStore.listClusterSessions("maintenance_pass"))
-        .map((session) => session.roomCode)
-        .filter((roomCode): roomCode is string => roomCode !== null),
-    );
-    for (const room of abandoned) {
-      if (occupied.has(room.code)) {
-        continue;
-      }
-      // Pinned to BOTH the instance and the version: this sweep read the room
-      // before it read the sessions, so anything that moved the record since —
-      // including the join that would have made it legitimate — must decline
-      // the write rather than have it applied on top (#277).
-      const result = await roomStore.updateRoom(
-        room.code,
-        { joinToken: room.joinToken, version: room.version },
-        { expiresAt: currentTime },
-        {
-          boundedBy:
-            "room-reaper: per-tick sweep cap (maintenance-pass derives stalled from this command's silence)",
-        },
-      );
-      if (!result.ok) {
-        continue;
-      }
-      logEvent("room_never_expiring_collected", {
-        roomCode: room.code,
-        provider: persistence.provider,
-        lastActiveAt: room.lastActiveAt,
-        result: "ok",
-      });
-    }
-  }
-
   async function collectExpiredRoom(code: string): Promise<RoomDeleteOutcome> {
     const outcome = await roomStore.deleteExpiredRoom(code, now());
     if (outcome === "superseded") {
@@ -1450,9 +1371,9 @@ export function createRoomService(options: {
    * in it. What an operator needs is the room code, which the log carries.
    */
   async function expireOrphanedRoom(
-    target: { code: string; joinToken: string },
+    target: { code: string; joinToken: string; version?: number | null },
     reason: string,
-    session: Session,
+    sessionId: string | null,
   ): Promise<void> {
     // `close()` may have run while the create that owes this rollback was
     // still in flight — a session handler is allowed to keep going past the
@@ -1460,10 +1381,14 @@ export function createRoomService(options: {
     // nobody waits for and nobody reports, so it is refused here for the same
     // reason a lazy delete is, and said out loud instead (#277 review).
     if (closing) {
+      pendingOrphanExpiries.set(target.code, {
+        joinToken: target.joinToken,
+        version: target.version ?? null,
+      });
       logEvent(
         "room_rollback_failed",
         {
-          sessionId: session.id,
+          sessionId,
           roomCode: target.code,
           provider: persistence.provider,
           result: "error",
@@ -1482,7 +1407,7 @@ export function createRoomService(options: {
     // less does not make the orphan more likely: the effect either lands or
     // reports, and shutdown drains what is still out (#277 review).
     const effect = roomRollbackConfirmationPacer.trackCall(
-      runOrphanExpiry(target, reason, session),
+      runOrphanExpiry(target, reason, sessionId),
     );
     try {
       await roomRollbackConfirmationPacer.capWait(
@@ -1497,7 +1422,7 @@ export function createRoomService(options: {
       logEvent(
         "room_rollback_unconfirmed",
         {
-          sessionId: session.id,
+          sessionId,
           roomCode: target.code,
           provider: persistence.provider,
           result: "timeout",
@@ -1511,9 +1436,9 @@ export function createRoomService(options: {
 
   /** The rollback itself. Reports its own residue and never rejects. */
   async function runOrphanExpiry(
-    target: { code: string; joinToken: string },
+    target: { code: string; joinToken: string; version?: number | null },
     reason: string,
-    session: Session,
+    sessionId: string | null,
   ): Promise<void> {
     // Every path out of the block below either returns or names a residue, so
     // there is no initial value to be shadowed.
@@ -1538,7 +1463,9 @@ export function createRoomService(options: {
           // `deleteRoom` pins this way. A replacement that took the code is at
           // version 0 too, so the version could not name our room anyway
           // (#277 review).
-          { joinToken: target.joinToken },
+          target.version === null || target.version === undefined
+            ? { joinToken: target.joinToken }
+            : { joinToken: target.joinToken, version: target.version },
           { expiresAt: now() },
           {
             boundedBy:
@@ -1548,6 +1475,15 @@ export function createRoomService(options: {
         // `not_found` covers both "already collected" and "a different room
         // holds this code" — neither owes us anything.
         if (rollback.ok || rollback.reason === "not_found") {
+          pendingOrphanExpiries.delete(target.code);
+          return;
+        }
+        // A caller that pinned the version was naming a PREMISE, not a
+        // starting point: a conflict means somebody moved the room, which
+        // revived it or gave it an expiry of its own. Retrying would write
+        // over that.
+        if (target.version !== null && target.version !== undefined) {
+          pendingOrphanExpiries.delete(target.code);
           return;
         }
       }
@@ -1558,10 +1494,17 @@ export function createRoomService(options: {
           ? rollbackError.message
           : String(rollbackError);
     }
+    // The room is memberless and still has no expiry, so nothing will ever
+    // reach it again on its own. Remembered rather than only reported, and
+    // drained by the reaper.
+    pendingOrphanExpiries.set(target.code, {
+      joinToken: target.joinToken,
+      version: target.version ?? null,
+    });
     logEvent(
       "room_rollback_failed",
       {
-        sessionId: session.id,
+        sessionId,
         roomCode: target.code,
         provider: persistence.provider,
         result: "error",
@@ -2014,6 +1957,7 @@ export function createRoomService(options: {
           scheduleError = error;
         }
         if (scheduled) {
+          pendingOrphanExpiries.delete(roomCode);
           logEvent("room_expiry_scheduled", {
             roomCode,
             version: scheduled.version,
@@ -2034,6 +1978,14 @@ export function createRoomService(options: {
         // spans both. Reporting the room that may now be an orphan keeps the
         // leave that succeeded and leaves exactly one thing wrong instead of
         // two (#277).
+        //
+        // Remembered as well as reported: the room is memberless and still has
+        // no expiry, so no sweep will ever reach it on its own. The reaper
+        // drains the ledger.
+        pendingOrphanExpiries.set(roomCode, {
+          joinToken: persistedRoom.joinToken,
+          version: persistedRoom.version,
+        });
         logEvent(
           "room_leave_orphan_possible",
           {
@@ -2062,6 +2014,10 @@ export function createRoomService(options: {
         // An effect admitted after the shutdown snapshot is one nobody waits
         // for and nobody drains, so it is refused here — the same rule the
         // lazy delete follows — and reported as the orphan risk it is.
+        pendingOrphanExpiries.set(roomCode, {
+          joinToken: persistedRoom.joinToken,
+          version: persistedRoom.version,
+        });
         logEvent(
           "room_leave_orphan_possible",
           {
@@ -2318,7 +2274,7 @@ export function createRoomService(options: {
             await expireOrphanedRoom(
               { code: roomCode, joinToken },
               "room_create_unconfirmed",
-              session,
+              session.id,
             );
           }
           createResidue = error;
@@ -2366,7 +2322,15 @@ export function createRoomService(options: {
         // was swallowed; capping the stamp made it reachable by a timeout and
         // by a lost code too, so what the rollback could not do is now said
         // out loud by `expireOrphanedRoom`.
-        await expireOrphanedRoom(persistedRoom, reason, session);
+        // Instance only, NOT `persistedRoom` whole: passing the version would
+        // make a conflict terminal, and on this path a conflict means an admin
+        // touched our still-memberless room — which #301 decided to retry
+        // through, not give up on.
+        await expireOrphanedRoom(
+          { code: persistedRoom.code, joinToken: persistedRoom.joinToken },
+          reason,
+          session.id,
+        );
         logEvent("room_persist_failed", {
           sessionId: session.id,
           roomCode: persistedRoom.code,
@@ -3023,18 +2987,24 @@ export function createRoomService(options: {
       // LAST, and swallowing its own failure — for the same reason the
       // acknowledgement above does. Everything before this point consumed the
       // results of a DESTRUCTIVE sweep: those rooms are already gone from
-      // Redis, so a throw between the delete and its follow-ups would strand
-      // their runtime state, their reclamation count and their `room_deleted`
-      // broadcast with no later pass able to name them again. This judgement is
-      // secondary and retried every tick, so its failure is reported and never
-      // allowed to overwrite a sweep that landed (#277 review).
+      // Redis, so a throw between the delete and the follow-ups it owes would
+      // strand them with nothing able to name them again. This drain is
+      // secondary and retried every tick.
       try {
-        await collectNeverExpiringOrphans(currentTime);
+        for (const [code, debt] of [...pendingOrphanExpiries]) {
+          // Settles the ledger itself, whichever way it goes.
+          await runOrphanExpiry(
+            { code, ...debt },
+            "pending_orphan_expiry",
+            null,
+          );
+        }
       } catch (error) {
         logEvent("room_persist_failed", {
           provider: persistence.provider,
           result: "error",
-          reason: "never_expiring_sweep_failed",
+          reason: "pending_orphan_expiry_drain_failed",
+          pendingCount: pendingOrphanExpiries.size,
           error: error instanceof Error ? error.message : String(error),
         });
       }
