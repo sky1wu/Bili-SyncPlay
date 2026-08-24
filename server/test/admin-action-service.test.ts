@@ -240,6 +240,37 @@ test("admin action service audits a video clear it could not confirm", async () 
   assert.equal(published, 0);
 });
 
+test("a video clear is refused once the service is closing", async () => {
+  // Every action that STARTS a room effect goes through one gate: an effect
+  // admitted after the shutdown snapshot is one nobody waits for and nobody
+  // drains, and the room store or event bus it needs is closed right after
+  // (#277 review). Hand-copying the deletion effect's shape is what left this
+  // action outside it.
+  let updateRoomCalls = 0;
+  const service = createService({
+    requestAdminCommand: async () => {
+      throw new Error("no command should be issued for a video clear");
+    },
+    updateRoom: async () => {
+      updateRoomCalls += 1;
+      throw new Error("updateRoom should not be reached while closing");
+    },
+  });
+
+  await service.close();
+
+  await assert.rejects(
+    () => service.clearRoomVideo(ACTOR, "ROOM01", "cleanup"),
+    (error: unknown) => {
+      assert.ok(error instanceof AdminActionError);
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.code, "admin_action_service_closed");
+      return true;
+    },
+  );
+  assert.equal(updateRoomCalls, 0);
+});
+
 test("a video clear that lands late still broadcasts the new state", async () => {
   // The half a 503 cannot express. The write keeps running past the wait, and
   // a cleared video nobody was told about leaves every connected client showing

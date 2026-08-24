@@ -167,7 +167,7 @@ export function createAdminActionService(options: {
   });
   const closeBudgetMs =
     options.closeBudgetMs ?? DEFAULT_ADMIN_ACTION_SERVICE_CLOSE_BUDGET_MS;
-  const roomDeletionHandlerPacer = createRetryPacer({
+  const roomEffectHandlerPacer = createRetryPacer({
     initialDelayMs: closeBudgetMs,
     maxDelayMs: closeBudgetMs,
   });
@@ -183,12 +183,12 @@ export function createAdminActionService(options: {
     // and create a deletion only afterwards. Drain handlers first, then take a
     // fresh deletion snapshot so that late-created effect stays in this same
     // lifecycle boundary.
-    await roomDeletionHandlerPacer.settleTracked(remainingBudgetMs());
+    await roomEffectHandlerPacer.settleTracked(remainingBudgetMs());
     const remaining = remainingBudgetMs();
     if (remaining > 0) {
       await roomDeletionPacer.settleTracked(remaining);
     }
-    const pendingHandlers = roomDeletionHandlerPacer.trackedCount();
+    const pendingHandlers = roomEffectHandlerPacer.trackedCount();
     const remainingForVideoClears = remainingBudgetMs();
     if (remainingForVideoClears > 0) {
       await roomVideoClearPacer.settleTracked(remainingForVideoClears);
@@ -212,7 +212,18 @@ export function createAdminActionService(options: {
     }
   }
 
-  function runRoomDeletionAction<T>(action: () => Promise<T>): Promise<T> {
+  /**
+   * The one gate every action that STARTS a room effect goes through.
+   *
+   * Two things, and they are why hand-copying the shape kept missing one: an
+   * effect admitted after the shutdown snapshot is one nobody waits for and
+   * nobody drains, and a handler can be accepted before `closing` and create
+   * its effect afterwards — so the handler itself is tracked, and the drain
+   * takes a fresh effect snapshot after it. Any action whose success owes a
+   * follow-up its own effect carries belongs here, not just the deletions it
+   * was first written for (#277 review).
+   */
+  function runGuardedRoomEffect<T>(action: () => Promise<T>): Promise<T> {
     if (closing) {
       return Promise.reject(
         new AdminActionError(
@@ -222,7 +233,7 @@ export function createAdminActionService(options: {
         ),
       );
     }
-    return roomDeletionHandlerPacer.trackCall(action());
+    return roomEffectHandlerPacer.trackCall(action());
   }
 
   function writeAudit(
@@ -894,13 +905,18 @@ export function createAdminActionService(options: {
       }
       return closePromise;
     },
+    clearRoomVideo(actor: AdminSession, roomCode: string, reason?: string) {
+      return runGuardedRoomEffect(() =>
+        actions.clearRoomVideo(actor, roomCode, reason),
+      );
+    },
     closeRoom(actor: AdminSession, roomCode: string, reason?: string) {
-      return runRoomDeletionAction(() =>
+      return runGuardedRoomEffect(() =>
         actions.closeRoom(actor, roomCode, reason),
       );
     },
     expireRoom(actor: AdminSession, roomCode: string, reason?: string) {
-      return runRoomDeletionAction(() =>
+      return runGuardedRoomEffect(() =>
         actions.expireRoom(actor, roomCode, reason),
       );
     },

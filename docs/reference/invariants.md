@@ -872,7 +872,12 @@ do NOT compose, and that is the part that decides which connection gets which:
   video clear NAMES its own deadline too — its success owes TWO things nobody
   else repeats, the audit record AND the `room_state_updated` broadcast, so the
   write keeps running past the wait and the effect owns both. An unconfirmed
-  clear is audited as unconfirmed rather than claimed as done. What
+  clear is audited as unconfirmed rather than claimed as done. It also goes
+  through the SAME shutdown gate the deletions do rather than a hand-copy of
+  their shape: **every action that starts a room effect belongs behind one
+  gate**, because an effect admitted after the shutdown snapshot is one nobody
+  waits for and nobody drains — and copying an effect's shape by hand is how a
+  part of it gets left out, twice in a row here. What
   remains discards its result safely, because the next share, playback or
   profile write supersedes it.
 
