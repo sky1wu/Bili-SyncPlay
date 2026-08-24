@@ -247,16 +247,14 @@ before changing the code it describes.
   no production caller. **A write can become boundable because a different
   change removed the caller whose needs kept it unbounded.** A capped write's
   LOCAL MIRROR update belongs on the capped promise, not the tracked one,
-  wherever the caller compensates by undoing it (the leave restores; a kick
-  does not — hence `evictMemberToken` keeps its mirror on the tracked promise).
-  And **a compensation carries the guard of the thing it compensates**: the
-  leave's recovery re-seats through the guarded `restoreMember`, never the
-  unconditional `addMember` a JOIN uses, or a cap-driven compensation overwrites
-  the binding of a successor who reconnected onto another node. Two writes on
-  one identity, one guarded and one not, is the shape to look for. A guarded
-  write's LOCAL mirror follows the shared answer instead of leading it, since
-  the successor it must not displace is invisible locally — a failure or a
-  timeout counts as a decline.
+  wherever the caller would otherwise act on an answer the mirror contradicts
+  (a kick is the opposite case — nobody undoes it, so `evictMemberToken` keeps
+  its mirror on the tracked promise). Bounding a write can also move WHERE it
+  belongs in its operation: `room:leave` now revokes BEFORE it removes, so a
+  revocation answered while still unanswered leaves the member in place and
+  there is nothing to compensate. **A compensation that needs its own guard, its
+  own ordering and its own late outcome is a signal that the operation it
+  compensates is in the wrong place.**
   `updateRoom` is CONDITIONAL and still stays, which
   is the correction this round bought: **conditionality makes a late landing
   safe to HAVE happened; it does not discharge what the write's SUCCESS owes,

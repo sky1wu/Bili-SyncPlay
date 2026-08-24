@@ -7,7 +7,6 @@ import {
   getOrCreateActiveRoom,
   type KickedMemberBlock,
   removeMemberFromRoom,
-  restoreMemberInRoom,
   revokeMemberTokenInRoom,
   resolveRoomCodeToLeave,
 } from "./runtime-store-state.js";
@@ -120,33 +119,6 @@ export type RuntimeStore = {
     session: Session,
     memberToken: string,
   ) => ActiveRoom;
-  /**
-   * Put a member back after a departure that could not be completed.
-   *
-   * NOT `addMember`: a join CLAIMS a seat, while this one only gives back a
-   * seat the caller failed to vacate, so it carries the guard the departure it
-   * compensates carried — re-seat only while the memberId is unbound or still
-   * bound to this session. Without it, a leave whose Redis went unanswered
-   * would compensate by overwriting the binding of a successor who reconnected
-   * onto another node in the meantime, which is the very thing
-   * {@link RuntimeStore.revokeMemberToken}'s guard exists to prevent (#277).
-   *
-   * Returns whether the seat was given back, and the LOCAL mirror follows that
-   * answer rather than being applied first. `addMember` may apply locally first
-   * because a join claims unconditionally; this one is guarded, and the
-   * successor it must not displace may be seated on ANOTHER node — invisible to
-   * the local mirror, which would therefore always say yes. Re-seating locally
-   * on that non-answer re-arms a socket whose client has already reconnected
-   * elsewhere: `requireMemberToken` reads this mirror, so the departed session
-   * would pass authentication and act on the room alongside its successor
-   * (#277 review).
-   */
-  restoreMember: (
-    code: string,
-    memberId: string,
-    session: Session,
-    memberToken: string,
-  ) => boolean | Promise<boolean>;
   findMemberIdByToken: (code: string, memberToken: string) => string | null;
   /**
    * Evict a member: block their token AND end their identity, as ONE commit.
@@ -526,14 +498,6 @@ export function createInMemoryRuntimeStore(
       // Back in use: the identity is no longer on the clock.
       memberTokenExpiryByRoom.get(code)?.delete(memberId);
       return addMemberToRoom(rooms, code, memberId, session, memberToken);
-    },
-    restoreMember(code, memberId, session, memberToken) {
-      pruneExpiredMemberTokens(code);
-      if (!restoreMemberInRoom(rooms, code, memberId, session, memberToken)) {
-        return false;
-      }
-      memberTokenExpiryByRoom.get(code)?.delete(memberId);
-      return true;
     },
     findMemberIdByToken(code, memberToken) {
       pruneExpiredMemberTokens(code);

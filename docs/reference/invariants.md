@@ -878,57 +878,31 @@ do NOT compose, and that is the part that decides which connection gets which:
   the caller whose needs kept it unbounded**; re-reading the reason on a write
   is worth as much as re-deriving it.
 
+  Bounding it also moved WHERE the leave revokes, and that reordering is the
+  substance of the change. `room:leave` used to remove the member first and
+  revoke afterwards. A bounded write can answer its caller while still
+  unanswered, so under that order every capped revocation left a member torn out
+  of the runtime that something had to put back — and the write that puts them
+  back re-seats an identity that may have changed hands, which is the very
+  overwrite the revocation's own guard exists to prevent. Four review rounds
+  went into guarding, ordering and confirming that compensation before the
+  simpler question got asked: **why is there anything to compensate?** Revoking
+  FIRST answers it. A revocation that fails or goes unanswered leaves the member
+  exactly where they were, the leave fails, and nothing is undone. It also gives
+  the guard the live binding it was written against — `removeMember` deletes
+  that binding, so a revocation running after it compared against nothing.
+  **A compensation that needs its own guard, its own ordering and its own late
+  outcome is a signal that the operation it compensates is in the wrong place.**
+
   It also sharpened where a capped write's LOCAL MIRROR update may run. The
   revocation applies its mirror on the CAPPED promise, not on the tracked one:
-  the caller acts on the capped answer, and an unconfirmed leave is compensated
-  by `restoreLeaveState`, so a mirror update arriving after that restore would
-  delete the token `requireMemberToken` checks every later message against —
-  leaving the member seated but unable to speak. Redis needs no such care: the
-  restore's own write is issued afterwards on the same connection, so it lands
-  last and repairs all three keys. The sibling `evictMemberToken` keeps its
-  mirror on the tracked promise and is right to: nobody compensates a kick by
-  restoring the identity, so its late apply is the intended end state. **The
+  the caller acts on the capped answer, and a mirror update arriving later would
+  delete the token `requireMemberToken` checks every message against while this
+  leave has already reported failure and left the member seated. The sibling
+  `evictMemberToken` keeps its mirror on the tracked promise and is right to:
+  nobody undoes a kick, so its late apply is the intended end state. **The
   question is not "is this write capped" but "does anyone undo it when told it
-  failed".**
-
-  **A compensation carries the guard of the thing it compensates.** The leave
-  removes presence and revokes identity, both conditional on this session still
-  owning the memberId; its recovery used to put the seat back with a plain
-  `addMember`, which is unconditional because a JOIN legitimately claims a seat.
-  Capping the revocation is what made that asymmetry routine: the caller stops
-  waiting after 5s and compensates, and by the time its write reaches a
-  recovering Redis the member may have reconnected onto another node — whose
-  binding the unguarded re-seat would then overwrite, so the successor's own
-  guarded writes start declining. `restoreMember` is therefore its own
-  primitive, guarded exactly like the revoke, and `addMember` keeps claiming
-  unconditionally for joins. Two writes on one identity, one guarded and one
-  not, is the shape to look for.
-
-  **And a guarded write's LOCAL mirror follows the shared answer, never leads
-  it.** `addMember` may apply locally first because a claim needs no permission;
-  `restoreMember` may not, because the successor it must not displace can be
-  seated on another node — invisible locally, so the local mirror would always
-  say yes. It reports whether the seat was given back, and both the Redis
-  store's own mirror and `createMirroredRuntimeStore`'s local store apply only
-  on a confirmed yes; a failure or a timeout counts as a decline, because
-  re-seating without a yes is the outcome that cannot be undone. The caller
-  follows the same answer: a leave whose seat moved on logs
-  `room_leave_recovery_skipped reason=member_seat_taken` instead of claiming a
-  recovery it did not get.
-
-  What remains NOT atomic, deliberately: a revocation that lands
-  late while the compensation's own `restoreMember` then fails leaves Redis without
-  the token binding and this node's mirror with it, so that member cannot
-  reclaim the same `memberId` on a reconnect. Two commands are two commands, and
-  the same connection guarantees ORDER, not that the second one runs. This is
-  not a state the cap introduced — a rejected command may have executed too, so
-  every `revokeMemberToken` rejection has always been able to reach it. It is
-  accepted because the loss is one `memberId` in a room its owner asked to
-  leave, weighed against `room:leave` hanging on a stalled Redis with nothing
-  counting down, which is the defect #277 exists for. Making the pair atomic
-  would put a compensating effect lifecycle in `room-service` for that; if it is
-  ever built, it belongs to whoever is fixing the reconnect identity, not to a
-  bound (#277 review). The standalone
+  failed".** The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
   had no production callers, so #277 removed them. **A write leaves this list by
   becoming CONDITIONAL, never by re-arguing #237**: a guarded write's late
