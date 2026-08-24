@@ -169,6 +169,20 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type LogEventOptions = {
   level?: LogLevel;
+  /**
+   * Marks this line as a repeating diagnosis: at most one per
+   * `throttleIntervalMs` per key reaches stdout.
+   *
+   * Gates the LINE only. The counter and the runtime-store record stay
+   * unconditional, because a throttled count cannot tell nine failures from
+   * nine million — the pairing #266 established and #268 built the throttle
+   * for. Callers that repeat a diagnosis on a dependency's schedule (a
+   * reconnect loop emits one per attempt) pass this instead of hand-rolling a
+   * second throttle.
+   */
+  throttleKey?: string;
+  /** Required with `throttleKey`; the caller owns the magnitude. */
+  throttleIntervalMs?: number;
 };
 
 export type LogEvent = (

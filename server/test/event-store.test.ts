@@ -327,7 +327,7 @@ test("in-memory event store hides system events by default and can include them 
     data: { roomCode: "ROOM01", result: "ok" },
   });
   await store.append({
-    event: "room_event_bus_error",
+    event: "room_event_publish_failed",
     timestamp: "2026-03-26T12:00:01.000Z",
     data: { result: "error" },
   });

@@ -183,13 +183,16 @@ test("a caller-bounded module opens its connection through connectWithin", () =>
 });
 
 test("a command_timeout client carries the backstop and a caller-bounded one does not", () => {
-  const backstopped = createBoundedRedisClient("redis://127.0.0.1:6399/0", {
-    bound: "command_timeout",
-  });
-  const callerBounded = createBoundedRedisClient("redis://127.0.0.1:6399/0", {
-    bound: "caller",
-    boundedBy: "a test",
-  });
+  const backstopped = createBoundedRedisClient(
+    "redis://127.0.0.1:6399/0",
+    { bound: "command_timeout" },
+    { component: "room_store", logEvent: () => undefined },
+  );
+  const callerBounded = createBoundedRedisClient(
+    "redis://127.0.0.1:6399/0",
+    { bound: "caller", boundedBy: "a test" },
+    { component: "room_store", logEvent: () => undefined },
+  );
 
   try {
     assert.equal(backstopped.options.commandTimeout, REDIS_COMMAND_TIMEOUT_MS);

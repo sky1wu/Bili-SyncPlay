@@ -12,7 +12,11 @@
  * The `runtime_event_appends_*` lines are absent because they never reach the
  * store to be filtered: `EVENT_STORE_EXCLUDED_EVENTS` in `logger.ts` keeps the
  * event store's own backpressure reports out of the event store (#266 review).
- * If that exclusion is ever lifted, they belong here.
+ * If that exclusion is ever lifted, they belong here. `redis_connection_error`
+ * is absent for the same reason and, unlike those, cannot come back: the report
+ * describes the transport the store is reached over (#280). It replaced
+ * `room_event_bus_error`, which was one connection's hand-written copy of a
+ * listener every connection now gets from `createBoundedRedisClient`.
  */
 const HIDDEN_SYSTEM_EVENTS = new Set([
   "admin_audit_appends_abandoned_at_shutdown",
@@ -31,7 +35,6 @@ const HIDDEN_SYSTEM_EVENTS = new Set([
   "node_heartbeat_skipped",
   "redis_runtime_store_operation_failed",
   "room_event_bus_close_unfinished",
-  "room_event_bus_error",
   "room_event_bus_invalid_message",
   "room_event_consumed",
   "room_event_handler_failed",

@@ -13,6 +13,7 @@ import type {
   GlobalAuditStore,
 } from "./global-audit-store.js";
 import type { AuditLogQuery, AuditLogRecord } from "./types.js";
+import type { LogEvent } from "../types.js";
 
 const DEFAULT_AUDIT_STREAM_KEY = "bsp:audit-logs";
 const DEFAULT_AUDIT_STREAM_MAX_LEN = 1_000;
@@ -141,6 +142,13 @@ export type RedisAuditStoreClient = {
 export type RedisAuditStoreOptions = {
   streamKey?: string;
   maxLen?: number;
+  /**
+   * Where this store's own connection reports socket-level failures.
+   *
+   * Only used when this store opens its own connection; an injected
+   * client carries whatever listener its creator attached (#280).
+   */
+  logEvent?: LogEvent;
   redisClient?: RedisAuditStoreClient;
   appendTimeoutMs?: number;
   maxPendingAppends?: number;
@@ -256,11 +264,15 @@ export async function createRedisAuditStore(
     // and erase the `writeIsStalled` evidence the read path judges on. The
     // policies differ — an audit record is refused, never shed — but that is a
     // handler choice, not a connection one.
-    (createBoundedRedisClient(redisUrl, {
-      bound: "caller",
-      boundedBy:
-        "append-chain: APPEND_TIMEOUT_MS per write, READ_COMMAND_TIMEOUT_MS per read, CLOSE_APPEND_SETTLE_TIMEOUT_MS on close",
-    }) as RedisAuditStoreClient);
+    (createBoundedRedisClient(
+      redisUrl,
+      {
+        bound: "caller",
+        boundedBy:
+          "append-chain: APPEND_TIMEOUT_MS per write, READ_COMMAND_TIMEOUT_MS per read, CLOSE_APPEND_SETTLE_TIMEOUT_MS on close",
+      },
+      { component: "audit_store", logEvent: options.logEvent },
+    ) as RedisAuditStoreClient);
   const streamKey = options.streamKey ?? DEFAULT_AUDIT_STREAM_KEY;
   const maxLen = options.maxLen ?? DEFAULT_AUDIT_STREAM_MAX_LEN;
   const chain = createAppendChain({

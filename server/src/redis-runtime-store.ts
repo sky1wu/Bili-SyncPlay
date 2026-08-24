@@ -27,6 +27,7 @@ import {
   type DurableWriteQueueOptions,
   type DurableWriteRequest,
 } from "./durable-write-queue.js";
+import type { LogEvent } from "./types.js";
 
 type RedisMulti = {
   sadd: (...args: string[]) => RedisMulti;
@@ -188,6 +189,13 @@ type RuntimeStoreOptions = {
     DurableWriteQueueOptions,
     "maxAttempts" | "initialRetryDelayMs" | "maxRetryDelayMs" | "sleep"
   >;
+  /**
+   * Where this store's own connection reports socket-level failures.
+   *
+   * Only used when this store opens its own connection; an injected
+   * client carries whatever listener its creator attached (#280).
+   */
+  logEvent?: LogEvent;
   redisClient?: RedisClient;
   onPendingOperationError?: (
     context: PendingOperationLogContext,
@@ -854,11 +862,15 @@ export async function createRedisRuntimeStore(
     // `evictMemberToken`. The former standalone `blockMemberToken` path had no
     // production caller and was removed in #277 rather than preserving another
     // unbounded persistent write.
-    createBoundedRedisClient(redisUrl, {
-      bound: "caller",
-      boundedBy:
-        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps",
-    })) as RedisClient;
+    createBoundedRedisClient(
+      redisUrl,
+      {
+        bound: "caller",
+        boundedBy:
+          "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps",
+      },
+      { component: "runtime_store", logEvent: options.logEvent },
+    )) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
     command: Promise<T>,
