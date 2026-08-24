@@ -7,7 +7,6 @@ import {
 } from "../src/admin/action-service.js";
 import { createAuditLogService } from "../src/admin/audit-log.js";
 import type { AdminSession } from "../src/admin/types.js";
-import { RedisStoreUnavailableError } from "../src/redis-store-unavailable.js";
 import type { RoomStore } from "../src/room-store.js";
 import type { AttachedSession, PersistedRoom, Session } from "../src/types.js";
 
@@ -80,6 +79,8 @@ function createService(options: {
   publishRoomDeleted?: (roomCode: string) => Promise<void>;
   auditLogService?: ReturnType<typeof createAuditLogService>;
   updateRoom?: RoomStore["updateRoom"];
+  publishRoomStateUpdate?: () => Promise<void>;
+  roomVideoClearConfirmTimeoutMs?: number;
   maxFanoutConcurrency?: number;
   logEvent?: (name: string, data?: Record<string, unknown>) => void;
   roomDeleteConfirmTimeoutMs?: number;
@@ -130,7 +131,8 @@ function createService(options: {
     requestAdminCommand: options.requestAdminCommand,
     auditLogService,
     getRoomStateByCode: async () => null,
-    publishRoomStateUpdate: async () => {},
+    publishRoomStateUpdate: options.publishRoomStateUpdate ?? (async () => {}),
+    roomVideoClearConfirmTimeoutMs: options.roomVideoClearConfirmTimeoutMs,
     publishRoomDeleted: options.publishRoomDeleted ?? (async () => {}),
     logEvent: (name, data) => options.logEvent?.(name, data),
     now: () => 10_000,
@@ -195,24 +197,24 @@ test("admin action service maps stale_target command results to 409", async () =
 });
 
 test("admin action service audits a video clear it could not confirm", async () => {
-  // The write is capped, so it can answer this action while still landing. An
-  // unconfirmed action is never audited as `ok` — the video may yet be cleared
-  // — but it IS audited: an accountability record owes the attempt and its
-  // outcome, and "unknown" is an outcome (#267, #277).
+  // The action's SUCCESS owes two things nobody else repeats — the audit record
+  // AND the `room_state_updated` broadcast — so its write keeps running past
+  // this wait rather than having its outcome discarded. An unconfirmed action
+  // is never audited as `ok`, but it IS audited: "unknown" is an outcome
+  // (#267, #277 review).
   const auditLogService = createAuditLogService();
+  let published = 0;
   const service = createService({
     auditLogService,
     requestAdminCommand: async () => {
       throw new Error("no command should be issued for a video clear");
     },
-    updateRoom: async () => {
-      throw new RedisStoreUnavailableError(
-        "room",
-        "update_room_cas",
-        "timeout",
-        "Redis room store command went unanswered.",
-      );
+    // Never answers: the wait ends, the effect does not.
+    updateRoom: () => new Promise(() => undefined),
+    publishRoomStateUpdate: async () => {
+      published += 1;
     },
+    roomVideoClearConfirmTimeoutMs: 20,
   });
 
   await assert.rejects(
@@ -233,39 +235,48 @@ test("admin action service audits a video clear it could not confirm", async () 
   assert.equal(auditLogs.total, 1);
   assert.equal(auditLogs.items[0]?.result, "rejected");
   assert.equal(auditLogs.items[0]?.reason, "room_video_clear_unconfirmed");
+  // The broadcast is owed to the effect, not to this waiter — and the effect
+  // has not landed, so nobody has been told anything yet.
+  assert.equal(published, 0);
 });
 
-test("admin action service does not audit a clear whose read timed out", async () => {
-  // The other polarity: `updateRoom` caps its READ half too, and a timeout
-  // there means the CAS was never issued. Auditing that as unconfirmed records
-  // a "may have happened" about something that provably did not (#277 review).
+test("a video clear that lands late still broadcasts the new state", async () => {
+  // The half a 503 cannot express. The write keeps running past the wait, and
+  // a cleared video nobody was told about leaves every connected client showing
+  // and syncing the old one (#277 review).
   const auditLogService = createAuditLogService();
+  let published = 0;
+  let releaseWrite: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseWrite = resolve;
+  });
   const service = createService({
     auditLogService,
     requestAdminCommand: async () => {
       throw new Error("no command should be issued for a video clear");
     },
-    updateRoom: async () => {
-      throw new RedisStoreUnavailableError(
-        "room",
-        "update_room",
-        "timeout",
-        "Redis room store command went unanswered.",
-      );
+    updateRoom: async (code, expected, patch) => {
+      await held;
+      return {
+        ok: true,
+        room: { ...createRoom(code), ...patch, version: 1 },
+      };
     },
+    publishRoomStateUpdate: async () => {
+      published += 1;
+    },
+    roomVideoClearConfirmTimeoutMs: 20,
   });
 
-  await assert.rejects(
-    () => service.clearRoomVideo(ACTOR, "ROOM01", "cleanup"),
-    (error: unknown) => error instanceof RedisStoreUnavailableError,
+  await assert.rejects(() =>
+    service.clearRoomVideo(ACTOR, "ROOM01", "cleanup"),
   );
+  assert.equal(published, 0);
 
-  const auditLogs = await auditLogService.query({
-    action: "clear_room_video",
-    page: 1,
-    pageSize: 10,
-  });
-  assert.equal(auditLogs.total, 0);
+  releaseWrite?.();
+  await service.close();
+
+  assert.equal(published, 1, "a late clear never told anybody");
 });
 
 test("admin action service audits an unconfirmed kick that may still land", async () => {

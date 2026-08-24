@@ -753,7 +753,8 @@ could not confirm reviving an expiring room logs `room_join_revive_unconfirmed`
 (the room may now be memberless with no expiry, which no reaper collects), and
 an admin video clear that could not confirm returns 503 and is audited as
 `rejected` with `room_video_clear_unconfirmed` rather than as a completed
-action.
+action — its write keeps running, and when it lands the broadcast goes out and
+`admin_room_video_clear_late_completed` records it.
 
 A leave that empties a room schedules its expiry after the departure is already
 complete, so that write is reported on its own: `room_expiry_scheduled` when it

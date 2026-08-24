@@ -869,7 +869,10 @@ do NOT compose, and that is the part that decides which connection gets which:
   rollback and the leave's expiry scheduling NAME their own deadline (and run
   admitted but uncapped, because a capped read would end the effect at its first
   timeout), the join REPORTS the revival it could not confirm, and the admin
-  video clear AUDITS an unconfirmed outcome rather than claiming one. What
+  video clear NAMES its own deadline too — its success owes TWO things nobody
+  else repeats, the audit record AND the `room_state_updated` broadcast, so the
+  write keeps running past the wait and the effect owns both. An unconfirmed
+  clear is audited as unconfirmed rather than claimed as done. What
   remains discards its result safely, because the next share, playback or
   profile write supersedes it.
 

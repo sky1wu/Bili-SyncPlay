@@ -675,7 +675,8 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 已经没有不设上限的持久写。`updateRoom` 是最后一个：加入若无法确认「复活一间正在过期的房」，
 会记 `room_join_revive_unconfirmed`（该房间可能已变成无成员且无过期时间，任何 reaper 都不回收）；
 管理端清空视频若无法确认，返回 503，并以 `rejected` + `room_video_clear_unconfirmed` 写入审计，
-而不是记成一次已完成的动作。
+而不是记成一次已完成的动作——它的写会继续跑，落地时照常发出广播，并记
+`admin_room_video_clear_late_completed`。
 
 把房间腾空的离房，会在「离开已经完成之后」给房间排期过期，因此这个写单独上报：落地时是
 `room_expiry_scheduled`（由效果发出，可能晚于请求），离房停止等待时是
