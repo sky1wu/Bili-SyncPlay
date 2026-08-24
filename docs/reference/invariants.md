@@ -1331,7 +1331,12 @@ do NOT compose, and that is the part that decides which connection gets which:
   repeats one code, while a node that reaches Redis on one connection and not
   another is a different incident that must not hide behind the first one's
   window — and each half of a pub/sub pair carries its own role for the same
-  reason. **The event store is not where this signal lives.** Every connection
+  reason. **Which node the connection belongs to is part of that identity**, and
+  it travels as ONE bundled value with the logger: carrying it as a second,
+  separately-optional option let the admin process's own bootstrap pass the
+  logger and forget the node, because "the bootstrap wraps its logger" is the
+  same per-call-site responsibility the listener itself used to be. Bundled,
+  that half-omission is not expressible. **The event store is not where this signal lives.** Every connection
   here is opened against one `REDIS_URL`, so an append describing a broken
   socket is issued over the deployment that just broke, and for the event
   store's own connection it is reflexive outright; a failing append is shed by

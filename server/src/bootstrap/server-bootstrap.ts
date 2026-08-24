@@ -60,7 +60,10 @@ import type {
   PersistenceConfig,
   SecurityConfig,
 } from "../types.js";
-import { logRedisConnectionErrorToStdout } from "../redis-connection-error.js";
+import {
+  logRedisConnectionErrorToStdout,
+  type RedisConnectionReporting,
+} from "../redis-connection-error.js";
 
 const DEFAULT_CLOSE_STEP_TIMEOUT_MS = 5_000;
 
@@ -293,14 +296,16 @@ export async function createServerBootstrapContext(
    *
    * Reads `connectionLogEvent` rather than capturing its value, for the reason
    * the close callbacks read `logEvent`: a connection error arriving after
-   * startup must reach the real logger, with the counter behind it.
+   * startup must reach the real logger, with the counter behind it. It adds
+   * nothing to the payload — which node a connection belongs to travels with
+   * the connection's identity, so the admin process's own bootstrap cannot
+   * report a connection without it (#280 review).
    */
-  const logConnectionEvent: LogEvent = (event, data, eventOptions) => {
-    connectionLogEvent(
-      event,
-      { instanceId: persistenceConfig.instanceId, ...data },
-      eventOptions,
-    );
+  const redisConnection: RedisConnectionReporting = {
+    instanceId: persistenceConfig.instanceId,
+    logEvent: (event, data, eventOptions) => {
+      connectionLogEvent(event, data, eventOptions);
+    },
   };
 
   function logRedisCloseUnfinished<
@@ -331,7 +336,7 @@ export async function createServerBootstrapContext(
     (persistenceConfig.provider === "redis"
       ? await createRedisRoomStore(persistenceConfig.redisUrl, {
           namespace: persistenceConfig.redisNamespace,
-          logEvent: logConnectionEvent,
+          connection: redisConnection,
           onCloseUnfinished: (report) =>
             logRedisCloseUnfinished("room_store_close_unfinished", report),
         })
@@ -356,7 +361,7 @@ export async function createServerBootstrapContext(
     persistenceConfig.runtimeStoreProvider === "redis"
       ? await createRedisRuntimeStore(persistenceConfig.redisUrl, {
           now,
-          logEvent: logConnectionEvent,
+          connection: redisConnection,
           keyPrefix: getRedisRuntimeKeyPrefix(persistenceConfig.redisNamespace),
           // How long a disconnected member can still reclaim their identity.
           // Twice the empty-room lifetime, so it comfortably covers a restart
@@ -391,7 +396,7 @@ export async function createServerBootstrapContext(
   const adminCommandBus =
     persistenceConfig.adminCommandBusProvider === "redis"
       ? await createRedisAdminCommandBus(persistenceConfig.redisUrl, {
-          logEvent: logConnectionEvent,
+          connection: redisConnection,
           commandChannelPrefix: getRedisAdminCommandChannelPrefix(
             persistenceConfig.redisNamespace,
           ),
@@ -411,7 +416,7 @@ export async function createServerBootstrapContext(
   const roomEventBus =
     persistenceConfig.roomEventBusProvider === "redis"
       ? await createRedisRoomEventBus(persistenceConfig.redisUrl, {
-          logEvent: logConnectionEvent,
+          connection: redisConnection,
           channel: getRedisRoomEventChannel(persistenceConfig.redisNamespace),
           metricsCollector,
           onInvalidMessage: (payload) => {
@@ -436,7 +441,7 @@ export async function createServerBootstrapContext(
   const eventStore =
     dependencies.adminConfig?.eventStoreProvider === "redis"
       ? await createRedisEventStore(persistenceConfig.redisUrl, {
-          logEvent: logConnectionEvent,
+          connection: redisConnection,
           streamKey: getRedisEventStreamKey(persistenceConfig.redisNamespace),
           countsKey: getRedisEventCountsKey(persistenceConfig.redisNamespace),
           legacyCountsKey: persistenceConfig.redisNamespace

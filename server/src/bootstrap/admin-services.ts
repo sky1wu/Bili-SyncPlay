@@ -90,7 +90,10 @@ export function createAdminServices(args: {
         const redisAdminSessionStore = await createRedisAdminSessionStore(
           args.persistenceConfig.redisUrl,
           {
-            logEvent: args.logEvent,
+            connection: {
+              instanceId: args.persistenceConfig.instanceId,
+              logEvent: args.logEvent,
+            },
             keyPrefix: getRedisAdminSessionKeyPrefix(
               args.persistenceConfig.redisNamespace,
             ),
@@ -153,7 +156,10 @@ export function createAdminServices(args: {
         const redisAuditStore = await createRedisAuditStore(
           args.persistenceConfig.redisUrl,
           {
-            logEvent: args.logEvent,
+            connection: {
+              instanceId: args.persistenceConfig.instanceId,
+              logEvent: args.logEvent,
+            },
             streamKey: getRedisAuditStreamKey(
               args.persistenceConfig.redisNamespace,
             ),

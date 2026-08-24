@@ -9,7 +9,7 @@ import {
   RedisCommandAdmissionError,
 } from "./redis-command-timeout.js";
 import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
-import type { LogEvent } from "./types.js";
+import type { RedisConnectionReporting } from "./redis-connection-error.js";
 
 const DEFAULT_ADMIN_SESSION_KEY_PREFIX = "bsp:admin:session:";
 
@@ -155,12 +155,13 @@ export async function createRedisAdminSessionStore(
      */
     onConnectionDropped?: (info: { consecutiveFailures: number }) => void;
     /**
-     * Where this store's own connection reports socket-level failures.
+     * Who this store's own connection reports socket failures to, and as
+     * which node.
      *
-     * Only used when this store opens its own connection; an injected
+     * Only read when this store opens its own connection; an injected
      * client carries whatever listener its creator attached (#280).
      */
-    logEvent?: LogEvent;
+    connection?: RedisConnectionReporting;
     redisClient?: RedisAdminSessionStoreClient;
   } = {},
 ): Promise<AdminSessionStore & { close: () => Promise<void> }> {
@@ -176,7 +177,7 @@ export async function createRedisAdminSessionStore(
     (createBoundedRedisClient(
       redisUrl,
       { bound: "command_timeout" },
-      { component: "admin_session_store", logEvent: options.logEvent },
+      { component: "admin_session_store", ...options.connection },
     ) as RedisAdminSessionStoreClient);
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;

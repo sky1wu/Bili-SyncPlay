@@ -35,6 +35,27 @@ export type RedisConnectionRole = "publisher" | "subscriber";
 export type RedisConnectionIdentity = {
   readonly component: RedisConnectionComponent;
   readonly role?: RedisConnectionRole;
+  /** Which node this connection belongs to; see {@link RedisConnectionReporting}. */
+  readonly instanceId?: string;
+};
+
+/**
+ * Everything a connection needs to report, as ONE value.
+ *
+ * Both halves or neither, deliberately. Which node a connection belongs to is
+ * part of its identity — multi-node deployments aggregate these lines into one
+ * backend, where "the audit store's connection was refused" without a node is
+ * not actionable. Carrying the node as a second, separately-optional option let
+ * a bootstrap pass the logger and forget the node, which is exactly what the
+ * admin services' own bootstrap did: they run as their own process and reach
+ * these stores through a different path, so "the bootstrap wraps its logger to
+ * add the node" was a per-call-site responsibility — the same shape that left
+ * seven connections without a listener in the first place. Bundled, that
+ * failure is not expressible (#280 review).
+ */
+export type RedisConnectionReporting = {
+  readonly instanceId: string;
+  readonly logEvent: LogEvent;
 };
 
 /**
@@ -102,6 +123,9 @@ export function createRedisConnectionErrorListener(
     logEvent(
       REDIS_CONNECTION_ERROR_EVENT,
       {
+        ...(identity.instanceId === undefined
+          ? {}
+          : { instanceId: identity.instanceId }),
         component: identity.component,
         ...(identity.role === undefined ? {} : { role: identity.role }),
         code,

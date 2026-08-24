@@ -278,15 +278,16 @@ test("every module that opens a connection hands it the caller's logger", () => 
     ) {
       return false;
     }
-    // The identity says WHICH connection broke; the logger is where the report
-    // goes. A connection that declares neither is one more silent socket.
-    return !source.includes("logEvent: options.logEvent");
+    // The identity says WHICH connection of WHICH node broke; the logger is
+    // where the report goes. A connection missing either is a report an
+    // operator cannot act on.
+    return !source.includes("...options.connection");
   });
 
   assert.deepEqual(
     offenders.map((file) => path.relative(sourceRoot, file)),
     [],
-    "a module opening its own Redis connection must pass its caller's logEvent",
+    "a module opening its own Redis connection must pass its caller's logEvent and instanceId",
   );
 });
 
@@ -409,5 +410,79 @@ test("every connection and code a deployment can produce keeps its own line", ()
     for (const client of clients) {
       client.disconnect();
     }
+  }
+});
+
+test("every bootstrap that builds a Redis component names its node", () => {
+  // The admin services run as their own process and reach these stores through
+  // a different bootstrap, so "the bootstrap wraps the logger to add the node"
+  // was a per-call-site responsibility — the same shape that left seven
+  // connections without a listener. Reporting is one bundled value now, so a
+  // bootstrap cannot supply the logger and forget the node; what it can still
+  // do is supply neither, which is what this checks (#280 review).
+  const bootstrapFiles = [
+    "../src/bootstrap/server-bootstrap.ts",
+    "../src/bootstrap/admin-services.ts",
+  ];
+  const offenders: string[] = [];
+
+  for (const relative of bootstrapFiles) {
+    const source = readFileSync(
+      fileURLToPath(new URL(relative, import.meta.url)),
+      "utf8",
+    );
+    const pattern = /createRedis[A-Za-z]*\(/g;
+    let match = pattern.exec(source);
+    while (match !== null) {
+      const start = match.index + match[0].length - 1;
+      let depth = 0;
+      let end = start;
+      for (let index = start; index < source.length; index += 1) {
+        const character = source[index];
+        if (character === "(") {
+          depth += 1;
+        } else if (character === ")") {
+          depth -= 1;
+          if (depth === 0) {
+            end = index;
+            break;
+          }
+        }
+      }
+      const call = source.slice(start, end);
+      if (!call.includes("connection:")) {
+        offenders.push(`${relative}: ${match[0]}`);
+      }
+      match = pattern.exec(source);
+    }
+  }
+
+  assert.deepEqual(offenders, []);
+});
+
+test("a connection reports which node it belongs to", () => {
+  const reports: Report[] = [];
+  const client = createBoundedRedisClient(
+    UNREACHABLE_REDIS_URL,
+    { bound: "command_timeout" },
+    {
+      component: "audit_store",
+      instanceId: "node-b",
+      logEvent: capturingLogEvent(reports),
+    },
+  );
+
+  try {
+    client.emit(
+      "error",
+      Object.assign(new Error("connect ECONNREFUSED"), {
+        code: "ECONNREFUSED",
+      }),
+    );
+    // Aggregated logs from several nodes: "the audit store's connection was
+    // refused" is not actionable without saying whose.
+    assert.equal(reports[0]?.data.instanceId, "node-b");
+  } finally {
+    client.disconnect();
   }
 });

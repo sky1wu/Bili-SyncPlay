@@ -17,7 +17,7 @@ import {
   type RedisPubSubClientPair,
 } from "./redis-pubsub-client.js";
 import { createRetryPacer } from "./retry-pacer.js";
-import type { LogEvent } from "./types.js";
+import type { RedisConnectionReporting } from "./redis-connection-error.js";
 
 const DEFAULT_COMMAND_CHANNEL_PREFIX = "bsp:admin-command:";
 const DEFAULT_RESULT_CHANNEL_PREFIX = "bsp:admin-command-result:";
@@ -196,12 +196,13 @@ export async function createRedisAdminCommandBus(
       info: RedisQuitReport<AdminCommandBusClientRole>,
     ) => void;
     /**
-     * Where this store's own connection reports socket-level failures.
+     * Who this store's own connection reports socket failures to, and as
+     * which node.
      *
-     * Only used when this store opens its own connection; an injected
+     * Only read when this store opens its own connection; an injected
      * client carries whatever listener its creator attached (#280).
      */
-    logEvent?: LogEvent;
+    connection?: RedisConnectionReporting;
     redisClients?: RedisPubSubClientPair;
   } = {},
 ): Promise<AdminCommandBus & { close: () => Promise<void> }> {
@@ -216,7 +217,7 @@ export async function createRedisAdminCommandBus(
     createRedisPubSubClientPair(
       redisUrl,
       { bound: "command_timeout" },
-      { component: "admin_command_bus", logEvent: options.logEvent },
+      { component: "admin_command_bus", ...options.connection },
     );
   const closeQuitTimeoutMs =
     options.closeQuitTimeoutMs ?? CLOSE_QUIT_TIMEOUT_MS;

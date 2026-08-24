@@ -22,7 +22,7 @@ import type {
   MetricsCollector,
 } from "./metrics.js";
 import type { RuntimeEvent } from "./types.js";
-import type { LogEvent } from "../types.js";
+import type { RedisConnectionReporting } from "../redis-connection-error.js";
 
 const DEFAULT_EVENT_STREAM_KEY = "bsp:events";
 const DEFAULT_EVENT_COUNTS_KEY = "bsp:event_counts";
@@ -367,12 +367,13 @@ export type RedisEventStoreOptions = {
   windowIndexKeyPrefix?: string;
   maxLen?: number;
   /**
-   * Where this store's own connection reports socket-level failures.
+   * Who this store's own connection reports socket failures to, and as
+   * which node.
    *
-   * Only used when this store opens its own connection; an injected
+   * Only read when this store opens its own connection; an injected
    * client carries whatever listener its creator attached (#280).
    */
-  logEvent?: LogEvent;
+  connection?: RedisConnectionReporting;
   redisClient?: RedisEventStoreClient;
   appendTimeoutMs?: number;
   maxPendingAppends?: number;
@@ -438,7 +439,7 @@ export async function createRedisEventStore(
         boundedBy:
           "append-chain: APPEND_TIMEOUT_MS per write, READ_COMMAND_TIMEOUT_MS per read, CLOSE_APPEND_SETTLE_TIMEOUT_MS on close",
       },
-      { component: "event_store", logEvent: options.logEvent },
+      { component: "event_store", ...options.connection },
     ) as RedisEventStoreClient);
   const streamKey = options.streamKey ?? DEFAULT_EVENT_STREAM_KEY;
   const countsKey = options.countsKey ?? DEFAULT_EVENT_COUNTS_KEY;

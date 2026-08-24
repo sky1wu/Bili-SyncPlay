@@ -27,7 +27,7 @@ import {
   type DurableWriteQueueOptions,
   type DurableWriteRequest,
 } from "./durable-write-queue.js";
-import type { LogEvent } from "./types.js";
+import type { RedisConnectionReporting } from "./redis-connection-error.js";
 
 type RedisMulti = {
   sadd: (...args: string[]) => RedisMulti;
@@ -190,12 +190,13 @@ type RuntimeStoreOptions = {
     "maxAttempts" | "initialRetryDelayMs" | "maxRetryDelayMs" | "sleep"
   >;
   /**
-   * Where this store's own connection reports socket-level failures.
+   * Who this store's own connection reports socket failures to, and as
+   * which node.
    *
-   * Only used when this store opens its own connection; an injected
+   * Only read when this store opens its own connection; an injected
    * client carries whatever listener its creator attached (#280).
    */
-  logEvent?: LogEvent;
+  connection?: RedisConnectionReporting;
   redisClient?: RedisClient;
   onPendingOperationError?: (
     context: PendingOperationLogContext,
@@ -869,7 +870,7 @@ export async function createRedisRuntimeStore(
         boundedBy:
           "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps",
       },
-      { component: "runtime_store", logEvent: options.logEvent },
+      { component: "runtime_store", ...options.connection },
     )) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(

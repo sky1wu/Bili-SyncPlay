@@ -21,7 +21,7 @@ import {
   type RoomUpdateResult,
 } from "./room-store.js";
 import type { PersistedRoom } from "./types.js";
-import type { LogEvent } from "./types.js";
+import type { RedisConnectionReporting } from "./redis-connection-error.js";
 
 /**
  * `close_room_store` has the default 5s shutdown budget and, after the room
@@ -800,12 +800,13 @@ export async function createRedisRoomStore(
       budgetMs: number;
     }) => void;
     /**
-     * Where this store's own connection reports socket-level failures.
+     * Who this store's own connection reports socket failures to, and as
+     * which node.
      *
-     * Only used when this store opens its own connection; an injected
+     * Only read when this store opens its own connection; an injected
      * client carries whatever listener its creator attached (#280).
      */
-    logEvent?: LogEvent;
+    connection?: RedisConnectionReporting;
     redisClient?: RedisRoomStoreClient;
   } = {},
 ): Promise<
@@ -846,7 +847,7 @@ export async function createRedisRoomStore(
         boundedBy:
           "boundCommand's cap on the request path, room-service's expired-room collection deadline, its orphan rollback and empty-room expiry scheduling deadlines, and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass",
       },
-      { component: "room_store", logEvent: options.logEvent },
+      { component: "room_store", ...options.connection },
     ) as RedisRoomStoreClient);
   const {
     orphanedRoomCodesKey,

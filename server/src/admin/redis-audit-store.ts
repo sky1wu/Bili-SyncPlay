@@ -13,7 +13,7 @@ import type {
   GlobalAuditStore,
 } from "./global-audit-store.js";
 import type { AuditLogQuery, AuditLogRecord } from "./types.js";
-import type { LogEvent } from "../types.js";
+import type { RedisConnectionReporting } from "../redis-connection-error.js";
 
 const DEFAULT_AUDIT_STREAM_KEY = "bsp:audit-logs";
 const DEFAULT_AUDIT_STREAM_MAX_LEN = 1_000;
@@ -143,12 +143,13 @@ export type RedisAuditStoreOptions = {
   streamKey?: string;
   maxLen?: number;
   /**
-   * Where this store's own connection reports socket-level failures.
+   * Who this store's own connection reports socket failures to, and as
+   * which node.
    *
-   * Only used when this store opens its own connection; an injected
+   * Only read when this store opens its own connection; an injected
    * client carries whatever listener its creator attached (#280).
    */
-  logEvent?: LogEvent;
+  connection?: RedisConnectionReporting;
   redisClient?: RedisAuditStoreClient;
   appendTimeoutMs?: number;
   maxPendingAppends?: number;
@@ -271,7 +272,7 @@ export async function createRedisAuditStore(
         boundedBy:
           "append-chain: APPEND_TIMEOUT_MS per write, READ_COMMAND_TIMEOUT_MS per read, CLOSE_APPEND_SETTLE_TIMEOUT_MS on close",
       },
-      { component: "audit_store", logEvent: options.logEvent },
+      { component: "audit_store", ...options.connection },
     ) as RedisAuditStoreClient);
   const streamKey = options.streamKey ?? DEFAULT_AUDIT_STREAM_KEY;
   const maxLen = options.maxLen ?? DEFAULT_AUDIT_STREAM_MAX_LEN;
