@@ -757,6 +757,13 @@ revocation took the request cap once its session guard became mandatory, so a
 stalled Redis answers a leave with `redis_runtime_store_operation_failed
 reason=timeout` instead of holding the connection open.
 
+The room reaper's tick also collects rooms that would never expire and have
+nobody in them — the shape produced whenever one of those writes did not land.
+It expires them (`room_never_expiring_collected`), so the ordinary expiry
+collection takes them on the next pass. A steady trickle of that event means
+one of the writes above is failing; a burst after an incident is the backlog
+draining.
+
 A leave that empties a room schedules its expiry after the departure is already
 complete, so that write is reported on its own: `room_expiry_scheduled` when it
 lands (from the effect, which may outlive the request),

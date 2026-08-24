@@ -136,6 +136,28 @@ export type RoomStore = {
    * record, so a version-exact guard would decline the very action that caused
    * the change.
    */
+  /**
+   * Rooms that will never expire on their own: `expiresAt === null`.
+   *
+   * The shape the reaper cannot judge, because "never expires" is only wrong
+   * when the room is also EMPTY, and membership lives in the runtime store —
+   * no write and no script spans both. So the room store only names the
+   * candidates; whoever has both views decides (#277).
+   *
+   * Capped in count, not in time: this is a maintenance read over a set that
+   * grows with the deployment, and a pass that tried to take all of it at once
+   * would be a fan-out nobody bounded.
+   *
+   * `offset` is what keeps that cap from becoming starvation. The set holds
+   * EVERY room without an expiry, which is every live room — so a fixed
+   * prefix of it is dominated by rooms that are perfectly fine, and an orphan
+   * behind them would never be looked at. The caller rotates through instead
+   * (#277 review).
+   */
+  listNeverExpiringRooms: (
+    limit: number,
+    offset: number,
+  ) => Promise<PersistedRoom[]>;
   deleteRoom: (expected: PersistedRoom) => Promise<RoomDeleteOutcome>;
   /**
    * Removes the room under this code only while it is still expired.
@@ -304,6 +326,12 @@ export function createInMemoryRoomStore(
       };
       rooms.set(code, nextRoom);
       return { ok: true, room: cloneRoom(nextRoom) };
+    },
+    async listNeverExpiringRooms(limit, offset): Promise<PersistedRoom[]> {
+      const all = Array.from(rooms.values())
+        .filter((room) => room.expiresAt === null)
+        .sort((left, right) => left.code.localeCompare(right.code));
+      return all.slice(offset, offset + limit).map(cloneRoom);
     },
     async deleteRoom(expected): Promise<RoomDeleteOutcome> {
       const room = rooms.get(expected.code);

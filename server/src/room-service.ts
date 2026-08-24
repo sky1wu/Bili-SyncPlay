@@ -55,6 +55,27 @@ const MAX_VERSION_RETRIES = 3;
  * room nothing collects, so the two are free to move for different reasons.
  */
 const ROOM_ROLLBACK_MAX_ATTEMPTS = 3;
+
+/**
+ * How many never-expiring rooms one sweep may judge.
+ *
+ * The candidate set grows with the deployment, so the pass takes a chunk rather
+ * than all of it: this is an anomaly backlog, and a minute per chunk drains it
+ * faster than anything produces it.
+ */
+const NEVER_EXPIRING_SWEEP_CHUNK = 32;
+
+/**
+ * How long a never-expiring room must have been untouched before a sweep may
+ * call it abandoned.
+ *
+ * Its OWN constant, not `emptyRoomTtlMs`: that one answers "how long does an
+ * empty room live", this one answers "how long until an unexplained one is
+ * evidence rather than a race". A room is created before its owner is seated,
+ * and a join revives a room before it seats anybody — both are windows where
+ * the record legitimately looks memberless and never-expiring.
+ */
+const NEVER_EXPIRING_GRACE_MS = 10 * 60_000;
 const ROOM_LAST_ACTIVE_WRITE_INTERVAL_MS = 30_000;
 const JOIN_ADMISSION_LOCK_KEY = "join-admission";
 const JOIN_ADMISSION_LOCK_TTL_MS = 30_000;
@@ -286,6 +307,8 @@ export function createRoomService(options: {
   roomRollbackConfirmationTimeoutMs?: number;
   /** How long a leave waits for the emptied room's expiry to be scheduled. */
   roomExpiryScheduleConfirmationTimeoutMs?: number;
+  /** Injectable only so a test can show the rotation in two ticks. */
+  neverExpiringSweepChunk?: number;
   /** Shared by late persisted-room deletions and runtime teardown effects. */
   closeBudgetMs?: number;
 }): {
@@ -381,6 +404,8 @@ export function createRoomService(options: {
   });
   const closeBudgetMs =
     options.closeBudgetMs ?? DEFAULT_ROOM_SERVICE_CLOSE_BUDGET_MS;
+  /** Where the next never-expiring sweep resumes; see the rotation below. */
+  let neverExpiringSweepOffset = 0;
   let closing = false;
   let closePromise: Promise<void> | null = null;
   const playbackAuthorityByRoom = new Map<string, PlaybackAuthority>();
@@ -932,6 +957,87 @@ export function createRoomService(options: {
    * simply not happen once the delete lands late, and each caller would have to
    * grow its own compensation for it (#277 review).
    */
+  /**
+   * Expire rooms that will never expire on their own and have nobody in them.
+   *
+   * The shape no reaper could collect: `expiresAt === null` keeps a record out
+   * of every expiry sweep, and it is produced whenever a write that was
+   * supposed to make a memberless room collectable did not land — a create that
+   * answered late, a generation stamp that was rolled back and could not be
+   * written, a leave whose expiry scheduling failed. Three producers each grew
+   * their own cleanup, and each cleanup can itself fail; this pass is what
+   * makes those best-effort instead of load-bearing (#277).
+   *
+   * It EXPIRES rather than deletes, so the collection that follows is the
+   * ordinary one, with the guards and follow-ups it already has — the
+   * reclamation count, the runtime teardown, the `room_deleted` broadcast.
+   *
+   * Emptiness comes from the CLUSTER SESSION INDEX, which every connection
+   * registers, read ONCE per sweep rather than per candidate — the one shape
+   * that keeps a deployment-sized judgement to a single bounded call. It is not
+   * the member binding a leave consults, and the difference is covered by the
+   * grace window rather than by a second read: the two can disagree only while
+   * a write is in flight, and this pass only judges records nothing has touched
+   * for {@link NEVER_EXPIRING_GRACE_MS}.
+   *
+   * Both reads are bounded by the pass that drives them: `maintenance-pass`
+   * derives `stalled` from their silence, and a cap would make that outcome
+   * unreachable (#261, #277).
+   */
+  async function collectNeverExpiringOrphans(
+    currentTime: number,
+  ): Promise<void> {
+    // Rotating, because the set holds EVERY room without an expiry — which is
+    // every live room. A fixed prefix of it is dominated by rooms that are
+    // perfectly fine, and an orphan behind them would never be looked at
+    // (#277 review). A short batch means the end: start over next tick.
+    const chunk = options.neverExpiringSweepChunk ?? NEVER_EXPIRING_SWEEP_CHUNK;
+    const candidates = await roomStore.listNeverExpiringRooms(
+      chunk,
+      neverExpiringSweepOffset,
+    );
+    neverExpiringSweepOffset =
+      candidates.length < chunk ? 0 : neverExpiringSweepOffset + chunk;
+    const abandoned = candidates.filter(
+      (room) => currentTime - room.lastActiveAt >= NEVER_EXPIRING_GRACE_MS,
+    );
+    if (abandoned.length === 0) {
+      return;
+    }
+    const occupied = new Set(
+      (await runtimeStore.listClusterSessions("maintenance_pass"))
+        .map((session) => session.roomCode)
+        .filter((roomCode): roomCode is string => roomCode !== null),
+    );
+    for (const room of abandoned) {
+      if (occupied.has(room.code)) {
+        continue;
+      }
+      // Pinned to BOTH the instance and the version: this sweep read the room
+      // before it read the sessions, so anything that moved the record since —
+      // including the join that would have made it legitimate — must decline
+      // the write rather than have it applied on top (#277).
+      const result = await roomStore.updateRoom(
+        room.code,
+        { joinToken: room.joinToken, version: room.version },
+        { expiresAt: currentTime },
+        {
+          boundedBy:
+            "room-reaper: per-tick sweep cap (maintenance-pass derives stalled from this command's silence)",
+        },
+      );
+      if (!result.ok) {
+        continue;
+      }
+      logEvent("room_never_expiring_collected", {
+        roomCode: room.code,
+        provider: persistence.provider,
+        lastActiveAt: room.lastActiveAt,
+        result: "ok",
+      });
+    }
+  }
+
   async function collectExpiredRoom(code: string): Promise<RoomDeleteOutcome> {
     const outcome = await roomStore.deleteExpiredRoom(code, now());
     if (outcome === "superseded") {
@@ -2863,6 +2969,7 @@ export function createRoomService(options: {
 
     async deleteExpiredRooms(currentTime = now()) {
       const swept = await roomStore.deleteExpiredRooms(currentTime);
+      await collectNeverExpiringOrphans(currentTime);
       // Only rooms this pass actually deleted. NOT the orphaned index entries
       // beside them — those never had a room behind them, so metering them
       // would put this counter back out of step with room creations, which is

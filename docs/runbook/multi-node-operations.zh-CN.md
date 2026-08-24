@@ -678,6 +678,10 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 的吊销在守卫变成必填之后拿到了请求路径上限，所以僵死的 Redis 会用
 `redis_runtime_store_operation_failed reason=timeout` 答复一次离房，而不再把连接一直挂着。
 
+房间 reaper 的每一跳还会收割「永不过期且没有人」的房间——只要上面那些写有一个没落地，就会
+留下这种形状。它把这些房间**过期掉**（`room_never_expiring_collected`），下一趟普通的过期回收
+再收走它们。这个事件持续小量出现，说明上面某个写在失败；事故之后成批出现，是积压在排空。
+
 把房间腾空的离房，会在「离开已经完成之后」给房间排期过期，因此这个写单独上报：落地时是
 `room_expiry_scheduled`（由效果发出，可能晚于请求），离房停止等待时是
 `room_expiry_schedule_unconfirmed`，确定没排上时是 `room_leave_orphan_possible`——最后这条

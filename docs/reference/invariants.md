@@ -862,6 +862,28 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
+- **A room that never expires and has nobody in it is a shape no expiry sweep
+  can reach**, and #277 produces it on purpose: every write meant to make a
+  memberless room collectable can now answer its caller before it lands, so a
+  create that answered late, a generation stamp rolled back and unwritable, and
+  a leave whose expiry scheduling failed all leave one behind. Three producers
+  had each grown their own cleanup, and each cleanup can itself fail. The room
+  reaper's tick now also collects the shape, which is what makes those three
+  best-effort instead of load-bearing. It EXPIRES rather than deletes, so the
+  collection that follows is the ordinary one with the guards and follow-ups it
+  already has. Emptiness comes from the cluster session index — one bounded call
+  per sweep, not one per candidate — and NOT from the member binding a leave
+  consults; the two can disagree only while a write is in flight, which is what
+  the grace window covers. That window is its OWN constant: `emptyRoomTtlMs`
+  answers "how long does an empty room live", this one answers "how long until
+  an unexplained record is evidence rather than a race", and a room is created
+  before its owner is seated. The write is pinned to instance AND version, like
+  every other judgement whose premise was read before it. And the chunk ROTATES:
+  the index holds every room without an expiry, which is every live room, so a
+  fixed prefix of it is dominated by rooms that are perfectly fine and an orphan
+  behind them would be starved — the cap that keeps the fan-out bounded is also
+  what makes a cursor necessary (#277 review).
+
 - **Still open, deliberately: one write — the room store's `updateRoom`.** Not
   #237's trade: it is conditional, and that turns out not to be enough. See
   below. Everything else on both connections took a bound.

@@ -48,6 +48,10 @@ export function instrumentRoomStore(
 
   const instrumented: RoomStore = {
     createRoom: measure("create_room", (input) => roomStore.createRoom(input)),
+    listNeverExpiringRooms: measure(
+      "list_never_expiring_rooms",
+      (limit, offset) => roomStore.listNeverExpiringRooms(limit, offset),
+    ),
     getRoom: measure("get_room", (code, caller) =>
       roomStore.getRoom(code, caller),
     ),

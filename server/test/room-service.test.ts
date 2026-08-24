@@ -608,6 +608,148 @@ test("a late expiry schedule does not land on a room somebody rejoined", async (
   assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
 });
 
+test("the sweep collects a room that would never expire and has nobody in it", async () => {
+  // The shape no reaper could reach: `expiresAt === null` keeps a record out of
+  // every expiry sweep, and it is produced whenever a write meant to make a
+  // memberless room collectable did not land. Three producers each grew their
+  // own cleanup; this pass is what makes those best-effort rather than
+  // load-bearing (#277).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createActiveRoomRegistry();
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMNE",
+  });
+
+  // The orphan: a room with no expiry and nobody in it.
+  const orphan = await roomStore.createRoom({
+    code: "ROOMNE",
+    joinToken: "orphan-join-token",
+    createdAt: currentTime,
+  });
+  assert.equal(orphan.expiresAt, null);
+
+  // Inside the grace window it is a race, not evidence: a room is created
+  // before its owner is seated, and a join revives one before it seats anybody.
+  await service.deleteExpiredRooms(currentTime);
+  assert.equal((await roomStore.getRoom("ROOMNE"))?.expiresAt, null);
+  assert.ok(!events.includes("room_never_expiring_collected"));
+
+  // Past it, the sweep expires it — and expiring is deliberate: the collection
+  // that follows is the ordinary one, with the guards and follow-ups it has.
+  currentTime += 10 * 60_000;
+  await service.deleteExpiredRooms(currentTime);
+  assert.equal((await roomStore.getRoom("ROOMNE"))?.expiresAt, currentTime);
+  assert.ok(events.includes("room_never_expiring_collected"));
+
+  // And the next sweep collects it through the ordinary expiry path.
+  currentTime += 1;
+  await service.deleteExpiredRooms(currentTime);
+  assert.equal(await roomStore.getRoom("ROOMNE"), null);
+});
+
+test("the never-expiring sweep rotates so an orphan behind live rooms is reached", async () => {
+  // The set holds EVERY room without an expiry, which is every live room. A
+  // fixed prefix of it is dominated by rooms that are perfectly fine, so a
+  // sweep that never advanced would look at the same healthy rooms forever and
+  // the orphan behind them would be starved (#277 review).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createInMemoryRuntimeStore(() => currentTime);
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => currentTime,
+    neverExpiringSweepChunk: 1,
+  });
+
+  // Two rooms without an expiry, in code order. The first is occupied and stays
+  // that way; the orphan sits behind it.
+  const owner = createSession("owner");
+  await activeRooms.registerSession(owner);
+  activeRooms.addMember("ROOMAA", "owner", owner, "token-1xxxxxxxxxxx");
+  owner.roomCode = "ROOMAA";
+  await roomStore.createRoom({
+    code: "ROOMAA",
+    joinToken: "live-join-token",
+    createdAt: currentTime,
+  });
+  await roomStore.createRoom({
+    code: "ROOMBB",
+    joinToken: "orphan-join-token",
+    createdAt: currentTime,
+  });
+
+  currentTime += 10 * 60_000;
+  // First tick sees only the live room and must not collect it.
+  await service.deleteExpiredRooms(currentTime);
+  assert.equal((await roomStore.getRoom("ROOMBB"))?.expiresAt, null);
+  // Second tick has advanced past it and reaches the orphan.
+  await service.deleteExpiredRooms(currentTime);
+  assert.equal((await roomStore.getRoom("ROOMBB"))?.expiresAt, currentTime);
+  assert.equal((await roomStore.getRoom("ROOMAA"))?.expiresAt, null);
+});
+
+test("the sweep leaves a never-expiring room that still has somebody in it", async () => {
+  // Emptiness comes from the cluster session index, which every connection
+  // registers. An occupied room legitimately has no expiry, and collecting it
+  // would hand the reaper a room with members (#277).
+  let currentTime = 1_000;
+  const roomStore = createInMemoryRoomStore({ now: () => currentTime });
+  const activeRooms = createInMemoryRuntimeStore(() => currentTime);
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms,
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => currentTime,
+    createRoomCode: () => "ROOMOC",
+  });
+
+  const owner = createSession("owner");
+  await activeRooms.registerSession(owner);
+  const created = await service.createRoomForSession(owner, "Alice");
+  assert.equal(created.room.expiresAt, null);
+
+  currentTime += 10 * 60_000;
+  await service.deleteExpiredRooms(currentTime);
+
+  assert.equal((await roomStore.getRoom(created.room.code))?.expiresAt, null);
+  assert.ok(!events.includes("room_never_expiring_collected"));
+  assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
+});
+
 test("a failed empty-room expiry schedule leaves the leave alone", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();

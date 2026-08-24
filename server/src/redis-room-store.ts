@@ -84,7 +84,12 @@ export type RedisRoomStoreClient = {
     ...args: Array<string | number>
   ) => Promise<unknown>;
   zrange: (key: string, start: number, stop: number) => Promise<string[]>;
-  zrangebyscore: (key: string, min: string, max: string) => Promise<string[]>;
+  zrangebyscore: (
+    key: string,
+    min: string,
+    max: string,
+    ...limit: ["LIMIT", number, number] | []
+  ) => Promise<string[]>;
   zcard: (key: string) => Promise<number>;
   zcount: (key: string, min: string, max: string) => Promise<number>;
   ping: () => Promise<string>;
@@ -1474,6 +1479,39 @@ export async function createRedisRoomStore(
         return { ok: false, reason: "version_conflict" };
       }
       return { ok: true, room: nextRoom };
+    },
+    async listNeverExpiringRooms(limit, offset) {
+      // `expiryScore` puts a never-expiring room in the index at `inf`, so the
+      // candidates are one range query rather than a keyspace walk.
+      //
+      // Bounded by the pass that drives it, not capped here: the room reaper's
+      // `maintenance-pass` derives `stalled` from this command's silence, and a
+      // cap would settle it and make that outcome unreachable (#261, #277).
+      const codes = await boundedByOuterCaller(
+        "list_never_expiring_rooms",
+        () =>
+          redis.zrangebyscore(
+            roomsByExpiryKey,
+            "+inf",
+            "+inf",
+            "LIMIT",
+            offset,
+            limit,
+          ),
+      );
+      const rooms = await Promise.all(
+        codes.map((code) =>
+          // The same waiting limiter every listing uses: admission is a refusal
+          // boundary and must never be reachable by ordinary fan-out (#277).
+          listingFanOut.run(async () =>
+            parseRoomOrNull(
+              await readRoomBody(code, boundedByOuterCaller),
+              code,
+            ),
+          ),
+        ),
+      );
+      return rooms.filter((room): room is PersistedRoom => room !== null);
     },
     deleteRoom(expected) {
       // Pinned by `joinToken`, and by nothing else: a recycled code always
