@@ -862,12 +862,55 @@ do NOT compose, and that is the part that decides which connection gets which:
   stalled Redis is never answered — measured, after #269 and the first round of
   #277 both leaned on it in a comment. Any argument of the form "this path is at
   least bounded by the HTTP server" is false here.
-- **Still open, deliberately: two writes, for two different reasons.** One
-  runtime-store write through `trackAwaitedOperation` (`revokeMemberToken`)
-  stays uncapped because #237 settled that an answer which can be wrong is
-  worse than a slow one and its effect does not expire on its own. The room
-  store's `updateRoom` stays for a different reason, below: it is conditional,
-  and that is not enough. The standalone
+- **Still open, deliberately: one write — the room store's `updateRoom`.** Not
+  #237's trade: it is conditional, and that turns out not to be enough. See
+  below. Everything else on both connections took a bound.
+
+  `revokeMemberToken` was the last to leave, and it left the way the others
+  did — by its GUARD becoming mandatory. Its script only ends the identity
+  while the session asking still owns the memberId, so a revocation landing
+  after the cap cannot reach the binding a successor is using, which was
+  exactly #237's objection. What made the guard mandatory was not an argument
+  but an earlier slice of #277: the kick — the one caller that meant "whoever
+  holds it now" — had already moved to `evictMemberToken`, leaving the
+  session-less path with no production caller at all, like `blockMemberToken`
+  before it. **A write can become boundable because a DIFFERENT change removed
+  the caller whose needs kept it unbounded**; re-reading the reason on a write
+  is worth as much as re-deriving it.
+
+  Bounding it also moved WHERE the leave revokes, and that reordering is the
+  substance of the change. `room:leave` used to remove the member first and
+  revoke afterwards. A bounded write can answer its caller while still
+  unanswered, so under that order every capped revocation left a member torn out
+  of the runtime that something had to put back — and the write that puts them
+  back re-seats an identity that may have changed hands, which is the very
+  overwrite the revocation's own guard exists to prevent. Four review rounds
+  went into guarding, ordering and confirming that compensation before the
+  simpler question got asked: **why is there anything to compensate?** Revoking
+  FIRST answers it. A revocation that fails or goes unanswered leaves the member
+  exactly where they were, the leave fails, and nothing is undone. It also gives
+  the guard the live binding it was written against — `removeMember` deletes
+  that binding, so a revocation running after it compared against nothing.
+  **A compensation that needs its own guard, its own ordering and its own late
+  outcome is a signal that the operation it compensates is in the wrong place.**
+
+  It also sharpened where a capped write's LOCAL MIRROR update may run. The
+  revocation applies its mirror on the CAPPED promise, not on the tracked one:
+  the caller acts on the capped answer, and a mirror update arriving later would
+  delete the token `requireMemberToken` checks every message against while this
+  leave has already reported failure and left the member seated. The sibling
+  `evictMemberToken` keeps its mirror on the tracked promise and is right to:
+  nobody undoes a kick, so its late apply is the intended end state. **The
+  question is not "is this write capped" but "does anyone undo it when told it
+  failed".** A bounded durable write also owes its own terminal report, because
+  a failure arriving after the cap reaches nobody through the returned promise —
+  and both halves must not overlap: `boundDurableWrite` counts ONE failure
+  whichever side answers, while leaving both LOG lines, since only the late one
+  carries what Redis said. Counting both doubles the rate an alert reads;
+  dropping the terminal report loses a prompt failure entirely, because a
+  bounded READ's rejection is metered by nobody. `trackOperation` had needed the
+  same flag, so this being its second copy is why it lives in one place
+  (#266, #277 review). The standalone
   `blockMemberToken` path and the room store's unconditional `saveRoom` write
   had no production callers, so #277 removed them. **A write leaves this list by
   becoming CONDITIONAL, never by re-arguing #237**: a guarded write's late

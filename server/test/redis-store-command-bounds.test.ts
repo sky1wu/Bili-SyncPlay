@@ -27,14 +27,17 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getDefaultSecurityConfig } from "../src/app.js";
 import { createRedisRuntimeStore } from "../src/redis-runtime-store.js";
 import {
   createRedisRoomStore,
   type RedisRoomStoreClient,
 } from "../src/redis-room-store.js";
+import { createSessionRateLimitState } from "../src/rate-limit.js";
 import { RedisStoreUnavailableError } from "../src/redis-store-unavailable.js";
 import { createPersistedRoom, type RoomReadCaller } from "../src/room-store.js";
 import type { RuntimeReadCaller } from "../src/runtime-store.js";
+import type { DetachedSession } from "../src/types.js";
 import { settleWithin } from "../src/retry-pacer.js";
 
 /** Short enough to keep the sweep fast; the mechanism is the same at 5s. */
@@ -155,6 +158,27 @@ async function withRuntimeStore<T>(
  * Request-path methods: each must answer its caller with one command hung, for
  * every command it issues.
  */
+/**
+ * Detached on purpose: a revocation reads nothing but the session's id, and a
+ * detached session is the one shape this file can build without casting past
+ * the checker.
+ */
+const PROBE_SESSION: DetachedSession = {
+  id: "session-probe",
+  connectionState: "detached",
+  socket: null,
+  instanceId: "session-probe-node",
+  remoteAddress: "127.0.0.1",
+  origin: "chrome-extension://allowed-extension",
+  roomCode: "ROOM01",
+  memberId: "member-probe",
+  memberToken: "token-probe",
+  displayName: "probe",
+  joinedAt: 0,
+  invalidMessageCount: 0,
+  rateLimitState: createSessionRateLimitState(getDefaultSecurityConfig(), 0),
+};
+
 const RUNTIME_REQUEST_PATH: Record<
   string,
   (store: RuntimeStoreUnderTest) => Promise<unknown>
@@ -191,6 +215,14 @@ const RUNTIME_REQUEST_PATH: Record<
   // be the wrong answer #237 refused to give.
   markRoomGeneration: (store) =>
     Promise.resolve(store.markRoomGeneration("ROOM01", "generation-1", null)),
+  // The other durable write that became conditional, and the last one to leave
+  // the table below: its script only ends the identity while the revoking
+  // session still owns it, so a revocation landing after the cap cannot reach
+  // the successor's binding (#277).
+  revokeMemberToken: (store) =>
+    Promise.resolve(
+      store.revokeMemberToken("ROOM01", "member-probe", PROBE_SESSION),
+    ),
 };
 
 /**
@@ -237,20 +269,18 @@ const RUNTIME_CALLER_CHOSEN: Record<
 };
 
 /**
- * The one remaining durable write #237 argued must never be told it failed
- * while the write may still land. Its side effect does not expire on its own,
- * so bounding it re-opens that trade — deliberately still open (#277).
+ * Empty, and it has to STAY a table rather than become a deleted concept: a
+ * runtime-store write added later must still declare itself, and "there are
+ * none right now" is the claim this makes mechanical.
  *
- * What left this table left it by becoming CONDITIONAL, not by re-arguing #237:
- * a guarded write's late landing is a no-op, so the answer its caller was given
- * cannot be wrong. The unused standalone token-block write was deleted; the
- * production eviction call reports an unconfirmed deadline while its real
- * effect continues; and `markRoomGeneration` compares the creator's pin.
+ * Everything that was here left by becoming CONDITIONAL, never by re-arguing
+ * #237 — a guarded write's late landing cannot be the wrong answer. The unused
+ * standalone token-block write was deleted; the production eviction call
+ * reports an unconfirmed deadline while its real effect continues;
+ * `markRoomGeneration` compares the creator's pin; and `revokeMemberToken`'s
+ * session guard became mandatory once the kick moved to `evictMemberToken`.
  */
-const RUNTIME_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {
-  revokeMemberToken:
-    "#237: an answer that can be wrong is worse than a slow one",
-};
+const RUNTIME_UNBOUNDED_DURABLE_WRITES: Record<string, string> = {};
 
 /** Methods that answer from the in-process mirror and issue no command. */
 const RUNTIME_LOCAL_ONLY = [
@@ -441,6 +471,166 @@ test("a capped generation stamp is still counted as outstanding", async () => {
     );
   } finally {
     await store.close();
+  }
+});
+
+test("a capped revocation leaves the local mirror alone when it lands late", async () => {
+  // The follow-up a cap must NOT keep. The caller is told the revocation did
+  // not happen and compensates by restoring the identity (`restoreLeaveState`);
+  // a mirror update arriving after that restore would delete the token
+  // `requireMemberToken` checks every later message against, leaving the member
+  // seated but unable to speak. Redis needs no such care — the restore's write
+  // is issued after this one on the same connection, so it lands last (#277).
+  const commands = createProbeCommands(null);
+  let releaseRevoke: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseRevoke = resolve;
+  });
+  const store = await createRedisRuntimeStore("redis://unused", {
+    redisClient: {
+      ...createRuntimeProbeClient(commands),
+      eval: async () => {
+        await held;
+        return 1;
+      },
+    },
+    pendingOperationTimeoutMs: BUDGET_MS,
+    closeQuitTimeoutMs: BUDGET_MS,
+    onPendingOperationError() {},
+    onCloseUnfinished() {},
+  });
+  try {
+    store.addMember("ROOM01", "member-probe", PROBE_SESSION, "token-probe");
+    await assert.rejects(
+      Promise.resolve(
+        store.revokeMemberToken("ROOM01", "member-probe", PROBE_SESSION),
+      ),
+      (error: unknown) =>
+        error instanceof RedisStoreUnavailableError &&
+        error.store === "runtime" &&
+        error.reason === "timeout",
+    );
+    // Exactly what the compensation does: put the identity back.
+    store.addMember("ROOM01", "member-probe", PROBE_SESSION, "token-probe");
+
+    releaseRevoke?.();
+    // `close()` is the anchor, and it has to be: it drains BOTH the pending
+    // operation set and the command pacer, so it is the one wait that covers
+    // the real command whichever of them is tracking it — and everything
+    // chained to it. A bare microtask turn would let this assertion win a race
+    // against the mirror update it is meant to catch (#277 review).
+    await store.close();
+
+    assert.equal(
+      store.getOrCreateRoom("ROOM01").memberTokens.get("member-probe"),
+      "token-probe",
+      "a capped revocation applied its mirror update over the restore",
+    );
+  } finally {
+    // Idempotent; the assertion above needs the drain to have happened first.
+    await store.close();
+  }
+});
+
+test("a durable write reports its failure exactly once, whenever it arrives", async () => {
+  // Two reporters watch a bounded durable write: the cap's, and the command's
+  // own terminal report — which exists because a failure arriving after the cap
+  // reaches nobody through the returned promise. Both halves are load-bearing
+  // and they must not overlap: counting a command that does BOTH twice doubles
+  // the failure rate an alert reads, while dropping the terminal report loses a
+  // prompt failure entirely, since a bounded read's rejection is metered by
+  // nobody (#266, #277 review). The log lines are deliberately NOT deduplicated
+  // — the late one is the only one carrying what Redis actually said.
+  const durableWrites: Record<
+    string,
+    (store: RuntimeStoreUnderTest) => Promise<unknown>
+  > = {
+    mark_room_generation: (store) =>
+      Promise.resolve(store.markRoomGeneration("ROOM01", "generation-1", null)),
+    revoke_member_token: (store) =>
+      Promise.resolve(
+        store.revokeMemberToken("ROOM01", "member-probe", PROBE_SESSION),
+      ),
+  };
+
+  for (const [operationName, call] of Object.entries(durableWrites)) {
+    // Late: the cap answers first, the command rejects afterwards.
+    const lateFailures: string[] = [];
+    let rejectEval!: (error: unknown) => void;
+    const heldEval = new Promise<never>((_resolve, reject) => {
+      rejectEval = reject;
+    });
+    const lateStore = await createRedisRuntimeStore("redis://unused", {
+      redisClient: {
+        ...createRuntimeProbeClient(createProbeCommands(null)),
+        eval: () => heldEval,
+      },
+      pendingOperationTimeoutMs: BUDGET_MS,
+      closeQuitTimeoutMs: BUDGET_MS,
+      metricsCollector: {
+        observeRedisRuntimeStoreDuration() {},
+        observeRedisRuntimeStoreFailure(operation) {
+          lateFailures.push(operation);
+        },
+      },
+      onPendingOperationError() {},
+      onCloseUnfinished() {},
+    });
+    try {
+      await assert.rejects(
+        call(lateStore),
+        (error: unknown) =>
+          error instanceof RedisStoreUnavailableError &&
+          error.reason === "timeout",
+      );
+      rejectEval(new Error("redis unavailable"));
+      // Handlers run in attachment order and the store attached its own before
+      // this one, so awaiting here is an ordering guarantee rather than a race.
+      await heldEval.catch(() => undefined);
+      await Promise.resolve();
+
+      assert.deepEqual(
+        lateFailures.filter((operation) => operation === operationName),
+        [operationName],
+        `${operationName} counted its timeout and its late failure separately`,
+      );
+    } finally {
+      await lateStore.close();
+    }
+
+    // Prompt: the command rejects before any cap could fire, so the terminal
+    // report is the ONLY thing that meters it.
+    const promptFailures: string[] = [];
+    const promptStore = await createRedisRuntimeStore("redis://unused", {
+      redisClient: {
+        ...createRuntimeProbeClient(createProbeCommands(null)),
+        eval: async () => {
+          throw new Error("redis unavailable");
+        },
+      },
+      pendingOperationTimeoutMs: BUDGET_MS,
+      closeQuitTimeoutMs: BUDGET_MS,
+      metricsCollector: {
+        observeRedisRuntimeStoreDuration() {},
+        observeRedisRuntimeStoreFailure(operation) {
+          promptFailures.push(operation);
+        },
+      },
+      onPendingOperationError() {},
+      onCloseUnfinished() {},
+    });
+    try {
+      await assert.rejects(call(promptStore), /redis unavailable/);
+      await Promise.resolve();
+
+      assert.deepEqual(
+        promptFailures.filter((operation) => operation === operationName),
+        [operationName],
+        `${operationName} did not meter a failure that arrived promptly`,
+      );
+    } finally {
+      await promptStore.close();
+    }
   }
 });
 

@@ -57,18 +57,17 @@
  * ## What that leaves open, deliberately
  *
  * #277 closed the request-path gap with a cap that keeps each command tracked.
- * TWO writes deliberately remain uncapped, and no longer for one shared
- * reason. The runtime store's `revokeMemberToken`, through
- * `trackAwaitedOperation`, is #237's trade unchanged: its effect does not
- * expire, so a timed-out answer could be contradicted by a late write. The
- * room store's `updateRoom` is not that case — its CAS compares the whole
- * previous body, so nothing it writes late can corrupt anything. It stays
- * because conditionality is only half the question: a cap must sit with
- * whoever owns what the write's SUCCESS owes, and `updateRoom` is reached from
- * six request handlers owing six different follow-ups. Every write that took a
- * cap has ONE caller owning ONE follow-up — which is how `createRoom` took
- * one despite `SET NX` guarding existence rather than identity: its single
- * caller expires the room a late landing may have built. The unused standalone `blockMemberToken` path and unconditional
+ * ONE write deliberately remains uncapped: the room store's `updateRoom`. Not
+ * #237's trade — its CAS compares the whole previous body, so nothing it
+ * writes late can corrupt anything. It stays because conditionality is only
+ * half the question: a cap must sit with whoever owns what the write's SUCCESS
+ * owes, and `updateRoom` is reached from six request handlers owing six
+ * different follow-ups. Every write that took a cap has ONE caller owning ONE
+ * follow-up — which is how `createRoom` took one despite `SET NX` guarding
+ * existence rather than identity (its single caller expires the room a late
+ * landing may have built), and how `revokeMemberToken` took one once its
+ * session guard became mandatory (the kick, which meant "whoever holds it
+ * now", had already moved to `evictMemberToken`). The unused standalone `blockMemberToken` path and unconditional
  * room-store `saveRoom` write were removed in #277; atomic eviction instead
  * bounds the executor's wait while keeping its real
  * effect alive, reports a typed unconfirmed outcome, and keeps its block

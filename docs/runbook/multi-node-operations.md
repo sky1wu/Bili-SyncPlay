@@ -748,13 +748,14 @@ on the background passes**, on purpose:
   `room_reaper_sweep_timeout` → `room_reaper_sweep_stalled`,
   `node_heartbeat_failed`.
 
-Two persistent writes remain uncapped by design, for two different reasons.
-The runtime store's one write through `trackAwaitedOperation` (revoke) is
-#237's rule: its effect does not expire, so an answer that may be wrong is
-worse than a slow one. The room store's `updateRoom` is conditional and could
-not corrupt anything by landing late, but it is reached from six request
-handlers whose successes owe six different follow-ups — a cap inside the store
-would answer all six by discarding the outcome those follow-ups need.
+One persistent write remains uncapped by design: the room store's
+`updateRoom`. It is conditional and could not corrupt anything by landing late,
+but it is reached from six request handlers whose successes owe six different
+follow-ups — a cap inside the store would answer all six by discarding the
+outcome those follow-ups need. The runtime store now has none: `room:leave`'s
+revocation took the request cap once its session guard became mandatory, so a
+stalled Redis answers a leave with `redis_runtime_store_operation_failed
+reason=timeout` instead of holding the connection open.
 
 `createRoom` left that list in #277 as well, and it is the one write whose late
 landing is not harmless: `SET NX` guards the code's existence, not the room's

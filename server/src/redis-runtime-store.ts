@@ -485,9 +485,18 @@ function deserializeSession(fields: Record<string, string>): Session | null {
  * session as the member, so a node-local check would let that node's explicit
  * leave revoke the identity the new node is actively using (#237 review).
  */
+/**
+ * End a member's identity, but only while the session revoking it still owns
+ * that memberId.
+ *
+ * The guard is not optional: it is what makes a revocation that lands after its
+ * caller stopped waiting harmless, so this write can take the request cap like
+ * any other command (#277). "Whoever holds it now" belongs to the kick, which
+ * has {@link EVICT_MEMBER_LUA}.
+ */
 const REVOKE_MEMBER_TOKEN_LUA = `
 local bound = redis.call("HGET", KEYS[1], ARGV[1])
-if ARGV[2] ~= "" and bound and bound ~= ARGV[2] then
+if bound and bound ~= ARGV[2] then
   return 0
 end
 redis.call("HDEL", KEYS[2], ARGV[1])
@@ -832,25 +841,23 @@ export async function createRedisRuntimeStore(
     // also why the bound has to be chosen per CALL, not per method:
     // `loadSession` is reached from the join path AND from the reaper.
     //
-    // What this does NOT resolve: one durable write through
-    // `trackAwaitedOperation` (`revokeMemberToken`). Capping it
-    // re-opens #237's trade that an answer which can be wrong is worse than a
-    // slow one, and its side effect does not expire on its own the way a
-    // lock or a dedup slot does. The former standalone `blockMemberToken` path
-    // had no production caller and was removed in #277 rather than preserving
-    // another unbounded persistent write. Three writes left that list by
-    // becoming CONDITIONAL rather than by re-arguing #237, since a guarded
-    // write's late landing is a no-op and can no longer be the wrong answer:
+    // Nothing on this connection is left without one. Every write that used to
+    // be here left by becoming CONDITIONAL rather than by re-arguing #237,
+    // since a guarded write's late landing can no longer be the wrong answer:
     // `deleteRoom`, whose generation guard is now mandatory and whose one real
     // per-room effect `room-service` retains through local settlement while
     // capping only a request's wait (maintenance callers still await the
     // effect); `evictMemberToken`, whose caller reports an unconfirmed
-    // deadline; and `markRoomGeneration`, whose script now compares the
-    // creator's pin, which is what let it take the ordinary request-path cap.
+    // deadline; `markRoomGeneration`, whose script compares the creator's pin;
+    // and `revokeMemberToken`, whose session guard became mandatory once the
+    // kick — the caller that meant "whoever holds it now" — moved to
+    // `evictMemberToken`. The former standalone `blockMemberToken` path had no
+    // production caller and was removed in #277 rather than preserving another
+    // unbounded persistent write.
     createBoundedRedisClient(redisUrl, {
       bound: "caller",
       boundedBy:
-        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps; NOT trackAwaitedOperation's one remaining durable write",
+        "boundCommand's cap on the request path, the durable write queue's capAttempt at pendingOperationTimeoutMs, trackOperation's cap, admin-command-consumer's member-eviction confirmation deadline, room-service's guarded runtime-teardown confirmation deadline, and maintenance-pass's per-tick caps",
     })) as RedisClient;
   const activeRedisCommands = new Set<Promise<void>>();
   const trackRedisCommand: TrackRedisCommand = <T>(
@@ -1013,9 +1020,63 @@ export async function createRedisRuntimeStore(
     operationName: string,
     issue: () => Promise<T>,
   ): Promise<T> {
+    return await bindCommand(operationName, issue, false);
+  }
+
+  /**
+   * A bounded DURABLE WRITE: bounded exactly like a read, plus its own terminal
+   * report.
+   *
+   * A read's rejection is handled by the caller it propagates to. A durable
+   * write's may arrive AFTER the cap already answered, when nobody is holding
+   * the promise any more — so the failure is metered and logged here instead.
+   *
+   * Exactly ONCE for the counter, whichever side it arrives on: a command that
+   * times out and THEN rejects would otherwise be counted twice and double the
+   * failure rate an alert reads (#277 review). The logs are not deduplicated —
+   * the counter answers "still happening?", while the late line is the only one
+   * carrying what Redis actually said (#266). `trackOperation` needed the same
+   * flag, and this being its second copy is why it lives in one place.
+   */
+  async function boundDurableWrite<T>(
+    operationName: string,
+    issue: () => Promise<T>,
+  ): Promise<T> {
+    return await bindCommand(operationName, issue, true);
+  }
+
+  async function bindCommand<T>(
+    operationName: string,
+    issue: () => Promise<T>,
+    reportsOwnFailure: boolean,
+  ): Promise<T> {
     ensurePendingCapacity(operationName);
+    let failureCounted = false;
+    const countFailureOnce = (): void => {
+      if (failureCounted) {
+        return;
+      }
+      failureCounted = true;
+      // Bounded still owes a report, and the counter is the half that answers
+      // "still happening?" statelessly (#266).
+      metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
+    };
+    const command = issue();
+    if (reportsOwnFailure) {
+      void command.catch((error: unknown) => {
+        countFailureOnce();
+        logPendingOperationError(
+          {
+            operationName,
+            pendingCount: pendingOperations.size,
+            reason: "failed",
+          },
+          error,
+        );
+      });
+    }
     return await commandPacer.capAttempt(
-      issue(),
+      command,
       pendingOperationTimeoutMs,
       () => {
         const error = new RedisStoreUnavailableError(
@@ -1024,9 +1085,7 @@ export async function createRedisRuntimeStore(
           "timeout",
           `Redis runtime store operation timed out: ${operationName}.`,
         );
-        // Bounded still owes a report, and the counter is the half that answers
-        // "still happening?" statelessly (#266).
-        metricsCollector?.observeRedisRuntimeStoreFailure(operationName);
+        countFailureOnce();
         logPendingOperationError(
           {
             operationName,
@@ -2026,30 +2085,40 @@ export async function createRedisRuntimeStore(
         );
       });
     },
-    revokeMemberToken(code: string, memberId: string, session?: Session) {
-      ensurePendingCapacity("revoke_member_token");
-      // Durable-first: the local mirror is only updated once Redis accepted the
-      // revocation. Mirroring first left a partial apply behind when the write
-      // failed — the caller saw a rejection while this node had already dropped
-      // the token (#237 review).
-      //
-      // Awaited, and rejecting: the kick disconnects the socket and reports
-      // success as soon as this resolves, so resolving before the write landed
-      // would report an eviction while the old token still resolved.
-      return trackAwaitedOperation(
-        "revoke_member_token",
-        redis.eval(
-          REVOKE_MEMBER_TOKEN_LUA,
-          3,
-          roomMembersKey(keyPrefix, code),
-          roomMemberTokensKey(keyPrefix, code),
-          roomMemberTokenExpiryKey(keyPrefix, code),
-          memberId,
-          session?.id ?? "",
-        ),
-      ).then(() => {
-        localRuntimeStore.revokeMemberToken(code, memberId, session);
-      });
+    revokeMemberToken(code: string, memberId: string, session: Session) {
+      // Bounded like any other request-path command now that the script's
+      // session guard is mandatory: a revocation that lands after the cap can
+      // only end the identity of the session that asked for it, never the one
+      // its successor is using, which was #237's objection (#277).
+      // `boundDurableWrite`, not `boundCommand`: the cap answers the caller
+      // without cancelling this write, so a failure arriving afterwards reaches
+      // nobody through the returned promise and is reported there instead —
+      // once for the counter, however late it comes (#266, #277 review).
+      return (
+        boundDurableWrite("revoke_member_token", () =>
+          redis.eval(
+            REVOKE_MEMBER_TOKEN_LUA,
+            3,
+            roomMembersKey(keyPrefix, code),
+            roomMemberTokensKey(keyPrefix, code),
+            roomMemberTokenExpiryKey(keyPrefix, code),
+            memberId,
+            session.id,
+          ),
+        )
+          // Durable-first, and on the CAPPED promise rather than the tracked one.
+          // Durable-first because mirroring first left a partial apply behind
+          // when the write failed — the caller saw a rejection while this node
+          // had already dropped the token (#237 review). On the capped promise
+          // because the answer the caller acts on is the capped one: this leave
+          // reports failure and leaves the member seated, so a mirror update
+          // arriving afterwards would delete the token `requireMemberToken`
+          // checks every later message against — seated, and unable to speak
+          // (#277).
+          .then(() => {
+            localRuntimeStore.revokeMemberToken(code, memberId, session);
+          })
+      );
     },
     async hasRoomResidue(code: string) {
       // Pruned first, so identities that have merely aged out do not keep the
@@ -2094,34 +2163,19 @@ export async function createRedisRuntimeStore(
       // conditional: room creation is the only caller, nothing else derives a
       // bound from this command's silence, and a stamp that lands after the cap
       // can no longer clobber the code's next occupant (#277).
-      const applied = await boundCommand("mark_room_generation", () => {
-        const stamp = redis.eval(
+      // `boundDurableWrite`, not `boundCommand`: the cap answers the caller
+      // without cancelling this write, so a failure arriving afterwards reaches
+      // nobody through the returned promise and is reported there instead —
+      // once for the counter, however late it comes (#266, #277 review).
+      const applied = await boundDurableWrite("mark_room_generation", () =>
+        redis.eval(
           MARK_ROOM_GENERATION_LUA,
           1,
           roomGenerationKey(keyPrefix, code),
           generation,
           expectedPrevious ?? "",
-        );
-        // The cap answers the caller without cancelling this write, so a
-        // failure that arrives afterwards reaches nobody through the returned
-        // promise. Reported here instead, which is also what keeps the late
-        // half of a capped stamp observable (#266). A prompt failure logs once:
-        // the cap never fired, so there is no `timeout` line beside it.
-        void stamp.catch((error: unknown) => {
-          metricsCollector?.observeRedisRuntimeStoreFailure(
-            "mark_room_generation",
-          );
-          logPendingOperationError(
-            {
-              operationName: "mark_room_generation",
-              pendingCount: pendingOperations.size,
-              reason: "failed",
-            },
-            error,
-          );
-        });
-        return stamp;
-      });
+        ),
+      );
       return Number(applied) === 1;
     },
     deleteRoom(code: string, expectedGeneration: string | null) {

@@ -278,6 +278,104 @@ test("room service refreshes lastActiveAt for active room joins after refresh wi
   assert.equal(persisted?.lastActiveAt, currentTime);
 });
 
+test("a leave whose revocation fails has nothing to compensate", async () => {
+  // Why the revocation goes FIRST. It is bounded (#277), so it can answer its
+  // caller while still unanswered; done after the removal, every such answer
+  // left a member torn out of the runtime that something had to put back — and
+  // that compensating write is unguarded, so it would re-seat the departed
+  // session over a successor who reconnected onto another node meanwhile. Done
+  // first, there is nothing to put back.
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      revokeMemberToken: async () => {
+        throw new Error("redis unavailable");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMNC",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  await assert.rejects(
+    service.leaveRoomForSession(owner),
+    (error: unknown) =>
+      error instanceof Error && error.message === "Internal server error.",
+  );
+
+  // Still seated, because the removal never ran.
+  assert.equal(activeRooms.getRoom(created.room.code)?.members.size, 1);
+  assert.equal(
+    activeRooms.getRoom(created.room.code)?.members.get("owner"),
+    owner,
+  );
+  // And no recovery happened, because there was nothing to recover. This is the
+  // assertion the old ordering fails: it removed first, so the failure had to
+  // be compensated.
+  assert.ok(!events.includes("room_leave_recovered"));
+});
+
+test("a revocation that stood is not undone when the removal then fails", async () => {
+  // The other side of the reordering, pinned so it is not "fixed" later into a
+  // compensation. Once the revocation has landed the identity is over ON
+  // PURPOSE; putting the token back would undo a write that succeeded. The
+  // member keeps only a seat they can no longer authenticate against, which the
+  // next message or the socket-close leave resolves — and unlike before the
+  // reordering, a synchronous failure here is inside the try and reported.
+  const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
+  const activeRooms = createActiveRoomRegistry();
+  const events: string[] = [];
+  const service = createRoomService({
+    config: getDefaultSecurityConfig(),
+    persistence: getDefaultPersistenceConfig(),
+    roomStore,
+    activeRooms: {
+      ...activeRooms,
+      removeMember: () => {
+        throw new Error("runtime store backpressure");
+      },
+    },
+    generateToken: (() => {
+      let id = 0;
+      return () => `token-${++id}`.padEnd(16, "x");
+    })(),
+    logEvent: ((name) => {
+      events.push(name);
+    }) satisfies LogEvent,
+    now: () => 1_000,
+    createRoomCode: () => "ROOMRF2",
+  });
+
+  const owner = createSession("owner");
+  const created = await service.createRoomForSession(owner, "Alice");
+
+  await assert.rejects(
+    service.leaveRoomForSession(owner),
+    (error: unknown) =>
+      error instanceof Error && error.message === "Internal server error.",
+  );
+
+  const room = activeRooms.getRoom(created.room.code);
+  assert.equal(room?.memberTokens.has("owner"), false, "the revocation stood");
+  assert.ok(!events.includes("room_leave_recovered"));
+  assert.ok(events.includes("room_persist_failed"));
+});
+
 test("room service restores member state when empty-room expiry scheduling fails", async () => {
   const roomStore = createInMemoryRoomStore({ now: () => 1_000 });
   const activeRooms = createActiveRoomRegistry();
@@ -1220,8 +1318,8 @@ test("room service flushes pending runtime store writes before exposing updated 
     removeMember(code, memberId, session) {
       return activeRooms.removeMember(code, memberId, session);
     },
-    revokeMemberToken(code, memberId) {
-      activeRooms.revokeMemberToken(code, memberId);
+    revokeMemberToken(code, memberId, session) {
+      activeRooms.revokeMemberToken(code, memberId, session);
     },
     evictMemberToken(code, memberId, memberToken, blockedUntil) {
       activeRooms.evictMemberToken(code, memberId, memberToken, blockedUntil);
@@ -3021,9 +3119,9 @@ test("join admission restores shared previous session when reconnect rollback ha
       shared.removeMember(code, memberId, session);
       return removal;
     },
-    revokeMemberToken: (code, memberId) => {
-      local.revokeMemberToken(code, memberId);
-      shared.revokeMemberToken(code, memberId);
+    revokeMemberToken: (code, memberId, session) => {
+      local.revokeMemberToken(code, memberId, session);
+      shared.revokeMemberToken(code, memberId, session);
     },
     evictMemberToken: (code, memberId, memberToken, blockedUntil) => {
       local.evictMemberToken(code, memberId, memberToken, blockedUntil);
@@ -3118,9 +3216,9 @@ test("join admission does not restore stale reconnect session over newer shared 
       shared.removeMember(code, memberId, session);
       return removal;
     },
-    revokeMemberToken: (code, memberId) => {
-      local.revokeMemberToken(code, memberId);
-      shared.revokeMemberToken(code, memberId);
+    revokeMemberToken: (code, memberId, session) => {
+      local.revokeMemberToken(code, memberId, session);
+      shared.revokeMemberToken(code, memberId, session);
     },
     evictMemberToken: (code, memberId, memberToken, blockedUntil) => {
       local.evictMemberToken(code, memberId, memberToken, blockedUntil);

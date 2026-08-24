@@ -1671,36 +1671,51 @@ export function createRoomService(options: {
     const leavingDisplayName = session.displayName;
     const leavingJoinedAt = session.joinedAt;
     const sessionSnapshot = snapshotJoinedSession(session);
-    const removal = session.memberId
-      ? runtimeStore.removeMember(roomCode, session.memberId, session)
-      : {
-          room: runtimeStore.getRoom(roomCode),
-          roomEmpty: false,
-          removed: false,
-        };
-    // The session is passed so the STORE decides whether this leave still owns
-    // the identity, against the shared member binding. Gating on `removal.removed`
-    // instead only worked within one node: the mirrored store returns the local
-    // removal, so after a member reconnected onto another node the old node still
-    // considered its stale session the current member and would revoke the token
-    // the new node was using (#237 review).
-
+    let removal: {
+      room: ActiveRoom | null;
+      roomEmpty: boolean;
+      removed: boolean;
+      durable?: Promise<void>;
+    } = {
+      room: runtimeStore.getRoom(roomCode),
+      roomEmpty: false,
+      removed: false,
+    };
     // Recomputed from the shared view inside the try; the catch reads it too.
-    let roomEmpty = removal.roomEmpty;
+    let roomEmpty = false;
 
     try {
-      // Inside the try: revoking is a durable write that now rejects when it
-      // fails, and outside the recovery path a failure left the member removed
-      // from the runtime while `clearSessionRoom` had not run — the client got
-      // an internal error still believing it was joined, with no runtime
-      // membership behind it (#237 review). `restoreLeaveState` in the catch
-      // re-adds the member with the snapshot token, undoing both.
+      // REVOKING COMES FIRST, and that ordering is what removes the need for a
+      // compensation on this path. The revocation is bounded (#277), so it can
+      // answer its caller while unanswered; done after the removal, every such
+      // answer left a member torn out of the runtime that something had to put
+      // back, and the write that put them back was itself unguarded, unbounded
+      // and reached for by a caller who no longer knew what was true. Done
+      // first, a revocation that fails or goes unanswered leaves the member
+      // exactly where they were: the leave fails and there is nothing to undo.
+      //
+      // The session is passed so the STORE decides whether this leave still
+      // owns the identity, against the shared member binding — which is a live
+      // binding here, because the removal that erases it has not run yet.
+      // Gating on `removal.removed` instead only worked within one node: the
+      // mirrored store returns the local removal, so after a member reconnected
+      // onto another node the old node still considered its stale session the
+      // current member and would revoke the token the new node was using
+      // (#237 review).
       if (reason === "client-request" && session.memberId) {
         await runtimeStore.revokeMemberToken(
           roomCode,
           session.memberId,
           session,
         );
+      }
+      if (session.memberId) {
+        removal = runtimeStore.removeMember(
+          roomCode,
+          session.memberId,
+          session,
+        );
+        roomEmpty = removal.roomEmpty;
       }
       await runtimeStore.flush?.();
       // The removal's REAL outcome, which `flush` cannot give: it waits on the

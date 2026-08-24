@@ -174,19 +174,26 @@ export type RuntimeStore = {
    * their `memberId`. Only for deliberate departures: an explicit `room:leave`
    * or an admin kick.
    *
-   * Pass `session` to make it conditional on that session still owning the
-   * memberId (see `revokeMemberTokenInRoom`); omit it only where the caller
-   * means "this identity is over regardless of who holds it now" — the kick.
+   * `session` is REQUIRED, and that is what bounds this write. The revocation
+   * only applies while that session still owns the memberId, so a write landing
+   * after its caller stopped waiting can no longer end the identity its
+   * successor is using — the hazard #237 weighed when it left this write
+   * uncapped. "This identity is over regardless of who holds it now" is the
+   * KICK, and the kick has its own atomic write ({@link
+   * RuntimeStore.evictMemberToken}); leaving a session-less path here would
+   * only be an unguarded write with no production caller (#277).
    *
-   * The returned promise settles once the revocation is durable and REJECTS if
-   * the write failed. A caller that acts on the revocation (the kick disconnects
-   * the socket right after) must await it: resolving early would report success
-   * while the old token still resolved (#237 review).
+   * The returned promise settles once the revocation is durable, and REJECTS
+   * if the write failed OR went unanswered past the store's request cap. Its
+   * local mirror is applied only on the settled path: a caller told the
+   * revocation did not happen compensates by restoring the identity, and a
+   * mirror update arriving after that would strip the token the restored
+   * session authenticates with.
    */
   revokeMemberToken: (
     code: string,
     memberId: string,
-    session?: Session,
+    session: Session,
   ) => void | Promise<void>;
   /**
    * Tear down every runtime key for a room. Returns a promise that settles once

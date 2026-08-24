@@ -240,9 +240,22 @@ before changing the code it describes.
   cannot be recreated. Thus a newer generation's success or a live persisted
   room supersedes older effects whose late skip/failure must not retain or
   resurrect the debt.
-  Still open on purpose: two writes, for two different reasons.
-  `revokeMemberToken` is #237's trade — its effect, unlike a lock's or a dedup
-  slot's, does not expire. `updateRoom` is CONDITIONAL and still stays, which
+  Still open on purpose: ONE write, the room store's `updateRoom`. Every other
+  write on both connections took a bound, `revokeMemberToken` last — by its
+  session guard becoming mandatory, which an earlier slice made possible by
+  moving the kick to `evictMemberToken` and leaving the session-less path with
+  no production caller. **A write can become boundable because a different
+  change removed the caller whose needs kept it unbounded.** A capped write's
+  LOCAL MIRROR update belongs on the capped promise, not the tracked one,
+  wherever the caller would otherwise act on an answer the mirror contradicts
+  (a kick is the opposite case — nobody undoes it, so `evictMemberToken` keeps
+  its mirror on the tracked promise). Bounding a write can also move WHERE it
+  belongs in its operation: `room:leave` now revokes BEFORE it removes, so a
+  revocation answered while still unanswered leaves the member in place and
+  there is nothing to compensate. **A compensation that needs its own guard, its
+  own ordering and its own late outcome is a signal that the operation it
+  compensates is in the wrong place.**
+  `updateRoom` is CONDITIONAL and still stays, which
   is the correction this round bought: **conditionality makes a late landing
   safe to HAVE happened; it does not discharge what the write's SUCCESS owes,
   and the cap must sit with whoever owns that.** Every write that took a cap
