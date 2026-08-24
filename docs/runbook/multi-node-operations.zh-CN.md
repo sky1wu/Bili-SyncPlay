@@ -682,9 +682,11 @@ socket，并在重抛意外实现错误之前 settle 两端结果。房间事件
 `SET NX` 守的是代号是否存在，而不是房间的身份，所以一次在调用方放弃之后才落地的建房，会留下
 一间没有成员、也永不过期的房。因此建房方会在上报之前把它可能建出来的那间房过期掉，并且不再
 换别的代号重试。房间存储僵死时，预期会看到
-`room_persist_failed reason=room_create_unconfirmed`；如果连这份补偿也写不进去，还会有
-`room_rollback_failed`——后者点名的房间代号需要运维手工过期或删除。`admission` 拒绝不做回滚：
-它证明了这条命令根本没有发出去。
+`room_persist_failed reason=room_create_unconfirmed`，外加两条之一，它们点名的房间代号需要
+运维手工过期或删除：补偿被拒或写丢是 `room_rollback_failed`，建房方不再等待它是
+`room_rollback_unconfirmed`——后一种情况下回滚仍在继续，关服时若还有没落地的，
+`room_service_close_unfinished` 会带上 `pendingRoomRollbacks`。建房本身被 `admission` 拒绝时
+不做回滚：它证明了这条命令根本没有发出去。
 
 generation 写在 #277 中因为变成「以建房方所 pin 的值为条件」而离开了这份名单，现在像其他
 命令一样在请求路径上答复调用方。删房也以同样方式离开，且是一对有守卫的形态：`deleteRoom`

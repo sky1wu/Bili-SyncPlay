@@ -762,10 +762,13 @@ identity, so a create that lands after its caller gave up leaves a memberless,
 never-expiring room. The creator therefore expires what it may have built
 before reporting, and stops trying further codes. Expect
 `room_persist_failed reason=room_create_unconfirmed` on a stalled room store,
-and `room_rollback_failed` if that compensation could not be written either —
-the second one names a room code an operator has to expire or delete by hand.
-An `admission` refusal takes no rollback: it proves the command was never
-issued.
+plus one of two lines naming the room code an operator has to expire or delete
+by hand: `room_rollback_failed` if the compensation was refused or lost, and
+`room_rollback_unconfirmed` if the creator stopped waiting for it — the
+rollback keeps going in that case, and a shutdown that still has one out
+reports `pendingRoomRollbacks` in `room_service_close_unfinished`. An
+`admission` refusal on the create itself takes no rollback: it proves the
+command was never issued.
 
 The generation stamp left that list in #277 by becoming conditional on the pin
 its creator read, so it now answers on the request path like any other command.

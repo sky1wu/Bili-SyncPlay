@@ -83,6 +83,19 @@ export const DEFAULT_RUNTIME_TEARDOWN_CONFIRM_TIMEOUT_MS = 5_000;
 export const DEFAULT_ROOM_DELETE_CONFIRM_TIMEOUT_MS = 5_000;
 
 /**
+ * How long a request waits to learn whether the room it may have created was
+ * expired again.
+ *
+ * Its own constant, not the Redis liveness backstop and not the delete's: this
+ * bounds a REQUEST that already knows its creation failed and is only waiting
+ * for the tidy-up. The rollback's write half is `updateRoom`'s CAS, which is
+ * deliberately uncapped in the store, so without a bound here the cap on
+ * `createRoom` would buy nothing — the request would hang on the compensation
+ * instead of on the create (#277 review).
+ */
+export const DEFAULT_ROOM_ROLLBACK_CONFIRM_TIMEOUT_MS = 5_000;
+
+/**
  * Leaves one second inside the shutdown step for reporting and dependency close
  * hand-off. The delete and teardown pacers share this one budget below.
  */
@@ -257,6 +270,8 @@ export function createRoomService(options: {
   runtimeTeardownConfirmationTimeoutMs?: number;
   /** How long a reader waits for an expired room's collection to confirm. */
   roomDeleteConfirmationTimeoutMs?: number;
+  /** How long a creator waits for its orphan rollback to confirm. */
+  roomRollbackConfirmationTimeoutMs?: number;
   /** Shared by late persisted-room deletions and runtime teardown effects. */
   closeBudgetMs?: number;
 }): {
@@ -335,6 +350,13 @@ export function createRoomService(options: {
   const roomDeleteConfirmationPacer = createRetryPacer({
     initialDelayMs: roomDeleteConfirmationTimeoutMs,
     maxDelayMs: roomDeleteConfirmationTimeoutMs,
+  });
+  const roomRollbackConfirmationTimeoutMs =
+    options.roomRollbackConfirmationTimeoutMs ??
+    DEFAULT_ROOM_ROLLBACK_CONFIRM_TIMEOUT_MS;
+  const roomRollbackConfirmationPacer = createRetryPacer({
+    initialDelayMs: roomRollbackConfirmationTimeoutMs,
+    maxDelayMs: roomRollbackConfirmationTimeoutMs,
   });
   const closeBudgetMs =
     options.closeBudgetMs ?? DEFAULT_ROOM_SERVICE_CLOSE_BUDGET_MS;
@@ -1035,18 +1057,31 @@ export function createRoomService(options: {
     if (remaining > 0) {
       await runtimeTeardownConfirmationPacer.settleTracked(remaining);
     }
+    // Independent of the two above — an orphan rollback starts nothing nested —
+    // but it is still an effect that outlived its request, so it owes this
+    // lifecycle boundary the same report.
+    const remainingForRollbacks = remainingBudgetMs();
+    if (remainingForRollbacks > 0) {
+      await roomRollbackConfirmationPacer.settleTracked(remainingForRollbacks);
+    }
 
     const pendingRoomDeletions = roomDeleteConfirmationPacer.trackedCount();
+    const pendingRoomRollbacks = roomRollbackConfirmationPacer.trackedCount();
     // The debt ledger is the source of truth, not the request confirmation
     // pacer. A fast rejection or guarded skip leaves no tracked request, but its
     // ownerless ledger entry is still the only trail to runtime state whose
     // persisted room has already gone.
     const pendingRuntimeTeardownCount = pendingRuntimeTeardowns.size;
-    if (pendingRoomDeletions > 0 || pendingRuntimeTeardownCount > 0) {
+    if (
+      pendingRoomDeletions > 0 ||
+      pendingRuntimeTeardownCount > 0 ||
+      pendingRoomRollbacks > 0
+    ) {
       logEvent("room_service_close_unfinished", {
         provider: persistence.provider,
         pendingRoomDeletions,
         pendingRuntimeTeardowns: pendingRuntimeTeardownCount,
+        pendingRoomRollbacks,
         budgetMs: closeBudgetMs,
         result: "timeout",
       });
@@ -1266,8 +1301,56 @@ export function createRoomService(options: {
    * the code changed hands (nothing of ours survives) and when an admin merely
    * touched OUR still-memberless room (the orphan is still there). The two are
    * told apart by re-reading, never assumed.
+   *
+   * It can also be refused before it issues, when the create that owes it took
+   * the last admission slot and is still holding it. That is reported like any
+   * other residue and not given reserved capacity: admission's whole value is
+   * being ONE number bounding ioredis's queue, and a second class inside it
+   * would not shrink the queue that caused the refusal — the create is still
+   * in it. What an operator needs is the room code, which the log carries.
    */
   async function expireOrphanedRoom(
+    target: { code: string; joinToken: string; version: number },
+    reason: string,
+    session: Session,
+  ): Promise<void> {
+    // Two lifetimes, like every other bounded effect here: the request stops
+    // waiting on its own deadline, the rollback keeps going. It has to, because
+    // its write half is `updateRoom`'s CAS — deliberately uncapped in the store
+    // — so a request that simply awaited it would hang on the compensation
+    // instead of on the create, and the cap above would buy nothing. Waiting
+    // less does not make the orphan more likely: the effect either lands or
+    // reports, and shutdown drains what is still out (#277 review).
+    const effect = roomRollbackConfirmationPacer.trackCall(
+      runOrphanExpiry(target, reason, session),
+    );
+    try {
+      await roomRollbackConfirmationPacer.capWait(
+        effect,
+        roomRollbackConfirmationTimeoutMs,
+        () =>
+          new Error(
+            `Room ${target.code} rollback went unconfirmed for ${roomRollbackConfirmationTimeoutMs}ms.`,
+          ),
+      );
+    } catch {
+      logEvent(
+        "room_rollback_unconfirmed",
+        {
+          sessionId: session.id,
+          roomCode: target.code,
+          provider: persistence.provider,
+          result: "timeout",
+          reason,
+          timeoutMs: roomRollbackConfirmationTimeoutMs,
+        },
+        { level: "error" },
+      );
+    }
+  }
+
+  /** The rollback itself. Reports its own residue and never rejects. */
+  async function runOrphanExpiry(
     target: { code: string; joinToken: string; version: number },
     reason: string,
     session: Session,

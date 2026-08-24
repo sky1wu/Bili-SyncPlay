@@ -934,6 +934,21 @@ do NOT compose, and that is the part that decides which connection gets which:
   connection that proves no command was issued, so rolling back there would
   write over a room that does not exist and report a residue that never was.
 
+  **The compensation is itself a second lifetime, and missing that is what would
+  have made the cap worthless.** Its write half is `updateRoom`'s CAS, which the
+  store leaves uncapped — so a creator that simply awaited the rollback would
+  hang on the compensation instead of on the create, and `createRoom`'s cap
+  would bound nothing. The request bounds its WAIT on its own constant
+  (`DEFAULT_ROOM_ROLLBACK_CONFIRM_TIMEOUT_MS`, not the Redis liveness backstop
+  and not the delete's), the effect keeps going, and `closeRoomService` drains
+  it inside the same shutdown budget as the delete chain and the runtime
+  teardowns, reporting `pendingRoomRollbacks`. The rollback can also be REFUSED
+  before it issues, when the create that owes it took the last admission slot
+  and still holds it; that is reported as residue and given no reserved
+  capacity, because admission's value is being one number bounding ioredis's
+  queue and a second class inside it would not shrink the queue that caused the
+  refusal.
+
   The room store's delete left the same list the same way, in TWO guarded forms
   because the guard is a property of the CALL, not of the method. `deleteRoom`
   pins the instance by `joinToken`: an admin closing a room disconnects its
