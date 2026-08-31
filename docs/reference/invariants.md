@@ -698,7 +698,7 @@ kicked a member, so shedding it quietly is not a trade anybody may make on an
 operator's behalf. The rules that fell out:
 
 - **Extract the mechanism, keep the policy at the call site.** The four bounds
-  are now `admin/append-chain.ts`, and the two stores differ only in what their
+  are now `server/src/admin/append-chain.ts`, and the two stores differ only in what their
   `onRefused` / `onAbandonedAtShutdown` handlers do — the event store returns
   the record it built, the audit store throws. Writing the chain a second time
   by hand is exactly the shape that cost #242 six duplicate findings, half of

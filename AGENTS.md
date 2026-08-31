@@ -74,7 +74,8 @@ Checklist for any PR touching the sync protocol; compatibility policy is in
    `MIN_PROTOCOL_VERSION` (currently `1`), so confirm an old client's guards
    tolerate them or gate on a version check — copy
    `MEMBER_DELTA_PROTOCOL_VERSION` (`server/src/room-event-consumer.ts`).
-4. Update `docs/reference/protocol.md` and `protocol.zh-CN.md` in the same PR.
+4. Update `docs/reference/protocol.md` and `docs/reference/protocol.zh-CN.md`
+   in the same PR.
 
 ## Structural Constraints
 
@@ -126,8 +127,8 @@ linked section, and that is where new detail goes, not here.
   precondition, not from its shape.**
 - **[Which record may be shed is a property of the record](./docs/reference/invariants.md#which-record-may-be-shed-is-a-property-of-the-record-not-of-the-queue)**
   (#267) — event store and audit store share the four bounds in
-  `admin/append-chain.ts` and differ only in `onRefused`; a shutdown step's
-  budget belongs to the step, not to one component inside it.
+  `server/src/admin/append-chain.ts` and differ only in `onRefused`; a shutdown
+  step's budget belongs to the step, not to one component inside it.
 - **[Two layers bound a Redis command, and they do not compose](./docs/reference/invariants.md#two-layers-bound-a-redis-command)**
   (#271, #277) — a **deadline** is per-behaviour, derived from what its caller
   can promise, and decides what happens next; `commandTimeout` is a **liveness
@@ -175,13 +176,15 @@ linked section, and that is where new detail goes, not here.
 
 ## Git And Execution Constraints
 
-- ALWAYS branch before making changes; NEVER push to `main`, and never rewrite
-  published history unless the maintainer asks.
+- ALWAYS branch before making changes; NEVER push to `main`.
+- Never rewrite published history unless the repository maintainer asks for it.
 - No destructive git operations (`git reset --hard`, force-push, overwriting
   unrelated uncommitted changes) unless explicitly requested.
-- Do not touch secrets, `.env`, release credentials or deployment settings, and
-  do not bump versions, lockfiles or release artifacts, unless the task requires
-  it.
+- Never touch secrets, `.env`, release credentials or production deployment
+  settings unless **explicitly requested** — a task that merely sounds
+  deployment-related is not that request.
+- Do not update versions, lockfiles or release artifacts unless the task clearly
+  requires it.
 - Keep changes scoped to the task; no opportunistic edits in unrelated files.
 - Small commits, behavior preserved at each step: formatting stays out of
   behavior commits, unrelated refactors/docs/fixes are not mixed when they can be
