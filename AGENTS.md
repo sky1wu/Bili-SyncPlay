@@ -5,13 +5,16 @@
 - For AI agents, coding assistants, and repository automations working in this
   codebase. [CONTRIBUTING.md](./CONTRIBUTING.md) applies here too — this file
   only adds agent-specific execution constraints and decision rules.
-- Keep it short: it loads into every agent's context. Budget **200 lines**, one
-  to four lines per rule. Longer reasoning goes to `docs/reference/` behind a
-  link; do not restate here what a linked doc already says.
-- Runtime invariants live in
+- Keep it short: it loads into every agent's context. The budget is the whole
+  file — **200 lines**, checkable with `wc -l AGENTS.md`. A rule here carries its
+  criterion and nothing else: the derivation goes to `docs/reference/` behind a
+  link. A rule whose reasoning lives elsewhere may still be stated here in short
+  form — `CONTRIBUTING.md` and `docs/` are not auto-loaded — but its reasoning
+  never is.
+- Runtime invariants:
   [docs/reference/invariants.md](./docs/reference/invariants.md)
-  ([中文](./docs/reference/invariants.zh-CN.md)) — read the relevant section
-  before touching playback timing, share ownership, the shared runtime store,
+  ([中文](./docs/reference/invariants.zh-CN.md)) — read the relevant section before
+  touching playback timing, share ownership, the shared runtime store,
   room-event broadcasts, or a background maintenance timer.
 
 ## Language Rules
@@ -65,9 +68,8 @@ Checklist for any PR touching the sync protocol; compatibility policy is in
 2. Grep ALL call sites of a changed signature, including `server/src/app.ts` and
    the `index.ts` adapters. `tsc` catches a call with too few arguments
    (`TS2554`) but silently accepts a function that _declares_ fewer parameters
-   than the type it is assigned to — that callback keeps typechecking, never
-   receives the new trailing argument, and drops it without a word. Only grep
-   catches this one.
+   than the type it is assigned to: that callback keeps typechecking and drops
+   the new trailing argument without a word. Only grep catches it.
 3. New enum values or fields: the server accepts clients down to
    `MIN_PROTOCOL_VERSION` (currently `1`), so confirm an old client's guards
    tolerate them or gate on a version check — copy
@@ -88,7 +90,7 @@ Checklist for any PR touching the sync protocol; compatibility policy is in
 ## Runtime Invariants
 
 Nothing in the type system enforces these; each cost multiple review rounds.
-These are the one-line versions — reasoning and code references are in the
+Each bullet is the criterion only — reasoning and code references live in the
 linked section, and that is where new detail goes, not here.
 
 - **[Playback timing](./docs/reference/invariants.md#playback-timing-invariants)**
@@ -181,9 +183,9 @@ linked section, and that is where new detail goes, not here.
   do not bump versions, lockfiles or release artifacts, unless the task requires
   it.
 - Keep changes scoped to the task; no opportunistic edits in unrelated files.
-- Small commits that preserve behavior at each step: formatting-only changes stay
-  out of behavior commits, unrelated refactors/docs/fixes are not mixed when they
-  can be reviewed apart, and prefixes follow
+- Small commits, behavior preserved at each step: formatting stays out of
+  behavior commits, unrelated refactors/docs/fixes are not mixed when they can be
+  reviewed apart, and prefixes follow
   [CONTRIBUTING.md](./CONTRIBUTING.md#commit-conventions) — never hide a behavior
   change in `chore:` or `docs:`.
 - When a change affects developer workflow, architecture or shared rules, update

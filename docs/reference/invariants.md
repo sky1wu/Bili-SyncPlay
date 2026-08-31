@@ -2,7 +2,7 @@
 
 Rules that no type, lint, or test enforces on their own, each written down after a
 bug or a long review round found it the hard way. [AGENTS.md](../../AGENTS.md)
-carries the one-line version of each; this file carries the reasoning, which is
+carries the criterion of each; this file carries the reasoning, which is
 what you need before changing the code they describe.
 
 Read the relevant section before touching: background playback timing, share
