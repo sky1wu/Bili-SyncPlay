@@ -135,6 +135,20 @@ describe("RoomsPage", () => {
     expect(screen.getAllByText("阿伟").length).toBeGreaterThan(0);
   });
 
+  it("keeps the room table readable with horizontal scrolling", async () => {
+    renderRooms(
+      createOperatorAuth({
+        listRooms: vi.fn().mockResolvedValue(makeListResult([makeRoom()])),
+      }),
+    );
+
+    await screen.findByText("ROOM1");
+    const table = screen.getByRole("table");
+    expect(table.style.width).toBe("1180px");
+    expect(table.style.minWidth).toBe("100%");
+    expect(table.parentElement?.style.overflowX).toBe("auto");
+  });
+
   it("passes URL search params through to the rooms query", async () => {
     const listRooms = vi.fn().mockResolvedValue(makeListResult([]));
     renderRooms(

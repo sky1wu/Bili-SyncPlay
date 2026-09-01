@@ -17,14 +17,14 @@ export function RoomsFilter({
   }, [query.keyword]);
 
   return (
-    <Space wrap>
+    <Space className="rooms-filter" wrap>
       <Input.Search
+        className="rooms-filter__search"
         allowClear
         placeholder="房间号 / 成员 / 视频标题 / URL，空格分隔多关键字"
         value={keywordDraft}
         onChange={(event) => setKeywordDraft(event.target.value)}
         onSearch={(keyword) => onChange({ keyword: keyword.trim(), page: 1 })}
-        style={{ width: 360 }}
       />
       <Segmented<RoomStatusFilter>
         value={query.status ?? "all"}

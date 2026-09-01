@@ -83,6 +83,7 @@ export function RoomsTable({
       loading={loading}
       dataSource={data?.items ?? []}
       locale={{ emptyText: "没有符合条件的房间。" }}
+      scroll={{ x: 1180 }}
       rowSelection={
         manageable
           ? {
@@ -105,6 +106,7 @@ export function RoomsTable({
         {
           title: "房间",
           dataIndex: "roomCode",
+          width: 128,
           render: (roomCode: string, room) => (
             <>
               <Typography.Link onClick={() => onOpenRoom(roomCode)}>
@@ -120,11 +122,13 @@ export function RoomsTable({
         {
           title: "状态",
           dataIndex: "isActive",
+          width: 110,
           render: (_value, room) => <RoomStatusTag room={room} />,
         },
         {
           title: "共享视频",
           dataIndex: "sharedVideo",
+          width: 260,
           render: (_value, room) =>
             room.sharedVideo ? (
               <Typography.Link
@@ -143,11 +147,13 @@ export function RoomsTable({
         {
           title: "播放进度",
           dataIndex: "playback",
+          width: 140,
           render: (_value, room) => <PlaybackCell room={room} />,
         },
         {
           title: "最近活跃",
           dataIndex: "lastActiveAt",
+          width: 160,
           sorter: true,
           sortOrder: controlledSortOrder("lastActiveAt"),
           render: (value: number) => formatDateTime(value),
@@ -155,6 +161,7 @@ export function RoomsTable({
         {
           title: "创建时间",
           dataIndex: "createdAt",
+          width: 160,
           sorter: true,
           sortOrder: controlledSortOrder("createdAt"),
           render: (value: number) => formatDateTime(value),
@@ -162,6 +169,7 @@ export function RoomsTable({
         {
           title: "操作",
           key: "actions",
+          width: 130,
           render: (_value, room) => (
             <Space>
               <Button size="small" onClick={() => onOpenRoom(room.roomCode)}>
