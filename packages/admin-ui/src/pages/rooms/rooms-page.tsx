@@ -224,7 +224,7 @@ export function RoomsPage() {
 
   return (
     <Space direction="vertical" size={16} style={{ display: "flex" }}>
-      <Card>
+      <Card className="rooms-filter-card">
         <Space direction="vertical" size={12} style={{ display: "flex" }}>
           <RoomsFilter query={query} onChange={updateQuery} />
           <Space wrap>

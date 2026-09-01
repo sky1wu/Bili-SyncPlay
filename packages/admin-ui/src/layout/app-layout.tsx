@@ -31,8 +31,12 @@ export function AppLayout() {
   };
 
   return (
-    <Layout style={{ minHeight: "100vh" }}>
-      <Layout.Sider breakpoint="lg" collapsedWidth={0}>
+    <Layout className="admin-layout">
+      <Layout.Sider
+        breakpoint="lg"
+        collapsedWidth={0}
+        zeroWidthTriggerStyle={{ top: 12 }}
+      >
         <div style={{ padding: "16px 24px" }}>
           <Typography.Text
             style={{ color: "rgba(255, 255, 255, 0.65)", fontSize: 12 }}
@@ -59,27 +63,24 @@ export function AppLayout() {
         />
       </Layout.Sider>
       <Layout>
-        <Layout.Header
-          style={{
-            background: "#fff",
-            padding: "0 24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
+        <Layout.Header className="admin-layout__header">
           <Typography.Title level={4} style={{ margin: 0 }}>
             {activeItem?.label ?? "概览"}
           </Typography.Title>
-          <Space>
-            <Typography.Text strong>{me?.username}</Typography.Text>
+          <Space className="admin-layout__account">
+            <Typography.Text className="admin-layout__username" strong>
+              {me?.username}
+            </Typography.Text>
             {me ? <Tag color="blue">{me.role}</Tag> : null}
             <Button onClick={handleLogout}>退出</Button>
           </Space>
         </Layout.Header>
-        <Layout.Content style={{ padding: 24 }}>
+        <Layout.Content className="admin-layout__content">
           {activeItem ? (
-            <Typography.Paragraph type="secondary">
+            <Typography.Paragraph
+              className="admin-layout__description"
+              type="secondary"
+            >
               {activeItem.description}
             </Typography.Paragraph>
           ) : null}

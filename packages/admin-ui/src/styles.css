@@ -1,0 +1,75 @@
+html,
+body,
+#root {
+  min-width: 0;
+  min-height: 100%;
+  margin: 0;
+}
+
+.admin-layout {
+  min-width: 0;
+  min-height: 100vh;
+}
+
+.admin-layout__header {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background: #fff;
+}
+
+.admin-layout__account {
+  flex: none;
+}
+
+.admin-layout__content {
+  min-width: 0;
+  padding: 24px;
+}
+
+.rooms-filter {
+  display: flex;
+  width: 100%;
+}
+
+.rooms-filter__search {
+  width: 360px;
+  max-width: 100%;
+}
+
+@media (max-width: 991px) {
+  .admin-layout__header {
+    padding-right: 16px;
+    padding-left: 56px;
+  }
+
+  .admin-layout__content {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 575px) {
+  .admin-layout__header {
+    gap: 8px;
+    padding-right: 12px;
+  }
+
+  .admin-layout__username {
+    display: none;
+  }
+
+  .admin-layout__content {
+    padding: 12px;
+  }
+
+  .rooms-filter-card > .ant-card-body {
+    padding: 16px;
+  }
+
+  .rooms-filter > .ant-space-item:first-child,
+  .rooms-filter__search {
+    width: 100%;
+  }
+}
