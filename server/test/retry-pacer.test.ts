@@ -119,3 +119,78 @@ test("capWait does not track repeated waits on an already tracked call", async (
   assert.equal(pacer.trackedCount(), 0);
   pacer.stop();
 });
+
+test("raceStopped parks one waiter per call and releases it when the call answers", async () => {
+  const pacer = createRetryPacer({ initialDelayMs: 1, maxDelayMs: 1 });
+
+  // The defect this guards (#312): the stop side used to be ONE
+  // process-lifetime promise every caller raced against. A promise that only
+  // settles at shutdown never releases the `PromiseReaction` each race attaches
+  // to it, so five call sites accumulated a reaction, two closures, a context
+  // and two promises per call — ~349 bytes a time — until major GC pauses grew
+  // 25x over four days of uptime.
+  //
+  // Two properties have to hold, and one without the other still leaks:
+  // the stop side is per CALL (so it dies with the call), and the Set that
+  // `stop` reaches those calls through is PRUNED (so it is not the same leak
+  // one level up).
+  const parked = Array.from({ length: 3 }, () => {
+    let resolve = (): void => {};
+    const promise = new Promise<void>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  });
+  const races = parked.map((work) => pacer.raceStopped(work.promise));
+  await delay(10);
+
+  // Per call, not one shared entry: a shared signal would sit at 1 here.
+  assert.equal(pacer.stopWaiterCount(), 3);
+
+  for (const work of parked) {
+    work.resolve();
+  }
+  await Promise.all(races);
+
+  // And back down. Leaving them in the Set would retain every closure the
+  // races captured, for as long as the pacer lives.
+  assert.equal(pacer.stopWaiterCount(), 0);
+  pacer.stop();
+});
+
+test("raceStopped gives up the wait when stop is called, and keeps rejections", async () => {
+  const pacer = createRetryPacer({ initialDelayMs: 1, maxDelayMs: 1 });
+
+  // Shutdown still cuts a parked wait short — the reason the stop side exists
+  // at all. `raceStopped` resolves rather than rejects, so callers keep the
+  // `if (stopped())` re-check they had when they wrote the race by hand.
+  const neverAnswers = new Promise<void>(() => {});
+  const parked = pacer.raceStopped(neverAnswers);
+  await delay(10);
+  assert.equal(pacer.stopWaiterCount(), 1);
+
+  pacer.stop();
+  await parked;
+  assert.equal(pacer.stopWaiterCount(), 0);
+  assert.equal(pacer.stopped(), true);
+
+  // Already stopped: answer without attaching anything, which is what racing an
+  // already-resolved signal did.
+  await pacer.raceStopped(new Promise<void>(() => {}));
+  assert.equal(pacer.stopWaiterCount(), 0);
+});
+
+test("raceStopped propagates the work's rejection", async () => {
+  const pacer = createRetryPacer({ initialDelayMs: 1, maxDelayMs: 1 });
+
+  // The five call sites were hand-written races, and a race rejects when its
+  // work rejects. `durable-write-queue`'s `settle()` and `pending-resync-queue`'s
+  // `inFlight` both can — swallowing that here would change their control flow
+  // silently.
+  await assert.rejects(
+    pacer.raceStopped(Promise.reject(new Error("work failed"))),
+    /work failed/,
+  );
+  assert.equal(pacer.stopWaiterCount(), 0);
+  pacer.stop();
+});
