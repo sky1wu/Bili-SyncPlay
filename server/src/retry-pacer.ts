@@ -156,9 +156,11 @@ export type RetryPacer = {
    * Wait for `work`, giving up the wait once {@link RetryPacer.stop} is called.
    *
    * Resolves with `work`'s value, or with `undefined` when stopping won the
-   * race; rejects exactly when `work` rejects, so callers keep the semantics
-   * they had when they wrote the race by hand. Callers still re-check
-   * {@link RetryPacer.stopped} afterwards to tell the two resolutions apart.
+   * race; rejects when `work` rejects AND wins, so callers keep the semantics
+   * they had when they wrote the race by hand. A rejection that loses the race
+   * is consumed rather than dropped, on both the parked and the
+   * already-stopped path. Callers still re-check {@link RetryPacer.stopped}
+   * afterwards to tell the two resolutions apart.
    *
    * The pacer owns the race because the stop side must be a promise that DIES
    * WITH THE CALL. The obvious shape — one process-lifetime `stoppedSignal`
@@ -261,9 +263,15 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
       return isStopped;
     },
     async raceStopped(work) {
-      // Already stopping: answer without attaching anything, which is also what
-      // racing an already-resolved signal did.
+      // Already stopping: answer without waiting, which is what racing an
+      // already-resolved signal did. It still has to CONSUME `work`'s
+      // rejection: `Promise.race` attaches to both arms even when one has
+      // already settled, so the old shape swallowed a late failure. Returning
+      // without a handler instead leaves it unhandled, and Node's default for
+      // an unhandled rejection is to terminate the process — a shutdown path
+      // is the last place that should be a new way to crash (#313 review).
       if (isStopped) {
+        void work.catch(() => undefined);
         return undefined;
       }
       let release = (): void => {};

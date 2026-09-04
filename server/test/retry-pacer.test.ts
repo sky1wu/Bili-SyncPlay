@@ -194,3 +194,43 @@ test("raceStopped propagates the work's rejection", async () => {
   assert.equal(pacer.stopWaiterCount(), 0);
   pacer.stop();
 });
+
+test("raceStopped consumes a rejection it stops waiting on, on both paths", async () => {
+  // `Promise.race` attaches to BOTH arms even when one has already settled, so
+  // the hand-written races consumed a `work` rejection that lost. Answering
+  // early without a handler instead leaves it unhandled, and Node's default is
+  // to terminate the process on one — turning a leak fix into a crash on the
+  // shutdown path (#313 review).
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    // Path 1: parked, then stop wins, then the work fails late.
+    const parkedPacer = createRetryPacer({ initialDelayMs: 1, maxDelayMs: 1 });
+    let failLate = (): void => {};
+    const losesTheRace = new Promise<void>((_resolve, reject) => {
+      failLate = () => reject(new Error("late failure"));
+    });
+    const parked = parkedPacer.raceStopped(losesTheRace);
+    await delay(5);
+    parkedPacer.stop();
+    await parked;
+    failLate();
+    await delay(20);
+
+    // Path 2: already stopped when the call arrives.
+    const stoppedPacer = createRetryPacer({ initialDelayMs: 1, maxDelayMs: 1 });
+    stoppedPacer.stop();
+    const answer = await stoppedPacer.raceStopped(
+      Promise.reject(new Error("failed after stop")),
+    );
+    assert.equal(answer, undefined);
+    await delay(20);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+
+  assert.deepEqual(unhandled, []);
+});
