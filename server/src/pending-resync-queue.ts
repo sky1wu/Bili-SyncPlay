@@ -282,7 +282,7 @@ export function createPendingResyncQueue(
             // another on top — at most ONE publish per room is ever out there.
             // `stopRetrying` cuts the wait short so shutdown is not pinned by
             // a bus that has stopped answering.
-            await Promise.race([inFlight, pacer.whenStopped()]);
+            await pacer.raceStopped(inFlight);
             if (pacer.stopped()) {
               return;
             }

@@ -221,10 +221,7 @@ export function createDurableWriteQueue(
         // `ensurePendingCapacity`, so the configured cap would not see them
         // (#242 review). `settle` is exactly "every command started so far has
         // answered"; the stop signal is what keeps shutdown from waiting on it.
-        await Promise.race([
-          request.settle?.() ?? Promise.resolve(),
-          pacer.whenStopped(),
-        ]);
+        await pacer.raceStopped(request.settle?.() ?? Promise.resolve());
         if (isSuperseded()) {
           throw new SupersededWriteError(request.key, request.operationName);
         }
@@ -254,7 +251,7 @@ export function createDurableWriteQueue(
         // reach of the stop check below, so `close()` sat on outcomes that
         // could never settle and the shutdown step was guaranteed to overrun
         // (#242 review). The KEY chain still waits — ordering is unchanged.
-        await Promise.race([previousSettled, pacer.whenStopped()]);
+        await pacer.raceStopped(previousSettled);
         if (pacer.stopped()) {
           throw new Error(
             `Durable write ${request.operationName} for ${request.key} was dropped: the queue is shutting down.`,

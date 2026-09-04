@@ -21,9 +21,10 @@
  *   under it. {@link RetryPacer.settleTracked} is the second answer, and
  *   {@link settleWithin} is the same answer for a caller holding its own
  *   promise (`redis-event-store`'s append chain).
- * - **One stop switch**, readable as a flag and awaitable as a promise, because
- *   callers need both (`if (stopped())` in a loop, `race([call, whenStopped()])`
- *   when parked on someone else's promise).
+ * - **One stop switch**, readable as a flag and raceable against someone else's
+ *   promise, because callers need both (`if (stopped())` in a loop,
+ *   {@link RetryPacer.raceStopped} when parked on a call they do not own).
+ *   Raceable, never exposed AS a promise: see {@link RetryPacer.raceStopped}.
  *
  * What is NOT here, on purpose: ordering, supersession, confirmation, dedupe,
  * and who decides to retry. Those differ per facility and belong to it.
@@ -137,6 +138,13 @@ export type RetryPacer = {
   /** Calls that have not answered yet. */
   trackedCount: () => number;
   /**
+   * {@link RetryPacer.raceStopped} calls currently parked, for the regression
+   * test that this number comes back DOWN. One per parked call, never one
+   * shared entry: a count that stays at 1 while ten calls are parked is the
+   * shared-signal shape (#312) wearing this Set as a disguise.
+   */
+  stopWaiterCount: () => number;
+  /**
    * Wait, bounded, for the calls that outlived their cap.
    *
    * Bounded because an unbounded wait only moves a shutdown overrun from
@@ -144,8 +152,28 @@ export type RetryPacer = {
    */
   settleTracked: (timeoutMs: number) => Promise<void>;
   stopped: () => boolean;
-  /** Resolves once {@link RetryPacer.stop} is called; never rejects. */
-  whenStopped: () => Promise<void>;
+  /**
+   * Wait for `work`, giving up the wait once {@link RetryPacer.stop} is called.
+   *
+   * Resolves with `work`'s value, or with `undefined` when stopping won the
+   * race; rejects when `work` rejects AND wins, so callers keep the semantics
+   * they had when they wrote the race by hand. A rejection that loses the race
+   * is consumed rather than dropped, on both the parked and the
+   * already-stopped path. Callers still re-check {@link RetryPacer.stopped}
+   * afterwards to tell the two resolutions apart.
+   *
+   * The pacer owns the race because the stop side must be a promise that DIES
+   * WITH THE CALL. The obvious shape — one process-lifetime `stoppedSignal`
+   * that callers `race` against — attaches a `PromiseReaction` to it per call,
+   * and a promise that only settles at shutdown never releases one: four call
+   * sites leaked a reaction, two closures, a context and two promises apiece,
+   * ~349 bytes a time, until major GC pauses grew 25x over four days (#312).
+   * A per-call promise becomes unreachable when the call is done, so nothing
+   * accumulates. `stopWaiters` is what `stop` still reaches them through, and
+   * it is pruned in `finally` — an unpruned Set is the same leak wearing a
+   * different hat.
+   */
+  raceStopped: <T>(work: Promise<T>) => Promise<T | void>;
   /** Stop retrying and cut short every backoff in flight. Irreversible. */
   stop: () => void;
 };
@@ -157,10 +185,8 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
   /** Calls still owed an answer, each error-swallowed so it stays quiet. */
   const trackedCalls = new Set<Promise<void>>();
   let isStopped = false;
-  let signalStopped = (): void => {};
-  const stoppedSignal = new Promise<void>((resolve) => {
-    signalStopped = resolve;
-  });
+  /** `resolve` for every {@link RetryPacer.raceStopped} currently parked. */
+  const stopWaiters = new Set<() => void>();
 
   function trackCall<T>(call: Promise<T>): Promise<T> {
     const answered = call.then(
@@ -218,6 +244,9 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
     trackedCount() {
       return trackedCalls.size;
     },
+    stopWaiterCount() {
+      return stopWaiters.size;
+    },
     async settleTracked(timeoutMs) {
       if (trackedCalls.size === 0) {
         return;
@@ -233,12 +262,39 @@ export function createRetryPacer(options: RetryPacerOptions): RetryPacer {
     stopped() {
       return isStopped;
     },
-    whenStopped() {
-      return stoppedSignal;
+    async raceStopped(work) {
+      // Already stopping: answer without waiting, which is what racing an
+      // already-resolved signal did. It still has to CONSUME `work`'s
+      // rejection: `Promise.race` attaches to both arms even when one has
+      // already settled, so the old shape swallowed a late failure. Returning
+      // without a handler instead leaves it unhandled, and Node's default for
+      // an unhandled rejection is to terminate the process — a shutdown path
+      // is the last place that should be a new way to crash (#313 review).
+      if (isStopped) {
+        void work.catch(() => undefined);
+        return undefined;
+      }
+      let release = (): void => {};
+      const stopping = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      stopWaiters.add(release);
+      try {
+        return await Promise.race([work, stopping]);
+      } finally {
+        stopWaiters.delete(release);
+        // `stopping` is unreachable from here on, so its reaction would go with
+        // it either way; settling it keeps that true even if a future caller
+        // holds the promise longer than the call.
+        release();
+      }
     },
     stop() {
       isStopped = true;
-      signalStopped();
+      for (const release of Array.from(stopWaiters)) {
+        release();
+      }
+      stopWaiters.clear();
       for (const release of Array.from(pendingWaits)) {
         release();
       }

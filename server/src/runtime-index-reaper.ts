@@ -287,7 +287,7 @@ export function createRuntimeIndexReaper(options: {
           return false;
         },
       );
-    await Promise.race([settled, pacer.whenStopped()]);
+    await pacer.raceStopped(settled);
     // Stopping is not a verdict on the write. Treating it as "unconfirmed"
     // hands the session to the next instance intact, which is exactly what a
     // half-finished cleanup needs — the alternative was announcing a room
@@ -416,15 +416,14 @@ export function createRuntimeIndexReaper(options: {
       ? options.runtimeStore.confirmWrites()
       : (options.runtimeStore.flush?.() ?? Promise.resolve());
     void confirmation.catch(() => undefined);
-    await Promise.race([
+    await pacer.raceStopped(
       confirmation.catch((error: unknown) => {
         options.logEvent?.("runtime_index_writes_unconfirmed", {
           result: "error",
           error: error instanceof Error ? error.message : String(error),
         });
       }),
-      pacer.whenStopped(),
-    ]);
+    );
 
     // After the whole sweep, so a room that lost several members to the same
     // dead node is announced once rather than once per seat.
