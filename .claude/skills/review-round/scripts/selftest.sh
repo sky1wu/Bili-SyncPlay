@@ -218,6 +218,327 @@ else
   echo "  – 跳过（用法: selftest.sh <PR编号> 可启用）"
 fi
 
+echo "== 16. resolve 回复必须持久化收敛决策 =="
+MISSING_META_OUT=$("$HERE/reply-resolve.sh" PRRT_fake "普通回复" 1 2>&1 || true)
+case $MISSING_META_OUT in
+  *"回复第 1 行必须是 [Change-Unit:"*) ok "缺少 Change Unit 时在访问 GitHub 前拒绝" ;;
+  *) no "无决策元数据的回复未被拒绝" ;;
+esac
+BAD_RESOLUTION_BODY=$(printf '%s\n' \
+  '[Change-Unit: review-convergence]' \
+  '[Root-ID: history-loss]' \
+  '[Resolution: keep-trying]' \
+  '说明')
+BAD_RESOLUTION_OUT=$("$HERE/reply-resolve.sh" PRRT_fake "$BAD_RESOLUTION_BODY" 1 2>&1 || true)
+case $BAD_RESOLUTION_OUT in
+  *"必须记录 first-fix"*) ok "未知 Resolution 被拒绝" ;;
+  *) no "未知 Resolution 未被拒绝" ;;
+esac
+DECISION_BODY=$(printf '%s\n' \
+  '[Change-Unit: review-convergence]' \
+  '[Decision-ID: review-budget]' \
+  '[Resolution: first-fix]' \
+  '说明')
+DECISION_OUT=$("$HERE/reply-resolve.sh" PRRT_fake "$DECISION_BODY" 1 2>&1 || true)
+case $DECISION_OUT in
+  *"回复第 2 行必须"*) no "合法 Decision ID 被元数据边界拒绝" ;;
+  *ERROR*) ok "合法 Decision ID 通过输入边界并进入只读线程查询" ;;
+  *) no "Decision ID 验证路径结果不明确" ;;
+esac
+
+echo "== 17. history 模式必须包含 resolved 与 open 线程 =="
+BAD_MODE_OUT=$("$HERE/list-unresolved.sh" 1 --unknown 2>&1 || true)
+case $BAD_MODE_OUT in
+  *"未知模式"*) ok "未知 history 模式在访问 GitHub 前被拒绝" ;;
+  *) no "未知模式未被拒绝" ;;
+esac
+TMP4=$(mktemp -d)
+cat >"$TMP4/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1:$2" = "repo:view" ]; then
+  echo "fixture/repo"
+elif [ "$1:$2" = "api:graphql" ]; then
+  cat <<'JSON'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"resolved-1","isResolved":true,"path":"a.ts","line":1,"originalLine":1,"comments":{"totalCount":2,"pageInfo":{"hasNextPage":false},"nodes":[{"author":{"login":"reviewer"},"body":"finding","pullRequestReview":{"commit":{"oid":"1111111"},"submittedAt":"2026-01-01T00:00:00Z"}},{"author":{"login":"agent"},"body":"[Change-Unit: review-convergence]\n[Root-ID: history-loss]\n[Resolution: first-fix]\nfixed","pullRequestReview":null}]}},{"id":"open-1","isResolved":false,"path":"b.ts","line":2,"originalLine":2,"comments":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"author":{"login":"reviewer"},"body":"new finding","pullRequestReview":{"commit":{"oid":"2222222"},"submittedAt":"2026-01-02T00:00:00Z"}}]}}]}}}}}
+JSON
+else
+  exit 2
+fi
+SH
+chmod +x "$TMP4/gh"
+HISTORY=$(PATH="$TMP4:$PATH" "$HERE/list-unresolved.sh" 1 --history 2>/dev/null)
+HISTORY_RC=$?
+OPEN_COUNT=$(PATH="$TMP4:$PATH" "$HERE/list-unresolved.sh" 1 --count 2>/dev/null)
+OPEN_RC=$?
+HISTORY_COUNT=$(printf '%s\n' "$HISTORY" | grep -c '^═══' || true)
+if [ "$HISTORY_RC" -eq 0 ] && [ "$OPEN_RC" -eq 0 ] &&
+  [ "$HISTORY_COUNT" -eq 2 ] && [ "$OPEN_COUNT" -eq 1 ] &&
+  printf '%s\n' "$HISTORY" | grep -q 'state=resolved' &&
+  printf '%s\n' "$HISTORY" | grep -q 'state=open' &&
+  printf '%s\n' "$HISTORY" | grep -q '\[Root-ID: history-loss\]'; then
+  ok "fixture history 同时恢复 resolved/open 线程及 Root ID（history=2 open=1）"
+else
+  no "fixture 未证明 history 覆盖已解决根因（history=$HISTORY_COUNT open=$OPEN_COUNT）"
+fi
+rm -rf "$TMP4"
+
+TMP4B=$(mktemp -d)
+cat >"$TMP4B/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1:$2" = "repo:view" ]; then
+  echo "fixture/repo"
+elif [ "$1:$2" = "api:graphql" ]; then
+  cat <<'JSON'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"resolved-without-decision","isResolved":true,"path":"a.ts","line":1,"originalLine":1,"comments":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"author":{"login":"reviewer"},"body":"finding","pullRequestReview":{"commit":{"oid":"1111111"},"submittedAt":"2026-01-01T00:00:00Z"}}]}}]}}}}}
+JSON
+else
+  exit 2
+fi
+SH
+chmod +x "$TMP4B/gh"
+VALIDATE_MISSING=$(PATH="$TMP4B:$PATH" \
+  "$HERE/list-unresolved.sh" 1 --validate-decisions 2>&1 || true)
+ROUND_MISSING=$(PATH="$TMP4B:$PATH" "$HERE/round-signal.sh" 1 2>&1 || true)
+if printf '%s\n' "$VALIDATE_MISSING" | grep -q '缺少可恢复的决策元数据' &&
+  printf '%s\n' "$ROUND_MISSING" | grep -q '决策历史不完整'; then
+  ok "外部 resolve 后缺失元数据会在历史扫描和结束路由中 STOP"
+else
+  no "外部 resolve 仍可绕过 reply-resolve 并静默结束"
+fi
+rm -rf "$TMP4B"
+
+echo "== 18. Review Unit 必须不可改名，repair 最多两批 =="
+TMP5=$(mktemp -d)
+cat >"$TMP5/gh" <<'SH'
+#!/usr/bin/env bash
+case "$1:$2" in
+repo:view)
+  echo "fixture/repo"
+  ;;
+pr:view)
+  echo "${CYCLE_HEAD:?}"
+  ;;
+pr:comment)
+  shift 2
+  body=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--body" ]; then body=$2; break; fi
+    shift
+  done
+  count=0
+  for file in "$CYCLE_COMMENT_DIR"/*; do
+    [ -e "$file" ] || continue
+    count=$((count + 1))
+  done
+  printf '%s' "$body" >"$CYCLE_COMMENT_DIR/comment-$count"
+  echo "https://example.invalid/comment"
+  ;;
+api:graphql)
+  after_first=false
+  case " $* " in
+  *" after=cursor-1 "*) after_first=true ;;
+  esac
+  if [ "${CYCLE_FIXTURE:-}" = "page2" ] && [ "$after_first" = false ]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"},"nodes":[]}}}}}'
+  else
+    read_dir="$CYCLE_COMMENT_DIR"
+    case " $* " in
+    *" pr=2 "*) read_dir="${CYCLE_PARENT_DIR:-$CYCLE_COMMENT_DIR}" ;;
+    *" pr=5 "*) read_dir="${CYCLE_MIDDLE_DIR:-$CYCLE_COMMENT_DIR}" ;;
+    esac
+    CYCLE_READ_DIR="$read_dir" CYCLE_DUPLICATE="${CYCLE_FIXTURE:-}" node -e '
+      const fs = require("fs");
+      const dir = process.env.CYCLE_READ_DIR;
+      const comments = fs.readdirSync(dir).sort().map((name) => ({
+        body: fs.readFileSync(`${dir}/${name}`, "utf8"),
+      }));
+      if (process.env.CYCLE_DUPLICATE === "duplicate-unit") {
+        const unit = comments.find((comment) => comment.body.startsWith("[Review-Unit:"));
+        if (unit) comments.push(unit);
+      }
+      process.stdout.write(JSON.stringify({data:{repository:{pullRequest:{comments:{
+        pageInfo:{hasNextPage:false,endCursor:null}, nodes:comments,
+      }}}}}));
+    '
+  fi
+  ;;
+*) exit 2 ;;
+esac
+SH
+chmod +x "$TMP5/gh"
+CYCLE_COMMENT_DIR="$TMP5/comments"
+mkdir "$CYCLE_COMMENT_DIR"
+HEAD_A=$(printf '%040d' 0 | tr 0 a)
+HEAD_B=$(printf '%040d' 0 | tr 0 b)
+HEAD_C=$(printf '%040d' 0 | tr 0 c)
+MISSING=$(CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$CYCLE_COMMENT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 1 2>&1 || true)
+INIT=$(CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$CYCLE_COMMENT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 1 --initialize review-convergence review-convergence-policy none)
+RENAME=$(CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$CYCLE_COMMENT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 1 --initialize review-convergence review-convergence-policies none 2>&1 || true)
+PAGE2=$(CYCLE_FIXTURE=page2 CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$CYCLE_COMMENT_DIR" \
+  PATH="$TMP5:$PATH" "$HERE/review-cycle.sh" 1)
+if printf '%s\n' "$MISSING" | grep -q '尚未初始化 Review Unit' &&
+  printf '%s\n' "$INIT" | grep -q 'change_unit=review-convergence-policy' &&
+  printf '%s\n' "$RENAME" | grep -q '不得改名' &&
+  printf '%s\n' "$PAGE2" | grep -q 'repairs=0/2'; then
+  ok "身份缺失会 STOP，初始化后跨页恢复且调用者不能重命名"
+else
+  no "Review Unit 身份恢复或不可改名约束失效"
+fi
+REPAIR1=$(CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$CYCLE_COMMENT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 1 --record-repair)
+REPLAY=$(CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$CYCLE_COMMENT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 1 --record-repair)
+REPAIR2=$(CYCLE_HEAD="$HEAD_B" CYCLE_COMMENT_DIR="$CYCLE_COMMENT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 1 --record-repair)
+THIRD=$(CYCLE_HEAD="$HEAD_C" CYCLE_COMMENT_DIR="$CYCLE_COMMENT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 1 --record-repair 2>&1 || true)
+if printf '%s\n' "$REPAIR1" | grep -q 'repairs=1/2' &&
+  printf '%s\n' "$REPLAY" | grep -q 'repairs=1/2' &&
+  printf '%s\n' "$REPAIR2" | grep -q 'repairs=2/2 terminal_review_only=true' &&
+  printf '%s\n' "$THIRD" | grep -q 'STOP_FAILED'; then
+  ok "同 head 幂等、两批 repair 后进入终局，第三个 head 被拒绝"
+else
+  no "repair 批次状态机未形成有限终点"
+fi
+DUPLICATE=$(CYCLE_FIXTURE=duplicate-unit CYCLE_HEAD="$HEAD_B" \
+  CYCLE_COMMENT_DIR="$CYCLE_COMMENT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 1 2>&1 || true)
+case $DUPLICATE in
+  *"身份不唯一，执行 STOP"*) ok "重复 Review Unit marker 被保守拒绝" ;;
+  *) no "重复 Review Unit 未被拒绝" ;;
+esac
+PARENT_DIR="$TMP5/parent-comments"
+CHILD_DIR="$TMP5/child-comments"
+BAD_CHILD_DIR="$TMP5/bad-child-comments"
+mkdir "$PARENT_DIR" "$CHILD_DIR" "$BAD_CHILD_DIR"
+printf '%s' '[Review-Unit: pr-2]
+[Problem-ID: review-convergence]
+[Change-Unit: failed-design]
+[Parent-PR: none]' >"$PARENT_DIR/comment-0"
+CHILD=$(CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$CHILD_DIR" CYCLE_PARENT_DIR="$PARENT_DIR" \
+  PATH="$TMP5:$PATH" "$HERE/review-cycle.sh" 3 --initialize \
+  review-convergence replacement-design 2)
+BAD_CHILD=$(CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$BAD_CHILD_DIR" CYCLE_PARENT_DIR="$PARENT_DIR" \
+  PATH="$TMP5:$PATH" "$HERE/review-cycle.sh" 4 --initialize \
+  renamed-problem replacement-design 2 2>&1 || true)
+if printf '%s\n' "$CHILD" | grep -q 'parent_pr=2' &&
+  printf '%s\n' "$BAD_CHILD" | grep -q '祖先 PR #2 的 Problem ID'; then
+  ok "替代设计从父 Review Unit 继承同一 Problem ID，改名被拒绝"
+else
+  no "Parent PR 未约束跨设计尝试的问题谱系"
+fi
+MIDDLE_DIR="$TMP5/middle-comments"
+GRANDCHILD_DIR="$TMP5/grandchild-comments"
+BAD_ROOT_DIR="$TMP5/bad-root-comments"
+BAD_GRANDCHILD_DIR="$TMP5/bad-grandchild-comments"
+mkdir "$MIDDLE_DIR" "$GRANDCHILD_DIR" "$BAD_ROOT_DIR" "$BAD_GRANDCHILD_DIR"
+printf '%s' '[Review-Unit: pr-5]
+[Problem-ID: review-convergence]
+[Change-Unit: replacement-one]
+[Parent-PR: 2]' >"$MIDDLE_DIR/comment-0"
+printf '%s' '[Review-Unit: pr-2]
+[Problem-ID: renamed-problem]
+[Change-Unit: failed-design]
+[Parent-PR: none]' >"$BAD_ROOT_DIR/comment-0"
+GRANDCHILD=$(CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$GRANDCHILD_DIR" \
+  CYCLE_MIDDLE_DIR="$MIDDLE_DIR" CYCLE_PARENT_DIR="$PARENT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 6 --initialize review-convergence replacement-two 5)
+BAD_GRANDCHILD=$(CYCLE_HEAD="$HEAD_A" CYCLE_COMMENT_DIR="$BAD_GRANDCHILD_DIR" \
+  CYCLE_MIDDLE_DIR="$MIDDLE_DIR" CYCLE_PARENT_DIR="$BAD_ROOT_DIR" PATH="$TMP5:$PATH" \
+  "$HERE/review-cycle.sh" 7 --initialize review-convergence replacement-two 5 2>&1 || true)
+if printf '%s\n' "$GRANDCHILD" | grep -q 'ancestors=5,2' &&
+  printf '%s\n' "$BAD_GRANDCHILD" | grep -q '祖先 PR #2 的 Problem ID'; then
+  ok "祖先链被递归恢复，祖父 Problem ID 不一致会 STOP"
+else
+  no "Root 历史仍只恢复直接父 PR"
+fi
+rm -rf "$TMP5"
+
+echo "== 19. 外部 resolved 不得抹掉决策历史 =="
+TMP6=$(mktemp -d)
+cat >"$TMP6/gh" <<'SH'
+#!/usr/bin/env bash
+case "$1:$2" in
+api:user)
+  echo agent
+  ;;
+api:graphql)
+  case " $* " in
+  *mutation*)
+    : >"$RESOLVED_MUTATION_FILE"
+    exit 9
+    ;;
+  esac
+  RESOLVED_HAS_REPLY="${RESOLVED_HAS_REPLY:-0}" node -e '
+    const body = "[Change-Unit: review-convergence]\n[Root-ID: resolved-history]\n[Resolution: first-fix]\n说明";
+    const mine = process.env.RESOLVED_HAS_REPLY === "1";
+    process.stdout.write(JSON.stringify({data:{node:{isResolved:true,comments:{
+      totalCount:1,
+      nodes:[{author:{login:mine ? "agent" : "reviewer"},body:mine ? body : "finding"}],
+    }}}}));
+  '
+  ;;
+*) exit 2 ;;
+esac
+SH
+chmod +x "$TMP6/gh"
+RESOLVED_BODY=$(printf '%s\n' \
+  '[Change-Unit: review-convergence]' \
+  '[Root-ID: resolved-history]' \
+  '[Resolution: first-fix]' \
+  '说明')
+RESOLVED_MUTATION_FILE="$TMP6/mutated"
+WITHOUT=$(RESOLVED_HAS_REPLY=0 RESOLVED_MUTATION_FILE="$RESOLVED_MUTATION_FILE" \
+  PATH="$TMP6:$PATH" "$HERE/reply-resolve.sh" PRRT_fake "$RESOLVED_BODY" 1 2>&1 || true)
+WITH=$(RESOLVED_HAS_REPLY=1 RESOLVED_MUTATION_FILE="$RESOLVED_MUTATION_FILE" \
+  PATH="$TMP6:$PATH" "$HERE/reply-resolve.sh" PRRT_fake "$RESOLVED_BODY" 1 2>&1 || true)
+if printf '%s\n' "$WITHOUT" | grep -q '缺少本用户的同一条决策元数据回复' &&
+  printf '%s\n' "$WITH" | grep -q '决策元数据回复已持久化' &&
+  [ ! -e "$RESOLVED_MUTATION_FILE" ]; then
+  ok "resolved 快路径只接受已持久化的同一决策回复"
+else
+  no "resolved 快路径仍可能静默丢失决策历史"
+fi
+rm -rf "$TMP6"
+
+echo "== 20. 中英文开发约束必须声明同一完整门禁顺序 =="
+REPO_ROOT=$(cd "$HERE/../../../.." && pwd)
+EN_GATE=$(grep -F 'Before every commit and push' "$REPO_ROOT/docs/development.md" || true)
+ZH_GATE=$(grep -F '每次提交和推送前' "$REPO_ROOT/docs/development.zh-CN.md" || true)
+CONTRIB_GATE=$(grep -F 'Before every commit and push' "$REPO_ROOT/CONTRIBUTING.md" || true)
+EXPECTED_EN='`npm run format:check`, `npm run lint`, `npm run typecheck`, `npm run build`, `npm test`, and `npm run audit`'
+EXPECTED_ZH='`npm run format:check`、`npm run lint`、`npm run typecheck`、`npm run build`、`npm test`、`npm run audit`'
+if [[ $EN_GATE == *"$EXPECTED_EN"* ]] && [[ $ZH_GATE == *"$EXPECTED_ZH"* ]] &&
+  [[ $CONTRIB_GATE == *"$EXPECTED_EN"* ]]; then
+  ok "CONTRIBUTING 与双语文档均要求 commit/push 前执行完整门禁"
+else
+  no "贡献约束的执行时机、门禁顺序或 audit 仍不一致"
+fi
+
+FULL_GATE='npm run format:check && npm run lint && npm run typecheck && npm run build && npm test && npm run audit'
+ADD_GATE_COUNT=$(grep -Fc "$FULL_GATE" "$REPO_ROOT/.claude/skills/add-feature/SKILL.md")
+FIX_GATE_COUNT=$(grep -Fc "$FULL_GATE" "$REPO_ROOT/.claude/skills/fix-issue/SKILL.md")
+REVIEW_GATE_COUNT=$(grep -Fc 'for step in format:check lint typecheck build test audit' \
+  "$REPO_ROOT/.claude/skills/review-round/SKILL.md")
+if [ "$ADD_GATE_COUNT" -eq 2 ] && [ "$FIX_GATE_COUNT" -eq 2 ] &&
+  [ "$REVIEW_GATE_COUNT" -eq 2 ]; then
+  ok "add/fix/review 均在 commit 前和 push 前各执行一次完整门禁"
+else
+  no "某个工作流只在 commit 前运行门禁，push 前仍缺失"
+fi
+
+if grep -Fq 'feat/$BRANCH_SLUG-after-pr-$PARENT_PR' \
+  "$REPO_ROOT/.claude/skills/add-feature/SKILL.md" &&
+  grep -Fq 'fix/issue-$ISSUE_NUM-after-pr-$PARENT_PR' \
+    "$REPO_ROOT/.claude/skills/fix-issue/SKILL.md"; then
+  ok "替代设计使用父 PR 派生的唯一分支名"
+else
+  no "替代设计仍会与保留的父 PR 分支重名"
+fi
+
 echo
 echo "通过 $PASS 条，失败 $FAIL 条"
 [ "$FAIL" -eq 0 ]
