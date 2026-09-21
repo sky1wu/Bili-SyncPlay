@@ -15,10 +15,22 @@ import {
   Typography,
 } from "antd";
 import { useState } from "react";
+import type { OverviewNode } from "../../api/types.js";
 import { formatDuration, formatTime } from "../../lib/format.js";
 import { useOverviewQuery, useReadyQuery } from "./overview-queries.js";
 import { EventStatsTable } from "./event-stats-table.js";
 import { NodesTable } from "./nodes-table.js";
+
+function hasUsableUptime(
+  node: OverviewNode,
+): node is OverviewNode & { uptimeMs: number } {
+  return (
+    node.health !== "offline" &&
+    typeof node.uptimeMs === "number" &&
+    Number.isFinite(node.uptimeMs) &&
+    node.uptimeMs >= 0
+  );
+}
 
 export function OverviewPage() {
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -63,6 +75,14 @@ export function OverviewPage() {
   const ready = readyQuery.data;
   const readyDegraded =
     readyQuery.isError || (ready && ready.status !== "ready");
+  const nodesWithUptime = overview.nodes.items.filter(hasUsableUptime);
+  const longestRunningNode = nodesWithUptime.reduce<
+    (typeof nodesWithUptime)[number] | null
+  >(
+    (longest, node) =>
+      longest === null || node.uptimeMs > longest.uptimeMs ? node : longest,
+    null,
+  );
 
   return (
     <Space direction="vertical" size={16} style={{ display: "flex" }}>
@@ -128,11 +148,19 @@ export function OverviewPage() {
         <Col xs={24} sm={12} lg={6}>
           <Card>
             <Statistic
-              title="运行时长"
-              value={formatDuration(overview.service.uptimeMs)}
+              title={
+                nodesWithUptime.length > 1 ? "最长节点运行时长" : "节点运行时长"
+              }
+              value={
+                longestRunningNode
+                  ? formatDuration(longestRunningNode.uptimeMs)
+                  : "—"
+              }
             />
             <Typography.Text type="secondary">
-              {overview.service.name} v{overview.service.version}
+              {longestRunningNode
+                ? `${longestRunningNode.instanceId} · ${longestRunningNode.version}`
+                : "暂无可用的节点运行时长"}
             </Typography.Text>
           </Card>
         </Col>
