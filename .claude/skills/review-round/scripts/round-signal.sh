@@ -8,6 +8,13 @@ source "$(dirname "$0")/lib.sh"
 
 PR=${1:?用法: round-signal.sh <PR编号>}
 BOT="chatgpt-codex-connector[bot]"
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+OPEN=$("$HERE/list-unresolved.sh" "$PR" --count) ||
+  die "无法确认未解决线程，停止读取评审信号"
+[ "$OPEN" -eq 0 ] || die "PR #$PR 仍有 $OPEN 条未解决线程，不得判定本轮结束"
+"$HERE/list-unresolved.sh" "$PR" --validate-decisions >/dev/null ||
+  die "已解决线程的决策历史不完整，不得判定本轮结束"
 
 resolve_repo
 
