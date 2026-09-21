@@ -189,6 +189,7 @@ Redis 集成测试说明：
   - `index.ts` 只负责装配
   - 本地 UI 状态统一收敛在 `popup-store.ts`
   - template、refs、render、actions、background port 同步各自独立
+  - 首次状态查询和端口订阅等待后台初始化结束（包括失败状态）；收到状态后才挂载可编辑控件，避免把构建默认值当作已恢复的设置
 - `extension/src/shared`
   - 扩展端共享 helper 必须沉淀在这里，例如共享视频 URL 归一化，不要回到各入口文件各写一份
 - `packages/protocol/src`

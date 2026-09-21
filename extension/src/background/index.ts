@@ -226,7 +226,7 @@ const BOOTSTRAP_FAILED_MESSAGE =
   "Extension initialization failed. Reload the extension and try again.";
 let bootstrapStatus: "pending" | "ready" | "failed" = "pending";
 
-void bootstrap().catch((error) => {
+const bootstrapCompleted = bootstrap().catch((error) => {
   bootstrapStatus = "failed";
   connectionState.connected = false;
   connectionState.lastError = BOOTSTRAP_FAILED_MESSAGE;
@@ -456,6 +456,7 @@ async function updateServerUrl(nextServerUrl: string): Promise<void> {
 }
 
 registerBackgroundListeners({
+  bootstrapCompleted,
   getBootstrapStatus: () => bootstrapStatus,
   bootstrapPendingMessage: BOOTSTRAP_PENDING_MESSAGE,
   bootstrapFailedMessage: BOOTSTRAP_FAILED_MESSAGE,

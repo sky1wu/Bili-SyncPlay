@@ -189,6 +189,7 @@ The repository follows a "thin entrypoint + named modules" structure. For the ru
   - `index.ts` is assembly only
   - local UI state lives in `popup-store.ts`
   - template, refs, render, actions, and background port sync live in separate modules
+  - initial state queries and port subscriptions wait for background initialization (including its failure state); editable controls mount only after that state arrives, so build defaults cannot be mistaken for restored settings
 - `extension/src/shared`
   - shared extension helpers such as normalized video URL handling must live here instead of being redefined in feature entrypoints
 - `packages/protocol/src`
