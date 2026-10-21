@@ -443,6 +443,12 @@ ping，连续两轮没有 pong 就断开它（`ws-heartbeat.ts`）。所以一�
 
    其他主机上的节点：把它们的 journal 拼进同一个管道，例如
    `{ journalctl ... ; ssh node-b journalctl ... ; } | node ...`。脚本会自己按时间排序。
+   重新入房的时间可能比它对应的踢线早至多 5 秒，脚本把这些单独归入 `<0s` 一档：
+   要么是客户端在节点清掉旧 socket 之前就已经换上了新连接（扩展在一个浏览器里只持有
+   一条 WebSocket，同一成员的第二个会话就是它的替身），要么是各节点的墙上时钟不一致。
+   日志分不开这两种情况，而两种都说明成员已经回来了——各节点要保持 NTP 同步，也不要
+   把几秒的间隔当成时钟读数。如果报告开头警告有被踢会话缺少
+   `ws_connection_accepted`，说明 journal 回溯得不够早，下面所有比例都不完整。
 
    进程启动以来 nginx 每 reload 过一次，就加一个 `--worker-reload <UTC 分钟>`
    （`ps -o pid,lstart,args -C nginx` 可以看到每代 worker 的启动时刻），
@@ -452,7 +458,9 @@ ping，连续两轮没有 pong 就断开它（`ws-heartbeat.ts`）。所以一�
    分子分母是同一批会话——所以故障期间的重连及其再次被踢，不会扭曲被踢那批客户端
    自己的比例。重连间隔按 `memberId` 跟踪每个被踢成员的
    下一次 `room_joined`（带着仍有效的 `memberToken` 重连会保留原 memberId），
-   而不是同一地址的下一条连接——共用 NAT 出口时那可能是别人。
+   而不是同一地址的下一条连接——共用 NAT 出口时那可能是别人。Firefox 的 origin 带有
+   每次安装随机生成的 UUID，因此归并为一个 `moz-extension://*` 类别；Chromium 系扩展的
+   id 按商店上架固定，分别保留。
 
 3. **解读报告：**
 

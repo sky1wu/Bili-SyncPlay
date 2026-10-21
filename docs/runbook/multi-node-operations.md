@@ -459,7 +459,16 @@ per-minute distribution below, not the alert duration.
 
    Nodes on other hosts: concatenate their journals into the same pipe, for
    example `{ journalctl ... ; ssh node-b journalctl ... ; } | node ...`. The
-   script orders events by timestamp itself.
+   script orders events by timestamp itself. A rejoin may be stamped up to 5 s
+   before the kill it follows, and the script reports those in a separate `<0s`
+   bucket: either the client replaced its socket before the node reaped the old
+   one (the extension holds one WebSocket per browser, so a second session of
+   the same member is its replacement), or the nodes' wall clocks disagree. The
+   log cannot tell the two apart, and both mean the member was back — keep the
+   nodes NTP-synced and do not read gaps of a few seconds as a clock
+   measurement. If the report opens with a
+   warning that killed sessions have no `ws_connection_accepted`, the journal
+   does not reach back far enough and every ratio below it is incomplete.
 
    Add `--worker-reload <UTC minute>` once per nginx reload since the process
    started (`ps -o pid,lstart,args -C nginx` shows when each worker generation
@@ -472,7 +481,9 @@ per-minute distribution below, not the alert duration.
    gap follows each dropped member to its next `room_joined` with the same
    `memberId` (a rejoin with a still-valid `memberToken` keeps it), not to the
    next connection from the same address, which behind a shared NAT would be
-   someone else's.
+   someone else's. Firefox origins carry a random per-install UUID, so they are
+   grouped into one `moz-extension://*` family; Chromium extension IDs are fixed
+   per store listing and stay separate.
 
 3. **Read the report:**
 
