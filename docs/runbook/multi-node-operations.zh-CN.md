@@ -317,23 +317,24 @@ curl -fsS http://10.0.0.11:8788/readyz
 
 ## 常见告警与定位
 
-| 告警或现象                                     | 主要指标 / 信号                                                                               | 优先检查                                                                                                        | 处理方向                                             |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| WebSocket 连接数异常下降                       | `bili_syncplay_connections`                                                                   | 入口层 upstream、Room Node `/readyz`、进程日志                                                                  | 恢复节点或从 LB 摘除异常节点                         |
-| 活跃房间数异常下降                             | `bili_syncplay_active_rooms`、`bili_syncplay_rooms_non_expired`                               | Redis 连通性、房间过期配置、重启记录                                                                            | 恢复 Redis，确认 `ROOM_STORE_PROVIDER` 未被改为内存  |
-| 过期房间不再被回收（reaper 停摆）              | `bili_syncplay_room_reaper_sweeps_total`                                                      | 见 [reaper 还在扫吗？](#reaper-还在扫吗)                                                                        | 恢复 Redis；确认 `ROOM_CLEANUP_INTERVAL_MS` 未被调大 |
-| 孤儿清理 claim 哈希持续增长或与 queue 不一致   | `HLEN bsp:room-index-orphans`、`ZCARD bsp:room-index-orphans-queue`                           | Room Reaper 结果、运行时拆除日志、ACL、两把键的 `TYPE`                                                          | 恢复 reaper/runtime store；重启前修正 ACL 或错误类型 |
-| Redis 操作失败                                 | `bili_syncplay_redis_operation_failures_total`                                                | Redis 进程、网络、ACL、密码、慢查询                                                                             | 优先恢复 Redis；必要时执行应急降级                   |
-| Redis 连接断开或被拒                           | `bili_syncplay_events_total{event="redis_connection_error"}`、`redis_connection_error` 日志行 | `component` / `role` 指明是哪条连接，`code` 指明套接字故障；短时故障先查宿主机 `apt` 历史有无自动升级重启 Redis | 恢复 Redis；短暂抖动只需确认计数不再增长             |
-| 已完成的管理命令结果发布路径失败               | `bili_syncplay_admin_command_result_publish_failures_total`                                   | 管理命令 publisher 饱和、Redis pub/sub、结果发布日志                                                            | 恢复 Redis；确认关房扇出和命令总线容量健康           |
-| Redis runtime store 延迟升高                   | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                                   | Redis CPU、内存、网络 RTT、命令排队                                                                             | 扩容 Redis 或降低入口层流量                          |
-| Redis room event bus publish 延迟或失败        | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`、失败计数                | Redis pub/sub 连通性、网络抖动、Room Node 日志                                                                  | 恢复 Redis 与网络；验证跨节点播放同步                |
-| 连接被拒绝增加                                 | `bili_syncplay_ws_connection_rejected_total`、结构化日志 `origin_not_allowed`                 | `ALLOWED_ORIGINS`、入口层是否改写 Origin                                                                        | 修正 Origin 白名单或反代配置                         |
-| 限流增加                                       | `bili_syncplay_rate_limited_total`                                                            | 来源 IP、入口层转发真实 IP、`TRUSTED_PROXY_ADDRESSES`                                                           | 调整限流或修正代理地址配置                           |
-| 消息处理耗时升高                               | `bili_syncplay_message_handler_duration_seconds_bucket`                                       | Node CPU、Redis 延迟、房间成员数、日志中的错误                                                                  | 限流、扩容 Room Node、排查慢 Redis                   |
-| Global Admin 看不到某个节点或节点显示过期      | Global Admin 概览、`node_heartbeat_failed` 日志                                               | `NODE_HEARTBEAT_ENABLED`、`INSTANCE_ID`、Redis runtime                                                          | 修复心跳配置或 Redis runtime store                   |
-| 后台登录失败或频繁要求重新登录                 | `/api/admin/auth/login` 响应、审计日志                                                        | `ADMIN_PASSWORD_HASH`、`ADMIN_SESSION_SECRET` 是否一致                                                          | 同步 admin 认证配置并重启                            |
-| 跨节点房间动作失败，例如踢人或关闭房间返回 503 | 审计日志、`ADMIN_COMMAND_BUS_PROVIDER`、目标节点心跳                                          | 管理命令总线、目标 `INSTANCE_ID`、Redis                                                                         | 恢复 Redis command bus 或在目标节点本地操作          |
+| 告警或现象                                     | 主要指标 / 信号                                                                               | 优先检查                                                                                                        | 处理方向                                                      |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| 心跳超时断连激增                               | `bili_syncplay_events_total{event="ws_heartbeat_timeout_terminated"}`                         | 在线数与入口容量、nginx `error.log`                                                                             | 见[为什么客户端被心跳超时踢掉？](#为什么客户端被心跳超时踢掉) |
+| WebSocket 连接数异常下降                       | `bili_syncplay_connections`                                                                   | 入口层 upstream、Room Node `/readyz`、进程日志                                                                  | 恢复节点或从 LB 摘除异常节点                                  |
+| 活跃房间数异常下降                             | `bili_syncplay_active_rooms`、`bili_syncplay_rooms_non_expired`                               | Redis 连通性、房间过期配置、重启记录                                                                            | 恢复 Redis，确认 `ROOM_STORE_PROVIDER` 未被改为内存           |
+| 过期房间不再被回收（reaper 停摆）              | `bili_syncplay_room_reaper_sweeps_total`                                                      | 见 [reaper 还在扫吗？](#reaper-还在扫吗)                                                                        | 恢复 Redis；确认 `ROOM_CLEANUP_INTERVAL_MS` 未被调大          |
+| 孤儿清理 claim 哈希持续增长或与 queue 不一致   | `HLEN bsp:room-index-orphans`、`ZCARD bsp:room-index-orphans-queue`                           | Room Reaper 结果、运行时拆除日志、ACL、两把键的 `TYPE`                                                          | 恢复 reaper/runtime store；重启前修正 ACL 或错误类型          |
+| Redis 操作失败                                 | `bili_syncplay_redis_operation_failures_total`                                                | Redis 进程、网络、ACL、密码、慢查询                                                                             | 优先恢复 Redis；必要时执行应急降级                            |
+| Redis 连接断开或被拒                           | `bili_syncplay_events_total{event="redis_connection_error"}`、`redis_connection_error` 日志行 | `component` / `role` 指明是哪条连接，`code` 指明套接字故障；短时故障先查宿主机 `apt` 历史有无自动升级重启 Redis | 恢复 Redis；短暂抖动只需确认计数不再增长                      |
+| 已完成的管理命令结果发布路径失败               | `bili_syncplay_admin_command_result_publish_failures_total`                                   | 管理命令 publisher 饱和、Redis pub/sub、结果发布日志                                                            | 恢复 Redis；确认关房扇出和命令总线容量健康                    |
+| Redis runtime store 延迟升高                   | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                                   | Redis CPU、内存、网络 RTT、命令排队                                                                             | 扩容 Redis 或降低入口层流量                                   |
+| Redis room event bus publish 延迟或失败        | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`、失败计数                | Redis pub/sub 连通性、网络抖动、Room Node 日志                                                                  | 恢复 Redis 与网络；验证跨节点播放同步                         |
+| 连接被拒绝增加                                 | `bili_syncplay_ws_connection_rejected_total`、结构化日志 `origin_not_allowed`                 | `ALLOWED_ORIGINS`、入口层是否改写 Origin                                                                        | 修正 Origin 白名单或反代配置                                  |
+| 限流增加                                       | `bili_syncplay_rate_limited_total`                                                            | 来源 IP、入口层转发真实 IP、`TRUSTED_PROXY_ADDRESSES`                                                           | 调整限流或修正代理地址配置                                    |
+| 消息处理耗时升高                               | `bili_syncplay_message_handler_duration_seconds_bucket`                                       | Node CPU、Redis 延迟、房间成员数、日志中的错误                                                                  | 限流、扩容 Room Node、排查慢 Redis                            |
+| Global Admin 看不到某个节点或节点显示过期      | Global Admin 概览、`node_heartbeat_failed` 日志                                               | `NODE_HEARTBEAT_ENABLED`、`INSTANCE_ID`、Redis runtime                                                          | 修复心跳配置或 Redis runtime store                            |
+| 后台登录失败或频繁要求重新登录                 | `/api/admin/auth/login` 响应、审计日志                                                        | `ADMIN_PASSWORD_HASH`、`ADMIN_SESSION_SECRET` 是否一致                                                          | 同步 admin 认证配置并重启                                     |
+| 跨节点房间动作失败，例如踢人或关闭房间返回 503 | 审计日志、`ADMIN_COMMAND_BUS_PROVIDER`、目标节点心跳                                          | 管理命令总线、目标 `INSTANCE_ID`、Redis                                                                         | 恢复 Redis command bus 或在目标节点本地操作                   |
 
 ### reaper 还在扫吗？
 
@@ -405,6 +406,69 @@ sum(rate(bili_syncplay_room_reaper_sweeps_total{result="error"}[<窗口>])) by (
 - `bili_syncplay_events_total{event="room_expired_deleted"}`——只在某轮真收到
   东西时才记。持续访问下惰性读取路径会在每轮扫描前把积压删光，健康的 reaper
   也可以长期不记。
+
+### 为什么客户端被心跳超时踢掉？
+
+Room Node 每隔 `WS_HEARTBEAT_INTERVAL_MS`（默认 30 秒）对每个连接发一次
+ping，连续两轮没有 pong 就断开它（`ws-heartbeat.ts`）。所以一条
+`ws_heartbeat_timeout_terminated` 意味着这个连接**完全静默了 60–90 秒**。
+普通丢包做不到这一点——TCP 会重传，pong 只是晚到——所以出现激增，说明有一批连接
+失去了路径，或者客户端与节点之间有什么停止了转发。进程本身通常看起来是健康的；
+要回答的是哪一层出了问题，而答案就在「被踢的是哪些人」的分布里。
+
+告警时长会夸大事件：`HeartbeatTimeoutSpike` 统计的是最近 15 分钟的总和，踢线停止后
+它还会再响约 15 分钟。看下面的每分钟分布，不要看告警持续了多久。
+
+1. **先排除入口层。** 拿在线数对比 `worker_processes × worker_connections / 2`，
+   再 grep nginx 日志；如果出现 `worker_connections are not enough`，到此为止，
+   按[连接容量](../operations/deployment.zh-CN.md#连接容量)处理。
+
+   ```bash
+   grep -c 'worker_connections are not enough' /var/log/nginx/error.log
+   ```
+
+2. **对 Room Node 的 journal 运行取证脚本。** `--since` 从进程启动时刻开始，
+   这样窗口内在线会话的 `ws_connection_accepted` 都在输入里。`--from`/`--to`
+   是 **UTC** 分钟（日志 `timestamp` 是 UTC）；在踢线前后各放宽几分钟。
+
+   ```bash
+   cd /opt/bili-syncplay
+   sudo journalctl -u bili-syncplay-room-node-a --since "$(systemctl show -p ActiveEnterTimestamp --value bili-syncplay-room-node-a)" -o cat \
+     | node scripts/heartbeat-triage.mjs --from 2026-10-21T13:29 --to 2026-10-21T13:36
+   ```
+
+   进程启动以来 nginx 每 reload 过一次，就加一个 `--worker-reload <UTC 分钟>`
+   （`ps -o pid,lstart,args -C nginx` 可以看到每代 worker 的启动时刻），
+   按承载它们的 worker 代际拆分在线会话。
+
+   origin 基线和 worker 代际都以 `--from` 时刻在线的会话为分母，这样故障期间的
+   重连不会抬高被踢那批客户端自己的基线。重连间隔按 `memberId` 跟踪每个被踢成员的
+   下一次 `room_joined`（带着仍有效的 `memberToken` 重连会保留原 memberId），
+   而不是同一地址的下一条连接——共用 NAT 出口时那可能是别人。
+
+3. **解读报告：**
+
+   | 报告段落          | 指向入口层或节点                                             | 指向客户端                     | 指向网络路径                                                                                   |
+   | ----------------- | ------------------------------------------------------------ | ------------------------------ | ---------------------------------------------------------------------------------------------- |
+   | 每分钟踢线数      | —                                                            | —                              | 几分钟宽、错峰的一波                                                                           |
+   | 来源 /16 网段     | —                                                            | —                              | 覆盖多个运营商、没有一家独大（一个网段独大：那家运营商的线路）                                 |
+   | 房间              | —                                                            | 集中在少数房间                 | 分散                                                                                           |
+   | origin 与基线对比 | —                                                            | 某个 origin 远高于它的基线占比 | 占比接近基线                                                                                   |
+   | 每分钟新建连接    | 新连接也停了                                                 | —                              | 新连接照常进来，与踢线大致 1:1                                                                 |
+   | worker 代际       | 某一代远高于其他代，**且** `error.log` 里只有它的 worker pid | —                              | 比例随连接年龄变化                                                                             |
+   | 重连间隔          | —                                                            | —                              | 秒级：踢线那一刻路径已经恢复；一分钟以上：客户端靠扩展每分钟一次的重连兜底才回来，路径当时仍断 |
+
+   worker 代际的比例自带幸存者偏差：越老的一代只剩挂了一天以上的连接，而它们正是
+   网络最稳定的那批客户端。那里比例低是意料之中的，单凭这一点不能说明最新一代 worker
+   有问题。
+
+4. **核对同一时段的宿主机：** `sar -u`（`%steal`）、`sar -n DEV`（网卡吞吐）、
+   `journalctl -k`，以及云厂商控制台的带宽与 DDoS 视图。
+
+如果每一行都指向网络路径、宿主机也干净，那我们这边没有需要改的：客户端会自行重连。
+带上时间窗口、公网 IP 和「多个运营商的已建立 TCP 连接静默约一分钟、同时新连接正常」
+去找云厂商。2026-10-21 21:29–21:35（UTC+8）那次就是这个样子——十几个运营商共 218 次
+踢线，重连中位数 3.3 秒。
 
 ### 某个节点不见了或显示已过期？
 

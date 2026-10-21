@@ -314,23 +314,24 @@ With `ADMIN_SESSION_STORE_PROVIDER=redis` and an unchanged `ADMIN_SESSION_SECRET
 
 ## Common Alerts and Triage
 
-| Alert or symptom                                                  | Key metrics / signals                                                                                | Check first                                                                                                                         | Direction                                                                                 |
-| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Abnormal drop in WebSocket connections                            | `bili_syncplay_connections`                                                                          | Edge upstreams, room node `/readyz`, process logs                                                                                   | Restore the node or remove the unhealthy node from the LB                                 |
-| Abnormal drop in active rooms                                     | `bili_syncplay_active_rooms`, `bili_syncplay_rooms_non_expired`                                      | Redis connectivity, room expiry settings, restart history                                                                           | Restore Redis; confirm `ROOM_STORE_PROVIDER` was not switched to memory                   |
-| Expired rooms stop being reclaimed (reaper stalled)               | `bili_syncplay_room_reaper_sweeps_total`                                                             | See [Is the room reaper still sweeping?](#is-the-room-reaper-still-sweeping)                                                        | Restore Redis; confirm `ROOM_CLEANUP_INTERVAL_MS` was not raised                          |
-| Orphan-cleanup claim hash grows or diverges from its queue        | `HLEN bsp:room-index-orphans`, `ZCARD bsp:room-index-orphans-queue`                                  | Room reaper outcomes, runtime teardown logs, ACLs, `TYPE` for both keys                                                             | Restore the reaper/runtime store; repair ACL or wrong-type keys before restart            |
-| Redis operation failures                                          | `bili_syncplay_redis_operation_failures_total`                                                       | Redis process, network, ACLs, password, slow queries                                                                                | Restore Redis first; downgrade to in-memory only if necessary                             |
-| Redis connection lost or refused                                  | `bili_syncplay_events_total{event="redis_connection_error"}`, the `redis_connection_error` log lines | `component` / `role` name the connection, `code` the socket failure; check the host's `apt` history for an unattended Redis restart | Restore Redis; a short blip needs no action beyond confirming the counter stopped growing |
-| Completed admin command result publish paths fail                 | `bili_syncplay_admin_command_result_publish_failures_total`                                          | Admin command bus publisher saturation, Redis pub/sub, result publish logs                                                          | Restore Redis; confirm close-room fan-out and command-bus capacity are healthy            |
-| Elevated Redis runtime store latency                              | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                                          | Redis CPU, memory, network RTT, command queueing                                                                                    | Scale Redis or reduce edge-layer traffic                                                  |
-| Redis room event bus publish latency or failures                  | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`, failure counters               | Redis pub/sub connectivity, network jitter, room node logs                                                                          | Restore Redis and the network; verify cross-node playback sync                            |
-| Increase in rejected connections                                  | `bili_syncplay_ws_connection_rejected_total`, structured `origin_not_allowed` logs                   | `ALLOWED_ORIGINS`, whether the edge rewrites `Origin`                                                                               | Fix the origin allowlist or the reverse-proxy configuration                               |
-| Increase in rate limiting                                         | `bili_syncplay_rate_limited_total`                                                                   | Source IPs, real IP forwarding at the edge, `TRUSTED_PROXY_ADDRESSES`                                                               | Tune the limits or fix the proxy address configuration                                    |
-| Elevated message handling latency                                 | `bili_syncplay_message_handler_duration_seconds_bucket`                                              | Node CPU, Redis latency, room member counts, errors in logs                                                                         | Rate-limit, scale room nodes, investigate slow Redis                                      |
-| Global admin missing a node, or a node shown as expired           | Global admin overview, `node_heartbeat_failed` logs                                                  | `NODE_HEARTBEAT_ENABLED`, `INSTANCE_ID`, Redis runtime store                                                                        | Fix the heartbeat configuration or the Redis runtime store                                |
-| Admin login failures or frequent re-login prompts                 | `/api/admin/auth/login` responses, audit logs                                                        | Whether `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET` are consistent                                                               | Align the admin auth settings and restart                                                 |
-| Cross-node room actions fail, e.g. kick or close room returns 503 | Audit logs, `ADMIN_COMMAND_BUS_PROVIDER`, target node heartbeat                                      | Admin command bus, target `INSTANCE_ID`, Redis                                                                                      | Restore the Redis command bus or perform the action locally on the target node            |
+| Alert or symptom                                                  | Key metrics / signals                                                                                | Check first                                                                                                                         | Direction                                                                                                        |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Heartbeat-timeout disconnects spike                               | `bili_syncplay_events_total{event="ws_heartbeat_timeout_terminated"}`                                | Online count vs entrypoint capacity, nginx `error.log`                                                                              | See [Why are clients being dropped by heartbeat timeouts?](#why-are-clients-being-dropped-by-heartbeat-timeouts) |
+| Abnormal drop in WebSocket connections                            | `bili_syncplay_connections`                                                                          | Edge upstreams, room node `/readyz`, process logs                                                                                   | Restore the node or remove the unhealthy node from the LB                                                        |
+| Abnormal drop in active rooms                                     | `bili_syncplay_active_rooms`, `bili_syncplay_rooms_non_expired`                                      | Redis connectivity, room expiry settings, restart history                                                                           | Restore Redis; confirm `ROOM_STORE_PROVIDER` was not switched to memory                                          |
+| Expired rooms stop being reclaimed (reaper stalled)               | `bili_syncplay_room_reaper_sweeps_total`                                                             | See [Is the room reaper still sweeping?](#is-the-room-reaper-still-sweeping)                                                        | Restore Redis; confirm `ROOM_CLEANUP_INTERVAL_MS` was not raised                                                 |
+| Orphan-cleanup claim hash grows or diverges from its queue        | `HLEN bsp:room-index-orphans`, `ZCARD bsp:room-index-orphans-queue`                                  | Room reaper outcomes, runtime teardown logs, ACLs, `TYPE` for both keys                                                             | Restore the reaper/runtime store; repair ACL or wrong-type keys before restart                                   |
+| Redis operation failures                                          | `bili_syncplay_redis_operation_failures_total`                                                       | Redis process, network, ACLs, password, slow queries                                                                                | Restore Redis first; downgrade to in-memory only if necessary                                                    |
+| Redis connection lost or refused                                  | `bili_syncplay_events_total{event="redis_connection_error"}`, the `redis_connection_error` log lines | `component` / `role` name the connection, `code` the socket failure; check the host's `apt` history for an unattended Redis restart | Restore Redis; a short blip needs no action beyond confirming the counter stopped growing                        |
+| Completed admin command result publish paths fail                 | `bili_syncplay_admin_command_result_publish_failures_total`                                          | Admin command bus publisher saturation, Redis pub/sub, result publish logs                                                          | Restore Redis; confirm close-room fan-out and command-bus capacity are healthy                                   |
+| Elevated Redis runtime store latency                              | `bili_syncplay_redis_runtime_store_duration_seconds_bucket`                                          | Redis CPU, memory, network RTT, command queueing                                                                                    | Scale Redis or reduce edge-layer traffic                                                                         |
+| Redis room event bus publish latency or failures                  | `bili_syncplay_redis_room_event_bus_publish_duration_seconds_bucket`, failure counters               | Redis pub/sub connectivity, network jitter, room node logs                                                                          | Restore Redis and the network; verify cross-node playback sync                                                   |
+| Increase in rejected connections                                  | `bili_syncplay_ws_connection_rejected_total`, structured `origin_not_allowed` logs                   | `ALLOWED_ORIGINS`, whether the edge rewrites `Origin`                                                                               | Fix the origin allowlist or the reverse-proxy configuration                                                      |
+| Increase in rate limiting                                         | `bili_syncplay_rate_limited_total`                                                                   | Source IPs, real IP forwarding at the edge, `TRUSTED_PROXY_ADDRESSES`                                                               | Tune the limits or fix the proxy address configuration                                                           |
+| Elevated message handling latency                                 | `bili_syncplay_message_handler_duration_seconds_bucket`                                              | Node CPU, Redis latency, room member counts, errors in logs                                                                         | Rate-limit, scale room nodes, investigate slow Redis                                                             |
+| Global admin missing a node, or a node shown as expired           | Global admin overview, `node_heartbeat_failed` logs                                                  | `NODE_HEARTBEAT_ENABLED`, `INSTANCE_ID`, Redis runtime store                                                                        | Fix the heartbeat configuration or the Redis runtime store                                                       |
+| Admin login failures or frequent re-login prompts                 | `/api/admin/auth/login` responses, audit logs                                                        | Whether `ADMIN_PASSWORD_HASH` / `ADMIN_SESSION_SECRET` are consistent                                                               | Align the admin auth settings and restart                                                                        |
+| Cross-node room actions fail, e.g. kick or close room returns 503 | Audit logs, `ADMIN_COMMAND_BUS_PROVIDER`, target node heartbeat                                      | Admin command bus, target `INSTANCE_ID`, Redis                                                                                      | Restore the Redis command bus or perform the action locally on the target node                                   |
 
 ### Is the room reaper still sweeping?
 
@@ -414,6 +415,81 @@ this series at all, so its absence there is expected rather than a stall.
 - `bili_syncplay_events_total{event="room_expired_deleted"}` — logged only on a
   pass that collected something. Under steady traffic the lazy read path empties
   the backlog before each sweep, so a healthy reaper can stay silent for hours.
+
+### Why are clients being dropped by heartbeat timeouts?
+
+The room node pings every socket each `WS_HEARTBEAT_INTERVAL_MS` (30 s by
+default) and terminates it after two rounds without a pong (`ws-heartbeat.ts`),
+so a `ws_heartbeat_timeout_terminated` means that connection was **completely
+silent for 60–90 s**. Ordinary packet loss does not do that — TCP retransmits
+and the pong arrives late — so a spike means a set of connections lost their
+path, or something between client and node stopped relaying them. The process
+itself usually looks healthy; the question is which layer, and the answer is in
+the shape of who was dropped.
+
+Alert timing overstates the event: `HeartbeatTimeoutSpike` sums the last 15
+minutes, so it stays firing about 15 minutes after the kills stop. Read the
+per-minute distribution below, not the alert duration.
+
+1. **Rule out the entrypoint first.** Compare the online count with
+   `worker_processes × worker_connections / 2` and grep nginx's log; if it says
+   `worker_connections are not enough`, stop here and follow
+   [Connection capacity](../operations/deployment.md#connection-capacity).
+
+   ```bash
+   grep -c 'worker_connections are not enough' /var/log/nginx/error.log
+   ```
+
+2. **Run the triage script** over the room node's journal. Start `--since` at the
+   process start so sessions online during the window have their
+   `ws_connection_accepted` in the input. `--from`/`--to` are **UTC** minutes
+   (the log `timestamp` is UTC); widen them a few minutes around the kills.
+
+   ```bash
+   cd /opt/bili-syncplay
+   sudo journalctl -u bili-syncplay-room-node-a --since "$(systemctl show -p ActiveEnterTimestamp --value bili-syncplay-room-node-a)" -o cat \
+     | node scripts/heartbeat-triage.mjs --from 2026-10-21T13:29 --to 2026-10-21T13:36
+   ```
+
+   Add `--worker-reload <UTC minute>` once per nginx reload since the process
+   started (`ps -o pid,lstart,args -C nginx` shows when each worker generation
+   began) to split the online sessions by the worker generation serving them.
+
+   The origin baseline and the worker cohorts are both computed over the
+   sessions online at `--from`, so reconnects during the incident do not
+   inflate the baseline of the very clients that were dropped. The reconnect
+   gap follows each dropped member to its next `room_joined` with the same
+   `memberId` (a rejoin with a still-valid `memberToken` keeps it), not to the
+   next connection from the same address, which behind a shared NAT would be
+   someone else's.
+
+3. **Read the report:**
+
+   | Report section      | Points at the entrypoint or node                                                | Points at clients                       | Points at the network path                                                                                                                                              |
+   | ------------------- | ------------------------------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | kills per minute    | —                                                                               | —                                       | a burst a few minutes wide, staggered                                                                                                                                   |
+   | source /16 prefixes | —                                                                               | —                                       | many ISPs, none dominant (one dominant prefix: that ISP's path)                                                                                                         |
+   | rooms               | —                                                                               | concentrated in a few rooms             | spread out                                                                                                                                                              |
+   | origins vs baseline | —                                                                               | one origin far above its baseline share | shares close to baseline                                                                                                                                                |
+   | accepted per minute | new connections also stop                                                       | —                                       | new connections keep arriving, roughly 1:1 with kills                                                                                                                   |
+   | worker cohorts      | one generation far above the others **and** only its worker PIDs in `error.log` | —                                       | ratios track connection age                                                                                                                                             |
+   | reconnect gap       | —                                                                               | —                                       | seconds: the path had already recovered at kill time; a minute or more: clients came back via the extension's one-minute reconnect watchdog, so the path was still down |
+
+   The worker-cohort ratio has a built-in survivorship bias: older generations
+   hold only connections that have survived for a day or more, which are the
+   clients with the most stable networks. A low ratio there is expected and is
+   not evidence against the newest workers on its own.
+
+4. **Cross-check the host** for the same minutes: `sar -u` (`%steal`),
+   `sar -n DEV` (interface throughput), `journalctl -k`, and the provider
+   console's bandwidth and DDoS views.
+
+If every row points at the path and the host is clean, there is nothing to
+change on our side: the clients reconnect by themselves. Raise it with the
+hosting provider with the time window, the public IP, and "existing TCP
+connections across several ISPs silent for about a minute while new connections
+succeeded". The 2026-10-21 21:29–21:35 (UTC+8) event looked exactly like this —
+218 kills across a dozen ISPs, reconnect median 3.3 s.
 
 ### Why is a node missing or shown as expired?
 
