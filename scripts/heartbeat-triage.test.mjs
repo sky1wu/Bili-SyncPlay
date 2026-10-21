@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CLOCK_SKEW_TOLERANCE_MS,
   formatReport,
   onlineAtFrom,
+  originFamily,
   parseArgs,
   parseEvents,
   prefixOf,
@@ -157,7 +159,7 @@ test("reconnectGaps pairs each kill with the same member's next rejoin", () => {
   assert.equal(result.reconnected, 2);
   assert.deepEqual(
     result.buckets.map((b) => b.count),
-    [1, 0, 0, 1, 0],
+    [0, 1, 0, 0, 1, 0],
   );
   assert.ok(Math.abs(result.median - 90) < 1e-9);
 });
@@ -271,4 +273,145 @@ test("parseArgs requires UTC minutes and both window bounds", () => {
     () => parseArgs(["--bogus", "2026-10-21T13:29"]),
     /unknown option/,
   );
+});
+
+test("reconnectGaps counts a rejoin stamped shortly before the kill as already back", () => {
+  const events = [
+    // the killed session's own join, seconds before the kill: never a reconnect
+    joined("a", "m-a", "1.1.1.1", "2026-10-21T13:30:58.000Z"),
+    kill("a", "1.1.1.1", "2026-10-21T13:31:00.000Z"),
+    // a replacement session (client reconnected first, or a node clock behind)
+    joined("a2", "m-a", "1.1.1.1", "2026-10-21T13:30:59.000Z"),
+    // beyond the tolerance: an earlier, unrelated join of the same member
+    joined("b0", "m-b", "2.2.2.2", "2026-10-21T13:30:00.000Z"),
+    kill("b", "2.2.2.2", "2026-10-21T13:31:00.000Z"),
+  ];
+  const result = reconnectGaps(events, WINDOW);
+  assert.equal(result.reconnected, 1);
+  assert.equal(result.earlyRejoins, 1);
+  assert.ok(Math.abs(result.earliest + 1) < 1e-9);
+  assert.deepEqual(
+    result.buckets.map((b) => b.count),
+    [1, 0, 0, 0, 0, 0],
+  );
+  assert.ok(CLOCK_SKEW_TOLERANCE_MS < 60_000);
+  const text = formatReport(triage(events, WINDOW));
+  assert.match(
+    text,
+    /<0s: 1 members were back in a room before their kill \(earliest 1\.0s before\)/,
+  );
+  assert.doesNotMatch(text, /clocks disagree, so/);
+});
+
+test("one member killed twice pairs each kill with its own later rejoin", () => {
+  const events = [
+    kill("a", "1.1.1.1", "2026-10-21T13:31:00.000Z"),
+    joined("a2", "m-a", "1.1.1.1", "2026-10-21T13:31:03.000Z"),
+    // the reconnected session keeps the member id, so its kill carries m-a too
+    kill("a2", "1.1.1.1", "2026-10-21T13:33:00.000Z", "ROOM01", "ext-a", "m-a"),
+    joined("a3", "m-a", "1.1.1.1", "2026-10-21T13:33:20.000Z"),
+  ];
+  const result = reconnectGaps(events, WINDOW);
+  assert.equal(result.reconnected, 2);
+  assert.deepEqual(
+    result.buckets.map((b) => b.count),
+    [0, 1, 0, 1, 0, 0],
+  );
+  assert.equal(result.earlyRejoins, 0);
+});
+
+test("Firefox per-install origins are grouped into one family", () => {
+  assert.equal(
+    originFamily("moz-extension://87af4953-024c-4a21-81c3-27897350af19"),
+    originFamily("moz-extension://e72fb32a-ade4-4ca8-a39b-67d1cb9d6601"),
+  );
+  assert.equal(
+    originFamily("chrome-extension://cpgcalajpoihfgfeidmnijcdimnjniam"),
+    "chrome-extension://cpgcalajpoihfgfeidmnijcdimnjniam",
+  );
+  const events = [
+    accepted("f1", "1.1.1.1", "2026-10-21T10:00:00.000Z", "moz-extension://u1"),
+    accepted("f2", "1.1.1.2", "2026-10-21T10:00:00.000Z", "moz-extension://u2"),
+    accepted("f3", "1.1.1.3", "2026-10-21T10:00:00.000Z", "moz-extension://u3"),
+    kill(
+      "f1",
+      "1.1.1.1",
+      "2026-10-21T13:31:00.000Z",
+      "R",
+      "moz-extension://u1",
+    ),
+  ];
+  const { rows } = triage(events, WINDOW).origins;
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].alive, rows[0].killed], [3, 1]);
+});
+
+test("kills whose accept is missing from the input are always flagged", () => {
+  const events = [
+    accepted("a", "1.1.1.1", "2026-10-21T10:00:00.000Z"),
+    // accepted before the journal starts: not in the input
+    kill("old", "2.2.2.2", "2026-10-21T13:31:00.000Z"),
+  ];
+  const report = triage(events, WINDOW);
+  assert.equal(report.acceptedUnknown, 1);
+  assert.equal(report.cohorts, null);
+  assert.match(
+    formatReport(report),
+    /WARNING: 1 killed sessions have no ws_connection_accepted/,
+  );
+  assert.doesNotMatch(
+    formatReport(
+      triage([accepted("a", "1.1.1.1", "2026-10-21T10:00:00.000Z")], WINDOW),
+    ),
+    /no ws_connection_accepted/,
+  );
+});
+
+test("a single rejoin is credited to only one kill", () => {
+  const events = [
+    // two sessions of the same member (two tabs) dropped together, one rejoin
+    kill("t1", "1.1.1.1", "2026-10-21T13:31:00.000Z", "R", "ext-a", "m-x"),
+    kill("t2", "1.1.1.1", "2026-10-21T13:31:01.000Z", "R", "ext-a", "m-x"),
+    joined("t3", "m-x", "1.1.1.1", "2026-10-21T13:31:04.000Z"),
+  ];
+  assert.equal(reconnectGaps(events, WINDOW).reconnected, 1);
+});
+
+test("a rejoin is never credited across the same member's next kill", () => {
+  const events = [
+    kill("k1", "1.1.1.1", "2026-10-21T13:31:00.000Z", "R", "ext-a", "m-y"),
+    kill("k2", "1.1.1.1", "2026-10-21T13:32:00.000Z", "R", "ext-a", "m-y"),
+    joined("j", "m-y", "1.1.1.1", "2026-10-21T13:32:01.000Z"),
+  ];
+  const result = reconnectGaps(events, WINDOW);
+  assert.equal(result.reconnected, 1);
+  // credited to the second kill (1 s), not the first (61 s)
+  assert.deepEqual(
+    result.buckets.map((b) => b.count),
+    [0, 1, 0, 0, 0, 0],
+  );
+});
+
+test("a rejoin both kills can reach is credited once", () => {
+  const events = [
+    kill("k1", "1.1.1.1", "2026-10-21T13:31:00.000Z", "R", "ext-a", "m-z"),
+    // within the tolerance before the next kill: reachable from both kills
+    joined("j", "m-z", "1.1.1.1", "2026-10-21T13:31:58.000Z"),
+    kill("k2", "1.1.1.1", "2026-10-21T13:32:00.000Z", "R", "ext-a", "m-z"),
+  ];
+  assert.equal(reconnectGaps(events, WINDOW).reconnected, 1);
+});
+
+test("a rejoin owed to a kill before the window is not claimed by one inside it", () => {
+  const events = [
+    // before --from (13:29): its reconnect belongs to it
+    kill("p", "1.1.1.1", "2026-10-21T13:28:58.000Z", "R", "ext-a", "m-w"),
+    joined("p2", "m-w", "1.1.1.1", "2026-10-21T13:28:59.000Z"),
+    // inside the window, 1 s after that rejoin
+    kill("q", "1.1.1.1", "2026-10-21T13:29:00.000Z", "R", "ext-a", "m-w"),
+  ];
+  const result = reconnectGaps(events, WINDOW);
+  assert.equal(result.kills, 1);
+  assert.equal(result.reconnected, 0);
+  assert.equal(result.earlyRejoins, 0);
 });

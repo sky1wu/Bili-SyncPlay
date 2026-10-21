@@ -171,32 +171,74 @@ export function workerCohorts(population, workerReloads) {
   return { cohorts, acceptedUnknown: population.acceptedUnknown };
 }
 
+// 入房时间可以早于踢线，有两个成因，日志里分不开：
+// - 跨主机拼接 journal 时各节点墙上时钟不一致，node-b 上的重连带着更早的时间戳；
+// - 客户端自己先察觉断线并重连成功，服务端稍后才清掉旧 socket。扩展在一个浏览器
+//   里只持有一条 WebSocket（socket-controller 用新连接顶替旧连接），所以同一
+//   memberId 在踢线前出现的另一个会话，就是这个客户端的替身连接。
+// 两种情况下成员都已经回来了，所以算作「踢线前已回来」单独一档，而不是丢掉——
+// 纯按时间戳配对会把它们永久算成「没回来」，恰好漏掉最能说明路径通的那批。
+// 但不把负间隔当成时钟偏差的量度。
+export const CLOCK_SKEW_TOLERANCE_MS = 5_000;
+
 // 每次踢线后，同一 memberId 下一次 room_joined 隔了多久。带着仍有效的
 // memberToken 重连时服务端沿用原 memberId（room-service 的 reconnectMemberId），
 // 所以这是按客户端配对；按 remoteAddress 配对会在 NAT 共用出口时把别人的新连接
-// 算成重连，制造假的秒级间隔。
+// 算成重连，制造假的秒级间隔。被踢会话自己（同 sessionId）踢线前的那次入房不是
+// 重连——放宽了时间下限之后，靠它把这次入房排除掉。
 // 秒级连回 = 踢线那一刻客户端收到了关闭，路径是通的；
 // 一分钟以上 = 客户端靠扩展的 reconnect watchdog（每分钟）才回来，路径当时仍断。
 export function reconnectGaps(events, { from, to }) {
-  const relevant = events
-    .filter(
-      (e) =>
-        e.memberId &&
-        (e.event === JOINED ||
-          (e.event === KILL && inWindow(e.timestamp, from, to))),
-    )
-    .map((e) => ({ ...e, at: Date.parse(e.timestamp) }))
+  const stamp = (e) => ({ ...e, at: Date.parse(e.timestamp) });
+  const joinsByMember = new Map();
+  for (const join of events
+    .filter((e) => e.event === JOINED && e.memberId)
+    .map(stamp)
+    .filter((e) => Number.isFinite(e.at))
+    .sort((a, b) => a.at - b.at)) {
+    const list = joinsByMember.get(join.memberId) ?? [];
+    list.push(join);
+    joinsByMember.set(join.memberId, list);
+  }
+  // 配对用全部踢线划分归属，只在统计时筛窗口：否则窗口前一次踢线的重连
+  // 会被窗口内的下一次踢线认领（尤其是落进容忍区间、被记成「已回来」时）。
+  const allKills = events
+    .filter((e) => e.event === KILL && e.memberId)
+    .map(stamp)
     .filter((e) => Number.isFinite(e.at))
     .sort((a, b) => a.at - b.at);
-  const pending = new Map();
+  // 同一成员的下一次踢线是这次配对的上界：越过它的入房属于后一次踢线。
+  // 下一次踢线前 TOLERANCE 内的入房两边都够得着，日志分不出归属；按时间顺序
+  // 归给先处理的那次，used 保证一次入房只记一次。
+  const nextKillAt = new Map();
+  const lastSeen = new Map();
+  for (let i = allKills.length - 1; i >= 0; i -= 1) {
+    const kill = allKills[i];
+    nextKillAt.set(kill, lastSeen.get(kill.memberId) ?? Infinity);
+    lastSeen.set(kill.memberId, kill.at);
+  }
+  const used = new Set();
   const gaps = [];
-  for (const event of relevant) {
-    if (event.event === KILL) {
-      pending.set(event.memberId, event.at);
-    } else if (pending.has(event.memberId)) {
-      gaps.push((event.at - pending.get(event.memberId)) / 1000);
-      pending.delete(event.memberId);
+  let earliest = 0;
+  for (const kill of allKills) {
+    const upper = nextKillAt.get(kill);
+    const join = (joinsByMember.get(kill.memberId) ?? []).find(
+      (j) =>
+        !used.has(j) &&
+        j.sessionId !== kill.sessionId &&
+        j.at >= kill.at - CLOCK_SKEW_TOLERANCE_MS &&
+        j.at < upper,
+    );
+    if (!join) {
+      continue;
     }
+    used.add(join);
+    if (!inWindow(kill.timestamp, from, to)) {
+      continue;
+    }
+    const gap = (join.at - kill.at) / 1000;
+    earliest = Math.min(earliest, gap);
+    gaps.push(gap);
   }
   const kills = events.filter(
     (e) => e.event === KILL && inWindow(e.timestamp, from, to),
@@ -204,6 +246,7 @@ export function reconnectGaps(events, { from, to }) {
   const withoutMember = kills.filter((e) => !e.memberId).length;
   gaps.sort((a, b) => a - b);
   const buckets = [
+    [-Infinity, 0],
     [0, 5],
     [5, 15],
     [15, 60],
@@ -222,10 +265,24 @@ export function reconnectGaps(events, { from, to }) {
     kills: kills.length,
     withoutMember,
     reconnected: gaps.length,
+    earlyRejoins: gaps.filter((g) => g < 0).length,
+    earliest,
     buckets,
     median: quantile(0.5),
     p90: quantile(0.9),
   };
+}
+
+// Firefox 给每个安装分配随机 UUID（ALLOW_ANY_FIREFOX_EXTENSION_ORIGIN），按完整
+// origin 分组会一安装一行：单人被踢就是 100%，Firefox 整体的异常反而汇总不起来。
+// Chromium 系的扩展 id 按商店上架固定，原样保留。
+export function originFamily(origin) {
+  if (!origin) {
+    return "unknown";
+  }
+  return origin.startsWith("moz-extension://")
+    ? "moz-extension://* (Firefox, per-install id)"
+    : origin;
 }
 
 export function triage(events, { from, to, workerReloads = [] }) {
@@ -240,8 +297,9 @@ export function triage(events, { from, to, workerReloads = [] }) {
   // 窗口内新连上又被踢的会话不在分母里，计进分子会把重连多的 origin 算高。
   const byOrigin = new Map();
   for (const session of population.online) {
-    const row = byOrigin.get(session.origin ?? "unknown") ?? {
-      origin: session.origin ?? "unknown",
+    const family = originFamily(session.origin);
+    const row = byOrigin.get(family) ?? {
+      origin: family,
       alive: 0,
       killed: 0,
     };
@@ -252,6 +310,7 @@ export function triage(events, { from, to, workerReloads = [] }) {
   const cohortKilled = population.online.filter((s) => s.killed).length;
   return {
     relevantEvents: events.length,
+    acceptedUnknown: population.acceptedUnknown,
     kills: kills.length,
     perMinute: countBy(kills, (e) => minuteOf(e.timestamp)).sort((a, b) =>
       a[0].localeCompare(b[0]),
@@ -284,6 +343,14 @@ export function formatReport(report) {
       "WARNING: no connection/heartbeat/join events in the input. Check that the",
       "room nodes log at LOG_LEVEL=info, the unit names, and --since. An empty",
       "report here does NOT mean nothing happened.",
+      "",
+    );
+  }
+  if (report.acceptedUnknown > 0) {
+    out.push(
+      `WARNING: ${report.acceptedUnknown} killed sessions have no ws_connection_accepted in the input`,
+      "(journal rotated, or --since too late). They are missing from every per-origin and",
+      "per-generation ratio below; start --since at the earliest room-node start.",
       "",
     );
   }
@@ -328,9 +395,6 @@ export function formatReport(report) {
         `  ${c.label.padEnd(22)} alive=${String(c.alive).padStart(5)} killed=${String(c.killed).padStart(4)} ratio=${c.alive ? pct(c.killed / c.alive) : "-"}`,
       );
     }
-    out.push(
-      `  killed sessions with no accepted in input: ${report.cohorts.acceptedUnknown}`,
-    );
   }
   const r = report.reconnect;
   out.push(
@@ -339,11 +403,18 @@ export function formatReport(report) {
   );
   for (const b of r.buckets) {
     out.push(
-      `  ${(b.hi === Infinity ? `${b.lo}s+` : `${b.lo}-${b.hi}s`).padStart(8)}  ${b.count}`,
+      `  ${(b.lo === -Infinity ? "<0s" : b.hi === Infinity ? `${b.lo}s+` : `${b.lo}-${b.hi}s`).padStart(8)}  ${b.count}`,
     );
   }
   if (r.median !== null) {
     out.push(`  median=${r.median.toFixed(1)}s p90=${r.p90.toFixed(1)}s`);
+  }
+  if (r.earlyRejoins > 0) {
+    out.push(
+      `  <0s: ${r.earlyRejoins} members were back in a room before their kill (earliest ${(-r.earliest).toFixed(1)}s before):`,
+      "  either the client replaced its socket before the old one was reaped, or node clocks",
+      "  disagree. Either way the member was back; gaps that small are not a clock reading.",
+    );
   }
   return out.join("\n");
 }
