@@ -438,7 +438,13 @@ The site files above do not touch `/etc/nginx/nginx.conf`, and distribution defa
 - from outside, new connections to the entrypoint time out or fail intermittently
 - `/var/log/nginx/error.log` repeats `768 worker_connections are not enough while connecting to upstream`
 
-Size it as `worker_processes × worker_connections / 2 ≥ peak concurrent WebSocket connections`, with generous headroom. Each connection is also a file descriptor, and systemd starts services with a **soft** open-file limit of 1024 — `systemctl show nginx -p LimitNOFILE` prints only the hard limit; check `-p LimitNOFILESoft` or `grep 'Max open files' /proc/$(pgrep -f 'nginx: worker' | head -1)/limits`. Raise it from nginx itself with `worker_rlimit_nofile`:
+Size it as `worker_processes × worker_connections / 2 ≥ peak concurrent WebSocket connections`, with generous headroom: the formula assumes connections spread evenly, and nothing guarantees that — a reconnect burst can land on one worker, and a WebSocket stays on the worker that accepted it. Leave `multi_accept` at its default `off`; turning it on lets one woken worker take the whole pending queue at once. Each connection is also a file descriptor, and systemd starts services with a **soft** open-file limit of 1024 — `systemctl show nginx -p LimitNOFILE` prints only the hard limit; check `-p LimitNOFILESoft`, or read what the running workers actually got:
+
+```bash
+for p in $(pgrep -f 'nginx: worker process$'); do grep 'Max open files' /proc/$p/limits; done
+```
+
+The `$` anchor skips workers still draining after a reload (`nginx: worker process is shutting down`), which keep the old limit until their last connection closes. Raise it from nginx itself with `worker_rlimit_nofile`:
 
 ```nginx
 # /etc/nginx/nginx.conf — top level, next to worker_processes
@@ -446,11 +452,10 @@ worker_rlimit_nofile 65535;
 
 events {
     worker_connections 16384;
-    multi_accept on;
 }
 ```
 
-`nginx -t && systemctl reload nginx` applies both without dropping existing WebSocket connections: new workers take new connections while the old ones keep theirs until they close.
+`sudo nginx -t && sudo systemctl reload nginx` applies both without dropping existing WebSocket connections: new workers take new connections while the old ones keep theirs until they close.
 
 ## 5. Enable TLS
 

@@ -436,7 +436,13 @@ sudo systemctl reload nginx
 - 从外部看，到入口的新连接间歇性超时或失败
 - `/var/log/nginx/error.log` 反复出现 `768 worker_connections are not enough while connecting to upstream`
 
-按 `worker_processes × worker_connections / 2 ≥ 峰值并发 WebSocket 连接数` 估算，并留足余量。每个连接同时也是一个文件描述符，而 systemd 启动服务时的**软**限制是 1024——`systemctl show nginx -p LimitNOFILE` 只显示硬限制；要看 `-p LimitNOFILESoft`，或 `grep 'Max open files' /proc/$(pgrep -f 'nginx: worker' | head -1)/limits`。用 nginx 自己的 `worker_rlimit_nofile` 提高它：
+按 `worker_processes × worker_connections / 2 ≥ 峰值并发 WebSocket 连接数` 估算，并留足余量：公式假设连接在 worker 间均匀分布，但这一点没有任何保证——一波重连可能集中落到同一个 worker 上，而 WebSocket 会一直留在接受它的那个 worker 上。`multi_accept` 保持默认的 `off`；打开后，一个被唤醒的 worker 会一次性接走全部排队连接。每个连接同时也是一个文件描述符，而 systemd 启动服务时的**软**限制是 1024——`systemctl show nginx -p LimitNOFILE` 只显示硬限制；要看 `-p LimitNOFILESoft`，或直接读运行中 worker 实际拿到的值：
+
+```bash
+for p in $(pgrep -f 'nginx: worker process$'); do grep 'Max open files' /proc/$p/limits; done
+```
+
+`$` 锚点会跳过 reload 后仍在排空连接的旧 worker（`nginx: worker process is shutting down`），它们会保留旧限制，直到最后一个连接关闭。用 nginx 自己的 `worker_rlimit_nofile` 提高它：
 
 ```nginx
 # /etc/nginx/nginx.conf —— 顶层，与 worker_processes 同级
@@ -444,11 +450,10 @@ worker_rlimit_nofile 65535;
 
 events {
     worker_connections 16384;
-    multi_accept on;
 }
 ```
 
-`nginx -t && systemctl reload nginx` 即可让两项生效，且不会断开已有的 WebSocket 连接：新 worker 接新连接，旧 worker 保留已有连接直到它们关闭。
+`sudo nginx -t && sudo systemctl reload nginx` 即可让两项生效，且不会断开已有的 WebSocket 连接：新 worker 接新连接，旧 worker 保留已有连接直到它们关闭。
 
 ## 5. 启用 TLS
 
