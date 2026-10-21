@@ -440,24 +440,35 @@ per-minute distribution below, not the alert duration.
    grep -c 'worker_connections are not enough' /var/log/nginx/error.log
    ```
 
-2. **Run the triage script** over the room node's journal. Start `--since` at the
-   process start so sessions online during the window have their
-   `ws_connection_accepted` in the input. `--from`/`--to` are **UTC** minutes
-   (the log `timestamp` is UTC); widen them a few minutes around the kills.
+2. **Run the triage script** over the journals of **every** room node. A dropped
+   client may reconnect to a different node, so reading only the node that
+   dropped it counts a successful reconnect as one that never came back. Start
+   `--since` at the earliest room-node start so sessions online during the
+   window have their `ws_connection_accepted` in the input. `--from`/`--to` are
+   **UTC** minutes (the log `timestamp` is UTC); widen them a few minutes around
+   the kills. The script needs the room nodes to log at `LOG_LEVEL=info` — all
+   four events it reads are info-level — and prints a warning instead of an
+   empty report when the input contains none of them.
 
    ```bash
    cd /opt/bili-syncplay
-   sudo journalctl -u bili-syncplay-room-node-a --since "$(systemctl show -p ActiveEnterTimestamp --value bili-syncplay-room-node-a)" -o cat \
+   # every room node on this host; the glob matches room-node-a, -b, ...
+   sudo journalctl -u 'bili-syncplay-room-node-*' --since "2026-10-20 21:39" -o cat \
      | node scripts/heartbeat-triage.mjs --from 2026-10-21T13:29 --to 2026-10-21T13:36
    ```
+
+   Nodes on other hosts: concatenate their journals into the same pipe, for
+   example `{ journalctl ... ; ssh node-b journalctl ... ; } | node ...`. The
+   script orders events by timestamp itself.
 
    Add `--worker-reload <UTC minute>` once per nginx reload since the process
    started (`ps -o pid,lstart,args -C nginx` shows when each worker generation
    began) to split the online sessions by the worker generation serving them.
 
-   The origin baseline and the worker cohorts are both computed over the
-   sessions online at `--from`, so reconnects during the incident do not
-   inflate the baseline of the very clients that were dropped. The reconnect
+   The per-origin and per-generation kill ratios are both computed over the
+   sessions online at `--from` — numerator and denominator are the same
+   sessions — so reconnects during the incident, and their repeat kills, do not
+   skew the ratio of the very clients that were dropped. The reconnect
    gap follows each dropped member to its next `room_joined` with the same
    `memberId` (a rejoin with a still-valid `memberToken` keeps it), not to the
    next connection from the same address, which behind a shared NAT would be
@@ -465,15 +476,15 @@ per-minute distribution below, not the alert duration.
 
 3. **Read the report:**
 
-   | Report section      | Points at the entrypoint or node                                                | Points at clients                       | Points at the network path                                                                                                                                              |
-   | ------------------- | ------------------------------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-   | kills per minute    | —                                                                               | —                                       | a burst a few minutes wide, staggered                                                                                                                                   |
-   | source /16 prefixes | —                                                                               | —                                       | many ISPs, none dominant (one dominant prefix: that ISP's path)                                                                                                         |
-   | rooms               | —                                                                               | concentrated in a few rooms             | spread out                                                                                                                                                              |
-   | origins vs baseline | —                                                                               | one origin far above its baseline share | shares close to baseline                                                                                                                                                |
-   | accepted per minute | new connections also stop                                                       | —                                       | new connections keep arriving, roughly 1:1 with kills                                                                                                                   |
-   | worker cohorts      | one generation far above the others **and** only its worker PIDs in `error.log` | —                                       | ratios track connection age                                                                                                                                             |
-   | reconnect gap       | —                                                                               | —                                       | seconds: the path had already recovered at kill time; a minute or more: clients came back via the extension's one-minute reconnect watchdog, so the path was still down |
+   | Report section        | Points at the entrypoint or node                                                | Points at clients                              | Points at the network path                                                                                                                                              |
+   | --------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | kills per minute      | —                                                                               | —                                              | a burst a few minutes wide, staggered                                                                                                                                   |
+   | source /16 prefixes   | —                                                                               | —                                              | many ISPs, none dominant (one dominant prefix: that ISP's path)                                                                                                         |
+   | rooms                 | —                                                                               | concentrated in a few rooms                    | spread out                                                                                                                                                              |
+   | per-origin kill ratio | —                                                                               | one origin's ratio far above the overall ratio | ratios close to the overall ratio                                                                                                                                       |
+   | accepted per minute   | new connections also stop                                                       | —                                              | new connections keep arriving, roughly 1:1 with kills                                                                                                                   |
+   | worker cohorts        | one generation far above the others **and** only its worker PIDs in `error.log` | —                                              | ratios track connection age                                                                                                                                             |
+   | reconnect gap         | —                                                                               | —                                              | seconds: the path had already recovered at kill time; a minute or more: clients came back via the extension's one-minute reconnect watchdog, so the path was still down |
 
    The worker-cohort ratio has a built-in survivorship bias: older generations
    hold only connections that have survived for a day or more, which are the
