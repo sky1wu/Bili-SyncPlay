@@ -428,6 +428,28 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+### 连接容量
+
+上面的站点配置不涉及 `/etc/nginx/nginx.conf`，而发行版在那里的默认值是按短 HTTP 请求设计的。Debian/Ubuntu 默认 `worker_connections 768`，而**每条被反代的 WebSocket 占两个 worker 连接**——一个对客户端，一个对上游节点。两个 worker 时入口约在 768 个并发 WebSocket 成员处封顶，而且撞上时很容易误判：
+
+- 被拒的连接根本到不了同步进程，它自己的指标（CPU、事件循环延迟、消息处理耗时）可能完全正常——不能据此排除入口层
+- 从外部看，到入口的新连接间歇性超时或失败
+- `/var/log/nginx/error.log` 反复出现 `768 worker_connections are not enough while connecting to upstream`
+
+按 `worker_processes × worker_connections / 2 ≥ 峰值并发 WebSocket 连接数` 估算，并留足余量。每个连接同时也是一个文件描述符，而 systemd 启动服务时的**软**限制是 1024——`systemctl show nginx -p LimitNOFILE` 只显示硬限制；要看 `-p LimitNOFILESoft`，或 `grep 'Max open files' /proc/$(pgrep -f 'nginx: worker' | head -1)/limits`。用 nginx 自己的 `worker_rlimit_nofile` 提高它：
+
+```nginx
+# /etc/nginx/nginx.conf —— 顶层，与 worker_processes 同级
+worker_rlimit_nofile 65535;
+
+events {
+    worker_connections 16384;
+    multi_accept on;
+}
+```
+
+`nginx -t && systemctl reload nginx` 即可让两项生效，且不会断开已有的 WebSocket 连接：新 worker 接新连接，旧 worker 保留已有连接直到它们关闭。
+
 ## 5. 启用 TLS
 
 生产环境中的扩展 WebSocket 服务应使用 `wss://`。常见做法是将 Certbot 与 Nginx 配合使用：
