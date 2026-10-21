@@ -442,7 +442,7 @@ sudo systemctl reload nginx
 for p in $(pgrep -f 'nginx: worker process$'); do grep 'Max open files' /proc/$p/limits; done
 ```
 
-`$` 锚点会跳过 reload 后仍在排空连接的旧 worker（`nginx: worker process is shutting down`），它们会保留旧限制，直到最后一个连接关闭。用 nginx 自己的 `worker_rlimit_nofile` 提高它：
+`$` 锚点会跳过 reload 后仍在排空连接的旧 worker（`nginx: worker process is shutting down`），它们会保留旧限制，直到最后一个连接关闭。`systemctl reload` 返回时旧 worker 可能还没改名，所以要等几秒再查——紧接着执行仍可能列出带旧限制的旧 worker。用 nginx 自己的 `worker_rlimit_nofile` 提高它：
 
 ```nginx
 # /etc/nginx/nginx.conf —— 顶层，与 worker_processes 同级
