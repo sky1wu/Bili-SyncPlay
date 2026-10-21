@@ -459,20 +459,36 @@ per-minute distribution below, not the alert duration.
 
    Nodes on other hosts: concatenate their journals into the same pipe, for
    example `{ journalctl ... ; ssh node-b journalctl ... ; } | node ...`. The
-   script orders events by timestamp itself. A rejoin may be stamped up to 5 s
-   before the kill it follows, and the script reports those in a separate `<0s`
-   bucket: either the client replaced its socket before the node reaped the old
-   one (the extension holds one WebSocket per browser, so a second session of
-   the same member is its replacement), or the nodes' wall clocks disagree. The
-   log cannot tell the two apart, and both mean the member was back — keep the
-   nodes NTP-synced and do not read gaps of a few seconds as a clock
-   measurement. If the report opens with a
+   script orders events by timestamp itself. A rejoin can come **before** the
+   kill: the node reaps a silent socket only after 60–90 s, and a client that
+   noticed first may already have reconnected, possibly on another node. The
+   extension holds one WebSocket per browser, so another session of the same
+   member that joined after the killed session was accepted is its replacement;
+   the script reports those in a separate `<0s` bucket as members that were
+   already back. That lifecycle test, not a time tolerance, is what decides —
+   sessions live for minutes to hours, far longer than any clock skew between
+   NTP-synced nodes. Only when the killed session's accept is missing from the
+   input does it fall back to accepting a rejoin up to 5 s early.
+
+   Read the reconnect gap as a **distribution**, not as exact pairs. The only
+   identity that links one client's sessions in the log is `memberId`, and the
+   timestamps come from more than one clock, so an individual kill cannot always
+   be matched to its own reconnect — a member that drops repeatedly, or a
+   replacement session racing the reaper, can be attributed to the neighbouring
+   kill. The question the section answers is whether most dropped members came
+   back within seconds or only after a minute or more; a handful of
+   misattributed pairs does not change that answer, and the script is not
+   trying to settle it per member. If the report
+   opens with a
    warning that killed sessions have no `ws_connection_accepted`, the journal
    does not reach back far enough and every ratio below it is incomplete.
 
-   Add `--worker-reload <UTC minute>` once per nginx reload since the process
+   Add `--worker-reload <UTC time>` once per nginx reload since the process
    started (`ps -o pid,lstart,args -C nginx` shows when each worker generation
    began) to split the online sessions by the worker generation serving them.
+   Give it to the second (`2026-10-21T02:23:45`): a reload in the middle of a
+   minute would otherwise put that minute's earlier connections, which the old
+   workers accepted, into the new generation.
 
    The per-origin and per-generation kill ratios are both computed over the
    sessions online at `--from` — numerator and denominator are the same
