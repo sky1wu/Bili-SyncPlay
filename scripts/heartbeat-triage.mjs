@@ -162,34 +162,52 @@ export function workerCohorts(population, workerReloads) {
     `< ${bounds[0] ?? "∞"}`,
     ...bounds.map((b) => `>= ${b}`),
   ].map((label) => ({ label, alive: 0, killed: 0 }));
+  // reload 可以落在某分钟中途：按秒比较，否则这一分钟前半段旧 worker 接下的
+  // 连接会被归到新一代。
+  const boundAt = bounds.map((b) =>
+    Date.parse(`${b}${b.length === 16 ? ":00" : ""}Z`),
+  );
   for (const session of population.online) {
-    const minute = minuteOf(session.timestamp);
-    const cohort = cohorts[bounds.filter((b) => minute >= b).length];
+    const at = Date.parse(session.timestamp);
+    const cohort = cohorts[boundAt.filter((b) => at >= b).length];
     cohort.alive += 1;
     cohort.killed += session.killed ? 1 : 0;
   }
   return { cohorts, acceptedUnknown: population.acceptedUnknown };
 }
 
-// 入房时间可以早于踢线，有两个成因，日志里分不开：
-// - 跨主机拼接 journal 时各节点墙上时钟不一致，node-b 上的重连带着更早的时间戳；
-// - 客户端自己先察觉断线并重连成功，服务端稍后才清掉旧 socket。扩展在一个浏览器
-//   里只持有一条 WebSocket（socket-controller 用新连接顶替旧连接），所以同一
-//   memberId 在踢线前出现的另一个会话，就是这个客户端的替身连接。
-// 两种情况下成员都已经回来了，所以算作「踢线前已回来」单独一档，而不是丢掉——
-// 纯按时间戳配对会把它们永久算成「没回来」，恰好漏掉最能说明路径通的那批。
-// 但不把负间隔当成时钟偏差的量度。
-export const CLOCK_SKEW_TOLERANCE_MS = 5_000;
+// 替身连接可以远早于踢线：服务端要等旧连接静默 60–90 秒才踢（ws-heartbeat），
+// 客户端若先察觉断线并在别处重连成功，它的入房会比旧会话的踢线早几十秒。扩展在
+// 一个浏览器里只持有一条 WebSocket（socket-controller 用新连接顶替旧连接），所以
+// 同一 memberId、被踢会话建立之后才入房、且踢线时仍未关闭的另一个会话，
+// 就是这个客户端的替身（踢线前已经关掉的会话说明它又断了一次，不是「回来了」）——
+// 判据是会话生命周期，不是某个时间容差。会话寿命以分钟到小时计，远大于节点间的
+// 时钟偏差，所以它顺带覆盖了跨主机拼接时「重连时间戳略早于踢线」的情况。
+// 被踢会话的 accepted 不在输入里时，生命周期无从谈起，只退回这么多的保守容差。
+export const UNKNOWN_ACCEPT_TOLERANCE_MS = 5_000;
 
 // 每次踢线后，同一 memberId 下一次 room_joined 隔了多久。带着仍有效的
 // memberToken 重连时服务端沿用原 memberId（room-service 的 reconnectMemberId），
 // 所以这是按客户端配对；按 remoteAddress 配对会在 NAT 共用出口时把别人的新连接
-// 算成重连，制造假的秒级间隔。被踢会话自己（同 sessionId）踢线前的那次入房不是
-// 重连——放宽了时间下限之后，靠它把这次入房排除掉。
+// 算成重连，制造假的秒级间隔。被踢会话自己（同 sessionId）的入房不是重连。
+// <0s = 踢线前替身已经入房，成员早就回来了；
 // 秒级连回 = 踢线那一刻客户端收到了关闭，路径是通的；
 // 一分钟以上 = 客户端靠扩展的 reconnect watchdog（每分钟）才回来，路径当时仍断。
 export function reconnectGaps(events, { from, to }) {
   const stamp = (e) => ({ ...e, at: Date.parse(e.timestamp) });
+  const acceptedAt = new Map();
+  const closedAt = new Map();
+  for (const e of events) {
+    if (e.event === ACCEPTED && e.sessionId) {
+      acceptedAt.set(e.sessionId, Date.parse(e.timestamp));
+    } else if (
+      e.event === CLOSED &&
+      e.sessionId &&
+      !closedAt.has(e.sessionId)
+    ) {
+      closedAt.set(e.sessionId, Date.parse(e.timestamp));
+    }
+  }
   const joinsByMember = new Map();
   for (const join of events
     .filter((e) => e.event === JOINED && e.memberId)
@@ -201,15 +219,15 @@ export function reconnectGaps(events, { from, to }) {
     joinsByMember.set(join.memberId, list);
   }
   // 配对用全部踢线划分归属，只在统计时筛窗口：否则窗口前一次踢线的重连
-  // 会被窗口内的下一次踢线认领（尤其是落进容忍区间、被记成「已回来」时）。
+  // 会被窗口内的下一次踢线认领（尤其是被记成「已回来」时）。
   const allKills = events
     .filter((e) => e.event === KILL && e.memberId)
     .map(stamp)
     .filter((e) => Number.isFinite(e.at))
     .sort((a, b) => a.at - b.at);
   // 同一成员的下一次踢线是这次配对的上界：越过它的入房属于后一次踢线。
-  // 下一次踢线前 TOLERANCE 内的入房两边都够得着，日志分不出归属；按时间顺序
-  // 归给先处理的那次，used 保证一次入房只记一次。
+  // 两次踢线的候选区间可能重叠，日志分不出归属；按时间顺序归给先处理的那次，
+  // used 保证一次入房只记一次。
   const nextKillAt = new Map();
   const lastSeen = new Map();
   for (let i = allKills.length - 1; i >= 0; i -= 1) {
@@ -222,12 +240,15 @@ export function reconnectGaps(events, { from, to }) {
   let earliest = 0;
   for (const kill of allKills) {
     const upper = nextKillAt.get(kill);
+    const lower =
+      acceptedAt.get(kill.sessionId) ?? kill.at - UNKNOWN_ACCEPT_TOLERANCE_MS;
     const join = (joinsByMember.get(kill.memberId) ?? []).find(
       (j) =>
         !used.has(j) &&
         j.sessionId !== kill.sessionId &&
-        j.at >= kill.at - CLOCK_SKEW_TOLERANCE_MS &&
-        j.at < upper,
+        j.at > lower &&
+        j.at < upper &&
+        !(closedAt.get(j.sessionId) < kill.at),
     );
     if (!join) {
       continue;
@@ -412,8 +433,8 @@ export function formatReport(report) {
   if (r.earlyRejoins > 0) {
     out.push(
       `  <0s: ${r.earlyRejoins} members were back in a room before their kill (earliest ${(-r.earliest).toFixed(1)}s before):`,
-      "  either the client replaced its socket before the old one was reaped, or node clocks",
-      "  disagree. Either way the member was back; gaps that small are not a clock reading.",
+      "  the client had already replaced its socket (the node reaps a silent one only after",
+      "  60-90 s), or node clocks disagree slightly. Either way the member was back.",
     );
   }
   return out.join("\n");
@@ -421,13 +442,21 @@ export function formatReport(report) {
 
 const MINUTE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 
+const SECOND = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
+
 // 形状对、且是真实存在的 UTC 时刻（2026-13-40T25:99 形状也对）。
-function isUtcMinute(value) {
-  if (!MINUTE.test(value ?? "")) {
+// 只有 --worker-reload 接受秒：reload 时刻来自 ps，可以落在分钟中途。
+function isUtcTime(value, { allowSeconds = false } = {}) {
+  const v = value ?? "";
+  const withSeconds = allowSeconds && SECOND.test(v);
+  if (!withSeconds && !MINUTE.test(v)) {
     return false;
   }
-  const at = new Date(`${value}:00Z`);
-  return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 16) === value;
+  const at = new Date(`${v}${withSeconds ? "" : ":00"}Z`);
+  return (
+    !Number.isNaN(at.getTime()) &&
+    at.toISOString().slice(0, withSeconds ? 19 : 16) === v
+  );
 }
 
 export function parseArgs(argv) {
@@ -435,9 +464,12 @@ export function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const [flag, inline] = argv[i].split("=", 2);
     const value = inline ?? argv[++i];
-    if (!isUtcMinute(value)) {
+    const allowSeconds = flag === "--worker-reload";
+    if (!isUtcTime(value, { allowSeconds })) {
       throw new Error(
-        `${flag} expects a UTC minute like 2026-10-21T13:29, got ${value}`,
+        allowSeconds
+          ? `${flag} expects a UTC time like 2026-10-21T02:23:45, got ${value}`
+          : `${flag} expects a UTC minute like 2026-10-21T13:29, got ${value}`,
       );
     }
     if (flag === "--from") options.from = value;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  CLOCK_SKEW_TOLERANCE_MS,
+  UNKNOWN_ACCEPT_TOLERANCE_MS,
   formatReport,
   onlineAtFrom,
   originFamily,
@@ -262,7 +262,7 @@ test("parseArgs requires UTC minutes and both window bounds", () => {
         "--worker-reload",
         "2026-02-30T00:00",
       ]),
-    /UTC minute/,
+    /UTC time/,
   );
   assert.throws(() => parseArgs(["--from", "2026-10-21T13:29"]), /required/);
   assert.throws(
@@ -294,7 +294,7 @@ test("reconnectGaps counts a rejoin stamped shortly before the kill as already b
     result.buckets.map((b) => b.count),
     [1, 0, 0, 0, 0, 0],
   );
-  assert.ok(CLOCK_SKEW_TOLERANCE_MS < 60_000);
+  assert.ok(UNKNOWN_ACCEPT_TOLERANCE_MS < 60_000);
   const text = formatReport(triage(events, WINDOW));
   assert.match(
     text,
@@ -414,4 +414,91 @@ test("a rejoin owed to a kill before the window is not claimed by one inside it"
   assert.equal(result.kills, 1);
   assert.equal(result.reconnected, 0);
   assert.equal(result.earlyRejoins, 0);
+});
+
+test("a replacement session that joined well before the kill counts as already back", () => {
+  const events = [
+    accepted("old", "1.1.1.1", "2026-10-21T12:00:00.000Z"),
+    // the client noticed first and reconnected; the node reaps the old socket 40 s later
+    joined("new", "m-old", "1.1.1.1", "2026-10-21T13:30:20.000Z"),
+    kill("old", "1.1.1.1", "2026-10-21T13:31:00.000Z"),
+    // a different session of the same member that joined BEFORE the killed session
+    // existed is not its replacement
+    accepted("older", "2.2.2.2", "2026-10-21T11:00:00.000Z"),
+    joined("before", "m-older", "2.2.2.2", "2026-10-21T11:30:00.000Z"),
+    accepted("older", "2.2.2.2", "2026-10-21T12:00:00.000Z"),
+    kill("older", "2.2.2.2", "2026-10-21T13:31:00.000Z"),
+  ];
+  const result = reconnectGaps(events, WINDOW);
+  assert.equal(result.reconnected, 1);
+  assert.equal(result.earlyRejoins, 1);
+  assert.ok(Math.abs(result.earliest + 40) < 1e-9);
+});
+
+test("worker cohorts split at the reload second, not the minute", () => {
+  const events = [
+    accepted("before", "1.1.1.1", "2026-10-21T02:23:10.000Z"),
+    accepted("after", "2.2.2.2", "2026-10-21T02:23:55.000Z"),
+  ];
+  const { cohorts } = workerCohorts(onlineAtFrom(events, WINDOW), [
+    "2026-10-21T02:23:50",
+  ]);
+  assert.deepEqual(
+    cohorts.map((c) => c.alive),
+    [1, 1],
+  );
+  // a minute-only bound still works and means :00
+  assert.deepEqual(
+    workerCohorts(onlineAtFrom(events, WINDOW), [
+      "2026-10-21T02:23",
+    ]).cohorts.map((c) => c.alive),
+    [0, 2],
+  );
+  assert.deepEqual(
+    parseArgs([
+      "--from",
+      "2026-10-21T13:29",
+      "--to",
+      "2026-10-21T13:36",
+      "--worker-reload",
+      "2026-10-21T02:23:50",
+    ]).workerReloads,
+    ["2026-10-21T02:23:50"],
+  );
+  assert.throws(
+    () =>
+      parseArgs(["--from", "2026-10-21T13:29:00", "--to", "2026-10-21T13:36"]),
+    /UTC minute/,
+  );
+  assert.throws(
+    () =>
+      parseArgs([
+        "--from",
+        "2026-10-21T13:29",
+        "--to",
+        "2026-10-21T13:36",
+        "--worker-reload",
+        "2026-10-21T02:23:61",
+      ]),
+    /UTC time/,
+  );
+});
+
+test("a replacement that closed again before the kill is not counted as back", () => {
+  const events = [
+    accepted("old", "1.1.1.1", "2026-10-21T12:00:00.000Z"),
+    // an earlier replacement that itself dropped before the kill
+    joined("flaky", "m-old", "1.1.1.1", "2026-10-21T13:30:10.000Z"),
+    closed("flaky", "2026-10-21T13:30:40.000Z"),
+    kill("old", "1.1.1.1", "2026-10-21T13:31:00.000Z"),
+    // the real reconnect after the kill
+    joined("back", "m-old", "1.1.1.1", "2026-10-21T13:31:04.000Z"),
+  ];
+  const result = reconnectGaps(events, WINDOW);
+  assert.equal(result.reconnected, 1);
+  assert.equal(result.earlyRejoins, 0);
+  assert.deepEqual(
+    result.buckets.map((b) => b.count),
+    [0, 1, 0, 0, 0, 0],
+  );
 });
