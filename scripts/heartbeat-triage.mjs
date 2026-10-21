@@ -4,13 +4,16 @@
 // 用法见 docs/runbook/multi-node-operations.md 的
 // 「Why are clients being dropped by heartbeat timeouts?」。
 //
-//   journalctl -u <room-node> --since <进程启动时刻> -o cat \
+//   journalctl -u 'bili-syncplay-room-node-*' --since <最早的进程启动时刻> -o cat \
 //     | node scripts/heartbeat-triage.mjs --from 2026-10-21T13:29 --to 2026-10-21T13:36 \
 //         [--worker-reload 2026-10-20T14:23 --worker-reload 2026-10-21T02:23]
 //
 // 时间参数一律是 UTC、精确到分钟（与日志 timestamp 前 16 位直接比较）。
 // --since 要早到覆盖窗口内在线会话的 ws_connection_accepted，否则这些会话
 // 进不了 cohort 分组，会计入 acceptedUnknown。
+// 多节点时要喂**全部** room node 的日志：被踢的客户端可能重连到别的节点，
+// 只读一个节点会把成功重连算成没回来。各节点的行可以直接拼接，脚本自己按时间排序。
+// 前提是 LOG_LEVEL 为 info（四类事件都是 info 级），否则输入里根本没有它们。
 
 const KILL = "ws_heartbeat_timeout_terminated";
 const ACCEPTED = "ws_connection_accepted";
@@ -78,19 +81,46 @@ function countBy(items, keyOf) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]);
 }
 
-function share(counts) {
-  const total = counts.reduce((sum, [, n]) => sum + n, 0);
-  return new Map(counts.map(([key, n]) => [key, total ? n / total : 0]));
+// 只为看「是否集中在少数网段」，不做精确归属：IPv4 取 /16，IPv6 取 /32
+// （国内运营商的 IPv6 分配大致在这一粒度）。IPv6 若原样分组，同一网络里的
+// 隐私地址会各成一行，把单一网络的故障伪装成来源分散。
+export function prefixOf(address) {
+  if (!address) {
+    return "unknown";
+  }
+  const v4 = /^(?:::ffff:)?(\d+\.\d+)\.\d+\.\d+$/i.exec(address);
+  if (v4) {
+    return `${v4[1]}.0.0/16`;
+  }
+  const hextets = expandIpv6(address);
+  return hextets ? `${hextets[0]}:${hextets[1]}::/32` : address;
 }
 
-// IPv4 取 /16，其他地址原样：只为看「是否集中在少数网段」，不做精确归属。
-export function prefixOf(address) {
-  const match = /^(?:::ffff:)?(\d+\.\d+)\.\d+\.\d+$/.exec(address ?? "");
-  return match ? `${match[1]}.0.0/16` : (address ?? "unknown");
+function expandIpv6(address) {
+  const bare = address.split("%")[0].toLowerCase();
+  if (!/^[0-9a-f:]+$/.test(bare) || bare.split("::").length > 2) {
+    return null;
+  }
+  const [head, tail] = bare.includes("::") ? bare.split("::") : [bare, null];
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if (tail === null ? missing !== 0 : missing < 1) {
+    return null;
+  }
+  const hextets = [
+    ...left,
+    ...Array(tail === null ? 0 : missing).fill("0"),
+    ...right,
+  ];
+  if (hextets.some((h) => !/^[0-9a-f]{1,4}$/.test(h))) {
+    return null;
+  }
+  return hextets.map((h) => h.replace(/^0+(?=.)/, ""));
 }
 
 // from 时刻的在线人群：accepted 早于 from、且 from 之前没有断开的会话。
-// 代际对照和 origin 基线都以它为分母——用整段输入的 accepted 当基线会被
+// 代际对照和 origin 对比都以它为分母——用整段输入的 accepted 当基线会被
 // 进程运行时长和故障期间的重连本身污染（重连越多的 origin 基线反而越高）。
 export function onlineAtFrom(events, { from, to }) {
   const accepted = new Map();
@@ -206,10 +236,22 @@ export function triage(events, { from, to, workerReloads = [] }) {
     (e) => e.event === ACCEPTED && inWindow(e.timestamp, from, to),
   );
   const population = onlineAtFrom(events, { from, to });
-  const baselineOrigins = share(
-    countBy(population.online, (e) => e.origin ?? "unknown"),
-  );
+  // 分子分母必须是同一批人：只看 --from 时在线的会话里，每个 origin 被踢了多少。
+  // 窗口内新连上又被踢的会话不在分母里，计进分子会把重连多的 origin 算高。
+  const byOrigin = new Map();
+  for (const session of population.online) {
+    const row = byOrigin.get(session.origin ?? "unknown") ?? {
+      origin: session.origin ?? "unknown",
+      alive: 0,
+      killed: 0,
+    };
+    row.alive += 1;
+    row.killed += session.killed ? 1 : 0;
+    byOrigin.set(row.origin, row);
+  }
+  const cohortKilled = population.online.filter((s) => s.killed).length;
   return {
+    relevantEvents: events.length,
     kills: kills.length,
     perMinute: countBy(kills, (e) => minuteOf(e.timestamp)).sort((a, b) =>
       a[0].localeCompare(b[0]),
@@ -219,14 +261,11 @@ export function triage(events, { from, to, workerReloads = [] }) {
     ).sort((a, b) => a[0].localeCompare(b[0])),
     prefixes: countBy(kills, (e) => prefixOf(e.remoteAddress)),
     rooms: countBy(kills, (e) => e.roomCode ?? "none"),
-    origins: countBy(kills, (e) => e.origin ?? "unknown").map(
-      ([origin, n]) => ({
-        origin,
-        killed: n,
-        killedShare: kills.length ? n / kills.length : 0,
-        baselineShare: baselineOrigins.get(origin) ?? 0,
-      }),
-    ),
+    origins: {
+      rows: [...byOrigin.values()].sort((a, b) => b.alive - a.alive),
+      alive: population.online.length,
+      killed: cohortKilled,
+    },
     cohorts: workerReloads.length
       ? workerCohorts(population, workerReloads)
       : null,
@@ -240,6 +279,14 @@ export function formatReport(report) {
   const out = [];
   const top = (rows, n = 10) =>
     rows.slice(0, n).map(([k, v]) => `  ${String(v).padStart(5)}  ${k}`);
+  if (report.relevantEvents === 0) {
+    out.push(
+      "WARNING: no connection/heartbeat/join events in the input. Check that the",
+      "room nodes log at LOG_LEVEL=info, the unit names, and --since. An empty",
+      "report here does NOT mean nothing happened.",
+      "",
+    );
+  }
   out.push(`heartbeat kills in window: ${report.kills}`);
   out.push(
     "",
@@ -261,10 +308,14 @@ export function formatReport(report) {
     `rooms (${report.rooms.length} distinct, top 10):`,
     ...top(report.rooms),
   );
-  out.push("", "origins (killed share vs sessions online at --from):");
-  for (const row of report.origins.slice(0, 10)) {
+  const o = report.origins;
+  out.push(
+    "",
+    `origins among sessions online at --from (overall ${o.killed}/${o.alive} killed${o.alive ? `, ${pct(o.killed / o.alive)}` : ""}):`,
+  );
+  for (const row of o.rows.slice(0, 10)) {
     out.push(
-      `  ${String(row.killed).padStart(5)}  ${pct(row.killedShare).padStart(6)} vs ${pct(row.baselineShare).padStart(6)}  ${row.origin}`,
+      `  alive=${String(row.alive).padStart(5)} killed=${String(row.killed).padStart(4)} ratio=${pct(row.killed / row.alive).padStart(6)}  ${row.origin}`,
     );
   }
   if (report.cohorts) {
@@ -299,12 +350,21 @@ export function formatReport(report) {
 
 const MINUTE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 
+// 形状对、且是真实存在的 UTC 时刻（2026-13-40T25:99 形状也对）。
+function isUtcMinute(value) {
+  if (!MINUTE.test(value ?? "")) {
+    return false;
+  }
+  const at = new Date(`${value}:00Z`);
+  return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 16) === value;
+}
+
 export function parseArgs(argv) {
   const options = { workerReloads: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const [flag, inline] = argv[i].split("=", 2);
     const value = inline ?? argv[++i];
-    if (!MINUTE.test(value ?? "")) {
+    if (!isUtcMinute(value)) {
       throw new Error(
         `${flag} expects a UTC minute like 2026-10-21T13:29, got ${value}`,
       );

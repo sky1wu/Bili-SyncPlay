@@ -86,10 +86,17 @@ test("parseEvents keeps journal JSON lines and skips noise", () => {
   );
 });
 
-test("prefixOf groups IPv4 by /16, including IPv4-mapped IPv6", () => {
+test("prefixOf groups IPv4 by /16 and IPv6 by /32", () => {
   assert.equal(prefixOf("39.144.10.20"), "39.144.0.0/16");
   assert.equal(prefixOf("::ffff:39.144.10.20"), "39.144.0.0/16");
-  assert.equal(prefixOf("2408::1"), "2408::1");
+  // privacy addresses inside one network collapse to one prefix
+  assert.equal(prefixOf("2408:8207:1:2::5"), "2408:8207::/32");
+  assert.equal(prefixOf("2408:8207:abcd:ef01:1:2:3:4"), "2408:8207::/32");
+  assert.equal(prefixOf("2408:0000::1"), "2408:0::/32");
+  assert.equal(prefixOf("fe80::1%eth0"), "fe80:0::/32");
+  // not an address: kept verbatim rather than guessed at
+  assert.equal(prefixOf("2001::db8::1"), "2001::db8::1");
+  assert.equal(prefixOf("1:2:3:4:5:6:7:8:9"), "1:2:3:4:5:6:7:8:9");
   assert.equal(prefixOf(undefined), "unknown");
 });
 
@@ -155,7 +162,7 @@ test("reconnectGaps pairs each kill with the same member's next rejoin", () => {
   assert.ok(Math.abs(result.median - 90) < 1e-9);
 });
 
-test("triage reports distribution, origin share against baseline, and renders", () => {
+test("triage reports distribution, per-origin kill ratio within one cohort, and renders", () => {
   const events = [
     accepted("a", "39.144.1.1", "2026-10-21T10:00:00.000Z", "ext-a"),
     accepted("b", "59.50.1.1", "2026-10-21T10:00:00.000Z", "ext-a"),
@@ -164,28 +171,53 @@ test("triage reports distribution, origin share against baseline, and renders", 
     kill("a", "39.144.1.1", "2026-10-21T13:31:05.000Z", "R1", "ext-a"),
     kill("b", "59.50.1.1", "2026-10-21T13:31:40.000Z", "R2", "ext-a"),
     kill("c", "59.50.2.2", "2026-10-21T13:33:00.000Z", "R2", "ext-b"),
-    // reconnects during the window are not part of the baseline: if they were,
-    // ext-a's reconnect storm would inflate ext-a's own baseline share
+    // reconnects during the window are outside the cohort: neither the
+    // reconnect nor its second kill may enter the per-origin ratio
     accepted("a2", "39.144.1.1", "2026-10-21T13:31:08.000Z", "ext-a"),
     accepted("b2", "59.50.1.1", "2026-10-21T13:31:45.000Z", "ext-a"),
     joined("a2", "m-a", "39.144.1.1", "2026-10-21T13:31:09.000Z"),
+    kill("a2", "39.144.1.1", "2026-10-21T13:34:00.000Z", "R1", "ext-a"),
   ];
   const report = triage(events, WINDOW);
-  assert.equal(report.kills, 3);
+  assert.equal(report.kills, 4);
   assert.deepEqual(report.perMinute, [
     ["2026-10-21T13:31", 2],
     ["2026-10-21T13:33", 1],
+    ["2026-10-21T13:34", 1],
   ]);
   assert.deepEqual(report.acceptedPerMinute, [["2026-10-21T13:31", 2]]);
-  assert.deepEqual(report.prefixes[0], ["59.50.0.0/16", 2]);
-  assert.deepEqual(report.rooms[0], ["R2", 2]);
-  const extA = report.origins.find((o) => o.origin === "ext-a");
-  assert.equal(extA.killed, 2);
-  assert.ok(Math.abs(extA.baselineShare - 2 / 4) < 1e-9);
+  assert.deepEqual(
+    new Map(report.prefixes),
+    new Map([
+      ["39.144.0.0/16", 2],
+      ["59.50.0.0/16", 2],
+    ]),
+  );
+  assert.equal(report.rooms.length, 2);
+  assert.deepEqual(
+    report.origins.rows.map(({ origin, alive, killed }) => [
+      origin,
+      alive,
+      killed,
+    ]),
+    [
+      ["ext-a", 2, 2],
+      ["ext-b", 2, 1],
+    ],
+  );
+  assert.equal(report.origins.alive, 4);
+  assert.equal(report.origins.killed, 3);
   assert.equal(report.cohorts, null);
   const text = formatReport(report);
-  assert.match(text, /heartbeat kills in window: 3/);
-  assert.match(text, /1\/3 reconnected/);
+  assert.match(text, /heartbeat kills in window: 4/);
+  assert.match(text, /1\/4 reconnected/);
+  assert.doesNotMatch(text, /WARNING/);
+});
+
+test("an input with no relevant events is flagged, not reported as calm", () => {
+  const text = formatReport(triage(parseEvents(["no json here"]), WINDOW));
+  assert.match(text, /WARNING: no connection\/heartbeat\/join events/);
+  assert.match(text, /LOG_LEVEL=info/);
 });
 
 test("parseArgs requires UTC minutes and both window bounds", () => {
@@ -205,6 +237,29 @@ test("parseArgs requires UTC minutes and both window bounds", () => {
   );
   assert.throws(
     () => parseArgs(["--from", "21:29", "--to", "2026-10-21T13:36"]),
+    /UTC minute/,
+  );
+  // the right shape but not a real UTC minute
+  for (const bogus of [
+    "2026-13-40T25:99",
+    "2026-02-30T10:00",
+    "2026-10-21T24:00",
+  ]) {
+    assert.throws(
+      () => parseArgs(["--from", bogus, "--to", "2026-12-31T00:00"]),
+      /UTC minute/,
+    );
+  }
+  assert.throws(
+    () =>
+      parseArgs([
+        "--from",
+        "2026-10-21T13:29",
+        "--to",
+        "2026-10-21T13:36",
+        "--worker-reload",
+        "2026-02-30T00:00",
+      ]),
     /UTC minute/,
   );
   assert.throws(() => parseArgs(["--from", "2026-10-21T13:29"]), /required/);
