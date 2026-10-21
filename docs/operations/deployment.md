@@ -444,7 +444,7 @@ Size it as `worker_processes × worker_connections / 2 ≥ peak concurrent WebSo
 for p in $(pgrep -f 'nginx: worker process$'); do grep 'Max open files' /proc/$p/limits; done
 ```
 
-The `$` anchor skips workers still draining after a reload (`nginx: worker process is shutting down`), which keep the old limit until their last connection closes. Raise it from nginx itself with `worker_rlimit_nofile`:
+The `$` anchor skips workers still draining after a reload (`nginx: worker process is shutting down`), which keep the old limit until their last connection closes. `systemctl reload` returns before the old workers have renamed themselves, so run the check a few seconds later — run immediately, it can still list old workers with the old limit. Raise it from nginx itself with `worker_rlimit_nofile`:
 
 ```nginx
 # /etc/nginx/nginx.conf — top level, next to worker_processes
