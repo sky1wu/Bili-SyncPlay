@@ -52,6 +52,7 @@ test("node heartbeat writes shared node status into redis runtime store", async 
     intervalMs: 50,
     ttlMs: 200,
     now: () => currentTime,
+    uptimeMs: () => 123,
   });
 
   try {
@@ -64,7 +65,30 @@ test("node heartbeat writes shared node status into redis runtime store", async 
     assert.equal(statuses.length, 1);
     assert.equal(statuses[0]?.instanceId, instanceId);
     assert.equal(statuses[0]?.version, "test-version");
+    assert.equal(statuses[0]?.uptimeMs, 123);
     assert.equal(statuses[0]?.health, "ok");
+
+    currentTime += 1;
+    await sharedRuntimeStore.heartbeatNode({
+      instanceId,
+      version: "old-version-without-uptime",
+      startedAt: 1,
+      lastHeartbeatAt: currentTime,
+      staleAt: currentTime + 100,
+      expiresAt: currentTime + 200,
+      connectionCount: 0,
+      activeRoomCount: 0,
+      activeMemberCount: 0,
+      health: "ok",
+    });
+    statuses = await sharedRuntimeStore.listNodeStatuses(
+      "maintenance_pass",
+      currentTime,
+    );
+    // Redis HSET leaves fields unknown to an older writer in place. Tie the
+    // duration to its heartbeat sample so a rollback cannot freeze a stale
+    // `uptimeMs` in the admin UI forever.
+    assert.equal(statuses[0]?.uptimeMs, undefined);
 
     currentTime += 120;
     statuses = await sharedRuntimeStore.listNodeStatuses(
@@ -192,6 +216,9 @@ test("start() beats immediately, not one interval from now", async () => {
     intervalMs: 60_000,
     ttlMs: 180_000,
     now: () => 10,
+    // Deliberately unrelated to the wall-clock timestamps: uptime must come
+    // from the monotonic node-local source.
+    uptimeMs: () => 321,
   });
 
   try {
@@ -202,6 +229,7 @@ test("start() beats immediately, not one interval from now", async () => {
     await firstBeat;
     assert.equal(beats[0]?.instanceId, "node-a");
     assert.equal(beats[0]?.connectionCount, 2);
+    assert.equal(beats[0]?.uptimeMs, 321);
     // staleAt is two intervals out — one missed beat is not yet news — capped
     // by the TTL and floored at a single interval; expiresAt is the full TTL.
     // Both are stamped from the same instant the beat was built.

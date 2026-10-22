@@ -113,6 +113,12 @@ export type ClusterNodeStatus = {
   instanceId: string;
   version: string;
   startedAt: number;
+  /**
+   * Duration sampled by the node itself. Optional so a new reader can coexist
+   * with node-status hashes written by an older process during a rolling
+   * upgrade.
+   */
+  uptimeMs?: number;
   lastHeartbeatAt: number;
   staleAt: number;
   expiresAt: number;

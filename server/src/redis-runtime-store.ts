@@ -2327,6 +2327,17 @@ export async function createRedisRuntimeStore(
           instanceId: status.instanceId,
           version: status.version,
           startedAt: String(status.startedAt),
+          ...(status.uptimeMs === undefined
+            ? {}
+            : {
+                uptimeMs: String(status.uptimeMs),
+                // An older node does not know either uptime field. If it takes
+                // over the same instance id, it updates `lastHeartbeatAt` but
+                // leaves unknown hash fields untouched. Matching the sample
+                // timestamp prevents a new reader from showing that stale
+                // duration forever after a rollback.
+                uptimeSampledAt: String(status.lastHeartbeatAt),
+              }),
           lastHeartbeatAt: String(status.lastHeartbeatAt),
           staleAt: String(status.staleAt),
           expiresAt: String(status.expiresAt),
@@ -2355,6 +2366,12 @@ export async function createRedisRuntimeStore(
               instanceId: fields.instanceId || instanceId,
               version: fields.version || "unknown",
               startedAt: Number(fields.startedAt ?? "0"),
+              ...(fields.uptimeSampledAt === fields.lastHeartbeatAt &&
+              fields.uptimeMs !== undefined &&
+              Number.isFinite(Number(fields.uptimeMs)) &&
+              Number(fields.uptimeMs) >= 0
+                ? { uptimeMs: Number(fields.uptimeMs) }
+                : {}),
               lastHeartbeatAt: Number(fields.lastHeartbeatAt ?? "0"),
               staleAt: Number(fields.staleAt ?? "0"),
               expiresAt: Number(fields.expiresAt ?? "0"),

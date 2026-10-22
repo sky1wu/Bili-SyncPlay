@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createGlobalAdminOverviewService } from "../src/admin/global-overview-service.js";
 import { createAdminOverviewService } from "../src/admin/overview-service.js";
 import { createEventStore } from "../src/admin/event-store.js";
 import { createInMemoryRoomStore } from "../src/room-store.js";
@@ -135,13 +136,20 @@ test("overview preserves local runtime count fallback when node data is unavaila
     runtimeStore,
     eventStore: createEventStore(),
     now: () => now,
+    uptimeMs: () => 120_000,
   });
 
   const overview = await service.getOverview();
 
   assert.equal(overview.runtime.connectionCount, 1);
   assert.equal(overview.runtime.activeMemberCount, 1);
-  assert.equal(overview.nodes.items.length, 0);
+  assert.deepEqual(
+    overview.nodes.items.map((node) => ({
+      instanceId: node.instanceId,
+      uptimeMs: node.uptimeMs,
+    })),
+    [{ instanceId: "instance-a", uptimeMs: 120_000 }],
+  );
 });
 
 test("overview falls back to heartbeat room count when node workload is unavailable", async () => {
@@ -157,6 +165,7 @@ test("overview falls back to heartbeat room count when node workload is unavaila
     instanceId: "instance-b",
     version: "0.9.2-test",
     startedAt: now - 2_000,
+    uptimeMs: 120_000,
     lastHeartbeatAt: now,
     staleAt: now + 10_000,
     expiresAt: now + 20_000,
@@ -184,6 +193,54 @@ test("overview falls back to heartbeat room count when node workload is unavaila
 
   assert.equal(remoteNode?.currentRoomCount, 3);
   assert.equal(remoteNode?.currentMemberCount, 7);
+  assert.equal(remoteNode?.uptimeMs, 120_000);
+});
+
+test("global overview reports room-node uptime without inventing a global-admin node", async () => {
+  const now = Date.parse("2026-04-05T12:00:00.000Z");
+  const roomStore = createInMemoryRoomStore({ now: () => now });
+  const runtimeStore = createInMemoryRuntimeStore(() => now - 5_000);
+  const persistenceConfig = {
+    ...getDefaultPersistenceConfig(),
+    instanceId: "global-admin",
+  };
+
+  await runtimeStore.heartbeatNode({
+    instanceId: "room-node-a",
+    version: "0.9.2-test",
+    startedAt: now - 3_600_000,
+    // Deliberately different from `now - startedAt`: the overview must use
+    // the duration sampled on the room node, not subtract clocks itself.
+    uptimeMs: 3_000_000,
+    lastHeartbeatAt: now,
+    staleAt: now + 10_000,
+    expiresAt: now + 20_000,
+    connectionCount: 0,
+    activeRoomCount: 0,
+    activeMemberCount: 0,
+    health: "ok",
+  });
+
+  const service = createGlobalAdminOverviewService({
+    instanceId: persistenceConfig.instanceId,
+    serviceName: "bili-syncplay-global-admin",
+    serviceVersion: "0.9.2-test",
+    persistenceConfig,
+    roomStore,
+    runtimeStore,
+    eventStore: createEventStore(),
+    now: () => now,
+  });
+
+  const overview = await service.getOverview();
+
+  assert.deepEqual(
+    overview.nodes.items.map((node) => ({
+      instanceId: node.instanceId,
+      uptimeMs: node.uptimeMs,
+    })),
+    [{ instanceId: "room-node-a", uptimeMs: 3_000_000 }],
+  );
 });
 
 test("overview aggregates event statistics from the event store", async () => {

@@ -41,6 +41,7 @@ export type OverviewNode = {
   instanceId: string;
   version: string;
   startedAt: number;
+  uptimeMs: number | null;
   lastHeartbeatAt: number;
   staleAt: number;
   expiresAt: number;
