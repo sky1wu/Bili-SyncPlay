@@ -220,6 +220,47 @@ test("only a change of announcement is broadcast", async () => {
   assert.equal(announcementOf(harness.sent[2].message), null);
 });
 
+test("every poll records exactly one outcome, changed or not", async () => {
+  let fail = false;
+  let reply: AnnouncementSnapshot | null = null;
+  const harness = createHarness({
+    sessions: [createSession("a", ANNOUNCEMENT_PROTOCOL_VERSION)],
+    read: async () => {
+      if (fail) {
+        throw new Error("redis down");
+      }
+      return reply;
+    },
+  });
+  const outcomes = () =>
+    harness.events
+      .filter(
+        (entry) =>
+          entry.event === "announcement_polled" ||
+          entry.event === "announcement_poll_failed",
+      )
+      .map((entry) => [entry.event, entry.data.changed ?? null]);
+
+  // Nothing published, three times over: an idle poller must not be silent.
+  await harness.broadcaster.pollNow();
+  await harness.broadcaster.pollNow();
+  await harness.broadcaster.pollNow();
+  reply = snapshot();
+  await harness.broadcaster.pollNow();
+  await harness.broadcaster.pollNow();
+  fail = true;
+  await harness.broadcaster.pollNow();
+
+  assert.deepEqual(outcomes(), [
+    ["announcement_polled", true],
+    ["announcement_polled", false],
+    ["announcement_polled", false],
+    ["announcement_polled", true],
+    ["announcement_polled", false],
+    ["announcement_poll_failed", null],
+  ]);
+});
+
 test("a failed poll keeps the last announcement instead of withdrawing it", async () => {
   let fail = false;
   const sessions = [createSession("a", ANNOUNCEMENT_PROTOCOL_VERSION)];

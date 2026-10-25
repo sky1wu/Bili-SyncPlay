@@ -114,10 +114,11 @@ export function createAnnouncementBroadcaster(options: {
     return true;
   }
 
-  function broadcast(): void {
+  /** Returns how many sessions it reached. */
+  function broadcast(): number {
     const message = currentMessage();
     if (message === null) {
-      return;
+      return 0;
     }
     let recipients = 0;
     for (const session of options.listRoomSessions()) {
@@ -133,6 +134,7 @@ export function createAnnouncementBroadcaster(options: {
       recipients,
       result: "ok",
     });
+    return recipients;
   }
 
   const pass = createMaintenancePass<
@@ -158,9 +160,17 @@ export function createAnnouncementBroadcaster(options: {
       // Ids are minted per publication, so "same id" means "same content".
       // The first answer always goes out: sessions that joined before it got
       // nothing, and may still hold a notice from before a restart.
-      if (previousId !== currentId) {
-        broadcast();
-      }
+      const changed = previousId !== currentId;
+      const recipients = changed ? broadcast() : 0;
+      // Every successful poll, changed or not: `announcement_broadcast` fires
+      // only on a change, so on its own a healthy idle poller and a stopped one
+      // are the same silence. This line is what tells them apart.
+      options.logEvent?.("announcement_polled", {
+        announcementId: currentId,
+        changed,
+        recipients,
+        result: "ok",
+      });
     },
     onFailure: ({ reason, error }) => {
       // `known` stays as it was. A read that failed says nothing about the
