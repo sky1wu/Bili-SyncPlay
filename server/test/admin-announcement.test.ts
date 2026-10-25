@@ -218,6 +218,29 @@ test("an audit store that throws is reported, not raised, with the instance", as
   assert.equal(failure?.data.error, "audit down");
 });
 
+test("the publication log names the announcement level without taking the log level's key", async () => {
+  const logged: Array<{ event: string; data: Record<string, unknown> }> = [];
+  const service = createAdminAnnouncementService({
+    instanceId: "admin-node",
+    roomStore: createInMemoryRoomStore({ now: () => 1_000_000 }),
+    auditLogService: createAuditLogService(),
+    logEvent: (event, data) => {
+      logged.push({ event, data });
+    },
+    now: () => 1_000_000,
+  });
+  await service.publish(ACTOR, {
+    level: "warning",
+    message: "x",
+    expiresAt: 2_000_000,
+  });
+  const published = logged.find(
+    (entry) => entry.event === "announcement_published",
+  );
+  assert.equal(published?.data.announcementLevel, "warning");
+  assert.equal("level" in (published?.data ?? {}), false);
+});
+
 // ---------------------------------------------------------------------------
 // End to end: HTTP API → store → node poll → WebSocket client.
 

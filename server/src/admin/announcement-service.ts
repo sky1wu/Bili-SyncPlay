@@ -177,7 +177,8 @@ export function createAdminAnnouncementService(options: {
     writeAudit(actor, "publish_announcement", announcement.id, request, "ok");
     options.logEvent("announcement_published", {
       announcementId: announcement.id,
-      level: announcement.level,
+      // Not `level`: the logger owns that key for the log level.
+      announcementLevel: announcement.level,
       ttlMs,
       actor: actor.username,
       result: "ok",
