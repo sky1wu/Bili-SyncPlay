@@ -187,6 +187,37 @@ test("a store failure is audited as an error and surfaces to the caller", async 
   assert.equal(items[0]?.result, "error");
 });
 
+test("an audit store that throws is reported, not raised, with the instance", async () => {
+  const logged: Array<{ event: string; data: Record<string, unknown> }> = [];
+  const service = createAdminAnnouncementService({
+    instanceId: "admin-node",
+    roomStore: createInMemoryRoomStore({ now: () => 1_000_000 }),
+    auditLogService: {
+      append: () => {
+        // Synchronously, the case the deferral exists for.
+        throw new Error("audit down");
+      },
+      query: () => ({ items: [], total: 0 }),
+    },
+    logEvent: (event, data) => {
+      logged.push({ event, data });
+    },
+    now: () => 1_000_000,
+  });
+  await service.publish(ACTOR, {
+    level: "info",
+    message: "x",
+    expiresAt: 2_000_000,
+  });
+  await flushAudit();
+  const failure = logged.find(
+    (entry) => entry.event === "admin_audit_log_append_failed",
+  );
+  assert.equal(failure?.data.instanceId, "admin-node");
+  assert.equal(failure?.data.targetType, "announcement");
+  assert.equal(failure?.data.error, "audit down");
+});
+
 // ---------------------------------------------------------------------------
 // End to end: HTTP API → store → node poll → WebSocket client.
 

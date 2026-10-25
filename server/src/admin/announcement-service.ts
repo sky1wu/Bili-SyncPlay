@@ -7,7 +7,10 @@ import type { StoredAnnouncement } from "../announcement.js";
 import type { RoomStore } from "../room-store.js";
 import type { LogEvent } from "../types.js";
 import { AdminActionError } from "./action-service.js";
-import type { GlobalAuditStore } from "./global-audit-store.js";
+import {
+  appendAuditDetached,
+  type GlobalAuditStore,
+} from "./global-audit-store.js";
 import type { AdminSession } from "./types.js";
 
 /**
@@ -78,31 +81,16 @@ export function createAdminAnnouncementService(options: {
     result: "ok" | "error",
     reason?: string,
   ): void {
-    // Same detachment as the action service: an audit store that throws, even
-    // synchronously, must not turn a completed action into a failed request.
-    void Promise.resolve()
-      .then(() =>
-        options.auditLogService.append({
-          actor,
-          action,
-          targetType: "announcement",
-          targetId,
-          request,
-          result,
-          reason,
-          instanceId: options.instanceId,
-        }),
-      )
-      .catch((error: unknown) => {
-        options.logEvent("admin_audit_log_append_failed", {
-          actor: actor.username,
-          action,
-          targetType: "announcement",
-          targetId,
-          result: "error",
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
+    appendAuditDetached(options.auditLogService, options.logEvent, {
+      actor,
+      action,
+      targetType: "announcement",
+      targetId,
+      request,
+      result,
+      reason,
+      instanceId: options.instanceId,
+    });
   }
 
   async function getCurrent(): Promise<{
