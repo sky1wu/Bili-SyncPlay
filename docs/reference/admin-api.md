@@ -104,6 +104,11 @@ Implemented endpoints:
 - `POST /api/admin/rooms/:roomCode/clear-video`
 - `POST /api/admin/rooms/:roomCode/members/:memberId/kick`
 - `POST /api/admin/sessions/:sessionId/disconnect`
+- `GET /api/admin/announcement` (viewer)
+- `POST /api/admin/announcement` (operator)
+- `POST /api/admin/announcement/withdraw` (operator)
+
+Announcements (#325): `POST /api/admin/announcement` takes `{ level: "info" | "warning", message, scheduledAt?, expiresAt }` — `message` non-blank and at most 500 characters, `scheduledAt` (display only) and `expiresAt` as epoch milliseconds, `expiresAt` in the future and within 30 days. It replaces any current announcement under a new `id`. `POST /api/admin/announcement/withdraw` takes an optional `{ reason }`. Both are recorded in the audit log with target type `announcement`. Every sync node re-reads the announcement every 15 seconds, so a change reaches connected extensions within that interval; see [Announcements](./protocol.md#announcements) for the wire format.
 
 Every `/api/admin/*` endpoint accepts CORS preflights for `GET`, `POST`, and `OPTIONS`, with `authorization` and `content-type` request headers. The admin UI-facing `/healthz` and `/readyz` endpoints use the same origin policy and accept `GET` and `OPTIONS`. The server reflects the exact request origin only when it is same-origin or explicitly included in `ALLOWED_ORIGINS`; wildcard origins are not used. When `GLOBAL_ADMIN_API_BASE_URL` points to a separate API origin, add the admin UI origin to that allowlist.
 

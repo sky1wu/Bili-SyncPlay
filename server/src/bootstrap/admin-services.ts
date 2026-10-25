@@ -2,6 +2,7 @@ import type { IncomingMessage } from "node:http";
 import type { ServerMessage } from "@bili-syncplay/protocol";
 import type { WebSocket } from "ws";
 import { createAdminActionService } from "../admin/action-service.js";
+import { createAdminAnnouncementService } from "../admin/announcement-service.js";
 import type { AdminCommandBus } from "../admin-command-bus.js";
 import { createAuditLogService } from "../admin/audit-log.js";
 import { createInMemoryAdminSessionStore } from "../admin/auth-store.js";
@@ -264,6 +265,14 @@ export function createAdminServices(args: {
       now: args.now,
     });
 
+    const announcementService = createAdminAnnouncementService({
+      instanceId: args.persistenceConfig.instanceId,
+      roomStore: args.roomStore,
+      auditLogService,
+      logEvent: args.logEvent,
+      now: args.now,
+    });
+
     const adminRouter = createAdminRouter({
       getConfigSummary: () => configService.getSummary(),
       getMetrics: () => metricsService.render(),
@@ -297,6 +306,11 @@ export function createAdminServices(args: {
         sessionId: string,
         reason?: string,
       ) => actionService.disconnectSession(actor, sessionId, reason),
+      getAnnouncement: () => announcementService.getCurrent(),
+      publishAnnouncement: (actor, input) =>
+        announcementService.publish(actor, input),
+      withdrawAnnouncement: (actor, reason) =>
+        announcementService.withdraw(actor, reason),
       eventStore: args.eventStore,
       serviceName: args.serviceName ?? "bili-syncplay-server",
       now: args.now,
