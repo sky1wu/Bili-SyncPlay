@@ -49,6 +49,8 @@ const ACTION_LABELS: Record<string, string> = {
   clear_room_video: "清空共享视频",
   kick_member: "踢出成员",
   disconnect_session: "断开会话",
+  publish_announcement: "发布公告",
+  withdraw_announcement: "撤回公告",
 };
 
 const TARGET_TYPE_LABELS: Record<AuditTargetType, string> = {
@@ -57,6 +59,7 @@ const TARGET_TYPE_LABELS: Record<AuditTargetType, string> = {
   member: "成员",
   config: "配置",
   block: "封禁",
+  announcement: "公告",
 };
 
 function queryFromSearchParams(params: URLSearchParams): AuditLogQuery {

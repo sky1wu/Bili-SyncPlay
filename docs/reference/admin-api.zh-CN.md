@@ -59,6 +59,7 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 - 概览
 - 房间列表和房间详情
 - 运行事件
+- 公告（查看、发布、撤回）
 - 审计日志
 - 配置摘要
 - 关房、过期、清空共享视频、踢人、断开会话等现有管理动作
@@ -72,12 +73,12 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 
 - 打开 `http://localhost:8787/admin`
 - 使用 `ADMIN_USERNAME`、`ADMIN_PASSWORD_HASH`、`ADMIN_SESSION_SECRET`、`ADMIN_ROLE` 配置的账号登录
-- 页面已覆盖登录、概览、房间列表、房间详情、运行事件、审计日志、配置摘要，以及现有管理动作
+- 页面已覆盖登录、概览、房间列表、房间详情、运行事件、公告、审计日志、配置摘要，以及现有管理动作
 
 角色模型：
 
-- `viewer`：只读访问概览、房间、事件、审计日志、配置摘要
-- `operator`：在 `viewer` 基础上可执行房间和会话管理动作
+- `viewer`：只读访问概览、房间、事件、公告、审计日志、配置摘要
+- `operator`：在 `viewer` 基础上可执行房间和会话管理动作，以及发布、撤回公告
 - `admin`：当前能力与 `operator` 基本一致，为后续更高权限治理能力预留扩展位
 
 动作语义说明：

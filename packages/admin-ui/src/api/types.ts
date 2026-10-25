@@ -197,7 +197,7 @@ export type EventListResult = {
 };
 
 export type AuditTargetType =
-  "room" | "session" | "member" | "config" | "block";
+  "room" | "session" | "member" | "config" | "block" | "announcement";
 export type AuditResult = "ok" | "rejected" | "error";
 
 export type AuditActor = {
@@ -275,4 +275,35 @@ export type AdminConfigSummary = {
     | {
         configured: false;
       };
+};
+
+export type AnnouncementLevel = "info" | "warning";
+
+export type AdminAnnouncement = {
+  id: string;
+  level: AnnouncementLevel;
+  message: string;
+  scheduledAt: number | null;
+  publishedAt: number;
+  /** 后台进程按自身时钟算出的到期时刻，仅供展示。 */
+  expiresAt: number;
+};
+
+export type AnnouncementResult = {
+  announcement: AdminAnnouncement | null;
+};
+
+export type PublishAnnouncementRequest = {
+  level: AnnouncementLevel;
+  message: string;
+  scheduledAt?: number;
+  expiresAt: number;
+};
+
+export type PublishAnnouncementResult = {
+  announcement: AdminAnnouncement;
+};
+
+export type WithdrawAnnouncementResult = {
+  withdrawnId: string | null;
 };

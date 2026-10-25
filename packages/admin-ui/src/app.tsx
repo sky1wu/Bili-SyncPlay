@@ -8,6 +8,7 @@ import { RequireAuth } from "./auth/require-auth.js";
 import { createQueryClient } from "./data/query-client.js";
 import { AppLayout } from "./layout/app-layout.js";
 import { LoginPage } from "./pages/login-page.js";
+import { AnnouncementPage } from "./pages/announcement/announcement-page.js";
 import { AuditLogsPage } from "./pages/audit/audit-page.js";
 import { ConfigPage } from "./pages/config/config-page.js";
 import { EventsPage } from "./pages/events/events-page.js";
@@ -36,6 +37,7 @@ export function App() {
                   <Route path="/rooms" element={<RoomsPage />} />
                   <Route path="/rooms/:roomCode" element={<RoomsPage />} />
                   <Route path="/events" element={<EventsPage />} />
+                  <Route path="/announcement" element={<AnnouncementPage />} />
                   <Route path="/audit-logs" element={<AuditLogsPage />} />
                   <Route path="/config" element={<ConfigPage />} />
                   <Route
