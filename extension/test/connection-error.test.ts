@@ -93,3 +93,39 @@ test("returns English connection guidance when the UI language is English", () =
   );
   setLocaleForTests(null);
 });
+
+test("a restarting server that cannot be reached reports the restart", () => {
+  setLocaleForTests("zh-CN");
+  const restarting = "同步服务器正在维护或重启，正在自动重连。";
+  assert.equal(
+    getConnectionErrorMessage({
+      healthcheckReachable: false,
+      serverRestarting: true,
+    }),
+    restarting,
+  );
+  for (const sawOpen of [true, false]) {
+    for (const healthcheckReachable of [true, false]) {
+      assert.equal(
+        getSocketErrorMessage({
+          sawOpen,
+          healthcheckReachable,
+          serverRestarting: true,
+        }),
+        restarting,
+      );
+    }
+  }
+});
+
+test("a restart does not override a server that answered and rejected the origin", () => {
+  setLocaleForTests("zh-CN");
+  assert.equal(
+    getConnectionErrorMessage({
+      healthcheckReachable: true,
+      extensionOrigin: "chrome-extension://abc123",
+      serverRestarting: true,
+    }),
+    "服务器可达，但 WebSocket 握手被拒绝。请检查服务端 ALLOWED_ORIGINS 是否包含 chrome-extension://abc123，以及反向代理是否已正确转发 WebSocket。",
+  );
+});

@@ -64,6 +64,8 @@ export { cleanupSessionAfterClose } from "./ws-session-handler.js";
 
 /** RFC 6455 "going away": the endpoint is shutting down, not failing. */
 const CLOSE_CODE_GOING_AWAY = 1001;
+// The extension matches this exact code + reason to tell users the server is
+// restarting (`extension/src/background/socket-controller.ts`); keep them in step.
 const SHUTDOWN_CLOSE_REASON = "server_shutting_down";
 const WS_CLOSE_HANDSHAKE_GRACE_MS = 2_000;
 

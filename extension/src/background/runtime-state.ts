@@ -77,6 +77,14 @@ export interface ConnectionState {
   reconnectTimer: number | null;
   reconnectAttempt: number;
   reconnectDeadlineMs: number | null;
+  /**
+   * True from the server's graceful-shutdown close (`1001` +
+   * `server_shutting_down`) until a socket opens again or the reconnect state
+   * is reset. While set, the failed reconnect attempts that follow — the
+   * server is down, so they will fail — report a restart instead of a generic
+   * "unreachable" that reads like a client-side problem.
+   */
+  serverRestarting: boolean;
 }
 
 export interface RoomSessionState {
@@ -169,6 +177,7 @@ export function createBackgroundRuntimeState(): BackgroundRuntimeState {
       reconnectTimer: null,
       reconnectAttempt: 0,
       reconnectDeadlineMs: null,
+      serverRestarting: false,
     },
     room: {
       roomCode: null,
