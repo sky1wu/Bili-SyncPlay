@@ -19,6 +19,7 @@ import { createNodeHeartbeat } from "./node-heartbeat.js";
 import { createRoomEventConsumer } from "./room-event-consumer.js";
 import { type RoomStore } from "./room-store.js";
 import { createRoomReaper } from "./room-reaper.js";
+import { createAnnouncementBroadcaster } from "./announcement-broadcaster.js";
 import { createRoomService } from "./room-service.js";
 import { createWsHeartbeat } from "./ws-heartbeat.js";
 import type { RoomEventBusMessage } from "./room-event-bus.js";
@@ -87,6 +88,8 @@ export type SyncServerDependencies = {
   metricsPort?: number;
   adminSessionStoreOverride?: AdminSessionStore;
   auditStoreOverride?: GlobalAuditStore;
+  /** Tests only: how often this node re-reads the announcement. */
+  announcementPollIntervalMs?: number;
 };
 
 export async function createSyncServer(
@@ -233,6 +236,17 @@ export async function createSyncServer(
     logEvent,
   });
 
+  const announcementBroadcaster = createAnnouncementBroadcaster({
+    readAnnouncement: () => roomStore.getAnnouncement("maintenance_pass"),
+    listRoomSessions: () =>
+      Array.from(localRuntimeStore.getActiveRoomCodes()).flatMap((roomCode) =>
+        localRuntimeStore.listSessionsByRoom(roomCode),
+      ),
+    send,
+    logEvent,
+    intervalMs: dependencies.announcementPollIntervalMs,
+  });
+
   const messageHandler = createMessageHandler({
     config: securityConfig,
     roomService,
@@ -272,6 +286,7 @@ export async function createSyncServer(
       await runtimeStore.markSessionLeftRoom(session.id, roomCode);
       await runtimeStore.flush?.();
     },
+    onRoomEntered: (session) => announcementBroadcaster.sendCurrentTo(session),
     now,
   });
 
@@ -299,6 +314,7 @@ export async function createSyncServer(
     logEvent,
   });
   nodeHeartbeat.start();
+  announcementBroadcaster.start();
   const {
     securityPolicy,
     httpServer,
@@ -398,6 +414,10 @@ export async function createSyncServer(
           {
             name: "stop_node_heartbeat",
             run: () => nodeHeartbeat.stop(),
+          },
+          {
+            name: "stop_announcement_broadcaster",
+            run: () => announcementBroadcaster.stop(),
           },
           {
             name: "stop_runtime_index_reaper",
