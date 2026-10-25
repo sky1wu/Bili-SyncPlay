@@ -1,6 +1,11 @@
 import { NotificationOutlined, ReloadOutlined } from "@ant-design/icons";
 import { ANNOUNCEMENT_MESSAGE_MAX_LENGTH } from "@bili-syncplay/protocol";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   Alert,
   App as AntdApp,
@@ -49,6 +54,20 @@ const LEVEL_COLORS: Record<AnnouncementLevel, string> = {
   info: "blue",
   warning: "orange",
 };
+
+/**
+ * 把写操作确认后的结果写进缓存。先取消在途的查询：它在写之前发出、答复的是写之前
+ * 的状态，晚于这里返回就会把刚确认的结果覆盖回去，直到下一次轮询。
+ */
+async function showConfirmedAnnouncement(
+  queryClient: QueryClient,
+  announcement: AdminAnnouncement | null,
+): Promise<void> {
+  await queryClient.cancelQueries({ queryKey: ANNOUNCEMENT_QUERY_KEY });
+  queryClient.setQueryData<AnnouncementResult>(ANNOUNCEMENT_QUERY_KEY, {
+    announcement,
+  });
+}
 
 type PublishFormValues = {
   level: AnnouncementLevel;
@@ -113,10 +132,8 @@ function PublishForm({ replacing }: { replacing: boolean }) {
         scheduledAt: values.scheduledAt?.valueOf(),
         expiresAt: values.expiresAt?.valueOf() ?? 0,
       }),
-    onSuccess: (result) => {
-      queryClient.setQueryData<AnnouncementResult>(ANNOUNCEMENT_QUERY_KEY, {
-        announcement: result.announcement,
-      });
+    onSuccess: async (result) => {
+      await showConfirmedAnnouncement(queryClient, result.announcement);
       form.resetFields();
       setError("");
       void message.success("公告已发布，各节点约 15 秒内推送。");
@@ -271,9 +288,7 @@ export function AnnouncementPage() {
       danger: true,
       execute: async (reason) => {
         await api.withdrawAnnouncement(reason);
-        queryClient.setQueryData<AnnouncementResult>(ANNOUNCEMENT_QUERY_KEY, {
-          announcement: null,
-        });
+        await showConfirmedAnnouncement(queryClient, null);
         void message.success("公告已撤回。");
       },
     });

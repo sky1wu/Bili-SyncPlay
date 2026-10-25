@@ -60,6 +60,14 @@ async function pickExpiresAt(
   await user.click(await screen.findByText(/^(OK|确\s*定)$/));
 }
 
+function deferred<T>() {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
 describe("AnnouncementPage", () => {
   it("shows the current announcement read-only to a viewer", async () => {
     renderPage(
@@ -229,5 +237,72 @@ describe("AnnouncementPage", () => {
       expect(withdrawAnnouncement).toHaveBeenCalledWith("维护提前结束");
     });
     expect(await screen.findByText("当前没有公告")).toBeTruthy();
+  });
+  it("keeps a withdrawal when an older refresh answers after it", async () => {
+    const stale = deferred<{ announcement: AdminAnnouncement | null }>();
+    const getAnnouncement = vi
+      .fn()
+      .mockResolvedValueOnce({ announcement: makeAnnouncement() })
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValue({ announcement: null });
+    const user = userEvent.setup({ delay: null });
+    renderPage({
+      getAnnouncement,
+      withdrawAnnouncement: vi
+        .fn()
+        .mockResolvedValue({ withdrawnId: "announcement-1" }),
+    });
+
+    await screen.findByText(/今晚 04:30 维护/);
+    // A refresh still in flight when the withdrawal lands.
+    await user.click(screen.getByRole("button", { name: /刷\s*新/ }));
+    await waitFor(() => {
+      expect(getAnnouncement).toHaveBeenCalledTimes(2);
+    });
+    await user.click(screen.getByRole("button", { name: /撤\s*回/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /确认执行/ }));
+    expect(await screen.findByText("当前没有公告")).toBeTruthy();
+
+    stale.resolve({ announcement: makeAnnouncement() });
+    await new Promise((settle) => setTimeout(settle, 50));
+    expect(screen.getByText("当前没有公告")).toBeTruthy();
+    expect(screen.queryByText(/今晚 04:30 维护/)).toBeNull();
+  });
+
+  it("keeps a publication when an older refresh answers after it", async () => {
+    const stale = deferred<{ announcement: AdminAnnouncement | null }>();
+    const published = makeAnnouncement({
+      id: "announcement-2",
+      message: "新版本已发布",
+    });
+    const getAnnouncement = vi
+      .fn()
+      .mockResolvedValueOnce({ announcement: null })
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValue({ announcement: published });
+    const user = userEvent.setup({ delay: null });
+    renderPage({
+      getAnnouncement,
+      publishAnnouncement: vi
+        .fn()
+        .mockResolvedValue({ announcement: published }),
+    });
+
+    await screen.findByText("当前没有公告");
+    await user.click(screen.getByRole("button", { name: /刷\s*新/ }));
+    await waitFor(() => {
+      expect(getAnnouncement).toHaveBeenCalledTimes(2);
+    });
+    await user.type(screen.getByLabelText("内容"), "新版本已发布");
+    await pickExpiresAt(user, dayjs().add(1, "hour"));
+    await user.click(screen.getByRole("button", { name: /发布公告/ }));
+    await user.click(await screen.findByText("确认发布"));
+    expect(await screen.findByText("新版本已发布")).toBeTruthy();
+
+    stale.resolve({ announcement: null });
+    await new Promise((settle) => setTimeout(settle, 50));
+    expect(screen.getByText("新版本已发布")).toBeTruthy();
+    expect(screen.queryByText("当前没有公告")).toBeNull();
   });
 });
