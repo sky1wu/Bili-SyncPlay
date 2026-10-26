@@ -1,10 +1,4 @@
-/**
- * What the extension announces it implements. Deliberately one behind the
- * server's `CURRENT_PROTOCOL_VERSION` (5) until the extension consumes
- * `server:announcement` (#325, PR C): announcing 5 earlier would have the
- * server send announcements that a released extension silently ignores.
- */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 export type RoomCode = string;
 export type PlaybackPlayState = "playing" | "paused" | "buffering";

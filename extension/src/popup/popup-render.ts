@@ -1,4 +1,5 @@
 import type { RoomMember } from "@bili-syncplay/protocol";
+import { formatAnnouncementSchedule } from "../shared/announcement";
 import type { BackgroundPopupState } from "../shared/messages";
 import { getUiLanguage, t } from "../shared/i18n";
 import {
@@ -40,6 +41,34 @@ export function applyRoomActionControlState(args: {
   args.refs.leaveRoomButton.disabled = isRoomTransitioning;
   args.refs.roomCodeInput.disabled =
     isRoomTransitioning || Boolean(args.lastKnownRoomCode);
+}
+
+export function renderAnnouncementBanner(
+  refs: Pick<
+    PopupRefs,
+    "announcementBanner" | "announcementMessage" | "announcementMeta"
+  >,
+  announcement: BackgroundPopupState["announcement"],
+  nowMs = Date.now(),
+): void {
+  refs.announcementBanner.hidden = announcement === null;
+  if (announcement === null) {
+    return;
+  }
+  refs.announcementBanner.classList.toggle(
+    "is-warning",
+    announcement.level === "warning",
+  );
+  refs.announcementBanner.classList.toggle(
+    "is-info",
+    announcement.level === "info",
+  );
+  refs.announcementMessage.textContent = announcement.message;
+  refs.announcementMeta.hidden = announcement.scheduledAt === null;
+  refs.announcementMeta.textContent =
+    announcement.scheduledAt === null
+      ? ""
+      : formatAnnouncementSchedule(announcement.scheduledAt, nowMs);
 }
 
 export function renderPopup(args: {
@@ -87,6 +116,7 @@ export function renderPopup(args: {
     args.state.clockOffsetMs,
     args.state.rttMs,
   );
+  renderAnnouncementBanner(args.refs, args.state.announcement);
   const visibleMessage = args.localStatusMessage ?? args.state.error;
   args.refs.message.textContent = visibleMessage ?? "";
   args.refs.message.hidden = !visibleMessage;

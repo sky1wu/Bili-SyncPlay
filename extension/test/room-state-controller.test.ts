@@ -18,6 +18,7 @@ function createController(shownToasts: string[]) {
     toastPresenter: {
       resetMountTarget: () => {},
       show: (message) => shownToasts.push(message),
+      pin: () => {},
     },
     getSharedVideo: () => null,
     normalizeUrl: (url) => url ?? null,

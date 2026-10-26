@@ -5,6 +5,7 @@ import {
   type RoomState,
   type SharedVideo,
 } from "@bili-syncplay/protocol";
+import { isAnnouncementView, type AnnouncementView } from "./announcement";
 
 export interface SharedVideoToastPayload {
   key: string;
@@ -23,7 +24,8 @@ export type PopupToBackgroundMessage =
   | { type: "popup:share-current-video" }
   | { type: "popup:set-server-url"; serverUrl: string }
   | { type: "popup:set-page-share-button-enabled"; enabled: boolean }
-  | { type: "popup:open-shared-video" };
+  | { type: "popup:open-shared-video" }
+  | { type: "popup:dismiss-announcement"; id: string };
 
 export interface ActiveVideoResponsePayload {
   video: SharedVideo;
@@ -42,6 +44,8 @@ export type ContentToBackgroundMessage =
     }
   | { type: "content:get-page-share-button-settings" }
   | { type: "content:set-page-share-button-enabled"; enabled: boolean }
+  | { type: "content:get-announcement" }
+  | { type: "content:dismiss-announcement"; id: string }
   | { type: "content:debug-log"; payload: { message: string } };
 
 export interface DebugLogEntry {
@@ -69,6 +73,7 @@ export type BackgroundToPopupMessage =
         clockOffsetMs: number | null;
         rttMs: number | null;
         pageShareButtonEnabled: boolean;
+        announcement: AnnouncementView | null;
         logs: DebugLogEntry[];
       };
     }
@@ -111,7 +116,9 @@ export function isBackgroundPopupStateMessage(
     typeof (payload as { connected?: unknown }).connected === "boolean" &&
     typeof (payload as { serverUrl?: unknown }).serverUrl === "string" &&
     typeof (payload as { pageShareButtonEnabled?: unknown })
-      .pageShareButtonEnabled === "boolean"
+      .pageShareButtonEnabled === "boolean" &&
+    ((payload as { announcement?: unknown }).announcement === null ||
+      isAnnouncementView((payload as { announcement?: unknown }).announcement))
   );
 }
 
@@ -164,6 +171,25 @@ export interface PageShareButtonSettingsResponse {
   ok: boolean;
   enabled: boolean;
   error?: string;
+}
+
+/** `content:get-announcement` 的响应。 */
+export interface AnnouncementResponse {
+  ok: boolean;
+  announcement: AnnouncementView | null;
+}
+
+export function isAnnouncementResponse(
+  value: unknown,
+): value is AnnouncementResponse {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as { ok?: unknown; announcement?: unknown };
+  return (
+    typeof record.ok === "boolean" &&
+    (record.announcement === null || isAnnouncementView(record.announcement))
+  );
 }
 
 export function isActiveVideoResponse(
@@ -298,5 +324,9 @@ export type BackgroundToContentMessage =
       payload: {
         enabled: boolean;
       };
+    }
+  | {
+      type: "background:announcement";
+      payload: { announcement: AnnouncementView | null };
     }
   | { type: "background:get-current-video" };

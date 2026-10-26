@@ -8,11 +8,9 @@
 
 | 常量                       | 位置                                    | 当前值 | 含义                                              |
 | -------------------------- | --------------------------------------- | ------ | ------------------------------------------------- |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
 | `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`    | 服务端当前使用的版本                              |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`    | 服务端仍接受的最老客户端版本                      |
-
-#325 分阶段落地期间，`PROTOCOL_VERSION` 有意落后一个版本：服务端已实现版本 5（`server:announcement`），但扩展在能处理公告之前仍上报 4，这样服务端不会给已发布的扩展发送它会忽略的消息。
 
 客户端在 `room:create` / `room:join` 的 payload 中携带 `protocolVersion`；低于 `MIN_PROTOCOL_VERSION` 的客户端会被以 `unsupported_protocol_version` 错误码拒绝。未携带 `protocolVersion` 的旧客户端按 `server/src/messages.ts` 中的兼容策略处理。
 
@@ -117,6 +115,7 @@ type Announcement = {
 - **投递。** 运营人员通过管理后台接口（`/api/admin/announcement`）发布和撤回。每个节点每 15 秒重读一次存储中的公告（`server/src/announcement-broadcaster.ts`），`id` 变化时广播，所以发布或撤回会在一个周期内送达；错过变化的节点（重启、Redis 抖动）在下一次读取时自动补齐。读取失败时保留上一次已知的公告，而不是当作撤回。
 - **有效期按时长传。** `expiresInMs` 与 `playbackAgeMs` 一样，跨两台时钟不一致的机器也安全；存储层把它保存为 Redis TTL，用 `PTTL` 读出，任何进程都不拿存储的时间戳和自己的时钟比较。`scheduledAt` 只给人看，从不与本地时钟比较。
 - **按版本下发。** 只有上报 `protocolVersion >= 5`（`ANNOUNCEMENT_PROTOCOL_VERSION`）的会话才会收到。旧客户端本来也会丢弃未知类型，按版本下发只是不给它们的日志添噪音。
+- **扩展端如何展示**（`extension/src/background/announcement-controller.ts`）。后台保存最近一次收到的 payload，每次读取时推导是否展示：在房间内、来自当前服务端、按本地单调时钟未超过 `expiresInMs`、且未被关闭。展示中的公告出现在弹窗顶部横幅，并在工具栏图标上显示 `!`（`info` 蓝色、`warning` 橙色）；`warning` 还会在 B 站页面顶部显示提示条（全屏时同样显示），直到被关闭。在任意一处关闭即处处隐藏；最近 20 个已关闭的 id 保存在 `chrome.storage.local`，新发布的公告（新 `id`）会重新显示。
 
 ### 时钟同步
 

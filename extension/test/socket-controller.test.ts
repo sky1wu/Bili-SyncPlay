@@ -97,6 +97,7 @@ function installGlobals(): { restore: () => void } {
 function createHarness(
   options: { withProbeFetch?: boolean; withHealthcheck?: boolean } = {},
 ) {
+  const serverMessages: Array<{ type: string; sourceServerUrl: string }> = [];
   const runtimeState = createBackgroundRuntimeState();
   runtimeState.connection.serverUrl = "ws://localhost:9999";
   runtimeState.room.roomCode = "ROOM01";
@@ -120,7 +121,9 @@ function createHarness(
       runtimeState.share.pendingLocalShareGeneration,
     sendJoinRequest: () => {},
     sendToServer: () => {},
-    handleServerMessage: async () => {},
+    handleServerMessage: async (message, sourceServerUrl) => {
+      serverMessages.push({ type: message.type, sourceServerUrl });
+    },
     // Returning null skips the connection-check / healthcheck fetches so the
     // probe goes straight to opening the (faked) socket. Opt into the
     // connection-check fetch to exercise the in-flight probe-abort window.
@@ -142,6 +145,7 @@ function createHarness(
     controller,
     clearPendingLocalShareReasons,
     adminResets,
+    serverMessages,
   };
 }
 
@@ -780,6 +784,33 @@ test("an unreachable healthcheck during a restart reports the restart", async ()
     );
   } finally {
     setLocaleForTests(null);
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a server message names the server its socket was opened for, not the one configured now", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+    await harness.controller.connect();
+    const socket = createdSockets[0];
+    socket.emit("open", {});
+    // A server change updates the configuration before the old socket closes.
+    harness.runtimeState.connection.serverUrl = "ws://other.example:1";
+
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "server:announcement",
+        payload: { announcement: null },
+      }),
+    });
+
+    assert.deepEqual(harness.serverMessages, [
+      { type: "server:announcement", sourceServerUrl: "ws://localhost:9999" },
+    ]);
+  } finally {
     harness?.controller.clearReconnectTimer();
     globals.restore();
   }

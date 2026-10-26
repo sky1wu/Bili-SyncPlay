@@ -1,4 +1,8 @@
 export interface PopupRefs {
+  announcementBanner: HTMLElement;
+  announcementMessage: HTMLElement;
+  announcementMeta: HTMLElement;
+  announcementDismissButton: HTMLButtonElement;
   serverStatus: HTMLElement;
   roomStatus: HTMLElement;
   membersStatus: HTMLElement;
@@ -29,6 +33,12 @@ export interface PopupRefs {
 
 export function collectPopupRefs(): PopupRefs {
   return {
+    announcementBanner: getById("announcement-banner"),
+    announcementMessage: getById("announcement-message"),
+    announcementMeta: getById("announcement-meta"),
+    announcementDismissButton: getById(
+      "announcement-dismiss",
+    ) as HTMLButtonElement,
     serverStatus: getById("server-status"),
     roomStatus: getById("room-status"),
     membersStatus: getById("members-status"),

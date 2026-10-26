@@ -9,6 +9,10 @@ import {
   toConnectionCheckUrl as buildConnectionCheckUrl,
   toHealthcheckUrl as buildHealthcheckUrl,
 } from "./clock-sync";
+import {
+  applyActionBadge,
+  createAnnouncementController,
+} from "./announcement-controller";
 import { registerBackgroundListeners } from "./chrome-runtime-bus";
 import { notifyContentTabs } from "./content-bus";
 import { bootstrapBackground } from "./bootstrap";
@@ -25,6 +29,7 @@ import {
 } from "./runtime-state";
 import { createServerMessageController } from "./server-message-controller";
 import { createServerUrlController } from "./server-url-controller";
+import { resolveServerUrlOrDefault } from "./server-url";
 import { createShareController } from "./share-controller";
 import { createSocketController } from "./socket-controller";
 import { createBackgroundStateStore } from "./state-store";
@@ -38,6 +43,10 @@ import { registerReconnectWatchdog } from "./reconnect-watchdog";
 import { disconnectSocket as executeDisconnectSocket } from "./socket-lifecycle";
 import { createTabController } from "./tab-controller";
 import { t } from "../shared/i18n";
+import {
+  loadDismissedAnnouncementIds,
+  saveDismissedAnnouncementIds,
+} from "../shared/storage";
 
 const normalizeUrl = normalizeSharedVideoUrl;
 const stateStore = createBackgroundStateStore();
@@ -138,6 +147,22 @@ const roomSessionController = createRoomSessionController({
   logServerError,
   shareToastTtlMs: SHARE_TOAST_TTL_MS,
 });
+const announcementController = createAnnouncementController({
+  getRoomCode: () => roomSessionState.roomCode,
+  // Normalized as the socket's URL is, so the two compare like for like.
+  getServerUrl: () => resolveServerUrlOrDefault(connectionState.serverUrl),
+  loadDismissedIds: loadDismissedAnnouncementIds,
+  saveDismissedIds: saveDismissedAnnouncementIds,
+  setBadge: (badge) => applyActionBadge(chrome.action, badge),
+  notifyContentScripts: (announcement) => {
+    void notifyContentScripts({
+      type: "background:announcement",
+      payload: { announcement },
+    });
+  },
+  notifyAll,
+  log: backgroundLog,
+});
 serverMessageController = createServerMessageController({
   log: serverLog,
   shouldLogIncomingMessage: (messageType) =>
@@ -147,6 +172,8 @@ serverMessageController = createServerMessageController({
   },
   handleRoomSessionServerMessage: (message) =>
     roomSessionController.handleServerMessage(message),
+  receiveAnnouncement: (announcement, sourceServerUrl) =>
+    announcementController.receive(announcement, sourceServerUrl),
   updateClockOffset,
   notifyAll,
 });
@@ -194,6 +221,7 @@ const serverUrlController = createServerUrlController({
 const popupStateController = createPopupStateController({
   createState: () => runtimeSyncController.syncRuntimeStateStore(),
   getRetryInMs: () => socketController.getRetryInMs(),
+  getAnnouncement: () => announcementController.getVisible(),
   notifyContentScripts,
   getSyncStatus: () => ({
     roomCode: roomSessionState.roomCode,
@@ -213,6 +241,7 @@ const messageController = createMessageController({
   tabController,
   clockController,
   socketController,
+  announcementController,
   sendToServer,
   updateServerUrl,
   persistState,
@@ -240,6 +269,9 @@ const bootstrapCompleted = bootstrap().catch((error) => {
 });
 
 async function bootstrap(): Promise<void> {
+  // Before the session is restored and reconnects: the join's announcement
+  // must not arrive ahead of the dismissals it is checked against.
+  await announcementController.hydrate();
   await bootstrapBackground({
     state: {
       get roomCode() {
@@ -377,8 +409,11 @@ function sendToServer(message: ClientMessage): void {
   outgoingMessageController?.sendToServer(message);
 }
 
-async function handleServerMessage(message: ServerMessage): Promise<void> {
-  await serverMessageController?.handleServerMessage(message);
+async function handleServerMessage(
+  message: ServerMessage,
+  sourceServerUrl: string,
+): Promise<void> {
+  await serverMessageController?.handleServerMessage(message, sourceServerUrl);
 }
 
 function updateClockOffset(
@@ -440,6 +475,7 @@ async function notifyPageShareButtonSettings(): Promise<void> {
 }
 
 function notifyAll(): void {
+  announcementController.refresh();
   popupStateController.notifyAll();
 }
 

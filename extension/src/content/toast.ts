@@ -26,9 +26,15 @@ export function createToastCoordinatorState(): ToastCoordinatorState {
 export function createToastPresenter(): {
   resetMountTarget: () => void;
   show: (message: string) => void;
+  /**
+   * Keep `node` at the head of the stack until replaced or `null`: a bar that
+   * stays (the announcement, #325) with the transient toasts flowing below.
+   */
+  pin: (node: HTMLElement | null) => void;
 } {
   let toastHost: HTMLDivElement | null = null;
   let toastContainer: HTMLDivElement | null = null;
+  let pinned: HTMLElement | null = null;
 
   function getToastMountTarget(): HTMLElement | null {
     return (document.fullscreenElement as HTMLElement | null) ?? document.body;
@@ -83,6 +89,54 @@ export function createToastPresenter(): {
           border: 1px solid rgba(148, 163, 184, 0.24);
           backdrop-filter: blur(14px);
         }
+        .announcement {
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+          box-sizing: border-box;
+          max-width: min(560px, calc(100vw - 32px));
+          padding: 10px 8px 10px 14px;
+          border-radius: 12px;
+          background: rgba(15, 23, 42, 0.92);
+          border: 1px solid rgba(251, 146, 60, 0.7);
+          box-shadow: 0 12px 30px rgba(15, 23, 42, 0.28);
+          color: #f8fafc;
+          font: 600 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          pointer-events: auto;
+        }
+        .announcement-icon {
+          flex: none;
+          color: #fb923c;
+        }
+        .announcement-body {
+          min-width: 0;
+        }
+        .announcement-message {
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+        }
+        .announcement-meta {
+          margin-top: 2px;
+          font-size: 12px;
+          font-weight: 500;
+          color: #fed7aa;
+        }
+        .announcement-dismiss {
+          flex: none;
+          width: 24px;
+          height: 24px;
+          padding: 0;
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          color: inherit;
+          font-size: 18px;
+          line-height: 24px;
+          cursor: pointer;
+        }
+        .announcement-dismiss:hover {
+          background: rgba(148, 163, 184, 0.2);
+        }
       </style>
       <div class="toast-stack" id="toast-stack"></div>
     `,
@@ -92,12 +146,26 @@ export function createToastPresenter(): {
     toastContainer = shadowRoot.getElementById(
       "toast-stack",
     ) as HTMLDivElement | null;
+    if (pinned) {
+      toastContainer?.prepend(pinned);
+    }
     return toastContainer;
   }
 
   return {
     resetMountTarget: () => {
       toastContainer = null;
+      // Toasts move on their next show; a pinned bar has to move now.
+      if (pinned) {
+        ensureToastContainer();
+      }
+    },
+    pin: (node: HTMLElement | null) => {
+      pinned?.remove();
+      pinned = node;
+      if (node) {
+        ensureToastContainer()?.prepend(node);
+      }
     },
     show: (message: string) => {
       const container = ensureToastContainer();

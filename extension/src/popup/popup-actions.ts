@@ -147,6 +147,20 @@ export function bindPopupActions(args: {
     window.close();
   });
 
+  refs.announcementDismissButton.addEventListener("click", async () => {
+    const id = args.getPopupState()?.announcement?.id;
+    if (!id) {
+      return;
+    }
+    // Hidden at once; the background's answer confirms it.
+    refs.announcementBanner.hidden = true;
+    const state = await sendPopupAction({
+      type: "popup:dismiss-announcement",
+      id,
+    });
+    args.applyActionState(state);
+  });
+
   refs.pageShareButtonEnabledInput.addEventListener("change", async () => {
     const state = await sendPopupAction({
       type: "popup:set-page-share-button-enabled",

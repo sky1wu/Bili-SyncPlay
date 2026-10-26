@@ -705,6 +705,7 @@ test("playback binding controller keeps hydration guard after direct room switch
     toastPresenter: {
       resetMountTarget: () => {},
       show: () => {},
+      pin: () => {},
     },
     getSharedVideo: () => null,
     normalizeUrl: (url) => url ?? null,
