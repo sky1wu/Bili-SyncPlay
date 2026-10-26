@@ -21,6 +21,11 @@ export const NAV_ITEMS: NavItem[] = [
     description: "按条件检索近期运行事件。",
   },
   {
+    path: "/announcement",
+    label: "公告",
+    description: "向扩展用户发布或撤回服务公告。",
+  },
+  {
     path: "/audit-logs",
     label: "审计日志",
     description: "查看管理员操作留痕和请求参数。",

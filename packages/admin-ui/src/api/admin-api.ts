@@ -8,14 +8,18 @@ import type {
   AdminLogoutResult,
   AdminMeResult,
   AdminOverview,
+  AnnouncementResult,
   AuditLogListResult,
   AuditLogQuery,
   EventListQuery,
   EventListResult,
+  PublishAnnouncementRequest,
+  PublishAnnouncementResult,
   ReadyStatus,
   RoomDetail,
   RoomListQuery,
   RoomListResult,
+  WithdrawAnnouncementResult,
 } from "./types.js";
 
 export function createAdminApi(client: HttpClient) {
@@ -92,6 +96,23 @@ export function createAdminApi(client: HttpClient) {
         `/api/admin/sessions/${encodeURIComponent(sessionId)}/disconnect`,
         { method: "POST", body: { reason: reason || undefined } },
       );
+    },
+    getAnnouncement(): Promise<AnnouncementResult> {
+      return client.request("/api/admin/announcement");
+    },
+    publishAnnouncement(
+      payload: PublishAnnouncementRequest,
+    ): Promise<PublishAnnouncementResult> {
+      return client.request("/api/admin/announcement", {
+        method: "POST",
+        body: payload,
+      });
+    },
+    withdrawAnnouncement(reason?: string): Promise<WithdrawAnnouncementResult> {
+      return client.request("/api/admin/announcement/withdraw", {
+        method: "POST",
+        body: { reason: reason || undefined },
+      });
     },
   };
 }

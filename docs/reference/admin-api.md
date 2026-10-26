@@ -59,6 +59,7 @@ After login, the current UI includes:
 - overview
 - room list and room detail
 - runtime events
+- announcement (view, publish, withdraw)
 - audit logs
 - config summary
 - existing admin actions such as close room, expire room, clear shared video, kick member, and disconnect session
@@ -72,12 +73,12 @@ Admin control panel:
 
 - open `http://localhost:8787/admin`
 - authenticate with the account configured by `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH`, `ADMIN_SESSION_SECRET`, and `ADMIN_ROLE`
-- the UI covers login, overview, rooms, room detail, events, audit logs, config summary, and the existing admin actions
+- the UI covers login, overview, rooms, room detail, events, announcement, audit logs, config summary, and the existing admin actions
 
 Role model:
 
-- `viewer`: read-only access to overview, rooms, events, audit logs, and config
-- `operator`: viewer permissions plus room/session actions
+- `viewer`: read-only access to overview, rooms, events, announcement, audit logs, and config
+- `operator`: viewer permissions plus room/session actions and publishing or withdrawing the announcement
 - `admin`: currently equivalent to operator, with headroom for future governance features
 
 Action behavior notes:
