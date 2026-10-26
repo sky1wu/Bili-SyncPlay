@@ -452,6 +452,105 @@ test("redis runtime store keeps only the latest room membership after rapid room
   }
 });
 
+test("redis runtime store's startup purge drops the previous run's heartbeat record", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+  });
+  const observer = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+  });
+  const heartbeat = (instanceId: string) => ({
+    instanceId,
+    version: "test",
+    startedAt: 1_000,
+    uptimeMs: 5_000,
+    lastHeartbeatAt: 6_000,
+    staleAt: 7_000,
+    expiresAt: 8_000,
+    connectionCount: 0,
+    activeRoomCount: 0,
+    activeMemberCount: 0,
+    health: "ok" as const,
+  });
+
+  try {
+    // Left by an earlier run of `room-node-a`. If this run has heartbeats
+    // disabled nothing refreshes it, and once it expires every other node's
+    // reaper would read it as this run being offline.
+    await observer.heartbeatNode(heartbeat("room-node-a"));
+    await observer.heartbeatNode(heartbeat("room-node-b"));
+
+    await store.purgeSessionsByInstance?.("room-node-a");
+
+    assert.deepEqual(
+      (await observer.listNodeStatuses("request", 6_500)).map(
+        (status) => status.instanceId,
+      ),
+      ["room-node-b"],
+    );
+  } finally {
+    await store.close();
+    await observer.close();
+  }
+});
+
+test("redis runtime store keeps the heartbeat record when the startup purge fails", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const keyPrefix = createKeyPrefix();
+  const store = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+  });
+  const observer = await createRedisRuntimeStore(REDIS_URL, {
+    keyPrefix,
+  });
+  const redis = new Redis(REDIS_URL);
+
+  try {
+    await observer.heartbeatNode({
+      instanceId: "room-node-a",
+      version: "test",
+      startedAt: 1_000,
+      lastHeartbeatAt: 6_000,
+      staleAt: 7_000,
+      expiresAt: 8_000,
+      connectionCount: 0,
+      activeRoomCount: 0,
+      activeMemberCount: 0,
+      health: "ok",
+    });
+    // Makes the session scan fail with WRONGTYPE: the purge aborts with the
+    // previous run's sessions (as far as it knows) still in the index, and the
+    // heartbeat record is what lets another node's reaper clear them later.
+    await redis.set(`${keyPrefix}sessions`, "not-a-set");
+
+    await assert.rejects(async () => {
+      await store.purgeSessionsByInstance?.("room-node-a");
+    });
+
+    assert.deepEqual(
+      (await observer.listNodeStatuses("request", 6_500)).map(
+        (status) => status.instanceId,
+      ),
+      ["room-node-a"],
+    );
+  } finally {
+    await redis.del(`${keyPrefix}sessions`);
+    redis.disconnect();
+    await store.close();
+    await observer.close();
+  }
+});
+
 test("redis runtime store can purge stale sessions for a restarted instance", async (t) => {
   if (!REDIS_URL) {
     t.skip("REDIS_URL is not configured.");

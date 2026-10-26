@@ -70,6 +70,12 @@ export type RuntimeStore = {
    * report their real outcome.
    */
   confirmWrites?: () => Promise<void>;
+  /**
+   * Startup only: clears what the previous run under this instance id left in
+   * the shared store — its sessions (the count returned) and its node
+   * heartbeat record, which would otherwise outlive it and be read as the
+   * state of the run now starting.
+   */
   purgeSessionsByInstance?: (instanceId: string) => Promise<number>;
   unregisterSession: (sessionId: string) => void;
   /**

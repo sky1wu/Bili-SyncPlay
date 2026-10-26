@@ -1571,6 +1571,25 @@ export async function createRedisRuntimeStore(
         purgedCount += 1;
       }
 
+      // The previous run's heartbeat record goes too. Nothing else removes it
+      // when this run has heartbeats disabled, and once it expires every other
+      // node's reaper reads it as THIS run being offline and reaps its live
+      // sessions. Deleting it before the process listens is half of what keeps
+      // that out; the reaper re-reading node statuses after it lists sessions
+      // is the other (#315 follow-up).
+      //
+      // Last, and only once every leftover session is gone — the same order
+      // the reaper keeps. If a step above fails, startup aborts with sessions
+      // still in the index, and this record is the only thing that lets
+      // another node's reaper tie them to a dead instance and clear them.
+      await boundCommand("purge_sessions_by_instance", () =>
+        redis
+          .multi()
+          .del(nodeStatusKey(keyPrefix, instanceId))
+          .srem(nodesKey(keyPrefix), instanceId)
+          .exec(),
+      );
+
       return purgedCount;
     },
     unregisterSession(sessionId: string) {

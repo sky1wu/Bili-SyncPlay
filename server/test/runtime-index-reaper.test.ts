@@ -197,6 +197,75 @@ test("runtime index reaper tells the rooms it emptied to rebuild", async (t) => 
   }
 });
 
+test("runtime index reaper judges a node offline only from a status read after its sessions", async () => {
+  // An instance id outlives its process. The first read still sees the record
+  // a previous run of `restarted-node` left behind; the node then restarts,
+  // deletes that record at startup and accepts a session — all before this
+  // sweep lists sessions. Condemning the session on the first read reaps a
+  // live connection on a dead predecessor's word.
+  const liveSession = createSession("session-live", "restarted-node");
+  liveSession.roomCode = "ROOM42";
+  liveSession.memberId = "member-live";
+  let sessionsListed = false;
+  const reaped: string[] = [];
+  const removed: string[] = [];
+  const purgedNodes: string[] = [];
+
+  const runtimeStore: RuntimeIndexReaperStore = {
+    async listNodeStatuses() {
+      if (sessionsListed) {
+        return [];
+      }
+      return [
+        {
+          instanceId: "restarted-node",
+          version: "test",
+          startedAt: 0,
+          lastHeartbeatAt: 0,
+          staleAt: 0,
+          expiresAt: 0,
+          connectionCount: 0,
+          activeRoomCount: 0,
+          activeMemberCount: 0,
+          health: "offline" as const,
+        },
+      ];
+    },
+    async listClusterSessions() {
+      sessionsListed = true;
+      return [liveSession];
+    },
+    removeMember(_roomCode: string, memberId: string) {
+      removed.push(memberId);
+      return { room: null, roomEmpty: false, removed: true };
+    },
+    async markSessionLeftRoom() {},
+    unregisterSession(sessionId: string) {
+      reaped.push(sessionId);
+    },
+    async purgeNodeStatus(instanceId: string) {
+      purgedNodes.push(instanceId);
+    },
+  };
+
+  const reaper = createRuntimeIndexReaper({
+    enabled: true,
+    runtimeStore,
+    intervalMs: 50,
+    now: () => 1_000,
+    publishRoomStateUpdate: async () => {},
+  });
+
+  try {
+    assert.equal(await reaper.sweep(), 0);
+    assert.deepEqual(removed, []);
+    assert.deepEqual(reaped, []);
+    assert.deepEqual(purgedNodes, []);
+  } finally {
+    await reaper.stop();
+  }
+});
+
 test("runtime index reaper leaves the session alone when its index write fails", async () => {
   // The announcement is one-shot, so spending it on a room whose index this
   // sweep has not cleaned strands that room for good. #235 answered this by

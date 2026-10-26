@@ -296,6 +296,18 @@ export function createRuntimeIndexReaper(options: {
     return pacer.stopped() ? false : await settled;
   }
 
+  async function listOfflineInstanceIds(): Promise<Set<string>> {
+    const nodeStatuses = await options.runtimeStore.listNodeStatuses(
+      "maintenance_pass",
+      now(),
+    );
+    return new Set(
+      nodeStatuses
+        .filter((status) => status.health === "offline")
+        .map((status) => status.instanceId),
+    );
+  }
+
   async function sweep(): Promise<number> {
     if (!options.enabled) {
       return 0;
@@ -303,22 +315,24 @@ export function createRuntimeIndexReaper(options: {
 
     await flushPendingResyncs();
 
-    const currentTime = now();
-    const nodeStatuses = await options.runtimeStore.listNodeStatuses(
-      "maintenance_pass",
-      currentTime,
-    );
-    const offlineInstanceIds = new Set(
-      nodeStatuses
-        .filter((status) => status.health === "offline")
-        .map((status) => status.instanceId),
-    );
-    if (offlineInstanceIds.size === 0) {
+    if ((await listOfflineInstanceIds()).size === 0) {
       return 0;
     }
 
     const sessions =
       await options.runtimeStore.listClusterSessions("maintenance_pass");
+    // The verdict that condemns a session is taken AFTER the session was read.
+    // An instance id outlives its process, and a restarting node deletes the
+    // record its previous run left behind before it accepts a connection
+    // (`purgeSessionsByInstance`). So any session of the new run listed above
+    // was registered after that deletion, and this read can no longer see the
+    // old record call its node offline. Reading it first, as the gate above
+    // does, leaves a restart that lands between the two reads to have its
+    // live sessions reaped on a dead predecessor's word.
+    const offlineInstanceIds = await listOfflineInstanceIds();
+    if (offlineInstanceIds.size === 0) {
+      return 0;
+    }
     let cleanedSessions = 0;
     const roomsToResync = new Set<string>();
     for (const session of sessions) {
