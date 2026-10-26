@@ -575,7 +575,7 @@ Reaper、后停索引 Reconciler，进程退出途中仍可能出现新 claim。
 - Docker：默认宽限期只有 10s，会在清理中途 SIGKILL（表现为退出码 `137`）。仓库内的 `docker-compose.yml` 已设 `stop_grace_period: 160s`；用 `docker run` 启动时对应 `docker stop -t 160 <容器名>`。愿意牺牲尾部清理的话可以调小，代价是 Redis 上的运行时状态要等 reaper 过期回收。
 - 启动期间（例如仍在连接 Redis）收到信号：进程会记录并等启动完成后再走完整关闭；如果启动 5s 内仍未完成，直接以退出码 `1` 退出，不会挂着等编排器 SIGKILL。
 - 有关闭步骤抛出异常时，进程以退出码 `1` 退出。仅仅是跑光了预算的步骤属于降级而非失败：这些预算之所以存在，正是因为对应步骤在等本进程无法取消的 I/O，放弃等待本就是设计中的结局，因此进程仍以 `0` 退出。两种情况都会以 error 级别记录 `server_shutdown_step_failed` 事件——区分它们要看事件的 `result` 字段（`"error"` 还是 `"timeout"`），退出码区分不了。
-- 客户端会收到正常的 close frame：`1001 going away`，reason 为 `server_shutting_down`；不再是断开 TCP 导致的 `1006`（与崩溃、断网无法区分）。2s 内没回应 close 握手的连接才会被强制断开。两种情况扩展都会自动重连。
+- 客户端会收到正常的 close frame：`1001 going away`，reason 为 `server_shutting_down`；不再是断开 TCP 导致的 `1006`（与崩溃、断网无法区分）。2s 内没回应 close 握手的连接才会被强制断开。两种情况扩展都会自动重连；收到这个 close frame 时，扩展弹窗会提示"服务器正在维护或重启"，并在服务端停机期间的重连失败中一直保持这条提示，而不是显示笼统的"无法连接"。
 - 在清理过程中再次收到信号（例如连按两次 Ctrl+C）会立即退出，放弃剩余清理步骤。
 
 ## 8. 运维说明
