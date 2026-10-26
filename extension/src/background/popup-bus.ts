@@ -1,9 +1,11 @@
+import type { AnnouncementView } from "../shared/announcement";
 import type { BackgroundToPopupMessage } from "../shared/messages";
 import type { BackgroundRuntimeState } from "./runtime-state";
 
 export function createPopupStateSnapshot(args: {
   state: BackgroundRuntimeState;
   retryInMs: number | null;
+  announcement: AnnouncementView | null;
 }): BackgroundToPopupMessage {
   return {
     type: "background:state",
@@ -23,6 +25,7 @@ export function createPopupStateSnapshot(args: {
       clockOffsetMs: args.state.clock.clockOffsetMs,
       rttMs: args.state.clock.rttMs,
       pageShareButtonEnabled: args.state.settings.pageShareButtonEnabled,
+      announcement: args.announcement,
       logs: args.state.diagnostics.logs,
     },
   };

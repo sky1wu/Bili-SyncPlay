@@ -430,6 +430,33 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+### Connection capacity
+
+The site files above do not touch `/etc/nginx/nginx.conf`, and distribution defaults there are sized for short HTTP requests. Debian/Ubuntu ship `worker_connections 768`, and **every proxied WebSocket holds two worker connections** — one to the client and one to the upstream node. With two workers that caps the entrypoint at roughly 768 concurrent WebSocket members, and hitting it is easy to misread:
+
+- the sync process never sees the refused connections, so its own metrics (CPU, event-loop lag, handler latency) can look healthy — do not rule out the entrypoint from them
+- from outside, new connections to the entrypoint time out or fail intermittently
+- `/var/log/nginx/error.log` repeats `768 worker_connections are not enough while connecting to upstream`
+
+Size it as `worker_processes × worker_connections / 2 ≥ peak concurrent WebSocket connections`, with generous headroom: the formula assumes connections spread evenly, and nothing guarantees that — a reconnect burst can land on one worker, and a WebSocket stays on the worker that accepted it. Leave `multi_accept` at its default `off`; turning it on lets one woken worker take the whole pending queue at once. Each connection is also a file descriptor, and systemd starts services with a **soft** open-file limit of 1024 — `systemctl show nginx -p LimitNOFILE` prints only the hard limit; check `-p LimitNOFILESoft`, or read what the running workers actually got:
+
+```bash
+for p in $(pgrep -f 'nginx: worker process$'); do grep 'Max open files' /proc/$p/limits; done
+```
+
+The `$` anchor skips workers still draining after a reload (`nginx: worker process is shutting down`), which keep the old limit until their last connection closes. `systemctl reload` returns before the old workers have renamed themselves, so run the check a few seconds later — run immediately, it can still list old workers with the old limit. Raise it from nginx itself with `worker_rlimit_nofile`:
+
+```nginx
+# /etc/nginx/nginx.conf — top level, next to worker_processes
+worker_rlimit_nofile 65535;
+
+events {
+    worker_connections 16384;
+}
+```
+
+`sudo nginx -t && sudo systemctl reload nginx` applies both without dropping existing WebSocket connections: new workers take new connections while the old ones keep theirs until they close.
+
 ## 5. Enable TLS
 
 WebSocket service for the extension should use `wss://` in production. A common setup is Certbot with Nginx:
@@ -559,7 +586,7 @@ Per deployment style:
 - Docker: the default grace period is only 10s, so the container is SIGKILLed mid-cleanup (exit code `137`). The repository's `docker-compose.yml` sets `stop_grace_period: 160s`; with `docker run`, stop the container using `docker stop -t 160 <container>`. Lower it if you prefer a faster hard stop, at the cost of leaving Redis runtime state for the reapers to expire.
 - A signal that arrives during startup (while still connecting to Redis, for example) is recorded, and the full shutdown runs once startup finishes; if startup has not finished within 5s the process exits with code `1` instead of hanging until the orchestrator sends SIGKILL.
 - If a shutdown step throws, the process exits with code `1`. A step that merely ran out of its budget is degraded, not failed: the budgets exist because those steps wait on I/O this process cannot cancel, so giving up on it is the designed outcome and the process still exits `0`. Both cases log a `server_shutdown_step_failed` event at error level — read its `result` field (`"error"` vs `"timeout"`) to tell them apart, because the exit code does not.
-- Clients receive a proper close frame — `1001 going away` with reason `server_shutting_down` — instead of the `1006` that a dropped TCP connection produces (which is indistinguishable from a crash or a network failure). Only connections that do not answer the close handshake within 2s are terminated. The extension reconnects either way.
+- Clients receive a proper close frame — `1001 going away` with reason `server_shutting_down` — instead of the `1006` that a dropped TCP connection produces (which is indistinguishable from a crash or a network failure). Only connections that do not answer the close handshake within 2s are terminated. The extension reconnects either way; on this close frame its popup says the server is restarting for maintenance — and keeps saying so through the reconnect attempts that fail while it is down — instead of a generic "unable to connect".
 - A second signal during shutdown (for example pressing Ctrl+C twice) exits immediately and abandons the remaining cleanup steps.
 
 ## 8. Operational notes

@@ -115,6 +115,13 @@ function createService(options: {
       createRoom: async () => {
         throw new Error("createRoom should not be called in this test");
       },
+      getAnnouncement: async () => null,
+      setAnnouncement: async () => {
+        throw new Error("setAnnouncement should not be called in this test");
+      },
+      clearAnnouncement: async () => {
+        throw new Error("clearAnnouncement should not be called in this test");
+      },
     },
     runtimeStore: {
       listSessionsByRoom: () => options.sessionsByRoom ?? [],

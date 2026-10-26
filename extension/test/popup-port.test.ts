@@ -27,6 +27,7 @@ const validStateMessage = {
     clockOffsetMs: null,
     rttMs: null,
     pageShareButtonEnabled: true,
+    announcement: null,
     logs: [],
   },
 };

@@ -27,7 +27,7 @@
     "build": "npm run build -w @bili-syncplay/protocol && npm run build -w @bili-syncplay/server && npm run build -w @bili-syncplay/extension && npm run build -w @bili-syncplay/admin-ui",
     "pretest": "npm run build -w @bili-syncplay/protocol",
     "test": "npm run test:audit-gate && npm run test:scripts && npm run --ignore-scripts test -w @bili-syncplay/protocol && npm run --ignore-scripts test -w @bili-syncplay/server && npm run --ignore-scripts test -w @bili-syncplay/extension && npm run --ignore-scripts test -w @bili-syncplay/admin-ui",
-    "test:scripts": "node --test scripts/target-browser.test.mjs",
+    "test:scripts": "node --test scripts/target-browser.test.mjs scripts/heartbeat-triage.test.mjs",
     "coverage": "npm run --ignore-scripts coverage -w @bili-syncplay/protocol && npm run --ignore-scripts coverage -w @bili-syncplay/server && npm run --ignore-scripts coverage -w @bili-syncplay/extension && npm run --ignore-scripts coverage -w @bili-syncplay/admin-ui",
     "audit": "node scripts/audit-gate.mjs",
     "test:audit-gate": "node --test scripts/audit-gate.test.mjs",

@@ -71,6 +71,15 @@ export function instrumentRoomStore(
     listRooms: measure("list_rooms", (query) => roomStore.listRooms(query)),
     countRooms: measure("count_rooms", (query) => roomStore.countRooms(query)),
     isReady: measure("is_ready", () => roomStore.isReady()),
+    getAnnouncement: measure("get_announcement", (caller) =>
+      roomStore.getAnnouncement(caller),
+    ),
+    setAnnouncement: measure("set_announcement", (announcement, ttlMs) =>
+      roomStore.setAnnouncement(announcement, ttlMs),
+    ),
+    clearAnnouncement: measure("clear_announcement", () =>
+      roomStore.clearAnnouncement(),
+    ),
   };
 
   if (typeof roomStore.acknowledgeOrphanedIndexClaims === "function") {

@@ -8,8 +8,8 @@
 
 | Constant                   | Location                                | Value | Meaning                                                      |
 | -------------------------- | --------------------------------------- | ----- | ------------------------------------------------------------ |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`   | Version sent by the extension in `room:create` / `room:join` |
-| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `4`   | Version the server currently speaks                          |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`   | Version sent by the extension in `room:create` / `room:join` |
+| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`   | Version the server currently speaks                          |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`   | Oldest client version the server still accepts               |
 
 Clients send `protocolVersion` inside the `room:create` / `room:join` payload; the server rejects clients below `MIN_PROTOCOL_VERSION` with the `unsupported_protocol_version` error code. Legacy clients that omit `protocolVersion` are treated according to the server's compatibility policy in `server/src/messages.ts`.
@@ -74,15 +74,16 @@ and leave its cached `sharedVideo` untouched.
 
 ## Server Messages (`ServerMessage`)
 
-| Type                 | Payload                                                                  | Purpose                                                                                                                                 |
-| -------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | Room created; carries the invite and session tokens                                                                                     |
-| `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | Join succeeded; returns the session `memberToken` (a rejoin with a still-valid previous token reuses it, otherwise a new one is issued) |
-| `room:state`         | `RoomState & { playbackAgeMs? }`                                         | Full room snapshot (after join, on request, on shared-video / playback changes)                                                         |
-| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | Member joined (delta, sent to `protocolVersion >= 2` clients)                                                                           |
-| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | Member left (delta, sent to `protocolVersion >= 2` clients)                                                                             |
-| `error`              | `{ code: ErrorCode, message }`                                           | Request failed                                                                                                                          |
-| `sync:pong`          | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | Clock-offset probe response                                                                                                             |
+| Type                  | Payload                                                                  | Purpose                                                                                                                                 |
+| --------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `room:created`        | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | Room created; carries the invite and session tokens                                                                                     |
+| `room:joined`         | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | Join succeeded; returns the session `memberToken` (a rejoin with a still-valid previous token reuses it, otherwise a new one is issued) |
+| `room:state`          | `RoomState & { playbackAgeMs? }`                                         | Full room snapshot (after join, on request, on shared-video / playback changes)                                                         |
+| `room:member-joined`  | `{ roomCode, member: RoomMember }`                                       | Member joined (delta, sent to `protocolVersion >= 2` clients)                                                                           |
+| `room:member-left`    | `{ roomCode, member: RoomMember }`                                       | Member left (delta, sent to `protocolVersion >= 2` clients)                                                                             |
+| `error`               | `{ code: ErrorCode, message }`                                           | Request failed                                                                                                                          |
+| `sync:pong`           | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | Clock-offset probe response                                                                                                             |
+| `server:announcement` | `{ announcement: Announcement \| null }`                                 | The operator announcement currently in effect, or `null` for none (sent to `protocolVersion >= 5` clients)                              |
 
 ### Membership deltas
 
@@ -98,6 +99,26 @@ Two rules keep it sound, neither of which the type system enforces:
 - **A duration, never a timestamp.** A duration is safe across two disagreeing clocks — the receiver only adds it to an anchor of its own. A timestamp would force the receiver to subtract a server time from a local one, which measures the clock disagreement rather than elapsed time (see the [playback timing invariants](./invariants.md#playback-timing-invariants)).
 
 Receivers subtract it from the message's local arrival time to get the anchor the position is extrapolated from (`extension/src/background/clock-sync.ts`), ignoring values that are absent (legacy server), negative, or implausibly large. Absent means "assume current", the pre-#212 behaviour.
+
+### Announcements
+
+`server:announcement` (protocol version 5, #325) carries an operator notice such as "maintenance tonight at 04:30, about 5 minutes":
+
+```ts
+type Announcement = {
+  id: string; // per publication, [A-Za-z0-9_-]{1,64}; receivers remember dismissals by it
+  level: "info" | "warning";
+  message: string; // non-blank, at most 500 characters
+  scheduledAt?: number; // epoch ms of the announced event, display only
+  expiresInMs: number; // > 0: remaining lifetime at the moment of sending
+};
+```
+
+- **State, not an event.** The payload is the announcement in effect _now_; `null` means there is none (withdrawn or expired). Sending it twice is harmless, so the server needs no delivery trail: it sends the current state to every capable session right after `room:created` / `room:joined` — the first point at which the client's protocol version is known — and broadcasts it whenever it changes.
+- **Delivery.** Operators publish and withdraw through the admin API (`/api/admin/announcement`). Each node re-reads the stored announcement every 15 seconds (`server/src/announcement-broadcaster.ts`) and broadcasts on a change of `id`, so a publication or withdrawal reaches clients within one interval, and a node that missed a change (restart, Redis blip) repairs it on its next read. A failed read keeps the last known announcement rather than withdrawing it.
+- **Lifetime as a duration.** `expiresInMs`, like `playbackAgeMs`, is safe across disagreeing clocks; the store keeps it as a Redis TTL and reports it with `PTTL`, so no process compares a stored timestamp with its own clock. `scheduledAt` is for a person to read and is never compared with a local clock.
+- **Version gate.** Only sessions that sent `protocolVersion >= 5` (`ANNOUNCEMENT_PROTOCOL_VERSION`) receive it. Older clients would drop the unknown type anyway; the gate keeps it off their logs.
+- **How the extension shows it** (`extension/src/background/announcement-controller.ts`). The background keeps the latest payload and derives on every read whether to show it: in a room, on the server that sent it, not past `expiresInMs` measured on a local monotonic clock, and not dismissed. A shown announcement appears as a banner at the top of the popup and a `!` on the toolbar icon (blue for `info`, orange for `warning`); a `warning` also appears as a bar at the top of Bilibili pages, fullscreen included, until dismissed. Dismissing it anywhere hides it everywhere; the last 20 dismissed ids are kept in `chrome.storage.local`, so a new publication (a new `id`) shows again.
 
 ### Clock synchronization
 

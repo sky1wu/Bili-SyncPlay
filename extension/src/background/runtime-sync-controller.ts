@@ -29,6 +29,7 @@ export function createRuntimeSyncController(args: {
         reconnectTimer: args.connectionState.reconnectTimer,
         reconnectAttempt: args.connectionState.reconnectAttempt,
         reconnectDeadlineMs: args.connectionState.reconnectDeadlineMs,
+        serverRestarting: args.connectionState.serverRestarting,
       },
       room: {
         roomCode: args.roomSessionState.roomCode,

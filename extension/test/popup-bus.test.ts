@@ -23,6 +23,7 @@ test("popup snapshot includes connection, room, retry, clock, and logs state", (
   const snapshot = createPopupStateSnapshot({
     state,
     retryInMs: 3000,
+    announcement: null,
   });
 
   assert.equal(snapshot.type, "background:state");

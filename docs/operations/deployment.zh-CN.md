@@ -428,6 +428,33 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+### 连接容量
+
+上面的站点配置不涉及 `/etc/nginx/nginx.conf`，而发行版在那里的默认值是按短 HTTP 请求设计的。Debian/Ubuntu 默认 `worker_connections 768`，而**每条被反代的 WebSocket 占两个 worker 连接**——一个对客户端，一个对上游节点。两个 worker 时入口约在 768 个并发 WebSocket 成员处封顶，而且撞上时很容易误判：
+
+- 被拒的连接根本到不了同步进程，它自己的指标（CPU、事件循环延迟、消息处理耗时）可能完全正常——不能据此排除入口层
+- 从外部看，到入口的新连接间歇性超时或失败
+- `/var/log/nginx/error.log` 反复出现 `768 worker_connections are not enough while connecting to upstream`
+
+按 `worker_processes × worker_connections / 2 ≥ 峰值并发 WebSocket 连接数` 估算，并留足余量：公式假设连接在 worker 间均匀分布，但这一点没有任何保证——一波重连可能集中落到同一个 worker 上，而 WebSocket 会一直留在接受它的那个 worker 上。`multi_accept` 保持默认的 `off`；打开后，一个被唤醒的 worker 会一次性接走全部排队连接。每个连接同时也是一个文件描述符，而 systemd 启动服务时的**软**限制是 1024——`systemctl show nginx -p LimitNOFILE` 只显示硬限制；要看 `-p LimitNOFILESoft`，或直接读运行中 worker 实际拿到的值：
+
+```bash
+for p in $(pgrep -f 'nginx: worker process$'); do grep 'Max open files' /proc/$p/limits; done
+```
+
+`$` 锚点会跳过 reload 后仍在排空连接的旧 worker（`nginx: worker process is shutting down`），它们会保留旧限制，直到最后一个连接关闭。`systemctl reload` 返回时旧 worker 可能还没改名，所以要等几秒再查——紧接着执行仍可能列出带旧限制的旧 worker。用 nginx 自己的 `worker_rlimit_nofile` 提高它：
+
+```nginx
+# /etc/nginx/nginx.conf —— 顶层，与 worker_processes 同级
+worker_rlimit_nofile 65535;
+
+events {
+    worker_connections 16384;
+}
+```
+
+`sudo nginx -t && sudo systemctl reload nginx` 即可让两项生效，且不会断开已有的 WebSocket 连接：新 worker 接新连接，旧 worker 保留已有连接直到它们关闭。
+
 ## 5. 启用 TLS
 
 生产环境中的扩展 WebSocket 服务应使用 `wss://`。常见做法是将 Certbot 与 Nginx 配合使用：
@@ -548,7 +575,7 @@ Reaper、后停索引 Reconciler，进程退出途中仍可能出现新 claim。
 - Docker：默认宽限期只有 10s，会在清理中途 SIGKILL（表现为退出码 `137`）。仓库内的 `docker-compose.yml` 已设 `stop_grace_period: 160s`；用 `docker run` 启动时对应 `docker stop -t 160 <容器名>`。愿意牺牲尾部清理的话可以调小，代价是 Redis 上的运行时状态要等 reaper 过期回收。
 - 启动期间（例如仍在连接 Redis）收到信号：进程会记录并等启动完成后再走完整关闭；如果启动 5s 内仍未完成，直接以退出码 `1` 退出，不会挂着等编排器 SIGKILL。
 - 有关闭步骤抛出异常时，进程以退出码 `1` 退出。仅仅是跑光了预算的步骤属于降级而非失败：这些预算之所以存在，正是因为对应步骤在等本进程无法取消的 I/O，放弃等待本就是设计中的结局，因此进程仍以 `0` 退出。两种情况都会以 error 级别记录 `server_shutdown_step_failed` 事件——区分它们要看事件的 `result` 字段（`"error"` 还是 `"timeout"`），退出码区分不了。
-- 客户端会收到正常的 close frame：`1001 going away`，reason 为 `server_shutting_down`；不再是断开 TCP 导致的 `1006`（与崩溃、断网无法区分）。2s 内没回应 close 握手的连接才会被强制断开。两种情况扩展都会自动重连。
+- 客户端会收到正常的 close frame：`1001 going away`，reason 为 `server_shutting_down`；不再是断开 TCP 导致的 `1006`（与崩溃、断网无法区分）。2s 内没回应 close 握手的连接才会被强制断开。两种情况扩展都会自动重连；收到这个 close frame 时，扩展弹窗会提示"服务器正在维护或重启"，并在服务端停机期间的重连失败中一直保持这条提示，而不是显示笼统的"无法连接"。
 - 在清理过程中再次收到信号（例如连按两次 Ctrl+C）会立即退出，放弃剩余清理步骤。
 
 ## 8. 运维说明

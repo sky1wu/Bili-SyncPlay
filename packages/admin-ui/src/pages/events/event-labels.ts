@@ -25,6 +25,9 @@ export const EVENT_LABELS: Record<string, string> = {
   admin_command_confirmation_timed_out: "管理命令确认超时",
   admin_command_consumer_close_unfinished: "管理命令效果关服未排空",
   admin_session_disconnected: "管理端断开会话",
+  announcement_published: "发布公告",
+  announcement_withdrawn: "撤回公告",
+  announcement_broadcast: "推送公告",
 };
 
 export function getEventLabel(event: string): string | null {

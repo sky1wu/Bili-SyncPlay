@@ -20,6 +20,9 @@ export function createStubApi(
     clearRoomVideo: vi.fn(),
     kickMember: vi.fn(),
     disconnectSession: vi.fn(),
+    getAnnouncement: vi.fn(),
+    publishAnnouncement: vi.fn(),
+    withdrawAnnouncement: vi.fn(),
     ...overrides,
   };
 }

@@ -1,3 +1,4 @@
+import type { AnnouncementView } from "../src/shared/announcement";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createMessageController } from "../src/background/message-controller";
@@ -43,6 +44,10 @@ function createControllerHarness(
     };
     settingsState?: {
       pageShareButtonEnabled: boolean;
+    };
+    announcementController?: {
+      getVisible(): AnnouncementView | null;
+      dismiss(id: string): Promise<void>;
     };
     isActiveSharedTab?: boolean;
     isRememberedSharedSourceTab?: boolean;
@@ -133,6 +138,10 @@ function createControllerHarness(
   };
 
   const controller = createMessageController({
+    announcementController: overrides.announcementController ?? {
+      getVisible: () => null,
+      async dismiss() {},
+    },
     connectionState,
     roomSessionState,
     settingsState,
@@ -1724,4 +1733,49 @@ test("message controller does not request a sync while offline", async () => {
 
   assert.deepEqual(harness.syncRequests(), []);
   assert.equal(harness.calls.connect, 1);
+});
+
+test("message controller answers and dismisses the announcement for popup and content", async () => {
+  const visible = {
+    id: "a1",
+    level: "warning" as const,
+    message: "维护",
+    scheduledAt: null,
+  };
+  const dismissed: string[] = [];
+  const harness = createControllerHarness({
+    announcementController: {
+      getVisible: () => (dismissed.includes(visible.id) ? null : visible),
+      async dismiss(id) {
+        dismissed.push(id);
+      },
+    },
+  });
+  const responses: unknown[] = [];
+  const respond = (response: unknown) => {
+    responses.push(response);
+  };
+
+  await harness.controller.handleRuntimeMessage(
+    { type: "content:get-announcement" },
+    {},
+    respond,
+  );
+  await harness.controller.handleRuntimeMessage(
+    { type: "content:dismiss-announcement", id: "a1" },
+    {},
+    respond,
+  );
+  await harness.controller.handleRuntimeMessage(
+    { type: "popup:dismiss-announcement", id: "a2" },
+    {},
+    respond,
+  );
+
+  assert.deepEqual(responses, [
+    { ok: true, announcement: visible },
+    { ok: true },
+    harness.popupState,
+  ]);
+  assert.deepEqual(dismissed, ["a1", "a2"]);
 });

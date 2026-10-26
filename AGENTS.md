@@ -64,7 +64,9 @@ Checklist for any PR touching the sync protocol; compatibility policy is in
 1. Wire format changed? Bump **both** constants — nothing enforces that they
    agree: `PROTOCOL_VERSION` (`packages/protocol/src/types/common.ts`, what the
    extension sends) and `CURRENT_PROTOCOL_VERSION` (`server/src/messages.ts`,
-   what the server implements and reports).
+   what the server implements and reports). Exception: a server capability the
+   extension does not consume yet bumps only the server; `PROTOCOL_VERSION`
+   follows in the PR that consumes it, with sends gated as in item 3.
 2. Grep ALL call sites of a changed signature, including `server/src/app.ts` and
    the `index.ts` adapters. `tsc` catches a call with too few arguments
    (`TS2554`) but silently accepts a function that _declares_ fewer parameters

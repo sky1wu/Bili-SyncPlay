@@ -1,5 +1,6 @@
 import {
   DashboardOutlined,
+  NotificationOutlined,
   FileSearchOutlined,
   SettingOutlined,
   TeamOutlined,
@@ -15,6 +16,7 @@ const NAV_ICONS: Record<string, ReactNode> = {
   "/overview": <DashboardOutlined />,
   "/rooms": <TeamOutlined />,
   "/events": <ThunderboltOutlined />,
+  "/announcement": <NotificationOutlined />,
   "/audit-logs": <FileSearchOutlined />,
   "/config": <SettingOutlined />,
 };

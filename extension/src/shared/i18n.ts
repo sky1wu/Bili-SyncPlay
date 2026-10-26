@@ -73,6 +73,13 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
     connectionAllowedOriginsRejected:
       "服务器可达，但 WebSocket 握手被拒绝。请检查服务端 ALLOWED_ORIGINS，以及反向代理是否已正确转发 WebSocket。",
     connectionLostReconnecting: "与同步服务器的连接已断开，正在尝试重连。",
+    connectionServerRestarting: "同步服务器正在维护或重启，正在自动重连。",
+    announcementDismiss: "关闭公告",
+    announcementScheduledAt: "维护时间：{time}",
+    announcementScheduledAtRelative: "维护时间：{time}（{relative}）",
+    announcementInMinutes: "约 {count} 分钟后",
+    announcementInHours: "约 {count} 小时后",
+    announcementInDays: "约 {count} 天后",
     connectionWebsocketFailed:
       "服务器 HTTP 可达，但 WebSocket 连接失败。服务端可能正在启动或重启；若持续出现，请检查反向代理的 WebSocket 转发与服务端 ALLOWED_ORIGINS。",
     adminRemovedFromRoom: "你已被管理员移出房间。",
@@ -174,6 +181,14 @@ const MESSAGES: Record<"zh" | "en", MessageCatalog> = {
       "The server is reachable, but the WebSocket handshake was rejected. Check ALLOWED_ORIGINS and make sure the reverse proxy forwards WebSocket correctly.",
     connectionLostReconnecting:
       "Lost connection to the sync server. Reconnecting…",
+    connectionServerRestarting:
+      "The sync server is restarting for maintenance. Reconnecting automatically…",
+    announcementDismiss: "Dismiss announcement",
+    announcementScheduledAt: "Scheduled: {time}",
+    announcementScheduledAtRelative: "Scheduled: {time} ({relative})",
+    announcementInMinutes: "in about {count} min",
+    announcementInHours: "in about {count} h",
+    announcementInDays: "in about {count} days",
     connectionWebsocketFailed:
       "The server responds over HTTP, but the WebSocket connection failed. It may be starting or restarting; if this persists, check the reverse proxy's WebSocket forwarding and the server's ALLOWED_ORIGINS.",
     adminRemovedFromRoom: "You were removed from the room by an admin.",

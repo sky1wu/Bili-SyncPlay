@@ -33,7 +33,8 @@ export type AuditLogRecord = {
     role: AdminRole;
   };
   action: string;
-  targetType: "room" | "session" | "member" | "config" | "block";
+  targetType:
+    "room" | "session" | "member" | "config" | "block" | "announcement";
   targetId: string;
   request: Record<string, unknown>;
   result: "ok" | "rejected" | "error";

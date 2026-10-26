@@ -12,6 +12,10 @@ import type { BackgroundPopupState } from "../src/shared/messages";
 import { setLocaleForTests } from "../src/shared/i18n";
 
 const REF_KEYS = [
+  "announcementBanner",
+  "announcementMessage",
+  "announcementMeta",
+  "announcementDismissButton",
   "serverStatus",
   "roomStatus",
   "membersStatus",
@@ -84,6 +88,7 @@ function createState(
     clockOffsetMs: null,
     rttMs: null,
     pageShareButtonEnabled: true,
+    announcement: null,
     logs: [],
     ...overrides,
   };

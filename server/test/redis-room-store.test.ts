@@ -2098,3 +2098,76 @@ test("a WRONGTYPE reply is still one unreadable key, not a dependency outage", a
     await store.close();
   }
 });
+
+test("redis room store keeps the announcement with a Redis-side lifetime (#325)", async (t) => {
+  if (!REDIS_URL) {
+    t.skip("REDIS_URL is not configured.");
+    return;
+  }
+
+  const namespace = uniqueNamespace("announcement");
+  const key = `${namespace}:announcement`;
+  const store = await createRedisRoomStore(REDIS_URL, { namespace });
+  const redis = await connect();
+  const announcement = {
+    id: "announcement-1",
+    level: "warning" as const,
+    message: "今晚 04:30 维护",
+    scheduledAt: 1_792_900_000_000,
+    publishedAt: 1_792_800_000_000,
+  };
+
+  try {
+    assert.equal(await store.getAnnouncement(), null);
+
+    await store.setAnnouncement(announcement, 60_000);
+    // The lifetime is a TTL on the key: Redis expires it on its own clock, and
+    // nothing compares a stored timestamp with another machine's.
+    const ttl = await redis.pttl(key);
+    assert.ok(ttl > 55_000 && ttl <= 60_000, `pttl ${ttl}`);
+
+    for (const caller of ["request", "maintenance_pass"] as const) {
+      const snapshot = await store.getAnnouncement(caller);
+      assert.deepEqual(snapshot?.announcement, announcement);
+      assert.ok(
+        snapshot !== null &&
+          snapshot.remainingMs > 55_000 &&
+          snapshot.remainingMs <= 60_000,
+      );
+    }
+
+    // A replacement takes the new lifetime, not the old one's remainder.
+    await store.setAnnouncement(
+      { ...announcement, id: "announcement-2" },
+      5_000,
+    );
+    const replaced = await store.getAnnouncement();
+    assert.equal(replaced?.announcement.id, "announcement-2");
+    assert.ok(replaced !== null && replaced.remainingMs <= 5_000);
+
+    await store.clearAnnouncement();
+    assert.equal(await redis.exists(key), 0);
+    assert.equal(await store.getAnnouncement(), null);
+
+    // Neither a body without a lifetime nor one no receiver would accept is
+    // read back as an announcement.
+    await redis.set(key, JSON.stringify(announcement));
+    assert.equal(await store.getAnnouncement(), null);
+    await redis.set(
+      key,
+      JSON.stringify({ ...announcement, level: "critical" }),
+      "PX",
+      60_000,
+    );
+    assert.equal(await store.getAnnouncement(), null);
+
+    // A lapsed announcement is gone.
+    await store.setAnnouncement(announcement, 20);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(await store.getAnnouncement(), null);
+  } finally {
+    await redis.del(key);
+    await redis.quit();
+    await store.close();
+  }
+});

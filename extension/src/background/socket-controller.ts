@@ -41,7 +41,14 @@ export function createSocketController(args: {
   getPendingLocalShareGeneration: () => number | null;
   sendJoinRequest: (targetRoomCode: string, targetJoinToken: string) => void;
   sendToServer: (message: ClientMessage) => void;
-  handleServerMessage: (message: ServerMessage) => Promise<void>;
+  /**
+   * `sourceServerUrl` is the configured server URL this socket was opened for,
+   * which a server change can replace while the old socket still delivers.
+   */
+  handleServerMessage: (
+    message: ServerMessage,
+    sourceServerUrl: string,
+  ) => Promise<void>;
   buildConnectionCheckUrl: (serverUrl: string) => string | null;
   buildHealthcheckUrl: (serverUrl: string) => string | null;
   onOpen: () => void;
@@ -174,6 +181,7 @@ export function createSocketController(args: {
           args.connectionState.lastError = getConnectionErrorMessage({
             healthcheckReachable: false,
             extensionOrigin,
+            serverRestarting: args.connectionState.serverRestarting,
           });
           args.connectionState.connected = false;
           args.stopClockSyncTimer();
@@ -207,6 +215,7 @@ export function createSocketController(args: {
         args.connectionState.lastError = getConnectionErrorMessage({
           healthcheckReachable: false,
           extensionOrigin,
+          serverRestarting: args.connectionState.serverRestarting,
         });
         args.connectionState.connected = false;
         args.stopClockSyncTimer();
@@ -259,6 +268,7 @@ export function createSocketController(args: {
       }
       args.connectionState.connected = true;
       args.connectionState.lastError = null;
+      args.connectionState.serverRestarting = false;
       args.connectionState.reconnectAttempt = 0;
       args.connectionState.reconnectDeadlineMs = null;
       args.log("background", "Socket connected");
@@ -318,7 +328,7 @@ export function createSocketController(args: {
         args.log("background", "Received unrecognized server message");
         return;
       }
-      void args.handleServerMessage(parsed);
+      void args.handleServerMessage(parsed, targetServerUrl);
     });
 
     socket.addEventListener("close", (event) => {
@@ -396,6 +406,20 @@ export function createSocketController(args: {
       }
 
       args.connectionState.connected = false;
+      if (
+        event.code === CLOSE_CODE_GOING_AWAY &&
+        event.reason === SERVER_SHUTDOWN_CLOSE_REASON
+      ) {
+        // The server said it is going away on purpose. Say so now rather than
+        // leaving the popup on a bare "disconnected", and keep saying it
+        // through the reconnect attempts that fail while it is down.
+        args.connectionState.serverRestarting = true;
+        args.connectionState.lastError = getSocketErrorMessage({
+          sawOpen,
+          healthcheckReachable,
+          serverRestarting: true,
+        });
+      }
       args.stopClockSyncTimer();
       // Keep the pending local-share confirmation marker while a share is queued
       // for re-flush on reconnect (the CLOSING/offline branch of
@@ -418,6 +442,7 @@ export function createSocketController(args: {
       args.connectionState.lastError = getSocketErrorMessage({
         sawOpen,
         healthcheckReachable,
+        serverRestarting: args.connectionState.serverRestarting,
       });
       args.connectionState.connected = false;
       args.stopClockSyncTimer();
@@ -482,6 +507,7 @@ export function createSocketController(args: {
   function resetReconnectState(): void {
     clearReconnectTimer();
     args.connectionState.reconnectAttempt = 0;
+    args.connectionState.serverRestarting = false;
   }
 
   return {
@@ -492,6 +518,10 @@ export function createSocketController(args: {
     resetReconnectState,
   };
 }
+
+// Mirrors the server's graceful-shutdown close (`server/src/app.ts`).
+const CLOSE_CODE_GOING_AWAY = 1001;
+const SERVER_SHUTDOWN_CLOSE_REASON = "server_shutting_down";
 
 const ADMIN_SESSION_RESET_REASONS = new Set([
   "Admin kicked member",

@@ -37,6 +37,14 @@ async function init(): Promise<void> {
 
   document.documentElement.lang = getDocumentLanguage();
   document.title = t("popupTitle");
+  connectPort();
+  const initialState = await queryState();
+  if (applyState(initialState, "query")) {
+    render();
+  }
+}
+
+function mountPopup(): void {
   // 用 DOMParser 解析静态模板再 adopt 进文档，替代 innerHTML 赋值：
   // 模板不含任何用户输入，DOMParser 不执行脚本，且 addons-linter 不会
   // 对其告警（innerHTML 的官方安全替代）。
@@ -63,11 +71,6 @@ async function init(): Promise<void> {
     applyRoomActionControlState,
     getPopupState: () => popupStateSync.popupState,
   });
-  connectPort();
-  const initialState = await queryState();
-  if (applyState(initialState, "query")) {
-    render();
-  }
 }
 
 async function queryState(): Promise<BackgroundPopupState> {
@@ -127,8 +130,13 @@ function applyState(
 }
 
 function render(): void {
-  if (!refs || !popupStateSync.popupState) {
+  if (!popupStateSync.popupState) {
     return;
+  }
+  // Either the query or the port can supply the first restored state. Until
+  // then, do not expose editable controls backed by empty/default drafts.
+  if (!refs) {
+    mountPopup();
   }
   const uiState = popupUiStateStore.getState();
   renderPopup({

@@ -48,6 +48,7 @@ const SESSION_KEY = "bili-syncplay-session";
 const PROFILE_KEY = "bili-syncplay-profile";
 const PAGE_SHARE_BUTTON_POSITION_KEY =
   "bili-syncplay-page-share-button-position";
+const DISMISSED_ANNOUNCEMENTS_KEY = "bili-syncplay-dismissed-announcements";
 
 export async function loadState(): Promise<PersistedState> {
   const [session, profile] = await Promise.all([
@@ -147,5 +148,25 @@ export async function savePageShareButtonPosition(
       x: value.x,
       y: value.y,
     },
+  });
+}
+
+/** Ids of announcements the user dismissed, oldest first (#325). */
+export async function loadDismissedAnnouncementIds(): Promise<string[]> {
+  const result = await chrome.storage.local.get<Record<string, unknown>>(
+    DISMISSED_ANNOUNCEMENTS_KEY,
+  );
+  const value = result[DISMISSED_ANNOUNCEMENTS_KEY];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((id): id is string => typeof id === "string");
+}
+
+export async function saveDismissedAnnouncementIds(
+  ids: readonly string[],
+): Promise<void> {
+  await chrome.storage.local.set({
+    [DISMISSED_ANNOUNCEMENTS_KEY]: [...ids],
   });
 }

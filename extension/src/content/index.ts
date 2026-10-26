@@ -4,6 +4,10 @@ import {
   type RoomStateHydrationResponse,
 } from "../shared/messages";
 import { normalizeSharedVideoUrl } from "../shared/url";
+import {
+  createAnnouncementBanner,
+  createAnnouncementBarPresenter,
+} from "./announcement-banner";
 import { createAutoShareNextController } from "./auto-share-next-controller";
 import { runtimeSendMessage } from "./content-messaging";
 import { createFestivalBridgeController } from "./festival-bridge";
@@ -36,6 +40,16 @@ const contentStateStore = createContentStateStore();
 const runtimeState = contentStateStore.getState();
 const toastState = createToastCoordinatorState();
 const toastPresenter = createToastPresenter();
+const announcementBanner = createAnnouncementBanner({
+  requestCurrent: () =>
+    runtimeSendMessage<unknown>({ type: "content:get-announcement" }),
+  dismiss: (id) => {
+    void runtimeSendMessage({ type: "content:dismiss-announcement", id }).catch(
+      () => undefined,
+    );
+  },
+  presenter: createAnnouncementBarPresenter((node) => toastPresenter.pin(node)),
+});
 
 const LOCAL_INTENT_GUARD_MS = 1200;
 const PAUSE_HOLD_MS = 1200;
@@ -286,6 +300,7 @@ async function init(): Promise<void> {
   });
   pageShareButtonController.start();
   void hydratePageShareButtonSettings();
+  announcementBanner.start();
   playbackBindingController.start();
   navigationController.start();
   // Inject the page-world bridge eagerly so its SPA navigation hooks are armed on
@@ -302,6 +317,7 @@ async function init(): Promise<void> {
       navigationSignalUnsubscribe?.();
       navigationSignalUnsubscribe = null;
       pageShareButtonController.destroy();
+      announcementBanner.destroy();
       autoShareNextController.destroy();
       syncController.destroy();
       playbackBindingController.destroy();
@@ -332,6 +348,11 @@ async function init(): Promise<void> {
       if (message.type === "background:page-share-button-settings") {
         clearPageShareButtonSettingsHydrationTimer();
         pageShareButtonController.setEnabled(message.payload.enabled);
+        return false;
+      }
+
+      if (message.type === "background:announcement") {
+        announcementBanner.apply(message.payload.announcement);
         return false;
       }
 

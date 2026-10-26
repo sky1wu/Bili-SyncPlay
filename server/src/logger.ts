@@ -29,7 +29,10 @@ const EVENT_STORE_BACKPRESSURE_EVENTS = new Set([
 ]);
 
 /** Excluded for volume rather than for reflexivity. */
-const HIGH_VOLUME_EXCLUDED_EVENTS = new Set(["node_heartbeat_sent"]);
+const HIGH_VOLUME_EXCLUDED_EVENTS = new Set([
+  "announcement_polled",
+  "node_heartbeat_sent",
+]);
 
 /**
  * A connection-level Redis failure, which must not be reported INTO Redis.

@@ -751,6 +751,20 @@ const ROOM_REQUEST_PATH: Record<
       joinToken: "probe-join-token",
       createdAt: 1_700_000_000_000,
     }),
+  // Plain overwrites from an admin request: a late landing leaves exactly what
+  // the caller asked for, and its success owes no follow-up (#325).
+  setAnnouncement: (store) =>
+    store.setAnnouncement(
+      {
+        id: "probe-announcement",
+        level: "info",
+        message: "probe",
+        scheduledAt: null,
+        publishedAt: 1_700_000_000_000,
+      },
+      60_000,
+    ),
+  clearAnnouncement: (store) => store.clearAnnouncement(),
 };
 
 const ROOM_CALLER_CHOSEN: Record<
@@ -758,6 +772,9 @@ const ROOM_CALLER_CHOSEN: Record<
   (store: RoomStoreUnderTest, caller: RoomReadCaller) => Promise<unknown>
 > = {
   getRoom: (store, caller) => store.getRoom("ROOM01", caller),
+  // The admin API reads it on a request; every node polls it from
+  // announcement-broadcaster's maintenance pass (#325).
+  getAnnouncement: (store, caller) => store.getAnnouncement(caller),
 };
 
 /**

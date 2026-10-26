@@ -34,6 +34,7 @@ function createPopupState(
     clockOffsetMs: null,
     rttMs: null,
     pageShareButtonEnabled: true,
+    announcement: null,
     logs: [],
     ...overrides,
   };

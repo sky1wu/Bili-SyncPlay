@@ -159,6 +159,14 @@ export function createMessageHandler(options: {
    * (#235 review). Anything published after a leave must wait for this.
    */
   onRoomLeft?: (session: Session, roomCode: string) => void | Promise<void>;
+  /**
+   * Runs once the client has been told it is in the room (`room:created` /
+   * `room:joined` sent) and before its bootstrap `room:state`. The first point
+   * at which the client's protocol version is known — it arrives with the
+   * create/join, not with the connection — which is what decides whether it
+   * can be sent anything newer than its version.
+   */
+  onRoomEntered?: (session: Session) => void;
   now?: () => number;
 }): {
   handleClientMessage: (
@@ -971,6 +979,7 @@ export function createMessageHandler(options: {
               serverProtocolVersion: CURRENT_PROTOCOL_VERSION,
             },
           });
+          options.onRoomEntered?.(session);
           await sendRoomStateToSession(session, memberToken, message.type);
           logEvent("room_created", {
             sessionId: session.id,
@@ -1065,6 +1074,7 @@ export function createMessageHandler(options: {
                 serverProtocolVersion: CURRENT_PROTOCOL_VERSION,
               },
             });
+            options.onRoomEntered?.(session);
             const bootstrapState = await sendRoomStateToSession(
               session,
               memberToken,

@@ -59,6 +59,7 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 - 概览
 - 房间列表和房间详情
 - 运行事件
+- 公告（查看、发布、撤回）
 - 审计日志
 - 配置摘要
 - 关房、过期、清空共享视频、踢人、断开会话等现有管理动作
@@ -72,12 +73,12 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 
 - 打开 `http://localhost:8787/admin`
 - 使用 `ADMIN_USERNAME`、`ADMIN_PASSWORD_HASH`、`ADMIN_SESSION_SECRET`、`ADMIN_ROLE` 配置的账号登录
-- 页面已覆盖登录、概览、房间列表、房间详情、运行事件、审计日志、配置摘要，以及现有管理动作
+- 页面已覆盖登录、概览、房间列表、房间详情、运行事件、公告、审计日志、配置摘要，以及现有管理动作
 
 角色模型：
 
-- `viewer`：只读访问概览、房间、事件、审计日志、配置摘要
-- `operator`：在 `viewer` 基础上可执行房间和会话管理动作
+- `viewer`：只读访问概览、房间、事件、公告、审计日志、配置摘要
+- `operator`：在 `viewer` 基础上可执行房间和会话管理动作，以及发布、撤回公告
 - `admin`：当前能力与 `operator` 基本一致，为后续更高权限治理能力预留扩展位
 
 动作语义说明：
@@ -104,6 +105,11 @@ node -e "const { createHash } = require('node:crypto'); const password = 'secret
 - `POST /api/admin/rooms/:roomCode/clear-video`
 - `POST /api/admin/rooms/:roomCode/members/:memberId/kick`
 - `POST /api/admin/sessions/:sessionId/disconnect`
+- `GET /api/admin/announcement`（viewer）
+- `POST /api/admin/announcement`（operator）
+- `POST /api/admin/announcement/withdraw`（operator）
+
+公告（#325）：`POST /api/admin/announcement` 接收 `{ level: "info" | "warning", message, scheduledAt?, expiresAt }`——`message` 非空白且最多 500 字符，`scheduledAt`（仅供显示）和 `expiresAt` 为 epoch 毫秒，`expiresAt` 必须在未来且不超过 30 天。新发布会以新的 `id` 替换当前公告。`POST /api/admin/announcement/withdraw` 可选接收 `{ reason }`。两者都会以目标类型 `announcement` 写入审计日志。每个同步节点每 15 秒重读一次公告，所以变更会在这个周期内送达已连接的扩展；消息格式见[公告](./protocol.zh-CN.md#公告)。
 
 所有 `/api/admin/*` 接口都支持 `GET`、`POST`、`OPTIONS` 的 CORS 预检，并允许 `authorization` 与 `content-type` 请求头。管理 UI 会访问的 `/healthz` 与 `/readyz` 使用相同的来源策略，并支持 `GET` 和 `OPTIONS`。只有请求 Origin 与 API 同源或被显式列入 `ALLOWED_ORIGINS` 时，服务端才会原样返回该 Origin，不使用通配符。`GLOBAL_ADMIN_API_BASE_URL` 指向独立 API 域名时，需把管理 UI 的 Origin 加入该白名单。
 

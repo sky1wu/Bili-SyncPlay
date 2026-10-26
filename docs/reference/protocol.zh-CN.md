@@ -8,8 +8,8 @@
 
 | 常量                       | 位置                                    | 当前值 | 含义                                              |
 | -------------------------- | --------------------------------------- | ------ | ------------------------------------------------- |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
-| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `4`    | 服务端当前使用的版本                              |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`    | 扩展在 `room:create` / `room:join` 中携带的版本号 |
+| `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`    | 服务端当前使用的版本                              |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`    | 服务端仍接受的最老客户端版本                      |
 
 客户端在 `room:create` / `room:join` 的 payload 中携带 `protocolVersion`；低于 `MIN_PROTOCOL_VERSION` 的客户端会被以 `unsupported_protocol_version` 错误码拒绝。未携带 `protocolVersion` 的旧客户端按 `server/src/messages.ts` 中的兼容策略处理。
@@ -71,15 +71,16 @@
 
 ## 服务端消息（`ServerMessage`）
 
-| 类型                 | Payload                                                                  | 用途                                                                                  |
-| -------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| `room:created`       | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | 房间已创建，携带邀请与会话 token                                                      |
-| `room:joined`        | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | 加入成功，返回本次会话的 `memberToken`（重连携带仍有效的旧 token 时复用，否则新签发） |
-| `room:state`         | `RoomState & { playbackAgeMs? }`                                         | 房间完整快照（加入后、按请求、共享视频/播放状态变化时）                               |
-| `room:member-joined` | `{ roomCode, member: RoomMember }`                                       | 成员加入（增量消息，发给 `protocolVersion >= 2` 客户端）                              |
-| `room:member-left`   | `{ roomCode, member: RoomMember }`                                       | 成员离开（增量消息，发给 `protocolVersion >= 2` 客户端）                              |
-| `error`              | `{ code: ErrorCode, message }`                                           | 请求失败                                                                              |
-| `sync:pong`          | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | 时钟偏移探测响应                                                                      |
+| 类型                  | Payload                                                                  | 用途                                                                                  |
+| --------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| `room:created`        | `{ roomCode, memberId, joinToken, memberToken, serverProtocolVersion? }` | 房间已创建，携带邀请与会话 token                                                      |
+| `room:joined`         | `{ roomCode, memberId, memberToken, serverProtocolVersion? }`            | 加入成功，返回本次会话的 `memberToken`（重连携带仍有效的旧 token 时复用，否则新签发） |
+| `room:state`          | `RoomState & { playbackAgeMs? }`                                         | 房间完整快照（加入后、按请求、共享视频/播放状态变化时）                               |
+| `room:member-joined`  | `{ roomCode, member: RoomMember }`                                       | 成员加入（增量消息，发给 `protocolVersion >= 2` 客户端）                              |
+| `room:member-left`    | `{ roomCode, member: RoomMember }`                                       | 成员离开（增量消息，发给 `protocolVersion >= 2` 客户端）                              |
+| `error`               | `{ code: ErrorCode, message }`                                           | 请求失败                                                                              |
+| `sync:pong`           | `{ clientSendTime, serverReceiveTime, serverSendTime }`                  | 时钟偏移探测响应                                                                      |
+| `server:announcement` | `{ announcement: Announcement \| null }`                                 | 当前生效的运营公告，`null` 表示没有（发给 `protocolVersion >= 5` 客户端）             |
 
 ### 成员增量消息
 
@@ -95,6 +96,26 @@
 - **只传时长，不传时刻。** 时长跨两个不一致的钟是安全的：接收端只是把它加到自己的锚上。时刻则不然，接收端必须拿服务端时刻减本地时刻，量到的是钟差而非流逝时间（见[运行时不变量](./invariants.zh-CN.md)的「播放计时不变量」一节）。
 
 接收端把它从该消息的本地到达时刻里减去，得到位置外推所用的锚（`extension/src/background/clock-sync.ts`）；缺失（旧服务端）、为负或大得不合理的值一律忽略。缺失即"视为最新"，也就是 #212 之前的行为。
+
+### 公告
+
+`server:announcement`（协议版本 5，#325）携带运营公告，例如"今晚 04:30 维护，预计中断 5 分钟"：
+
+```ts
+type Announcement = {
+  id: string; // 每次发布唯一，[A-Za-z0-9_-]{1,64}；接收方按它记住"已关闭"
+  level: "info" | "warning";
+  message: string; // 非空白，最多 500 字符
+  scheduledAt?: number; // 所公告事件的 epoch 毫秒，仅供显示
+  expiresInMs: number; // > 0：发送那一刻的剩余有效期
+};
+```
+
+- **是状态，不是事件。** payload 是**此刻**生效的公告；`null` 表示没有（已撤回或已过期）。重复发送无害，所以服务端不需要投递记录：在 `room:created` / `room:joined` 之后（这是第一个能知道客户端协议版本的时刻）给每个支持的会话发一次当前状态，公告变化时再广播。
+- **投递。** 运营人员通过管理后台接口（`/api/admin/announcement`）发布和撤回。每个节点每 15 秒重读一次存储中的公告（`server/src/announcement-broadcaster.ts`），`id` 变化时广播，所以发布或撤回会在一个周期内送达；错过变化的节点（重启、Redis 抖动）在下一次读取时自动补齐。读取失败时保留上一次已知的公告，而不是当作撤回。
+- **有效期按时长传。** `expiresInMs` 与 `playbackAgeMs` 一样，跨两台时钟不一致的机器也安全；存储层把它保存为 Redis TTL，用 `PTTL` 读出，任何进程都不拿存储的时间戳和自己的时钟比较。`scheduledAt` 只给人看，从不与本地时钟比较。
+- **按版本下发。** 只有上报 `protocolVersion >= 5`（`ANNOUNCEMENT_PROTOCOL_VERSION`）的会话才会收到。旧客户端本来也会丢弃未知类型，按版本下发只是不给它们的日志添噪音。
+- **扩展端如何展示**（`extension/src/background/announcement-controller.ts`）。后台保存最近一次收到的 payload，每次读取时推导是否展示：在房间内、来自当前服务端、按本地单调时钟未超过 `expiresInMs`、且未被关闭。展示中的公告出现在弹窗顶部横幅，并在工具栏图标上显示 `!`（`info` 蓝色、`warning` 橙色）；`warning` 还会在 B 站页面顶部显示提示条（全屏时同样显示），直到被关闭。在任意一处关闭即处处隐藏；最近 20 个已关闭的 id 保存在 `chrome.storage.local`，新发布的公告（新 `id`）会重新显示。
 
 ### 时钟同步
 

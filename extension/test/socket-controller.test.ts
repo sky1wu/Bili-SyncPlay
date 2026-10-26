@@ -46,7 +46,14 @@ let blockFetch = false;
 let releaseFetch: (() => void) | null = null;
 // When set, the connection-check fetch resolves with this instead of the
 // default ok/websocketAllowed response (e.g. a reverse proxy's 502).
-let fetchResponseOverride: { ok: boolean; status: number } | null = null;
+let fetchResponseOverride: {
+  ok: boolean;
+  status: number;
+  json?: () => Promise<unknown>;
+} | null = null;
+// When true the healthcheck fetch rejects, as a fetch to a host that refuses
+// the connection does.
+let healthcheckFails = false;
 
 function installGlobals(): { restore: () => void } {
   const original = {
@@ -59,11 +66,15 @@ function installGlobals(): { restore: () => void } {
   blockFetch = false;
   releaseFetch = null;
   fetchResponseOverride = null;
+  healthcheckFails = false;
   Object.assign(globalThis, {
     WebSocket: FakeWebSocket,
     chrome: { runtime: { getURL: () => "chrome-extension://test/" } },
     self: { setTimeout, clearTimeout },
-    fetch: () => {
+    fetch: (url: string) => {
+      if (healthcheckFails && url.includes("/healthz")) {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
       const result = fetchResponseOverride ?? {
         ok: true,
         json: async () => ({ data: { websocketAllowed: true } }),
@@ -83,7 +94,10 @@ function installGlobals(): { restore: () => void } {
   };
 }
 
-function createHarness(options: { withProbeFetch?: boolean } = {}) {
+function createHarness(
+  options: { withProbeFetch?: boolean; withHealthcheck?: boolean } = {},
+) {
+  const serverMessages: Array<{ type: string; sourceServerUrl: string }> = [];
   const runtimeState = createBackgroundRuntimeState();
   runtimeState.connection.serverUrl = "ws://localhost:9999";
   runtimeState.room.roomCode = "ROOM01";
@@ -107,7 +121,9 @@ function createHarness(options: { withProbeFetch?: boolean } = {}) {
       runtimeState.share.pendingLocalShareGeneration,
     sendJoinRequest: () => {},
     sendToServer: () => {},
-    handleServerMessage: async () => {},
+    handleServerMessage: async (message, sourceServerUrl) => {
+      serverMessages.push({ type: message.type, sourceServerUrl });
+    },
     // Returning null skips the connection-check / healthcheck fetches so the
     // probe goes straight to opening the (faked) socket. Opt into the
     // connection-check fetch to exercise the in-flight probe-abort window.
@@ -115,7 +131,8 @@ function createHarness(options: { withProbeFetch?: boolean } = {}) {
       options.withProbeFetch
         ? "https://localhost:9999/api/connection-check"
         : null,
-    buildHealthcheckUrl: () => null,
+    buildHealthcheckUrl: () =>
+      options.withHealthcheck ? "https://localhost:9999/healthz" : null,
     onOpen: () => {},
     onAdminSessionReset: (reason) => {
       adminResets.push(reason);
@@ -128,6 +145,7 @@ function createHarness(options: { withProbeFetch?: boolean } = {}) {
     controller,
     clearPendingLocalShareReasons,
     adminResets,
+    serverMessages,
   };
 }
 
@@ -139,6 +157,23 @@ const sampleVideo: SharedVideo = {
 
 function closeEvent(reason = "") {
   return { code: 1006, reason, wasClean: false };
+}
+
+/** The close frame the server sends on graceful shutdown (`server/src/app.ts`). */
+function shutdownCloseEvent() {
+  return { code: 1001, reason: "server_shutting_down", wasClean: true };
+}
+
+/** Connects, opens, then closes the live socket with `event`. */
+async function connectThenClose(
+  harness: ReturnType<typeof createHarness>,
+  event: { code: number; reason: string; wasClean: boolean },
+): Promise<void> {
+  await harness.controller.connect();
+  const socket = createdSockets[createdSockets.length - 1];
+  socket.emit("open", {});
+  socket.readyState = FakeWebSocket.CLOSED;
+  socket.emit("close", event);
 }
 
 test("socket close keeps the pending local share marker while a share is queued for re-flush", async () => {
@@ -558,6 +593,225 @@ test("counts down the reconnect retry on the monotonic clock", () => {
   } finally {
     harness?.controller.clearReconnectTimer();
     clock.restore();
+    globals.restore();
+  }
+});
+
+test("a graceful-shutdown close reports a server restart immediately", async () => {
+  const globals = installGlobals();
+  setLocaleForTests("zh-CN");
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+    await connectThenClose(harness, shutdownCloseEvent());
+
+    assert.equal(harness.runtimeState.connection.connected, false);
+    assert.equal(harness.runtimeState.connection.serverRestarting, true);
+    assert.equal(
+      harness.runtimeState.connection.lastError,
+      t("connectionServerRestarting"),
+    );
+    // Still reconnects: the restart message replaces the wording, not the retry.
+    assert.notEqual(harness.runtimeState.connection.reconnectTimer, null);
+  } finally {
+    setLocaleForTests(null);
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("reconnect attempts that fail during a restart keep reporting the restart", async () => {
+  const globals = installGlobals();
+  setLocaleForTests("zh-CN");
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness({ withProbeFetch: true });
+    await connectThenClose(harness, shutdownCloseEvent());
+    harness.controller.clearReconnectTimer();
+
+    // The proxy answers 502 while the backend is down.
+    fetchResponseOverride = { ok: false, status: 502 };
+    await harness.controller.connect();
+    assert.equal(
+      harness.runtimeState.connection.lastError,
+      t("connectionServerRestarting"),
+    );
+    harness.controller.clearReconnectTimer();
+
+    // The proxy is back but the backend is not: the probe passes, the
+    // WebSocket upgrade fails before open.
+    fetchResponseOverride = null;
+    await harness.controller.connect();
+    createdSockets[createdSockets.length - 1].emit("error", {});
+    assert.equal(
+      harness.runtimeState.connection.lastError,
+      t("connectionServerRestarting"),
+    );
+  } finally {
+    setLocaleForTests(null);
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a restart never masks an authoritative origin rejection", async () => {
+  const globals = installGlobals();
+  setLocaleForTests("zh-CN");
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness({ withProbeFetch: true });
+    await connectThenClose(harness, shutdownCloseEvent());
+    harness.controller.clearReconnectTimer();
+
+    // The server came back and refused the origin: that is a configuration
+    // problem to report as such, not the restart still in progress.
+    fetchResponseOverride = {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { websocketAllowed: false, reason: "origin_not_allowed" },
+      }),
+    };
+    await harness.controller.connect();
+    assert.equal(
+      harness.runtimeState.connection.lastError,
+      t("connectionOriginRejected", {
+        extensionOrigin: "chrome-extension://test",
+      }),
+    );
+  } finally {
+    setLocaleForTests(null);
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("reconnecting ends the restart: later failures report plain unreachable", async () => {
+  const globals = installGlobals();
+  setLocaleForTests("zh-CN");
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness({ withProbeFetch: true });
+    await connectThenClose(harness, shutdownCloseEvent());
+    harness.controller.clearReconnectTimer();
+
+    await harness.controller.connect();
+    const reconnected = createdSockets[createdSockets.length - 1];
+    reconnected.emit("open", {});
+    assert.equal(harness.runtimeState.connection.serverRestarting, false);
+    assert.equal(harness.runtimeState.connection.lastError, null);
+
+    // An ordinary drop afterwards is not the old restart.
+    reconnected.readyState = FakeWebSocket.CLOSED;
+    reconnected.emit("close", closeEvent());
+    harness.controller.clearReconnectTimer();
+    fetchResponseOverride = { ok: false, status: 502 };
+    await harness.controller.connect();
+    assert.equal(
+      harness.runtimeState.connection.lastError,
+      t("connectionServerUnreachable"),
+    );
+  } finally {
+    setLocaleForTests(null);
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("resetting the reconnect state ends the restart", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+    await connectThenClose(harness, shutdownCloseEvent());
+    assert.equal(harness.runtimeState.connection.serverRestarting, true);
+
+    // Leave / create / join / server URL change all go through this reset; a
+    // fresh session must not inherit the previous server's restart.
+    harness.controller.resetReconnectState();
+    assert.equal(harness.runtimeState.connection.serverRestarting, false);
+  } finally {
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("only the graceful-shutdown close frame counts as a restart", async () => {
+  const cases = [
+    { code: 1006, reason: "", wasClean: false },
+    { code: 1001, reason: "", wasClean: true },
+    { code: 1000, reason: "server_shutting_down", wasClean: true },
+  ];
+  for (const event of cases) {
+    const globals = installGlobals();
+    let harness: ReturnType<typeof createHarness> | undefined;
+    try {
+      harness = createHarness();
+      await connectThenClose(harness, event);
+      assert.equal(
+        harness.runtimeState.connection.serverRestarting,
+        false,
+        JSON.stringify(event),
+      );
+      assert.equal(
+        harness.runtimeState.connection.lastError,
+        null,
+        JSON.stringify(event),
+      );
+    } finally {
+      harness?.controller.clearReconnectTimer();
+      globals.restore();
+    }
+  }
+});
+
+test("an unreachable healthcheck during a restart reports the restart", async () => {
+  const globals = installGlobals();
+  setLocaleForTests("zh-CN");
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness({ withHealthcheck: true });
+    await connectThenClose(harness, shutdownCloseEvent());
+    harness.controller.clearReconnectTimer();
+
+    // Nothing answers on the host at all while it restarts.
+    healthcheckFails = true;
+    await harness.controller.connect();
+    assert.equal(createdSockets.length, 1);
+    assert.equal(
+      harness.runtimeState.connection.lastError,
+      t("connectionServerRestarting"),
+    );
+  } finally {
+    setLocaleForTests(null);
+    harness?.controller.clearReconnectTimer();
+    globals.restore();
+  }
+});
+
+test("a server message names the server its socket was opened for, not the one configured now", async () => {
+  const globals = installGlobals();
+  let harness: ReturnType<typeof createHarness> | undefined;
+  try {
+    harness = createHarness();
+    await harness.controller.connect();
+    const socket = createdSockets[0];
+    socket.emit("open", {});
+    // A server change updates the configuration before the old socket closes.
+    harness.runtimeState.connection.serverUrl = "ws://other.example:1";
+
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "server:announcement",
+        payload: { announcement: null },
+      }),
+    });
+
+    assert.deepEqual(harness.serverMessages, [
+      { type: "server:announcement", sourceServerUrl: "ws://localhost:9999" },
+    ]);
+  } finally {
+    harness?.controller.clearReconnectTimer();
     globals.restore();
   }
 });
