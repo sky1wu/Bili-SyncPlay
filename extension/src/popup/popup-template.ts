@@ -12,6 +12,14 @@ export function renderPopupTemplate(): string {
         </div>
       </header>
 
+      <div class="announcement-banner" id="announcement-banner" role="status" hidden>
+        <div class="announcement-body">
+          <div class="announcement-message" id="announcement-message"></div>
+          <div class="announcement-meta" id="announcement-meta" hidden></div>
+        </div>
+        <button class="announcement-dismiss" id="announcement-dismiss" type="button" aria-label="${escapeHtml(t("announcementDismiss"))}" title="${escapeHtml(t("announcementDismiss"))}">×</button>
+      </div>
+
       <section class="popup-section">
         <div class="section-heading">${escapeHtml(t("sectionRoom"))}</div>
 

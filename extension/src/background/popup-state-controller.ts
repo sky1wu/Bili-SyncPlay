@@ -1,3 +1,4 @@
+import type { AnnouncementView } from "../shared/announcement";
 import type {
   BackgroundToContentMessage,
   BackgroundToPopupMessage,
@@ -16,6 +17,7 @@ export interface PopupStateController {
 export function createPopupStateController(args: {
   createState: () => BackgroundRuntimeState;
   getRetryInMs: () => number | null;
+  getAnnouncement: () => AnnouncementView | null;
   notifyContentScripts: (message: BackgroundToContentMessage) => Promise<void>;
   getSyncStatus: () => {
     roomCode: string | null;
@@ -30,6 +32,7 @@ export function createPopupStateController(args: {
     return createPopupStateSnapshot({
       state: args.createState(),
       retryInMs: args.getRetryInMs(),
+      announcement: args.getAnnouncement(),
     });
   }
 

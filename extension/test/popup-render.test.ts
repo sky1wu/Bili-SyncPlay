@@ -4,6 +4,7 @@ import {
   applyRoomActionControlState,
   renderPopup,
   resetPopupRenderDebugStateForTests,
+  renderAnnouncementBanner,
 } from "../src/popup/popup-render";
 import type { PopupRefs } from "../src/popup/popup-view";
 import { setLocaleForTests } from "../src/shared/i18n";
@@ -70,6 +71,10 @@ const fakeDocument = {
 
 function createPopupRefs(): PopupRefs {
   return {
+    announcementBanner: createElement() as unknown as HTMLElement,
+    announcementMessage: createElement() as unknown as HTMLElement,
+    announcementMeta: createElement() as unknown as HTMLElement,
+    announcementDismissButton: createElement() as unknown as HTMLButtonElement,
     serverStatus: createElement() as unknown as HTMLElement,
     roomStatus: createElement() as unknown as HTMLElement,
     membersStatus: createElement() as unknown as HTMLElement,
@@ -167,6 +172,7 @@ test("renderPopup updates popup metrics, owner hint, logs, and draft values", as
         clockOffsetMs: 25,
         rttMs: 60,
         pageShareButtonEnabled: false,
+        announcement: null,
         logs: [
           {
             at: 1_710_000_000_000,
@@ -251,6 +257,7 @@ test("renderPopup debug log distinguishes background pending state from local UI
         clockOffsetMs: null,
         rttMs: null,
         pageShareButtonEnabled: true,
+        announcement: null,
         logs: [],
       },
       serverUrlDraft: { value: "", dirty: false },
@@ -306,6 +313,7 @@ test("renderPopup only logs once for repeated identical pending renders", async 
       clockOffsetMs: null,
       rttMs: null,
       pageShareButtonEnabled: true,
+      announcement: null,
       logs: [],
     },
     serverUrlDraft: { value: "", dirty: false },
@@ -376,6 +384,7 @@ test("renderPopup falls back to sharedByDisplayName when the sharer is no longer
         clockOffsetMs: null,
         rttMs: null,
         pageShareButtonEnabled: true,
+        announcement: null,
         logs: [],
       },
       serverUrlDraft: { value: "", dirty: false },
@@ -397,4 +406,41 @@ test("renderPopup falls back to sharedByDisplayName when the sharer is no longer
     setLocaleForTests(null);
     Object.assign(globalThis, { document: originalDocument });
   }
+});
+
+test("renderAnnouncementBanner shows the announcement with its level and schedule", () => {
+  setLocaleForTests("zh-CN");
+  const refs = createPopupRefs();
+  const scheduledAt = new Date(2026, 9, 27, 4, 30).getTime();
+
+  renderAnnouncementBanner(
+    refs,
+    { id: "a1", level: "warning", message: "今晚维护", scheduledAt },
+    scheduledAt - 6 * 60 * 60 * 1000,
+  );
+
+  assert.equal(refs.announcementBanner.hidden, false);
+  assert.equal(refs.announcementBanner.classList.contains("is-warning"), true);
+  assert.equal(refs.announcementBanner.classList.contains("is-info"), false);
+  assert.equal(refs.announcementMessage.textContent, "今晚维护");
+  assert.equal(refs.announcementMeta.hidden, false);
+  assert.equal(
+    refs.announcementMeta.textContent,
+    "维护时间：10-27 04:30（约 6 小时后）",
+  );
+
+  renderAnnouncementBanner(refs, {
+    id: "a2",
+    level: "info",
+    message: "新版本",
+    scheduledAt: null,
+  });
+
+  assert.equal(refs.announcementBanner.classList.contains("is-warning"), false);
+  assert.equal(refs.announcementBanner.classList.contains("is-info"), true);
+  assert.equal(refs.announcementMeta.hidden, true);
+
+  renderAnnouncementBanner(refs, null);
+
+  assert.equal(refs.announcementBanner.hidden, true);
 });

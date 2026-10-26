@@ -1,4 +1,8 @@
-import type { RoomState, ServerMessage } from "@bili-syncplay/protocol";
+import type {
+  Announcement,
+  RoomState,
+  ServerMessage,
+} from "@bili-syncplay/protocol";
 
 export interface ServerMessageController {
   handleServerMessage(message: ServerMessage): Promise<void>;
@@ -9,6 +13,7 @@ export function createServerMessageController(args: {
   shouldLogIncomingMessage: (messageType: ServerMessage["type"]) => boolean;
   consumeRoomState: (roomState: RoomState) => void;
   handleRoomSessionServerMessage: (message: ServerMessage) => Promise<void>;
+  receiveAnnouncement: (announcement: Announcement | null) => void;
   updateClockOffset: (
     clientSendTime: number,
     serverReceiveTime: number,
@@ -21,6 +26,11 @@ export function createServerMessageController(args: {
       args.consumeRoomState(message.payload);
     } else if (args.shouldLogIncomingMessage(message.type)) {
       args.log(`<- ${message.type}`);
+    }
+
+    if (message.type === "server:announcement") {
+      args.receiveAnnouncement(message.payload.announcement);
+      return;
     }
 
     if (message.type !== "sync:pong") {

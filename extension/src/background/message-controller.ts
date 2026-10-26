@@ -1,4 +1,6 @@
+import type { AnnouncementView } from "../shared/announcement";
 import type {
+  AnnouncementResponse,
   ContentToBackgroundMessage,
   PageShareButtonSettingsResponse,
   PopupToBackgroundMessage,
@@ -92,6 +94,10 @@ export function createMessageController(args: {
   };
   socketController: {
     connect(): Promise<void>;
+  };
+  announcementController: {
+    getVisible(): AnnouncementView | null;
+    dismiss(id: string): Promise<void>;
   };
   sendToServer: (message: unknown) => void;
   updateServerUrl: (serverUrl: string) => Promise<void>;
@@ -205,6 +211,10 @@ export function createMessageController(args: {
         return;
       case "popup:set-page-share-button-enabled":
         await updatePageShareButtonEnabled(message.enabled);
+        sendResponse(args.popupStateController.popupState());
+        return;
+      case "popup:dismiss-announcement":
+        await args.announcementController.dismiss(message.id);
         sendResponse(args.popupStateController.popupState());
         return;
       case "content:get-share-context": {
@@ -568,6 +578,16 @@ export function createMessageController(args: {
           ok: true,
           enabled: args.settingsState.pageShareButtonEnabled,
         } satisfies PageShareButtonSettingsResponse);
+        return;
+      case "content:get-announcement":
+        sendResponse({
+          ok: true,
+          announcement: args.announcementController.getVisible(),
+        } satisfies AnnouncementResponse);
+        return;
+      case "content:dismiss-announcement":
+        await args.announcementController.dismiss(message.id);
+        sendResponse({ ok: true });
         return;
       case "content:report-user":
         if (args.roomSessionState.displayName !== message.payload.displayName) {

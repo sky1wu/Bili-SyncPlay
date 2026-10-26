@@ -39,6 +39,12 @@
   --chip-active-border: #f2b7c7;
   --chip-active-text: #ff5a8a;
   --focus-ring: rgba(255, 90, 138, 0.18);
+  --announce-info-bg: #eff6ff;
+  --announce-info-border: #bfdbfe;
+  --announce-info-text: #1d4ed8;
+  --announce-warning-bg: #fff7ed;
+  --announce-warning-border: #fdba74;
+  --announce-warning-text: #c2410c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -79,6 +85,12 @@
     --chip-active-border: #a34c68;
     --chip-active-text: #ff8cab;
     --focus-ring: rgba(255, 107, 150, 0.2);
+    --announce-info-bg: #172338;
+    --announce-info-border: #2f4f86;
+    --announce-info-text: #93c5fd;
+    --announce-warning-bg: #3a2414;
+    --announce-warning-border: #9a4a1c;
+    --announce-warning-text: #fdba74;
   }
 }
 
@@ -124,7 +136,8 @@ body {
 }
 
 .popup-section + .popup-section,
-.popup-header + .popup-section {
+.popup-header + .popup-section,
+.announcement-banner + .popup-section {
   border-top: 1px solid var(--divider);
 }
 
@@ -776,4 +789,71 @@ button.secondary.success-button .button-icon-check {
   line-height: 1.5;
   color: var(--text-muted);
   word-break: break-word;
+}
+
+.announcement-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 20px 15px;
+  padding: 8px 6px 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--announce-info-border);
+  background: var(--announce-info-bg);
+  color: var(--announce-info-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.announcement-banner.is-warning {
+  border-color: var(--announce-warning-border);
+  background: var(--announce-warning-bg);
+  color: var(--announce-warning-text);
+}
+
+.announcement-banner[hidden] {
+  display: none;
+}
+
+.announcement-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.announcement-message {
+  font-weight: 600;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.announcement-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.announcement-meta[hidden] {
+  display: none;
+}
+
+.announcement-dismiss {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 16px;
+  line-height: 22px;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.announcement-dismiss:hover {
+  background: rgba(127, 127, 127, 0.15);
 }

@@ -8,11 +8,9 @@
 
 | Constant                   | Location                                | Value | Meaning                                                      |
 | -------------------------- | --------------------------------------- | ----- | ------------------------------------------------------------ |
-| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `4`   | Version sent by the extension in `room:create` / `room:join` |
+| `PROTOCOL_VERSION`         | `packages/protocol/src/types/common.ts` | `5`   | Version sent by the extension in `room:create` / `room:join` |
 | `CURRENT_PROTOCOL_VERSION` | `server/src/messages.ts`                | `5`   | Version the server currently speaks                          |
 | `MIN_PROTOCOL_VERSION`     | `server/src/messages.ts`                | `1`   | Oldest client version the server still accepts               |
-
-`PROTOCOL_VERSION` is deliberately one behind while #325 lands in stages: the server already implements version 5 (`server:announcement`), but the extension keeps announcing 4 until it consumes announcements, so the server never sends a released extension a message it would ignore.
 
 Clients send `protocolVersion` inside the `room:create` / `room:join` payload; the server rejects clients below `MIN_PROTOCOL_VERSION` with the `unsupported_protocol_version` error code. Legacy clients that omit `protocolVersion` are treated according to the server's compatibility policy in `server/src/messages.ts`.
 
@@ -120,6 +118,7 @@ type Announcement = {
 - **Delivery.** Operators publish and withdraw through the admin API (`/api/admin/announcement`). Each node re-reads the stored announcement every 15 seconds (`server/src/announcement-broadcaster.ts`) and broadcasts on a change of `id`, so a publication or withdrawal reaches clients within one interval, and a node that missed a change (restart, Redis blip) repairs it on its next read. A failed read keeps the last known announcement rather than withdrawing it.
 - **Lifetime as a duration.** `expiresInMs`, like `playbackAgeMs`, is safe across disagreeing clocks; the store keeps it as a Redis TTL and reports it with `PTTL`, so no process compares a stored timestamp with its own clock. `scheduledAt` is for a person to read and is never compared with a local clock.
 - **Version gate.** Only sessions that sent `protocolVersion >= 5` (`ANNOUNCEMENT_PROTOCOL_VERSION`) receive it. Older clients would drop the unknown type anyway; the gate keeps it off their logs.
+- **How the extension shows it** (`extension/src/background/announcement-controller.ts`). The background keeps the latest payload and derives on every read whether to show it: in a room, on the server that sent it, not past `expiresInMs` measured on a local monotonic clock, and not dismissed. A shown announcement appears as a banner at the top of the popup and a `!` on the toolbar icon (blue for `info`, orange for `warning`); a `warning` also appears as a bar at the top of Bilibili pages, fullscreen included, until dismissed. Dismissing it anywhere hides it everywhere; the last 20 dismissed ids are kept in `chrome.storage.local`, so a new publication (a new `id`) shows again.
 
 ### Clock synchronization
 
