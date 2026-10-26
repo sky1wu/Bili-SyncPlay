@@ -27,31 +27,43 @@ type NodeWorkload = {
   roomCodes: Set<string>;
 };
 
+function emptyWorkload(): NodeWorkload {
+  return {
+    connectionCount: 0,
+    currentMemberCount: 0,
+    roomCodes: new Set<string>(),
+  };
+}
+
+function addSessionToWorkload(workload: NodeWorkload, session: Session) {
+  workload.connectionCount += 1;
+  if (session.roomCode) {
+    workload.currentMemberCount += 1;
+    workload.roomCodes.add(session.roomCode);
+  }
+}
+
 function summarizeNodeWorkloads(
   sessions: Session[],
   fallbackInstanceId: string | null,
-): Map<string, NodeWorkload> {
-  const workloads = new Map<string, NodeWorkload>();
+): { byNode: Map<string, NodeWorkload>; unattributed: NodeWorkload } {
+  const byNode = new Map<string, NodeWorkload>();
+  // Which node a session belongs to and whether it counts are separate
+  // questions: a session with no node id (`SessionBase.instanceId` is
+  // optional) is still a live connection, so it stays in the runtime totals
+  // even where no node can be credited with it.
+  const unattributed = emptyWorkload();
   for (const session of sessions) {
     const instanceId = session.instanceId || fallbackInstanceId;
     if (!instanceId) {
+      addSessionToWorkload(unattributed, session);
       continue;
     }
-    const workload = workloads.get(instanceId) ?? {
-      connectionCount: 0,
-      currentMemberCount: 0,
-      roomCodes: new Set<string>(),
-    };
-
-    workload.connectionCount += 1;
-    if (session.roomCode) {
-      workload.currentMemberCount += 1;
-      workload.roomCodes.add(session.roomCode);
-    }
-
-    workloads.set(instanceId, workload);
+    const workload = byNode.get(instanceId) ?? emptyWorkload();
+    addSessionToWorkload(workload, session);
+    byNode.set(instanceId, workload);
   }
-  return workloads;
+  return { byNode, unattributed };
 }
 
 function synthesizeNodeStatus(
@@ -155,7 +167,7 @@ export function createAdminOverviewService(options: {
       );
       const clusterSessions =
         await options.runtimeStore.listClusterSessions("request");
-      const nodeWorkloads = summarizeNodeWorkloads(
+      const { byNode: nodeWorkloads, unattributed } = summarizeNodeWorkloads(
         clusterSessions,
         includeLocalNodeFallback ? options.instanceId : null,
       );
@@ -169,8 +181,21 @@ export function createAdminOverviewService(options: {
           roomCodes: options.runtimeStore.getActiveRoomCodes(),
         });
       }
+      const localStartedAt = options.runtimeStore.getStartedAt();
       const nodeStatusByInstanceId = new Map(
-        nodeStatuses.map((status) => [status.instanceId, status]),
+        nodeStatuses
+          // An instance id outlives the process: a record under this node's
+          // id whose `startedAt` is not this process's was left by a previous
+          // incarnation (e.g. one that ran with heartbeats enabled), and must
+          // not mark the running process offline. A record this process wrote
+          // still wins, so a failing heartbeat keeps showing up as stale.
+          .filter(
+            (status) =>
+              !includeLocalNodeFallback ||
+              status.instanceId !== options.instanceId ||
+              status.startedAt === localStartedAt,
+          )
+          .map((status) => [status.instanceId, status]),
       );
       const nodeInstanceIds = new Set<string>([
         ...nodeStatuses.map((status) => status.instanceId),
@@ -192,7 +217,7 @@ export function createAdminOverviewService(options: {
                 : null,
               localUptimeMs,
               serviceVersion: options.serviceVersion,
-              startedAt: options.runtimeStore.getStartedAt(),
+              startedAt: localStartedAt,
             });
           const roomCodes = Array.from(workload?.roomCodes ?? []).sort();
           return {
@@ -218,16 +243,18 @@ export function createAdminOverviewService(options: {
           ? null
           : nodeItems.filter((status) => status.health !== "offline");
       const connectionCount =
-        activeNodeStatuses?.reduce(
+        (activeNodeStatuses?.reduce(
           (total, status) => total + status.connectionCount,
           0,
-        ) ?? options.runtimeStore.getConnectionCount();
+        ) ?? options.runtimeStore.getConnectionCount()) +
+        unattributed.connectionCount;
       const activeRoomCount = activePersistedRoomCodes.length;
       const activeMemberCount =
-        activeNodeStatuses?.reduce(
+        (activeNodeStatuses?.reduce(
           (total, status) => total + status.currentMemberCount,
           0,
-        ) ?? options.runtimeStore.getActiveMemberCount();
+        ) ?? options.runtimeStore.getActiveMemberCount()) +
+        unattributed.currentMemberCount;
 
       return {
         service: {
