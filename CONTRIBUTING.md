@@ -46,6 +46,7 @@ Use this checklist for every PR that adds, removes, renames, retypes, or changes
 
 - Classify the change as additive/backward compatible or breaking in the PR description.
 - Bump `PROTOCOL_VERSION` in `packages/protocol/src/types/common.ts` and `CURRENT_PROTOCOL_VERSION` in `server/src/messages.ts` for every wire-shape or semantic protocol change.
+  - Staged exception: when the server gains a capability the extension does not consume yet (for example a new server message whose handling and UI land in a later PR), bump only `CURRENT_PROTOCOL_VERSION` and gate every send of the new capability on the client's announced version. Bump `PROTOCOL_VERSION` in the PR that makes the extension consume it. `PROTOCOL_VERSION` is a claim of what the extension implements; bumping it early would have the server send a released extension something it silently drops, and nothing else would notice. Comment the gap at `PROTOCOL_VERSION` and in `docs/reference/protocol.md` while it lasts (#325).
 - Decide whether `MIN_PROTOCOL_VERSION` must also be bumped. Leave it at the previous accepted version when the server can still safely handle old clients.
 - When `MIN_PROTOCOL_VERSION` changes, update the unsupported-version user prompt and any popup state that surfaces upgrade guidance.
 - Update protocol type-guard tests for both accepted and rejected payloads.

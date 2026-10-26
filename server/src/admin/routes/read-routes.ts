@@ -131,7 +131,8 @@ export const handleReadRoutes: AdminRouteHandler = async ({
         targetTypeValue === "session" ||
         targetTypeValue === "member" ||
         targetTypeValue === "config" ||
-        targetTypeValue === "block"
+        targetTypeValue === "block" ||
+        targetTypeValue === "announcement"
           ? targetTypeValue
           : undefined,
       result:

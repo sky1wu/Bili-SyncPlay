@@ -1,13 +1,18 @@
-import type {
-  ErrorMessage,
-  RoomCreatedMessage,
-  RoomJoinedMessage,
-  RoomMemberJoinedMessage,
-  RoomMemberLeftMessage,
-  RoomStateMessage,
-  RoomStatePayload,
-  ServerMessage,
-  SyncPongMessage,
+import {
+  ANNOUNCEMENT_ID_MAX_LENGTH,
+  ANNOUNCEMENT_MESSAGE_MAX_LENGTH,
+  type Announcement,
+  type AnnouncementLevel,
+  type ErrorMessage,
+  type RoomCreatedMessage,
+  type RoomJoinedMessage,
+  type RoomMemberJoinedMessage,
+  type RoomMemberLeftMessage,
+  type RoomStateMessage,
+  type RoomStatePayload,
+  type ServerAnnouncementMessage,
+  type ServerMessage,
+  type SyncPongMessage,
 } from "../types/server-message.js";
 import type {
   PlaybackState,
@@ -183,6 +188,46 @@ function isSyncPongMessage(value: unknown): value is SyncPongMessage {
   );
 }
 
+const ANNOUNCEMENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+export function isAnnouncementLevel(
+  value: unknown,
+): value is AnnouncementLevel {
+  return value === "info" || value === "warning";
+}
+
+export function isAnnouncement(value: unknown): value is Announcement {
+  return (
+    isRecord(value) &&
+    isString(value.id) &&
+    value.id.length > 0 &&
+    value.id.length <= ANNOUNCEMENT_ID_MAX_LENGTH &&
+    ANNOUNCEMENT_ID_PATTERN.test(value.id) &&
+    isAnnouncementLevel(value.level) &&
+    isString(value.message) &&
+    value.message.trim().length > 0 &&
+    value.message.length <= ANNOUNCEMENT_MESSAGE_MAX_LENGTH &&
+    (value.scheduledAt === undefined ||
+      (isFiniteNumber(value.scheduledAt) && value.scheduledAt >= 0)) &&
+    // A remaining lifetime of zero is an announcement that already ended; the
+    // server sends `null` for that instead.
+    isFiniteNumber(value.expiresInMs) &&
+    value.expiresInMs > 0
+  );
+}
+
+function isServerAnnouncementMessage(
+  value: unknown,
+): value is ServerAnnouncementMessage {
+  return (
+    isRecord(value) &&
+    value.type === "server:announcement" &&
+    isRecord(value.payload) &&
+    (value.payload.announcement === null ||
+      isAnnouncement(value.payload.announcement))
+  );
+}
+
 export function isServerMessage(value: unknown): value is ServerMessage {
   if (!isRecord(value) || !isString(value.type)) {
     return false;
@@ -203,6 +248,8 @@ export function isServerMessage(value: unknown): value is ServerMessage {
       return isErrorMessage(value);
     case "sync:pong":
       return isSyncPongMessage(value);
+    case "server:announcement":
+      return isServerAnnouncementMessage(value);
     default:
       return false;
   }

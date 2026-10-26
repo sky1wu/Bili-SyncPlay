@@ -85,6 +85,48 @@ export interface SyncPongMessage {
   };
 }
 
+export type AnnouncementLevel = "info" | "warning";
+
+/** Upper bounds every receiver enforces, shared with the admin form. */
+export const ANNOUNCEMENT_ID_MAX_LENGTH = 64;
+export const ANNOUNCEMENT_MESSAGE_MAX_LENGTH = 500;
+
+/**
+ * An operator notice, e.g. "maintenance tonight at 04:30, about 5 minutes".
+ *
+ * `expiresInMs` is a duration, for the reason `RoomStatePayload.playbackAgeMs`
+ * is one: the server's clock and the receiver's disagree, so the receiver adds
+ * it to an anchor of its own instead of comparing a server timestamp with a
+ * local one. It is computed per send and is only true at that instant.
+ *
+ * `scheduledAt` is the exception and deliberately so: it is a wall-clock time
+ * for a person to read ("04:30"), never compared against a local clock to
+ * decide anything.
+ */
+export interface Announcement {
+  /** Stable per publication; receivers remember dismissals by it. */
+  id: string;
+  level: AnnouncementLevel;
+  message: string;
+  /** Epoch milliseconds of the announced event, for display only. */
+  scheduledAt?: number;
+  expiresInMs: number;
+}
+
+/**
+ * The server's CURRENT announcement, not an event: `null` means there is none
+ * (withdrawn or expired). Sending it again is harmless — receivers replace what
+ * they hold — which is what lets the server resend it on every join instead of
+ * keeping a delivery trail. Only sent to clients that announced protocol
+ * version 5 or later.
+ */
+export interface ServerAnnouncementMessage {
+  type: "server:announcement";
+  payload: {
+    announcement: Announcement | null;
+  };
+}
+
 export type ServerMessage =
   | RoomCreatedMessage
   | RoomJoinedMessage
@@ -92,4 +134,5 @@ export type ServerMessage =
   | RoomMemberJoinedMessage
   | RoomMemberLeftMessage
   | ErrorMessage
-  | SyncPongMessage;
+  | SyncPongMessage
+  | ServerAnnouncementMessage;

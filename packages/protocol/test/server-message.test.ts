@@ -622,3 +622,77 @@ test("rejects a non-finite playback age", () => {
     false,
   );
 });
+
+function announcementMessage(announcement: unknown) {
+  return { type: "server:announcement", payload: { announcement } };
+}
+
+const VALID_ANNOUNCEMENT = {
+  id: "0b6f0c2e-5d8a-4c1e-9f3a-2b7d6e1a9c40",
+  level: "warning",
+  message: "今晚 04:30 维护，预计中断 5 分钟",
+  scheduledAt: 1_792_900_000_000,
+  expiresInMs: 3_600_000,
+};
+
+test("accepts a server:announcement carrying an announcement", () => {
+  assert.equal(isServerMessage(announcementMessage(VALID_ANNOUNCEMENT)), true);
+  const { scheduledAt: _omitted, ...withoutSchedule } = VALID_ANNOUNCEMENT;
+  assert.equal(isServerMessage(announcementMessage(withoutSchedule)), true);
+  assert.equal(
+    isServerMessage(
+      announcementMessage({ ...VALID_ANNOUNCEMENT, level: "info" }),
+    ),
+    true,
+  );
+});
+
+test("accepts a server:announcement withdrawing the announcement", () => {
+  assert.equal(isServerMessage(announcementMessage(null)), true);
+});
+
+test("rejects a server:announcement without an announcement field", () => {
+  assert.equal(
+    isServerMessage({ type: "server:announcement", payload: {} }),
+    false,
+  );
+});
+
+test("rejects announcements that break a bound receivers rely on", () => {
+  const invalid: Array<[string, Record<string, unknown>]> = [
+    ["unknown level", { level: "critical" }],
+    ["empty id", { id: "" }],
+    ["id with spaces", { id: "has space" }],
+    ["id too long", { id: "a".repeat(65) }],
+    ["blank message", { message: "   " }],
+    ["message too long", { message: "x".repeat(501) }],
+    ["negative schedule", { scheduledAt: -1 }],
+    ["non-numeric schedule", { scheduledAt: "04:30" }],
+    ["expired lifetime", { expiresInMs: 0 }],
+    ["negative lifetime", { expiresInMs: -5 }],
+    ["missing lifetime", { expiresInMs: undefined }],
+    ["infinite lifetime", { expiresInMs: Number.POSITIVE_INFINITY }],
+  ];
+  for (const [label, override] of invalid) {
+    assert.equal(
+      isServerMessage(
+        announcementMessage({ ...VALID_ANNOUNCEMENT, ...override }),
+      ),
+      false,
+      label,
+    );
+  }
+});
+
+test("accepts announcements at the exact length bounds", () => {
+  assert.equal(
+    isServerMessage(
+      announcementMessage({
+        ...VALID_ANNOUNCEMENT,
+        id: "a".repeat(64),
+        message: "x".repeat(500),
+      }),
+    ),
+    true,
+  );
+});

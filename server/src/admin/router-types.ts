@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { PublishAnnouncementInput } from "./announcement-service.js";
 import type { AdminAuthService } from "./auth-service.js";
 import type { AdminWriteOriginPolicy } from "./csrf.js";
 import type { GlobalAuditQueryResult } from "./global-audit-store.js";
@@ -46,6 +47,15 @@ export type AdminRouterOptions = {
     actor: AdminSession,
     sessionId: string,
     reason?: string,
+  ) => Promise<unknown>;
+  getAnnouncement: () => Promise<unknown>;
+  publishAnnouncement: (
+    actor: AdminSession,
+    input: PublishAnnouncementInput,
+  ) => Promise<unknown>;
+  withdrawAnnouncement: (
+    actor: AdminSession,
+    reason?: unknown,
   ) => Promise<unknown>;
   eventStore: GlobalEventStore;
   serviceName: string;

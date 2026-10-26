@@ -12,6 +12,7 @@ import { quitWithin, type RedisQuitOutcome } from "./redis-graceful-close.js";
 import { createConcurrencyLimiter } from "./concurrency-limiter.js";
 import { createRetryPacer, settleWithin } from "./retry-pacer.js";
 import { getRedisRoomStoreKeys } from "./redis-namespace.js";
+import { parseStoredAnnouncement } from "./announcement.js";
 import { RedisStoreUnavailableError } from "./redis-store-unavailable.js";
 import {
   createPersistedRoom,
@@ -613,6 +614,28 @@ const REPAIR_CHUNK_SIZE = 500;
 // hears about, and reaps rooms whose membership nobody removes.
 export const ROOM_INDEX_RECONCILE_INTERVAL_MS = 900_000;
 
+// Body and remaining lifetime from one snapshot, so a lifetime can never be
+// paired with a body it does not belong to. The lifetime is Redis's own: no
+// process compares a stored timestamp with its clock (#325).
+const READ_ANNOUNCEMENT_LUA = `
+local body = redis.call("GET", KEYS[1])
+if not body then
+  return false
+end
+return { body, redis.call("PTTL", KEYS[1]) }
+`;
+
+// Through EVAL rather than dedicated client methods so the injectable client
+// shape, and every test double of it, stays as it is.
+const WRITE_ANNOUNCEMENT_LUA = `
+redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+return 1
+`;
+
+const CLEAR_ANNOUNCEMENT_LUA = `
+return redis.call("DEL", KEYS[1])
+`;
+
 // SCAN MATCH takes a glob, so a namespace carrying glob metacharacters — a
 // plain string as far as the config layer is concerned, e.g. "tenant[1]" —
 // would silently match nothing and leave that deployment's rooms unmigrated.
@@ -846,11 +869,12 @@ export async function createRedisRoomStore(
       {
         bound: "caller",
         boundedBy:
-          "boundCommand's cap on the request path, room-service's expired-room collection deadline, its orphan rollback and empty-room expiry scheduling deadlines, and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap and room-index-reconciler's, both via maintenance-pass",
+          "boundCommand's cap on the request path, room-service's expired-room collection deadline, its orphan rollback and empty-room expiry scheduling deadlines, and the admin action service's room-deletion deadline (each capping its caller's wait while the effect keeps the outcome its follow-ups need), plus room-reaper's sweep cap, room-index-reconciler's and announcement-broadcaster's poll cap, all via maintenance-pass",
       },
       { component: "room_store", ...options.connection },
     ) as RedisRoomStoreClient);
   const {
+    announcementKey,
     orphanedRoomCodesKey,
     orphanedRoomQueueKey,
     roomKeyPrefix,
@@ -1603,6 +1627,46 @@ export async function createRedisRoomStore(
       } catch {
         return false;
       }
+    },
+    async getAnnouncement(caller = "request") {
+      // Same per-call choice as `getRoom`: the node polls this from a
+      // maintenance pass that derives `stalled` from the command's silence,
+      // while the admin API reads it on a request.
+      const bound = caller === "request" ? boundCommand : boundedByOuterCaller;
+      const reply = await bound("get_announcement", () =>
+        redis.eval(READ_ANNOUNCEMENT_LUA, 1, announcementKey),
+      );
+      if (!Array.isArray(reply) || reply.length !== 2) {
+        return null;
+      }
+      const [raw, remainingMs] = reply as [unknown, unknown];
+      // PTTL is -1 for a key without an expiry, which this store never writes;
+      // a key like that is not an announcement it can give a lifetime to.
+      if (
+        typeof raw !== "string" ||
+        typeof remainingMs !== "number" ||
+        remainingMs <= 0
+      ) {
+        return null;
+      }
+      const announcement = parseStoredAnnouncement(raw);
+      return announcement === null ? null : { announcement, remainingMs };
+    },
+    async setAnnouncement(announcement, ttlMs) {
+      await boundCommand("set_announcement", () =>
+        redis.eval(
+          WRITE_ANNOUNCEMENT_LUA,
+          1,
+          announcementKey,
+          JSON.stringify(announcement),
+          Math.max(1, Math.floor(ttlMs)),
+        ),
+      );
+    },
+    async clearAnnouncement() {
+      await boundCommand("clear_announcement", () =>
+        redis.eval(CLEAR_ANNOUNCEMENT_LUA, 1, announcementKey),
+      );
     },
     // Outside the RoomStore contract: only this implementation keeps an index
     // that can drift from the room bodies. `createRoomIndexReconciler` owns

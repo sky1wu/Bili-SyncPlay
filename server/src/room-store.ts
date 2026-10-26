@@ -1,5 +1,9 @@
 import type { PlaybackState, SharedVideo } from "@bili-syncplay/protocol";
 import type { RoomListQuery } from "./admin/types.js";
+import type {
+  AnnouncementSnapshot,
+  StoredAnnouncement,
+} from "./announcement.js";
 import {
   resolveSharedVideoOwnerId,
   type SharedVideoOwnerCandidate,
@@ -185,6 +189,31 @@ export type RoomStore = {
     query: Pick<RoomListQuery, "keyword" | "includeExpired">,
   ) => Promise<number>;
   isReady: () => Promise<boolean>;
+  /**
+   * The operator announcement and its remaining lifetime, read together, or
+   * `null` when there is none.
+   *
+   * Kept here rather than behind a store of its own so it rides the connection,
+   * bounds and instrumentation every room-serving and admin process already
+   * holds. `caller` picks the bound exactly as it does for {@link getRoom}: the
+   * node polls this from a maintenance pass, whose `stalled` outcome is derived
+   * from the command's silence.
+   */
+  getAnnouncement: (
+    caller?: RoomReadCaller,
+  ) => Promise<AnnouncementSnapshot | null>;
+  /**
+   * Replaces the announcement, to expire on its own after `ttlMs`.
+   *
+   * A plain overwrite: there is one announcement, the newest publication wins,
+   * and a write that lands after its caller gave up leaves exactly what that
+   * caller asked for.
+   */
+  setAnnouncement: (
+    announcement: StoredAnnouncement,
+    ttlMs: number,
+  ) => Promise<void>;
+  clearAnnouncement: () => Promise<void>;
 };
 
 type CreateInMemoryRoomStoreOptions = {
@@ -229,6 +258,10 @@ export function createInMemoryRoomStore(
 ): RoomStore {
   const rooms = new Map<string, PersistedRoom>();
   const now = options.now ?? Date.now;
+  let announcement: {
+    value: StoredAnnouncement;
+    expiresAt: number;
+  } | null = null;
 
   function matchesQuery(
     room: PersistedRoom,
@@ -351,6 +384,23 @@ export function createInMemoryRoomStore(
     },
     async isReady() {
       return true;
+    },
+    async getAnnouncement() {
+      if (announcement === null) {
+        return null;
+      }
+      const remainingMs = announcement.expiresAt - now();
+      if (remainingMs <= 0) {
+        announcement = null;
+        return null;
+      }
+      return { announcement: { ...announcement.value }, remainingMs };
+    },
+    async setAnnouncement(value, ttlMs) {
+      announcement = { value: { ...value }, expiresAt: now() + ttlMs };
+    },
+    async clearAnnouncement() {
+      announcement = null;
     },
   };
 }

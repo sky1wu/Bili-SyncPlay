@@ -29,6 +29,9 @@ export function getRedisRoomStoreKeys(namespace?: string) {
     // member supplies monotonic scores without requiring Redis newer than the
     // 6.0 minimum documented for this project.
     orphanedRoomQueueKey: `${base}room-index-orphans-queue`,
+    // The operator announcement (#325). Kept with the room store's keys because
+    // it rides that store's connection; it expires through its own TTL.
+    announcementKey: `${base}announcement`,
   };
 }
 

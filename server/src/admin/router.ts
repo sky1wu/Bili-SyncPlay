@@ -20,6 +20,7 @@ import {
   UNAUTHORIZED_MESSAGE,
 } from "../messages.js";
 import { handleActionRoutes } from "./routes/action-routes.js";
+import { handleAnnouncementRoutes } from "./routes/announcement-routes.js";
 import { handleAuthRoutes } from "./routes/auth-routes.js";
 import { handleReadRoutes } from "./routes/read-routes.js";
 import { handleSystemRoutes } from "./routes/system-routes.js";
@@ -55,6 +56,7 @@ export function createAdminRouter(options: AdminRouterOptions) {
     handleAuthRoutes,
     handleReadRoutes,
     handleActionRoutes,
+    handleAnnouncementRoutes,
   ];
 
   async function requireAdmin(
