@@ -49,8 +49,11 @@ export function applyActionBadge(
 export interface AnnouncementController {
   /** Load the remembered dismissals; call before the first `receive`. */
   hydrate(): Promise<void>;
-  /** The server's current announcement (`server:announcement`). */
-  receive(announcement: Announcement | null): void;
+  /**
+   * The server's current announcement (`server:announcement`), from the
+   * configured server URL the delivering socket was opened for.
+   */
+  receive(announcement: Announcement | null, sourceServerUrl: string): void;
   dismiss(id: string): Promise<void>;
   /** What to show right now, or `null`. */
   getVisible(): AnnouncementView | null;
@@ -148,7 +151,7 @@ export function createAnnouncementController(args: {
         );
       }
     },
-    receive(announcement) {
+    receive(announcement, sourceServerUrl) {
       if (announcement === null) {
         current = null;
       } else {
@@ -160,7 +163,9 @@ export function createAnnouncementController(args: {
             scheduledAt: announcement.scheduledAt ?? null,
           },
           expiresAtMs: monotonicNow() + announcement.expiresInMs,
-          serverUrl: args.getServerUrl(),
+          // Where it came from, not what is configured now: a server change
+          // updates the configuration before the old socket stops delivering.
+          serverUrl: sourceServerUrl,
         };
       }
       scheduleExpiry();

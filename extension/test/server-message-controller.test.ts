@@ -4,7 +4,7 @@ import type { Announcement, ServerMessage } from "@bili-syncplay/protocol";
 import { createServerMessageController } from "../src/background/server-message-controller";
 
 test("server:announcement goes to the announcement controller, not the room session", async () => {
-  const received: Array<Announcement | null> = [];
+  const received: Array<[Announcement | null, string]> = [];
   const roomSessionMessages: ServerMessage["type"][] = [];
   const controller = createServerMessageController({
     log: () => {},
@@ -13,7 +13,8 @@ test("server:announcement goes to the announcement controller, not the room sess
     handleRoomSessionServerMessage: async (message) => {
       roomSessionMessages.push(message.type);
     },
-    receiveAnnouncement: (announcement) => received.push(announcement),
+    receiveAnnouncement: (announcement, sourceServerUrl) =>
+      received.push([announcement, sourceServerUrl]),
     updateClockOffset: () => {},
     notifyAll: () => {},
   });
@@ -24,15 +25,24 @@ test("server:announcement goes to the announcement controller, not the room sess
     expiresInMs: 1_000,
   };
 
-  await controller.handleServerMessage({
-    type: "server:announcement",
-    payload: { announcement },
-  });
-  await controller.handleServerMessage({
-    type: "server:announcement",
-    payload: { announcement: null },
-  });
+  await controller.handleServerMessage(
+    {
+      type: "server:announcement",
+      payload: { announcement },
+    },
+    "ws://a.example",
+  );
+  await controller.handleServerMessage(
+    {
+      type: "server:announcement",
+      payload: { announcement: null },
+    },
+    "ws://a.example",
+  );
 
-  assert.deepEqual(received, [announcement, null]);
+  assert.deepEqual(received, [
+    [announcement, "ws://a.example"],
+    [null, "ws://a.example"],
+  ]);
   assert.deepEqual(roomSessionMessages, []);
 });

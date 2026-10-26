@@ -41,7 +41,14 @@ export function createSocketController(args: {
   getPendingLocalShareGeneration: () => number | null;
   sendJoinRequest: (targetRoomCode: string, targetJoinToken: string) => void;
   sendToServer: (message: ClientMessage) => void;
-  handleServerMessage: (message: ServerMessage) => Promise<void>;
+  /**
+   * `sourceServerUrl` is the configured server URL this socket was opened for,
+   * which a server change can replace while the old socket still delivers.
+   */
+  handleServerMessage: (
+    message: ServerMessage,
+    sourceServerUrl: string,
+  ) => Promise<void>;
   buildConnectionCheckUrl: (serverUrl: string) => string | null;
   buildHealthcheckUrl: (serverUrl: string) => string | null;
   onOpen: () => void;
@@ -321,7 +328,7 @@ export function createSocketController(args: {
         args.log("background", "Received unrecognized server message");
         return;
       }
-      void args.handleServerMessage(parsed);
+      void args.handleServerMessage(parsed, targetServerUrl);
     });
 
     socket.addEventListener("close", (event) => {

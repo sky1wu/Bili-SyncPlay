@@ -74,6 +74,11 @@ function createHarness(
   });
   return {
     controller,
+    /** From a socket opened for the configured server, unless told otherwise. */
+    receive: (
+      announcement: Announcement | null,
+      sourceServerUrl = state.serverUrl,
+    ) => controller.receive(announcement, sourceServerUrl),
     state,
     badges,
     pushes,
@@ -89,7 +94,7 @@ test("a received announcement is shown, badged by level and pushed once", async 
   const harness = createHarness();
   await harness.controller.hydrate();
 
-  harness.controller.receive(makeAnnouncement({ scheduledAt: 5_000 }));
+  harness.receive(makeAnnouncement({ scheduledAt: 5_000 }));
   harness.controller.refresh();
 
   assert.deepEqual(harness.controller.getVisible(), {
@@ -107,7 +112,7 @@ test("a received announcement is shown, badged by level and pushed once", async 
 
 test("an info announcement gets the info colour", async () => {
   const harness = createHarness();
-  harness.controller.receive(makeAnnouncement({ level: "info" }));
+  harness.receive(makeAnnouncement({ level: "info" }));
 
   assert.deepEqual(harness.badges.at(-1), {
     text: "!",
@@ -117,8 +122,8 @@ test("an info announcement gets the info colour", async () => {
 
 test("the same announcement resent does not push it again", () => {
   const harness = createHarness();
-  harness.controller.receive(makeAnnouncement());
-  harness.controller.receive(makeAnnouncement({ expiresInMs: 50_000 }));
+  harness.receive(makeAnnouncement());
+  harness.receive(makeAnnouncement({ expiresInMs: 50_000 }));
 
   assert.equal(harness.pushes.length, 1);
   assert.equal(harness.badges.length, 1);
@@ -126,8 +131,8 @@ test("the same announcement resent does not push it again", () => {
 
 test("a withdrawal hides it and clears the badge", () => {
   const harness = createHarness();
-  harness.controller.receive(makeAnnouncement());
-  harness.controller.receive(null);
+  harness.receive(makeAnnouncement());
+  harness.receive(null);
 
   assert.equal(harness.controller.getVisible(), null);
   assert.deepEqual(harness.badges.at(-1), null);
@@ -136,7 +141,7 @@ test("a withdrawal hides it and clears the badge", () => {
 
 test("leaving the room hides it without anyone clearing it", () => {
   const harness = createHarness();
-  harness.controller.receive(makeAnnouncement());
+  harness.receive(makeAnnouncement());
 
   harness.state.roomCode = null;
   harness.controller.refresh();
@@ -147,16 +152,27 @@ test("leaving the room hides it without anyone clearing it", () => {
 
 test("an announcement from the previous server is not shown on a new one", () => {
   const harness = createHarness();
-  harness.controller.receive(makeAnnouncement());
+  harness.receive(makeAnnouncement());
 
   harness.state.serverUrl = "ws://b.example";
 
   assert.equal(harness.controller.getVisible(), null);
 });
 
+test("one delivered by the old server during a server change is not shown as the new one's", () => {
+  const harness = createHarness();
+  // The configuration moves to B before A's socket is closed.
+  harness.state.serverUrl = "ws://b.example";
+
+  harness.receive(makeAnnouncement(), "ws://a.example");
+
+  assert.equal(harness.controller.getVisible(), null);
+  assert.deepEqual(harness.badges, [null]);
+});
+
 test("it lapses after its lifetime on the local clock and re-broadcasts", () => {
   const harness = createHarness();
-  harness.controller.receive(makeAnnouncement({ expiresInMs: 60_000 }));
+  harness.receive(makeAnnouncement({ expiresInMs: 60_000 }));
   const notifiesAfterReceive = harness.notifyAllCount;
 
   harness.state.nowMs += 59_999;
@@ -186,7 +202,7 @@ test("a lifetime beyond the timer limit does not lapse early", () => {
   try {
     const harness = createHarness();
     const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-    harness.controller.receive(makeAnnouncement({ expiresInMs: thirtyDaysMs }));
+    harness.receive(makeAnnouncement({ expiresInMs: thirtyDaysMs }));
     const notifiesAfterReceive = harness.notifyAllCount;
 
     mock.timers.tick(1);
@@ -209,7 +225,7 @@ test("a lifetime beyond the timer limit does not lapse early", () => {
 test("dismissing hides it everywhere and remembers the id", async () => {
   const harness = createHarness();
   await harness.controller.hydrate();
-  harness.controller.receive(makeAnnouncement());
+  harness.receive(makeAnnouncement());
 
   await harness.controller.dismiss("a1");
 
@@ -218,10 +234,10 @@ test("dismissing hides it everywhere and remembers the id", async () => {
   assert.deepEqual(harness.pushes.at(-1), null);
   assert.deepEqual(harness.saved, [["a1"]]);
 
-  harness.controller.receive(makeAnnouncement());
+  harness.receive(makeAnnouncement());
   assert.equal(harness.controller.getVisible(), null);
 
-  harness.controller.receive(makeAnnouncement({ id: "a2" }));
+  harness.receive(makeAnnouncement({ id: "a2" }));
   assert.equal(harness.controller.getVisible()?.id, "a2");
 });
 
@@ -246,7 +262,7 @@ test("a dismissal remembered from before is honoured", async () => {
   const harness = createHarness({ dismissedIds: ["a1"] });
   await harness.controller.hydrate();
 
-  harness.controller.receive(makeAnnouncement());
+  harness.receive(makeAnnouncement());
 
   assert.equal(harness.controller.getVisible(), null);
 });
@@ -254,7 +270,7 @@ test("a dismissal remembered from before is honoured", async () => {
 test("storage failures neither throw nor keep a dismissed one on screen", async () => {
   const harness = createHarness({ loadFails: true, saveFails: true });
   await harness.controller.hydrate();
-  harness.controller.receive(makeAnnouncement());
+  harness.receive(makeAnnouncement());
 
   await harness.controller.dismiss("a1");
 

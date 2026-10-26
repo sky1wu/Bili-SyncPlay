@@ -29,6 +29,7 @@ import {
 } from "./runtime-state";
 import { createServerMessageController } from "./server-message-controller";
 import { createServerUrlController } from "./server-url-controller";
+import { resolveServerUrlOrDefault } from "./server-url";
 import { createShareController } from "./share-controller";
 import { createSocketController } from "./socket-controller";
 import { createBackgroundStateStore } from "./state-store";
@@ -148,7 +149,8 @@ const roomSessionController = createRoomSessionController({
 });
 const announcementController = createAnnouncementController({
   getRoomCode: () => roomSessionState.roomCode,
-  getServerUrl: () => connectionState.serverUrl,
+  // Normalized as the socket's URL is, so the two compare like for like.
+  getServerUrl: () => resolveServerUrlOrDefault(connectionState.serverUrl),
   loadDismissedIds: loadDismissedAnnouncementIds,
   saveDismissedIds: saveDismissedAnnouncementIds,
   setBadge: (badge) => applyActionBadge(chrome.action, badge),
@@ -170,8 +172,8 @@ serverMessageController = createServerMessageController({
   },
   handleRoomSessionServerMessage: (message) =>
     roomSessionController.handleServerMessage(message),
-  receiveAnnouncement: (announcement) =>
-    announcementController.receive(announcement),
+  receiveAnnouncement: (announcement, sourceServerUrl) =>
+    announcementController.receive(announcement, sourceServerUrl),
   updateClockOffset,
   notifyAll,
 });
@@ -407,8 +409,11 @@ function sendToServer(message: ClientMessage): void {
   outgoingMessageController?.sendToServer(message);
 }
 
-async function handleServerMessage(message: ServerMessage): Promise<void> {
-  await serverMessageController?.handleServerMessage(message);
+async function handleServerMessage(
+  message: ServerMessage,
+  sourceServerUrl: string,
+): Promise<void> {
+  await serverMessageController?.handleServerMessage(message, sourceServerUrl);
 }
 
 function updateClockOffset(
