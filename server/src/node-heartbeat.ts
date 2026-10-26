@@ -77,9 +77,11 @@ export function createNodeHeartbeat(options: {
   intervalMs: number;
   ttlMs: number;
   now?: () => number;
+  uptimeMs?: () => number;
   logEvent?: LogEvent;
 }): NodeHeartbeat {
   const now = options.now ?? Date.now;
+  const uptimeMs = options.uptimeMs ?? (() => process.uptime() * 1_000);
   const staleAfterMs = Math.max(
     options.intervalMs,
     Math.min(options.ttlMs, options.intervalMs * 2),
@@ -99,10 +101,15 @@ export function createNodeHeartbeat(options: {
     unrefTimer: true,
     run: async () => {
       const currentTime = now();
+      const startedAt = options.runtimeStore.getStartedAt();
       const status: ClusterNodeStatus = {
         instanceId: options.instanceId,
         version: options.serviceVersion,
-        startedAt: options.runtimeStore.getStartedAt(),
+        startedAt,
+        // Sample the node-local monotonic process clock. Neither cross-machine
+        // clock skew nor a wall-clock correction on this host may change the
+        // reported process lifetime.
+        uptimeMs: Math.max(0, uptimeMs()),
         lastHeartbeatAt: currentTime,
         staleAt: currentTime + staleAfterMs,
         expiresAt: currentTime + options.ttlMs,

@@ -1,6 +1,6 @@
 import { Table, Tag, Typography } from "antd";
 import type { NodeHealth, OverviewNode } from "../../api/types.js";
-import { formatDateTime } from "../../lib/format.js";
+import { formatDateTime, formatDuration } from "../../lib/format.js";
 
 const HEALTH_PRESENTATION: Record<
   NodeHealth,
@@ -44,6 +44,12 @@ export function NodesTable({ nodes }: { nodes: OverviewNode[] }) {
         { title: "连接", dataIndex: "connectionCount" },
         { title: "房间", dataIndex: "currentRoomCount" },
         { title: "用户", dataIndex: "currentMemberCount" },
+        {
+          title: "运行时长",
+          dataIndex: "uptimeMs",
+          render: (value: number | null | undefined) =>
+            typeof value === "number" ? formatDuration(value) : "—",
+        },
         {
           title: "最近心跳",
           dataIndex: "lastHeartbeatAt",

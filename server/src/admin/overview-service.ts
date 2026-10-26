@@ -27,28 +27,43 @@ type NodeWorkload = {
   roomCodes: Set<string>;
 };
 
+function emptyWorkload(): NodeWorkload {
+  return {
+    connectionCount: 0,
+    currentMemberCount: 0,
+    roomCodes: new Set<string>(),
+  };
+}
+
+function addSessionToWorkload(workload: NodeWorkload, session: Session) {
+  workload.connectionCount += 1;
+  if (session.roomCode) {
+    workload.currentMemberCount += 1;
+    workload.roomCodes.add(session.roomCode);
+  }
+}
+
 function summarizeNodeWorkloads(
   sessions: Session[],
-  fallbackInstanceId: string,
-): Map<string, NodeWorkload> {
-  const workloads = new Map<string, NodeWorkload>();
+  fallbackInstanceId: string | null,
+): { byNode: Map<string, NodeWorkload>; unattributed: NodeWorkload } {
+  const byNode = new Map<string, NodeWorkload>();
+  // Which node a session belongs to and whether it counts are separate
+  // questions: a session with no node id (`SessionBase.instanceId` is
+  // optional) is still a live connection, so it stays in the runtime totals
+  // even where no node can be credited with it.
+  const unattributed = emptyWorkload();
   for (const session of sessions) {
     const instanceId = session.instanceId || fallbackInstanceId;
-    const workload = workloads.get(instanceId) ?? {
-      connectionCount: 0,
-      currentMemberCount: 0,
-      roomCodes: new Set<string>(),
-    };
-
-    workload.connectionCount += 1;
-    if (session.roomCode) {
-      workload.currentMemberCount += 1;
-      workload.roomCodes.add(session.roomCode);
+    if (!instanceId) {
+      addSessionToWorkload(unattributed, session);
+      continue;
     }
-
-    workloads.set(instanceId, workload);
+    const workload = byNode.get(instanceId) ?? emptyWorkload();
+    addSessionToWorkload(workload, session);
+    byNode.set(instanceId, workload);
   }
-  return workloads;
+  return { byNode, unattributed };
 }
 
 function synthesizeNodeStatus(
@@ -56,16 +71,18 @@ function synthesizeNodeStatus(
   workload: NodeWorkload | undefined,
   options: {
     currentTime: number;
-    fallbackInstanceId: string;
+    localInstanceId: string | null;
+    localUptimeMs: number;
     serviceVersion: string;
     startedAt: number;
   },
 ): ClusterNodeStatus {
+  const isLocalNode = instanceId === options.localInstanceId;
   return {
     instanceId,
     version: options.serviceVersion,
-    startedAt:
-      instanceId === options.fallbackInstanceId ? options.startedAt : 0,
+    startedAt: isLocalNode ? options.startedAt : 0,
+    ...(isLocalNode ? { uptimeMs: options.localUptimeMs } : {}),
     lastHeartbeatAt: options.currentTime,
     staleAt: options.currentTime,
     expiresAt: options.currentTime,
@@ -84,14 +101,19 @@ export function createAdminOverviewService(options: {
   roomStore: RoomStore;
   runtimeStore: RuntimeStore;
   eventStore: GlobalEventStore;
+  includeLocalNodeFallback?: boolean;
   now?: () => number;
+  uptimeMs?: () => number;
 }) {
   const now = options.now ?? Date.now;
+  const uptimeMs = options.uptimeMs ?? (() => process.uptime() * 1_000);
+  const includeLocalNodeFallback = options.includeLocalNodeFallback ?? true;
   const roomFanOut = createRoomFanOutLimiter();
 
   return {
     async getOverview() {
       const currentTime = now();
+      const localUptimeMs = Math.max(0, uptimeMs());
       // Use the literal ms window [now - windowMs, now]. Event stores keep a
       // timestamp index for recent events, so these counters stay precise even
       // after the query buffer or Redis stream has trimmed older entries.
@@ -145,18 +167,41 @@ export function createAdminOverviewService(options: {
       );
       const clusterSessions =
         await options.runtimeStore.listClusterSessions("request");
-      const nodeWorkloads = summarizeNodeWorkloads(
+      const { byNode: nodeWorkloads, unattributed } = summarizeNodeWorkloads(
         clusterSessions,
-        options.instanceId,
+        includeLocalNodeFallback ? options.instanceId : null,
       );
+      if (includeLocalNodeFallback && !nodeWorkloads.has(options.instanceId)) {
+        // A standalone room node may run with heartbeats disabled (the
+        // default), and a shared session read may also be unavailable while
+        // the local runtime remains authoritative for its own workload.
+        nodeWorkloads.set(options.instanceId, {
+          connectionCount: options.runtimeStore.getConnectionCount(),
+          currentMemberCount: options.runtimeStore.getActiveMemberCount(),
+          roomCodes: options.runtimeStore.getActiveRoomCodes(),
+        });
+      }
+      const localStartedAt = options.runtimeStore.getStartedAt();
       const nodeStatusByInstanceId = new Map(
-        nodeStatuses.map((status) => [status.instanceId, status]),
+        nodeStatuses
+          // An instance id outlives the process: a record under this node's
+          // id whose `startedAt` is not this process's was left by a previous
+          // incarnation (e.g. one that ran with heartbeats enabled), and must
+          // not mark the running process offline. A record this process wrote
+          // still wins, so a failing heartbeat keeps showing up as stale.
+          .filter(
+            (status) =>
+              !includeLocalNodeFallback ||
+              status.instanceId !== options.instanceId ||
+              status.startedAt === localStartedAt,
+          )
+          .map((status) => [status.instanceId, status]),
       );
       const nodeInstanceIds = new Set<string>([
         ...nodeStatuses.map((status) => status.instanceId),
         ...nodeWorkloads.keys(),
       ]);
-      if (nodeInstanceIds.size > 0) {
+      if (includeLocalNodeFallback) {
         nodeInstanceIds.add(options.instanceId);
       }
       const nodeItems = Array.from(nodeInstanceIds)
@@ -167,13 +212,22 @@ export function createAdminOverviewService(options: {
             nodeStatusByInstanceId.get(instanceId) ??
             synthesizeNodeStatus(instanceId, workload, {
               currentTime,
-              fallbackInstanceId: options.instanceId,
+              localInstanceId: includeLocalNodeFallback
+                ? options.instanceId
+                : null,
+              localUptimeMs,
               serviceVersion: options.serviceVersion,
-              startedAt: options.runtimeStore.getStartedAt(),
+              startedAt: localStartedAt,
             });
           const roomCodes = Array.from(workload?.roomCodes ?? []).sort();
           return {
             ...status,
+            uptimeMs:
+              status.uptimeMs !== undefined &&
+              Number.isFinite(status.uptimeMs) &&
+              status.uptimeMs >= 0
+                ? status.uptimeMs
+                : null,
             connectionCount:
               workload?.connectionCount ?? status.connectionCount,
             currentRoomCount: workload
@@ -189,16 +243,18 @@ export function createAdminOverviewService(options: {
           ? null
           : nodeItems.filter((status) => status.health !== "offline");
       const connectionCount =
-        activeNodeStatuses?.reduce(
+        (activeNodeStatuses?.reduce(
           (total, status) => total + status.connectionCount,
           0,
-        ) ?? options.runtimeStore.getConnectionCount();
+        ) ?? options.runtimeStore.getConnectionCount()) +
+        unattributed.connectionCount;
       const activeRoomCount = activePersistedRoomCodes.length;
       const activeMemberCount =
-        activeNodeStatuses?.reduce(
+        (activeNodeStatuses?.reduce(
           (total, status) => total + status.currentMemberCount,
           0,
-        ) ?? options.runtimeStore.getActiveMemberCount();
+        ) ?? options.runtimeStore.getActiveMemberCount()) +
+        unattributed.currentMemberCount;
 
       return {
         service: {
@@ -206,7 +262,7 @@ export function createAdminOverviewService(options: {
           name: options.serviceName,
           version: options.serviceVersion,
           startedAt: options.runtimeStore.getStartedAt(),
-          uptimeMs: currentTime - options.runtimeStore.getStartedAt(),
+          uptimeMs: localUptimeMs,
         },
         storage: {
           provider: options.persistenceConfig.provider,

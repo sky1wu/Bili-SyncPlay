@@ -25,8 +25,8 @@ function createOverviewFixture(
       instanceId: "node-a",
       name: "bili-syncplay-server",
       version: "1.2.4",
-      startedAt: Date.now() - 3_600_000,
-      uptimeMs: 3_600_000,
+      startedAt: Date.now() - 5_000,
+      uptimeMs: 5_000,
     },
     storage: { provider: "redis", redisConnected: true },
     runtime: {
@@ -45,6 +45,7 @@ function createOverviewFixture(
           instanceId: "node-a",
           version: "1.2.4",
           startedAt: Date.now() - 3_600_000,
+          uptimeMs: 3_600_000,
           lastHeartbeatAt: Date.now(),
           staleAt: Date.now() + 30_000,
           expiresAt: Date.now() + 60_000,
@@ -108,8 +109,46 @@ describe("OverviewPage", () => {
     expect(screen.getByText("总计 9 非过期")).toBeTruthy();
     expect(screen.getByText("已连接")).toBeTruthy();
     expect(screen.getByText("node-a")).toBeTruthy();
+    expect(screen.getByText("节点运行时长")).toBeTruthy();
+    expect(screen.getAllByText("1 小时 0 分钟").length).toBeGreaterThan(0);
+    expect(screen.queryByText("5 秒")).toBeNull();
     expect(screen.getByText("最近一小时")).toBeTruthy();
     expect(screen.queryByText(/readyz 状态为|readyz 检查失败/)).toBeNull();
+  });
+
+  it("labels and selects the longest non-offline node in a multi-node cluster", async () => {
+    const overview = createOverviewFixture();
+    overview.nodes = {
+      total: 3,
+      online: 2,
+      stale: 0,
+      offline: 1,
+      items: [
+        ...overview.nodes.items,
+        {
+          ...overview.nodes.items[0]!,
+          instanceId: "node-b",
+          uptimeMs: 7_200_000,
+        },
+        {
+          ...overview.nodes.items[0]!,
+          instanceId: "node-offline",
+          health: "offline",
+          uptimeMs: 10_800_000,
+        },
+      ],
+    };
+
+    renderOverview(
+      createAuthValue({
+        getOverview: vi.fn().mockResolvedValue(overview),
+        getReady: vi.fn().mockResolvedValue(readyFixture),
+      }),
+    );
+
+    expect(await screen.findByText("最长节点运行时长")).toBeTruthy();
+    expect(screen.getAllByText("2 小时 0 分钟").length).toBeGreaterThan(0);
+    expect(screen.getByText("node-b · 1.2.4")).toBeTruthy();
   });
 
   it("shows a degradation banner when readyz is not ready", async () => {
